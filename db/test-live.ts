@@ -5633,7 +5633,7 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
 {
   // test-schema [56] holds the rules on one connection; what it cannot hold is
   // a second writer's uncommitted row. Each race below goes stale without the
-  // lock (or the re-read) it names, and drift() — 058's formulas against the
+  // lock it names, and drift() — 058's formulas against the
   // tables — is the check.
   const db = new SQL({ url: URL_!, max: 1 });
   const drift = async () => Number((await db`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`)[0].n);
@@ -5668,14 +5668,17 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
       bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
       await tx`UPDATE thoughts SET metadata = metadata || '{"status": "Todo"}' WHERE id = ${x2}::uuid`;
     }).catch((e: Error) => { bError = e.message; });
-    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22561)) === 1);
-    const bWaited = bPid > 0 && (await waitingOn(bPid, 22561)) === 1;
+    // On R-1's issue bucket — or first on a pointer bucket, when the two rows'
+    // ids share one (one time in 256; second review pass).
+    const waitingOnEither = async () => (await waitingOn(bPid, 22561)) + (await waitingOn(bPid, 22562));
+    await waitFor(async () => bPid > 0 && (await waitingOnEither()) === 1);
+    const bWaited = bPid > 0 && (await waitingOnEither()) === 1;
     done();
     await aDone; await bDone;
     await connA.close(); await connB.close();
     const h = await head("R-1");
     assert(aHolding && bWaited && aError === "" && bError === "" && h?.id === x1 && h.status_type === "completed" && (await drift()) === 0,
-      `a second writer of R-1 waits on its key (class 22561) until the first commits, then recomputes from it: the head is X1 with the first writer's status, and no drift (${JSON.stringify(h)}; ${aError || bError || "clean"})`);
+      `a second writer of R-1 waits on its key (class 22561, or 22562 when the rows' ids share a bucket) until the first commits, then recomputes from it: the head is X1 with the first writer's status, and no drift (${JSON.stringify(h)}; ${aError || bError || "clean"})`);
   }
 
   // A row gaining an issue key while a new row supersedes it (first review

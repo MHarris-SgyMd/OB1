@@ -1434,11 +1434,12 @@ if (configFailed) {
             const projectionMiss = PROJECTION.flatMap((t) => missingByTable.get(t) ?? []);
             if (projectionMiss.length) {
               // Split by privilege (first review pass): SELECT alone keeps every
-              // lifecycle read working; the writes break only writes that move a
-              // key, a status, a watermark or a pointer.
-              const writesMiss = projectionMiss.some((p) => p !== "SELECT");
-              fails.push((projectionMiss.includes("SELECT") ? "every lifecycle read (node_lifecycle, node_state, search_thoughts' prefer_current)" + (writesMiss ? " and " : "") : "")
-                + (writesMiss ? "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes and a delete of such a row included" : "")
+              // lifecycle read working. Any of the four missing breaks the writes
+              // that move a key, a status, a watermark or a pointer — the
+              // triggers read the tables too (second review pass) — and SELECT
+              // missing breaks the reads as well.
+              fails.push((projectionMiss.includes("SELECT") ? "every lifecycle read (node_lifecycle, node_state, search_thoughts' prefer_current) and " : "")
+                + "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes and a delete of such a row included"
                 + " (060's triggers keep the node_state projection as the caller)");
             }
             const why = ` — so ${fails.join(", and ")} would fail`;
@@ -2257,13 +2258,24 @@ if (configFailed) {
          * the server still works, the guarantees named do not (third review
          * pass, SMD-1712).
          */
+        // Since 060 REPEATABLE READ is more than a lost guarantee: the node_state
+        // projection's triggers refuse, under it, every write that moves a
+        // ticket's key, status or watermark or a supersedes pointer — captures
+        // naming supersedes and deletes of such rows among them — so it fails;
+        // SERIALIZABLE keeps the projection exact only if every ticket writer
+        // is serializable (SMD-2256, second review pass).
         try {
-          const [{ level }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level`) as { level: string }[];
+          const [{ level, projection }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level,
+                                                            to_regprocedure('ob1_node_projection_sync()') IS NOT NULL AS projection`) as { level: string; projection: boolean }[];
           if (/^read (committed|uncommitted)$/i.test(level)) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
+          } else if (projection && /^repeatable read$/i.test(level)) {
+            add("transaction isolation", "fail",
+                `default_transaction_isolation is ${level}: migration 060's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes and deletes of such rows included) — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed).`);
           } else {
             add("transaction isolation", "warn",
-                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source`,
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? "; and 060's node_state projection stays exact only if every writer of ticket rows is serializable" : ""}`,
                 `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed).`);
           }
         } catch (e) {

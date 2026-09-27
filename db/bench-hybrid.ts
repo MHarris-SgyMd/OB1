@@ -49,10 +49,12 @@
  *
  * ── prefer_current (059, SMD-2255; stored, 060 / SMD-2256) ───────────────────
  * The last blocks time search_thoughts_current against the hybrid on the same
- * rows, after stamping lifecycles and supersession onto them — interleaved,
- * the added cost the median of paired differences — against the budget the
- * flag was pre-registered with (at most the hybrid's own median at 10,000
- * rows); then what 060's triggers cost a writer, on against off.
+ * rows, after stamping lifecycles and supersession onto them — interleaved in
+ * alternating order, the added cost the difference of the two medians (the
+ * estimator pre-registered at 059), the median of the paired differences
+ * printed beside it — against the budget the flag was pre-registered with (at
+ * most the hybrid's own median at 10,000 rows); then what 060's triggers cost
+ * a writer, against the triggers dropped.
  */
 
 import { SQL } from "bun";
@@ -220,7 +222,7 @@ for (const n of SCALES) {
   };
   const plainP = await paired(() => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`,
                               () => sql`SELECT id FROM search_thoughts_current(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`);
-  const needleP = await paired(hybrid, () => sql`SELECT id FROM search_thoughts_current(${q}::vector, ${text}, 0.0, 10, '{}'::jsonb)`);
+  const needleP = await paired(hybrid, () => sql`SELECT content, matched_needles FROM search_thoughts_current(${q}::vector, ${text}, 0.0, 10, '{}'::jsonb)`);
   const windowP = await paired(() => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`,
                                () => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 40, '{}'::jsonb)`);
   // A read of the columns, not count(*): since 060 count(*) reads none, and
@@ -231,7 +233,7 @@ for (const n of SCALES) {
   console.log(`\n  prefer_current (059, stored since 060), ${st.settled.toLocaleString()} settled and ${st.superseded.toLocaleString()} superseded rows, ${ROUNDS} interleaved rounds:\n`);
   console.log(`    hybrid, no needle                       ${fmt(plainP.off).padStart(9)}`);
   console.log(`    search_thoughts_current, no needle      ${fmt(plainP.on).padStart(9)}   (+${fmt(plainP.added)}; paired +${fmt(plainP.pairedAdded)}${verdict(plainP)})`);
-  console.log(`      of which the hybrid at the window (40) ${fmt(windowP.on).padStart(8)}   (+${fmt(windowP.added)}; paired +${fmt(windowP.pairedAdded)})`);
+  console.log(`      the hybrid asked for 40, its window     ${fmt(windowP.on).padStart(9)}   (+${fmt(windowP.added)} over asked for 10, no needle; paired +${fmt(windowP.pairedAdded)})`);
   console.log(`    hybrid, one needle                      ${fmt(needleP.off).padStart(9)}`);
   console.log(`    search_thoughts_current, one needle     ${fmt(needleP.on).padStart(9)}   (+${fmt(needleP.added)}; paired +${fmt(needleP.pairedAdded)}${verdict(needleP)})`);
   console.log(`      node_state()'s lifecycle and superseded_by, every thought ${fmt(tState)}`);
@@ -239,11 +241,15 @@ for (const n of SCALES) {
 
   // What 060's triggers cost a writer, pre-registered: a plain capture at most
   // +0.1 ms, a ticket's status update at most +0.5 ms, a bulk stamp of 40% of
-  // the rows at most +20%. Off is the three triggers disabled, in alternating
-  // blocks; the rebuild after puts the projection back, and drift() must then
-  // be empty.
-  const projectionTriggers = (on: boolean) => sql.unsafe(["insert", "update", "delete"]
-    .map((e) => `ALTER TABLE thoughts ${on ? "ENABLE" : "DISABLE"} TRIGGER thoughts_node_projection_${e}`).join("; "));
+  // the rows at most +20%. Off is the three row-change triggers DROPPED, in
+  // alternating blocks, and on is them re-created from their own definitions:
+  // a disabled trigger still has its transition tables filled, which is most
+  // of what it costs a bulk statement (second review pass: DISABLE hid it).
+  const triggerDefs = (await sql`SELECT tgname, pg_get_triggerdef(oid) AS def FROM pg_trigger
+                                  WHERE tgrelid = 'thoughts'::regclass AND tgname IN ('thoughts_node_projection_insert', 'thoughts_node_projection_update', 'thoughts_node_projection_delete')`) as { tgname: string; def: string }[];
+  if (triggerDefs.length !== 3) throw new Error(`expected 060's three row-change triggers, found ${triggerDefs.length}`);
+  const projectionTriggers = (on: boolean) => sql.unsafe(triggerDefs
+    .map((t) => `DROP TRIGGER IF EXISTS ${t.tgname} ON thoughts;${on ? ` ${t.def};` : ""}`).join(" "));
   const writeBlocks = async (call: () => Promise<unknown>) => {
     const on: number[] = [], off: number[] = [];
     for (let block = 0; block < 10; block++) {
@@ -267,7 +273,8 @@ for (const n of SCALES) {
   // projection behind the rows, so an untimed rebuild follows it: every on run
   // then moves the projection too, not only the rows (first review pass: the
   // on runs flipped back to what the tables already held, and wrote nothing
-  // there).
+  // there). The last on run is the triggers' own: drift() is read after it,
+  // not after a rebuild (second review pass).
   const stampsOn: number[] = [], stampsOff: number[] = [];
   for (let k = 0; k < 3; k++) {
     await projectionTriggers(false);
@@ -276,15 +283,14 @@ for (const n of SCALES) {
     await sql`SELECT * FROM ob1_rebuild_node_projection()`;
     stampsOn.push(await timed(() => stampTickets("completed", "started")));
   }
-  await sql`SELECT * FROM ob1_rebuild_node_projection()`;
   const [{ drift }] = await sql`SELECT count(*)::int AS drift FROM ob1_node_projection_drift()`;
   const stampOn = median(stampsOn), tStampOff = median(stampsOff);
   const within = (ok: boolean) => (ok ? "within" : "OVER");
-  console.log(`\n  060's triggers on a writer, on vs off (medians; the bulk stamp three times each way):\n`);
+  console.log(`\n  060's triggers on a writer, against them dropped (medians; the bulk stamp three times each way):\n`);
   console.log(`    a plain upsert_thought                  ${fmt(capture.on).padStart(9)} vs ${fmt(capture.off)}   (+${fmt(capture.on - capture.off)}; budget 0.10 ms: ${within(capture.on - capture.off <= 0.1)})`);
   console.log(`    a ticket's status update                ${fmt(statusUpdate.on).padStart(9)} vs ${fmt(statusUpdate.off)}   (+${fmt(statusUpdate.on - statusUpdate.off)}; budget 0.50 ms: ${within(statusUpdate.on - statusUpdate.off <= 0.5)})`);
   console.log(`    stamping 40% of the rows                ${fmt(stampOn).padStart(9)} vs ${fmt(tStampOff)}   (${stampOn >= tStampOff ? "+" : ""}${((stampOn / tStampOff - 1) * 100).toFixed(0)}%; budget +20%: ${within(stampOn <= tStampOff * 1.2)})`);
-  console.log(`    drift() after the rebuild               ${String(drift).padStart(9)}${drift === 0 ? "" : "  ← the projection did not come back"}`);
+  console.log(`    drift() after the last triggered stamp  ${String(drift).padStart(9)}${drift === 0 ? "" : "  ← the triggers left the projection behind"}`);
   await sql.close();
 }
 console.log("");

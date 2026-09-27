@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1862 assertions: 1862 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1863 assertions: 1863 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty (60) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -476,8 +476,8 @@ count, latest source watermark and whether its top N is exact. Priced first in
 MRR +0.052, live-ticket MRR +0.194; costs disclosed — topical −0.127, a note
 under a Done ticket −0.292, a settled key −0.750); the query log records such a
 search as arm `current` (the CHECK widened), and `db/tier.ts` replays it. The
-server group gains SELECT on `thought_sources`, which `node_state` read (until
-060); the wrapper is dropped before it is created, as 058's three are. At 059
+server group gains SELECT on `thought_sources`, which `node_state` reads for
+its dependency columns (since 060 the search's columns do not); the wrapper is dropped before it is created, as 058's three are. At 059
 it cost what `node_state` cost — the whole brain's lifecycle per call: +10.7 ms
 at 10,000 thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the
 budget pre-registered for it; shipped opt-in on the maintainer's call, and 060
@@ -498,11 +498,16 @@ locks are transaction advisory locks on buckets of the keys' hashes (classes
 statements moving one ticket's key, status, watermark or pointers serialise
 until commit (a content-only edit takes none), a row whose head fields move
 holds its own pointer bucket so a concurrent pointer to it waits and reads its
-issue after, and a multi-statement transaction writing tickets in one order can
-now deadlock (40P01) with one writing them in another — retry it (the repo's
-writers make one statement per transaction). Such a statement is refused under
-REPEATABLE READ (its snapshot predates the lock); SERIALIZABLE keeps the tables
-exact only when every ticket writer is serializable. It is fed by the row
+issue after, a deleted row holds its own so the cascade that nulls pointers to
+it needs none it lacks, and a transaction whose ticket writes take more than
+one round of locks — two or more statements, or one that fires the trigger
+twice (a MERGE with several actions, a multi-row upsert that both inserts and
+updates, a writable CTE with several kinds of write) — can now deadlock (40P01)
+where it waited: retry it (the repo's writers are single-row, one statement per
+transaction). Such a statement is refused under REPEATABLE READ (its snapshot
+predates the lock); SERIALIZABLE keeps the tables exact only when every ticket
+writer is serializable. The trigger and the reconcile plan every statement
+afresh: a plan cached while the tables were small went on scanning them. It is fed by the row
 store, not the log: every writer reaches `thoughts`, raw ones included, and the
 log carries no `created_at` move; SMD-1997's fold can later feed the heads'
 status. `node_lifecycle()` and `node_state()` keep their signatures and rows and
@@ -515,16 +520,19 @@ window's bound, so a ten-thousand-thought brain does not hash-join the whole
 table to it. Measured on `bench-hybrid.ts`'s arm:
 `prefer_current` adds +0.84 to +1.06 ms at 10,000 thoughts (the
 difference of medians, alternating order; inside the budget 059 missed — as
-sql, re-planned per call, the wrapper was +1.11 against 1.10), +0.6 of it the
-hybrid at the wider window, and about +2.9 ms at 100,000, +2.1 of it the
-window. A narrow read is what got cheaper: a whole-brain read of every
-thought's lifecycle still reads every row (93 ms at 100,000, 058's about 125).
-A writer pays under 0.1 ms on a plain capture, 0.3 to 0.5 ms on a ticket's
-status update, and 1–7% on a statement stamping 40% of the rows.
+sql, re-planned per call, the wrapper was +1.11 against 1.10), +0.6 to +1.0
+of it the hybrid asked for its wider window, and +1.7 to +2.9 ms at 100,000,
+most of it the window. A narrow read is what got cheaper: a whole-brain read of
+every thought's lifecycle still reads every row (86 to 93 ms at 100,000). A
+writer's cost is measured against the triggers dropped — disabling them still fills their transition tables — and
+is in `changes/smd-2256.md`.
 `ob1_node_projection_drift()` compares the tables with 058's formulas (zero
 rows when exact) and `ob1_rebuild_node_projection()` repairs them after a write
 made with the triggers disabled (`DISABLE TRIGGER`, `session_replication_role
-= replica`). The triggers run as the writer, so the **capture** group gains the
+= replica`); it refuses to run outside READ COMMITTED, and `migrate.ts` now
+runs every file under READ COMMITTED, so 060's seed is right on a brain whose
+default is not. Preflight fails a connection whose default is REPEATABLE
+READ. The triggers run as the writer, so the **capture** group gains the
 writes on both tables: a role granted before 060 fails preflight until
 `migrate.ts --grant` runs again, and a reader of `node_lifecycle()` needs
 SELECT on `ob1_ticket_head`. On PostgreSQL 16 and 17 the search's lifecycle
@@ -2474,7 +2482,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1862 assertions, PGlite, no container
+bun test-schema.ts                          # 1863 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 772 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or [26]'s four sweep cases are, on a machine with a recipes/lint-sweep/.env or .env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

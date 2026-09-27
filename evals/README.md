@@ -2613,8 +2613,8 @@ one machine's: a review pass measured +18.8 ms over 1.6 at 10,000 — over budge
 either way. Migration 060 (SMD-2256) stores the heads and superseders
 `node_state` read, kept current by triggers on `thoughts`, and re-creates the
 wrapper in plpgsql: the arm adds +0.84 to +1.06 ms at 10,000 (the difference
-of medians, alternating order — inside the budget) and about +2.9 ms at
-100,000, of which the hybrid's own cost at the 4N window is +0.6 and +2.1; the
+of medians, alternating order — inside the budget) and +1.7 to +2.9 ms at
+100,000, most of both the hybrid's own cost at the 4N window; the
 eval's SQL-equals-oracle check is unchanged by it (the rows are 058's).
 
 **A tie-break, after the first review pass.** On a query that is only literals

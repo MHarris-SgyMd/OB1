@@ -1349,8 +1349,16 @@ else {
   await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
     const rr = await run(SQL_ENV);
-    assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a connection defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+    // Since 060 a fail: the projection's triggers refuse every ticket or
+    // pointer write under repeatable read (SMD-2256, second review pass).
+    assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 060's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
+             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
+           `a connection defaulting to repeatable read is refused, naming 060's refused writes and the guarantees that rest on read committed, with the ALTER ROLE that restores it (exit ${rr.code})`);
+    await onThisDatabase("SET default_transaction_isolation = ''serializable''");
+    const ser = await run(SQL_ENV);
+    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /060's node_state projection stays exact only if every writer of ticket rows is serializable/.test(ser.out),
+           `a connection defaulting to serializable starts with a warning that names 060's condition (exit ${ser.code})`);
+    await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
     // …and nowhere else: a session as the same role in `postgres` is still at
     // read committed. The suite's own database is asked of the server, not
     // read from the URL; a role that may not connect there skips, and any
@@ -1695,8 +1703,14 @@ else {
              /every lifecycle read \(node_lifecycle, node_state, search_thoughts' prefer_current\) and a write that moves an issue key/.test(writeLine(projectionAll.out)) &&
              /GRANT SELECT, INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;/.test(projectionAll.out),
              `with SELECT missing as well it names every lifecycle read beside those writes, and the GRANT carries SELECT (exit ${projectionAll.code})`);
-      await claims.unsafe("GRANT SELECT ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
+      // SELECT alone missing: the triggers read the tables, so the writes are
+      // named as well as the reads (second review pass).
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
+      const projectionSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(projectionSelect.code === 1 &&
+             /SELECT on ob1_ticket_head; SELECT on ob1_superseded_by — so every lifecycle read \(node_lifecycle, node_state, search_thoughts' prefer_current\) and a write that moves an issue key/.test(writeLine(projectionSelect.out)),
+             `with only SELECT missing it names the reads and the writes, since the triggers read the tables (exit ${projectionSelect.code})`);
+      await claims.unsafe("GRANT SELECT ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
 
       // 016's trigger reads ob1_config as the caller on EVERY capture (before it
       // checks the key), so with the trigger present — the schema is fully

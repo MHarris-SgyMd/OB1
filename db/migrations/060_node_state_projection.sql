@@ -34,8 +34,9 @@
 --     synced_at. Keyed by md5(issue)::uuid with the issue beside it, so a key
 --     of any length never fails a write that succeeds without this file (a
 --     btree entry is capped near 2.7 kB); every read rechecks the issue. Two
---     issues whose md5 collide keep one head (the lesser issue's) and the
---     other reads its own keys — drift() names it; nothing fails.
+--     issues whose md5 collide share one row, the lesser issue's head (a
+--     keyed recompute of either computes both), and the other reads its own
+--     keys — drift() names it; nothing fails.
 --   * ob1_superseded_by — one row per thought some row's supersedes names:
 --     the newest successor by (created_at, id) descending — 058's rule.
 --   * ob1_superseders_of(uuid[]) and ob1_ticket_heads_of(text[]) — the two
@@ -50,7 +51,10 @@
 --     heads: a keyed delete of what vanished and an upsert of what changed.
 --   * ob1_rebuild_node_projection() — every key, under the exclusive lock;
 --     returns what it wrote and deleted, zeros when exact. The seed below,
---     and the repair after a write made with triggers disabled.
+--     and the repair after a write made with triggers disabled. It refuses
+--     to run outside READ COMMITTED (a snapshot older than its lock would
+--     write back what a concurrent writer deleted); db/migrate.ts runs every
+--     file under READ COMMITTED, whatever the database's default.
 --   * ob1_node_projection_drift() — every stored row against 058's formulas,
 --     verbatim and independent of the two rule functions; zero rows when the
 --     projection is exact.
@@ -60,7 +64,10 @@
 --     capture needs no privilege here); otherwise the keys it moved — both
 --     sides of an issue key's move, the targets of a pointer's move and their
 --     issues, a successor's created_at — are locked and reconciled. A fourth,
---     AFTER TRUNCATE, empties both tables. None writes thoughts.
+--     AFTER TRUNCATE, empties both tables. None writes thoughts. The trigger
+--     and the reconcile plan each statement afresh (plan_cache_mode =
+--     force_custom_plan): a plan cached while the tables were small went on
+--     scanning them after they grew.
 --   * search_thoughts_current (059) re-created in plpgsql, body, columns and
 --     settings unchanged, so its plan is cached rather than made per call.
 --   * node_lifecycle() and node_state() read the tables, same signatures,
@@ -85,25 +92,31 @@
 --   issues, the pointer targets' issues read once the pointer buckets are held
 --   (a write moving a target's issue holds that target's bucket too); each
 --   recompute is a statement after the grant, so it sees every write committed
---   before it. So statements moving one ticket's key, status,
---   watermark or pointers serialise until commit (a content-only edit takes
---   no lock), and a transaction holds at most 513 of these locks however many
---   keys it writes. Two new costs of that: a multi-statement transaction
---   writing tickets in one order can deadlock (40P01) with one writing them in
---   another, where before it waited — retry it (the repo's writers make one
---   statement per transaction); and ob1_rebuild_node_projection() takes 22560
---   exclusively. REPEATABLE READ is refused for such a statement: its snapshot
---   predates the lock, so a concurrent commit would be lost without a
---   conflict. SERIALIZABLE is left to SSI, which keeps the tables exact only
---   when every writer of ticket rows is serializable; a mix needs a rebuild.
+--   before it. So statements moving one ticket's key, status, watermark or
+--   pointers serialise until commit (a content-only edit takes no lock), and a
+--   transaction holds at most 513 of these locks however many keys it writes.
+--   A deleted row takes its own pointer bucket, so the ON DELETE SET NULL
+--   cascade's firing needs no bucket it does not hold. Two new costs of that:
+--   a transaction whose ticket writes take more than one round of locks — two
+--   or more statements, or one statement that fires the trigger twice (a MERGE
+--   with several actions, a multi-row INSERT ... ON CONFLICT that both inserts
+--   and updates, a writable CTE with more than one kind of write) — can
+--   deadlock (40P01) with another, where before it waited: retry it (the
+--   repo's writers are single-row, one statement per transaction); and
+--   ob1_rebuild_node_projection() takes 22560 exclusively. REPEATABLE READ is
+--   refused for such a statement: its snapshot predates the lock, so a
+--   concurrent commit could be lost without a conflict. SERIALIZABLE is left
+--   to SSI, which keeps the tables exact only when every writer of ticket rows
+--   is serializable; after a mix, run the rebuild under READ COMMITTED.
 --
 -- SAFETY
 --   Additive: two tables, one index, seven functions, four triggers; two
 --   bodies redefined with their signatures, columns and rows unchanged, and
 --   059's wrapper re-created in plpgsql the same way; the hybrid's row
---   estimate. Every write to thoughts now also materialises
---   its transition tables (whole rows, the vector included): a plain capture
---   measured under 0.1 ms, a whole-table stamp at 100,000 rows about +10%.
+--   estimate. Every write to thoughts now also materialises its transition
+--   tables (whole rows, the vector included) — a cost disabling the triggers
+--   does not remove, so bench-hybrid.ts measures a writer against the
+--   triggers dropped.
 --   SECURITY INVOKER throughout (no SECURITY DEFINER in this repo), so the
 --   triggers run as the writing role: db/config.mjs ROLE_GRANTS gives the
 --   capture group SELECT, INSERT, UPDATE and DELETE on both tables, and a
@@ -112,8 +125,9 @@
 --   write that moves an issue key, a ticket's status or watermark, or a
 --   pointer, and every lifecycle read, is refused on the new tables. A reader
 --   of node_lifecycle() — graph-centrality's default modes — needs SELECT on
---   ob1_ticket_head now, beside thoughts. Idempotent: IF NOT EXISTS, DROP TRIGGER IF EXISTS,
---   CREATE OR REPLACE, and the seed is a reconcile, not a wipe. The seed runs
+--   ob1_ticket_head now, beside thoughts. Idempotent: IF NOT EXISTS, DROP
+--   TRIGGER IF EXISTS, CREATE OR REPLACE, and the seed is a reconcile, not a
+--   wipe. The seed runs
 --   after the triggers exist; CREATE TRIGGER holds writers off until commit.
 --   A write made with thoughts' user triggers disabled — ALTER TABLE ...
 --   DISABLE TRIGGER, session_replication_role = replica (logical replication's
@@ -209,8 +223,7 @@ AS $$
           UNION ALL
           SELECT p.metadata->>'issue', p.id, p.metadata->>'status', p.metadata->>'status_type', p.metadata->>'linear_updated_at'
             FROM (SELECT DISTINCT k FROM unnest(p_issues) k WHERE k IS NOT NULL) u
-            JOIN thoughts p ON p.metadata ? 'issue' AND md5(p.metadata->>'issue')::uuid = md5(u.k)::uuid
-                           AND p.metadata->>'issue' = u.k) c
+            JOIN thoughts p ON p.metadata ? 'issue' AND md5(p.metadata->>'issue')::uuid = md5(u.k)::uuid) c
     LEFT JOIN ob1_superseded_by x ON x.old_id = c.id
    ORDER BY md5(c.issue)::uuid, c.issue, (x.old_id IS NULL) DESC, c.synced_at DESC NULLS LAST, c.id
 $$;
@@ -225,6 +238,11 @@ CREATE OR REPLACE FUNCTION ob1_node_projection_reconcile(p_issues text[], p_ids 
 RETURNS TABLE (heads_written int, heads_deleted int, superseders_written int, superseders_deleted int)
 LANGUAGE plpgsql
 SET jit = off
+-- A plan cached while the tables were small seq-scanned them on every call
+-- after they grew, until an ANALYZE (second review pass: 50,000 ticket writes
+-- in one transaction took 935 s). Each statement here is small: plan it with
+-- its keys and the tables' current size every time.
+SET plan_cache_mode = force_custom_plan
 AS $$
 BEGIN
   heads_written := 0; heads_deleted := 0; superseders_written := 0; superseders_deleted := 0;
@@ -282,12 +300,21 @@ RETURNS TABLE (heads_written int, heads_deleted int, superseders_written int, su
 LANGUAGE plpgsql
 AS $$
 BEGIN
+  -- Its snapshot must postdate the lock: under REPEATABLE READ or
+  -- SERIALIZABLE a row a writer deleted after the snapshot would be written
+  -- back without a conflict (second review pass).
+  IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('ob1_rebuild_node_projection() must run under READ COMMITTED; this transaction is %s', upper(current_setting('transaction_isolation'))),
+      HINT = 'BEGIN ISOLATION LEVEL READ COMMITTED, or call it outside an explicit transaction.',
+      ERRCODE = 'feature_not_supported';
+  END IF;
   PERFORM pg_advisory_xact_lock(22560, 0);
   RETURN QUERY SELECT * FROM ob1_node_projection_reconcile(NULL, NULL);
 END
 $$;
 COMMENT ON FUNCTION ob1_rebuild_node_projection() IS
-  'Reconciles the whole node_state projection under the exclusive lock (22560, 0) and returns what it wrote and deleted — zeros when it was exact. 060''s seed, and the repair after a write made with thoughts'' user triggers disabled. Migration 060 / SMD-2256.';
+  'Reconciles the whole node_state projection under the exclusive lock (22560, 0) and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 060''s seed, and the repair after a write made with thoughts'' user triggers disabled. Migration 060 / SMD-2256.';
 
 -- 058's two formulas verbatim, independent of the rule functions above: what
 -- a verifier must not share with the thing it verifies.
@@ -327,6 +354,7 @@ COMMENT ON FUNCTION ob1_node_projection_drift() IS
 CREATE OR REPLACE FUNCTION ob1_node_projection_sync()
 RETURNS trigger
 LANGUAGE plpgsql
+SET plan_cache_mode = force_custom_plan
 AS $$
 DECLARE
   v_issues  text[];   -- issue keys whose head may have moved
@@ -346,7 +374,12 @@ BEGIN
   ELSIF TG_OP = 'DELETE' THEN
     SELECT array_agg(DISTINCT o.metadata->>'issue') FILTER (WHERE o.metadata->>'issue' IS NOT NULL),
            array_agg(DISTINCT o.supersedes) FILTER (WHERE o.supersedes IS NOT NULL),
-           array_agg(o.id) FILTER (WHERE o.metadata->>'issue' IS NOT NULL)
+           -- every deleted row, not only issue rows: ON DELETE SET NULL then
+           -- fires this trigger again for the rows that pointed at them, and
+           -- that firing needs their buckets — held already, so no bucket is
+           -- taken out of order (second review pass: a deadlock between two
+           -- single-row writers).
+           array_agg(o.id)
       INTO v_issues, v_ids, v_rows
       FROM old_rows o WHERE o.metadata ? 'issue' OR o.supersedes IS NOT NULL;
     v_targets := v_ids;
@@ -381,12 +414,12 @@ BEGIN
     RETURN NULL;
   END IF;
   -- REPEATABLE READ recomputes from the transaction's snapshot, after a lock
-  -- that cannot refresh it: a concurrent move committed since would be lost
+  -- that cannot refresh it: a concurrent move committed since could be lost
   -- without a conflict (first review pass). SERIALIZABLE is left to SSI.
   IF current_setting('transaction_isolation') = 'repeatable read' THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'this write moves an issue key, a ticket''s status or watermark, or a supersedes pointer, and node_state''s projection (migration 060) cannot be kept under REPEATABLE READ',
-      HINT = 'Run it under READ COMMITTED (the default) or SERIALIZABLE.',
+      MESSAGE = 'this write moves an issue key, a ticket''s status or watermark, a supersedes pointer or a successor''s created_at, and node_state''s projection (migration 060) cannot be kept under REPEATABLE READ',
+      HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of ticket rows is serializable.',
       ERRCODE = 'feature_not_supported';
   END IF;
   -- Never NULL past here: NULL means every key to the rules.
@@ -429,14 +462,16 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  PERFORM pg_advisory_xact_lock(22560, 0);
+  -- TRUNCATE holds ACCESS EXCLUSIVE on thoughts, which excludes every writer
+  -- and the rebuild's read; the advisory lock it once took here inverted the
+  -- rebuild's order (22560, then thoughts) — a deadlock (second review pass).
   DELETE FROM ob1_ticket_head WHERE true;
   DELETE FROM ob1_superseded_by WHERE true;
   RETURN NULL;
 END
 $$;
 COMMENT ON FUNCTION ob1_node_projection_truncate() IS
-  'thoughts_node_projection_truncate''s body: emptying thoughts leaves no head and no superseder, so both tables are emptied under the exclusive lock (first review pass: a cascading truncation left them stale). Migration 060 / SMD-2256.';
+  'thoughts_node_projection_truncate''s body: emptying thoughts leaves no head and no superseder, so both tables are emptied, under the truncation''s own lock (first review pass: a cascading truncation left them stale). Migration 060 / SMD-2256.';
 
 DROP TRIGGER IF EXISTS thoughts_node_projection_insert ON thoughts;
 CREATE TRIGGER thoughts_node_projection_insert
@@ -531,10 +566,10 @@ COMMENT ON FUNCTION node_state(uuid[]) IS
 -- ---------------------------------------------------------------------------
 -- search_thoughts_current in plpgsql: 059's body, columns and settings,
 -- unchanged, in a language whose plan is cached. As LANGUAGE sql with a SET
--- clause it was planned afresh on every call, most of what the flag still
--- added beyond the wider window once node_state was a lookup (first review
--- pass: +1.11 ms at 10,000 thoughts against a budget of 1.10 as sql, +0.84 as
--- plpgsql). CREATE OR REPLACE keeps its signature, columns, COMMENT and ACL;
+-- clause it was planned afresh on every call (first review pass: as sql, in
+-- one run, +1.11 ms at 10,000 thoughts against a budget of 1.10; as plpgsql
+-- +0.84 to +1.06 against 1.09 to 1.19 — a margin inside the hybrid median's
+-- own spread from run to run). CREATE OR REPLACE keeps its signature, columns, COMMENT and ACL;
 -- --reapply replays 059's sql body and then this one. The body is still a
 -- string, so it records no dependency on node_state.
 -- ---------------------------------------------------------------------------

@@ -8751,9 +8751,14 @@ console.log("\n[56] Migration 060: node_state reads a stored projection kept cur
   const rrTicket = await underIso("REPEATABLE READ", `UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled"}' WHERE id = '${x.id}'`);
   const rrPlain = await underIso("REPEATABLE READ", `INSERT INTO thoughts (content, metadata) VALUES ('[56] a plain capture under repeatable read', '{}')`);
   const serTicket = await underIso("SERIALIZABLE", `UPDATE thoughts SET metadata = metadata || '{"status_type": "started", "linear_updated_at": "2026-09-29"}' WHERE id = '${x.id}'`);
+  // The rebuild's snapshot must postdate its lock too (second review pass): it
+  // refuses outside READ COMMITTED.
+  const rrRebuild = await underIso("REPEATABLE READ", `SELECT * FROM ob1_rebuild_node_projection()`);
+  const serRebuild = await underIso("SERIALIZABLE", `SELECT * FROM ob1_rebuild_node_projection()`);
   const iso = await diverged();
-  assert(/cannot be kept under REPEATABLE READ/.test(rrTicket) && rrPlain === "ok" && serTicket === "ok" && !iso.drift && !iso.life,
-    `under REPEATABLE READ a write moving a ticket's status is refused naming the level and a plain capture is not; under SERIALIZABLE it runs and the projection stays exact (${rrTicket}; ${rrPlain}; ${serTicket})`);
+  assert(/cannot be kept under REPEATABLE READ/.test(rrTicket) && rrPlain === "ok" && serTicket === "ok" && !iso.drift && !iso.life
+      && /must run under READ COMMITTED; this transaction is REPEATABLE READ/.test(rrRebuild) && /this transaction is SERIALIZABLE/.test(serRebuild),
+    `under REPEATABLE READ a write moving a ticket's status is refused naming the level and a plain capture is not; under SERIALIZABLE it runs and the projection stays exact; the rebuild refuses both levels (${rrTicket}; ${rrPlain}; ${serTicket}; ${rrRebuild}; ${serRebuild})`);
 
   // However many keys a transaction writes, it holds at most 513 of the
   // projection's locks — buckets of the key's hash, 256 per class, and the
@@ -8766,6 +8771,28 @@ console.log("\n[56] Migration 060: node_state reads a stored projection kept cur
     await tx.rollback();
   });
   assert(held > 300 && held <= 513, `six hundred ticket writes with six hundred issue keys in one transaction hold ${held} of the projection's locks — more than one class's buckets, never more than 513`);
+
+  // A deleted row takes its own pointer bucket, so the ON DELETE SET NULL
+  // cascade that follows needs none it lacks (second review pass: a deleted
+  // row with no issue key left its bucket to the cascade's firing, out of
+  // order — a deadlock between two single-row writers). T supersedes P and
+  // nothing supersedes T, so only the DELETE's own firing can take T's bucket;
+  // P's bucket is picked to differ.
+  let tRow = "", pRow = "";
+  for (let k = 0; ; k++) {
+    const [pp] = await q<{ id: string; b: number }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}') RETURNING id::text AS id, hashtext(id::text) & 255 AS b`, [`[56] cascade P ${k}`]);
+    const [tt] = await q<{ id: string; b: number }>(`INSERT INTO thoughts (content, metadata, supersedes) VALUES ($1, '{}', $2::uuid) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`, [`[56] cascade T ${k}`, pp.id]);
+    if (tt.b !== pp.b) { tRow = tt.id; pRow = pp.id; break; }
+  }
+  let ownBucket = false;
+  await db.transaction(async (tx) => {
+    await tx.query(`DELETE FROM thoughts WHERE id = $1`, [tRow]);
+    ownBucket = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND classid = 22562
+                                                  AND objid = (SELECT hashtext($1) & 255)`, [tRow])).rows[0].n > 0;
+    await tx.rollback();
+  });
+  await db.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[tRow, pRow]]);
+  assert(ownBucket, "a delete of a row that supersedes another holds the deleted row's own pointer bucket (class 22562), so a cascade nulling pointers to it takes nothing out of order");
 
   // A TRUNCATE leaves no head and no superseder: the fourth trigger empties
   // both tables (first review pass: TRUNCATE ... CASCADE left them stale).
