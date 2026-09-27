@@ -21,3 +21,19 @@ services:
       EXECUTIONS_DATA_PRUNE_SOFT_DELETE_INTERVAL: "1"
       EXECUTIONS_DATA_PRUNE_HARD_DELETE_INTERVAL: "1"
       EXECUTIONS_DATA_HARD_DELETE_BUFFER: "0"
+
+  # The import runner as it ships (SMD-2212), given the kit's allowlist in
+  # place of the shipped one, which is empty until a recipe is converted.
+  # Three pipelines, each its own source (the I check,
+  # evals/orchestration/n8n.ts):
+  # - `fixture`: a Python emitter over a five-entry export;
+  # - `stray`: its third line claims another source, and it must be refused
+  #   before anything is written;
+  # - `snoop`: an emitter an export has taken over, which must find nothing
+  #   to read and leave nothing running.
+  orchestration-runner:
+    volumes:
+      # With the shipped mounts' options, so the kit runs them too (review pass 5).
+      - ../evals/orchestration/runner/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z
+      - ../evals/orchestration/runner/emit-fixture.py:/app/evals/orchestration/runner/emit-fixture.py:ro,z
+      - ../evals/orchestration/runner/imports:/imports:ro,z

@@ -23,7 +23,7 @@
  *   bun db/consolidate.ts --url … --dry-run               # what a run would do; writes nothing
  *   bun db/consolidate.ts --url … --retry-failed          # failed rows back into the pool first
  *   bun db/consolidate.ts --url … --dump verdicts.jsonl   # also append every verdict, for evals/eval-consolidate.ts
- *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|all]   # the queue, with both thoughts
+ *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|all]   # the queue, with both thoughts
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
@@ -95,86 +95,72 @@ import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { isoTimestampOrNull } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
+import { commandLine } from "./cli.ts";
 
-const args = process.argv.slice(2);
-const flag = (name: string): string | undefined => {
-  const i = args.indexOf(`--${name}`);
-  return i >= 0 ? args[i + 1] : undefined;
-};
-const has = (name: string) => args.includes(`--${name}`);
-/** A numeric flag. Present with no value is an error, not the default (extract-entities.ts's rule). */
-const numberFlag = (name: string, fallback: number, min: number, opts: { optional?: boolean; integer?: boolean; max?: number } = {}): number => {
-  const raw = flag(name);
-  const integer = opts.integer ?? true;
-  if (raw === undefined || raw.startsWith("--")) {
-    if (has(name) && !opts.optional) {
-      console.error(`--${name} needs a value (${integer ? "an integer" : "a number"} >= ${min}).`);
-      process.exit(2);
-    }
-    return fallback;
-  }
-  const n = Number(raw);
-  if (!Number.isFinite(n) || (integer && !Number.isInteger(n)) || n < min || (opts.max !== undefined && n > opts.max)) {
-    console.error(`--${name} must be ${integer ? "an integer" : "a number"} >= ${min}${opts.max !== undefined ? ` and <= ${opts.max}` : ""}, got "${raw}"`);
-    process.exit(2);
-  }
-  return n;
-};
+/**
+ * Every argument accounted for (db/cli.ts): a flag this worker does not have
+ * is refused — `--K 10` for `--k 10` ran the default and exited 0, so a trial
+ * measured something other than what was asked (SMD-2015). A numeric flag
+ * present with no value is an error, not the default (extract-entities.ts's
+ * rule); --follow, --stale and --list take theirs optionally.
+ */
+const cli = commandLine("consolidate.ts", {
+  url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one",
+  k: "one", "min-sim": "one", "min-confidence": "one", limit: "one", follow: "optional", stale: "optional", dump: "one",
+  list: "optional", accept: "one", reject: "one", direction: "one", note: "one", force: "none",
+  status: "none", "dry-run": "none", "retry-failed": "none",
+}, { hints: { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|all]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" } });
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const url = flag("url") ?? process.env.DATABASE_URL;
+const url = cli.value("url") ?? process.env.DATABASE_URL;
 if (!url) {
   console.error("No database URL. Pass --url or set DATABASE_URL.");
   process.exit(2);
 }
 
-const WORKERS = numberFlag("workers", 2, 1);
+const WORKERS = cli.int("workers", { absent: 2, min: 1 });
 // One thought per claim: up to --k model calls per thought against a claim of
 // half a millisecond, so a bigger batch buys nothing, and a worker that dies
 // holds fewer rows. (Until migration 031 the lease was stamped once per batch
 // and could not be moved, so a batch of several at a long timeout could
 // outlive it; the heartbeat retires that reason.)
-const BATCH = numberFlag("batch", 1, 1);
+const BATCH = cli.int("batch", { absent: 1, min: 1 });
 // The lease is renewed on a heartbeat while the worker holds rows, so it has
 // to outlast a missed beat, not the batch — db/lease.ts holds the rule the
 // three consumers share, and the refusal below is its.
-const TTL = numberFlag("ttl", DEFAULT_TTL_S, 1);
-const HEARTBEAT = has("heartbeat") ? numberFlag("heartbeat", DEFAULT_HEARTBEAT_S, 1) : heartbeatFor(TTL);
-const TIMEOUT_S = numberFlag("timeout", 120, 1);
-const K = numberFlag("k", DEFAULT_CANDIDATES, 1, { max: 50 });
-const MIN_SIM = numberFlag("min-sim", DEFAULT_MIN_SIMILARITY, -1, { integer: false, max: 1 });
-const MIN_CONFIDENCE = numberFlag("min-confidence", DEFAULT_MIN_CONFIDENCE, 0, { integer: false, max: 1 });
+const TTL = cli.int("ttl", { absent: DEFAULT_TTL_S, min: 1 });
+const HEARTBEAT = cli.has("heartbeat") ? cli.int("heartbeat", { absent: DEFAULT_HEARTBEAT_S, min: 1 }) : heartbeatFor(TTL);
+const TIMEOUT_S = cli.int("timeout", { absent: 120, min: 1 });
+const K = cli.int("k", { absent: DEFAULT_CANDIDATES, min: 1, max: 50 });
+const MIN_SIM = cli.number("min-sim", { absent: DEFAULT_MIN_SIMILARITY, min: -1, max: 1, fraction: true });
+const MIN_CONFIDENCE = cli.number("min-confidence", { absent: DEFAULT_MIN_CONFIDENCE, min: 0, max: 1, fraction: true });
 {
-  const refusal = leaseRefusal(TTL, HEARTBEAT, !has("heartbeat"));
+  const refusal = leaseRefusal(TTL, HEARTBEAT, !cli.has("heartbeat"));
   if (refusal) {
     console.error(refusal);
     process.exit(2);
   }
 }
 /** Append every verdict here as JSONL — {newer, older, similarity, shared, verdict, supersedes, confidence, reason, key, proposal} — for evals/eval-consolidate.ts. */
-const DUMP = flag("dump");
-if (has("dump") && (DUMP === undefined || DUMP.startsWith("--"))) {
-  console.error("--dump needs a file path.");
-  process.exit(2);
-}
-const LIMIT = has("limit") ? numberFlag("limit", 0, 1) : 0;
-const FOLLOW = has("follow") ? numberFlag("follow", 15, 1, { optional: true }) : 0;
-const STATUS_ONLY = has("status");
-const DRY_RUN = has("dry-run");
-const RETRY_FAILED = has("retry-failed");
-const LIST = has("list") ? (flag("list") && !flag("list")!.startsWith("--") ? flag("list")! : "pending") : undefined;
-const ACCEPT = flag("accept");
-const REJECT = flag("reject");
-const STALE_DAYS = has("stale") ? numberFlag("stale", 90, 1, { optional: true }) : 0;
-const DIRECTION = flag("direction");
-const FORCE = has("force");
-const NOTE = flag("note");
-if (LIST !== undefined && !["pending", "accepted", "rejected", "all"].includes(LIST)) {
-  console.error(`--list takes pending, accepted, rejected or all, got "${LIST}"`);
+const DUMP = cli.value("dump");
+const LIMIT = cli.int("limit", { absent: 0, min: 1 });
+const FOLLOW = cli.int("follow", { absent: 0, bare: 15, min: 1 });
+const STATUS_ONLY = cli.has("status");
+const DRY_RUN = cli.has("dry-run");
+const RETRY_FAILED = cli.has("retry-failed");
+const LIST = cli.has("list") ? (cli.value("list") ?? "pending") : undefined;
+const ACCEPT = cli.value("accept");
+const REJECT = cli.value("reject");
+const STALE_DAYS = cli.int("stale", { absent: 0, bare: 90, min: 1 });
+const DIRECTION = cli.value("direction");
+const FORCE = cli.has("force");
+const NOTE = cli.value("note");
+if (LIST !== undefined && !["pending", "accepted", "rejected", "stale", "all"].includes(LIST)) {
+  console.error("--list takes pending, accepted, rejected, stale or all (or nothing, for pending).");
   process.exit(2);
 }
 for (const [name, v] of [["accept", ACCEPT], ["reject", REJECT]] as const) {
-  if (has(name) && (v === undefined || !UUID_RE.test(v))) {
+  if (v !== undefined && !UUID_RE.test(v)) {
     console.error(`--${name} needs a proposal id (a UUID from --list or the list_supersession_proposals tool).`);
     process.exit(2);
   }
@@ -189,6 +175,11 @@ if (DIRECTION !== undefined && (!ACCEPT || !["newer", "older"].includes(DIRECTIO
 }
 if (FORCE && !ACCEPT) {
   console.error("--force goes with --accept: it accepts a proposal whose thought was edited after it was judged.");
+  process.exit(2);
+}
+// Read only by the decision: beside anything else it would be dropped without a word (SMD-2015's kind).
+if (NOTE !== undefined && !ACCEPT && !REJECT) {
+  console.error("--note goes with --accept or --reject: it is recorded with the decision.");
   process.exit(2);
 }
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
@@ -339,11 +330,13 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     console.log(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
     console.log(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
     console.log(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${p.judge_key} on ${day(p.judged_at)}`);
-    if (p.status === "pending") {
+    if (p.status === "pending" || p.status === "stale") {
       // Commands as they run: a placeholder the shell cannot parse rather
       // than `newer|older`, which it would read as a pipe (review pass 3).
+      // A stale row (063: a text moved under the verdict) is the reviewer's
+      // too — its texts moved, so an accept takes --force.
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
-      const force = p.older_edited || p.newer_edited ? " --force" : "";
+      const force = p.older_edited || p.newer_edited || p.status === "stale" ? " --force" : "";
       console.log(`     --accept ${p.id}${dir}${force}    --reject ${p.id}`);
     }
     console.log("");
@@ -432,9 +425,16 @@ async function printQueue(): Promise<void> {
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending,
            count(*) FILTER (WHERE status = 'accepted')::int AS accepted,
            count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+           count(*) FILTER (WHERE status = 'stale')::int AS stale,
            count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected
     FROM supersession_proposals`;
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected — --list shows them; --accept / --reject decides one`);
+  // 063 (SMD-1732): a stale row is a pending verdict whose texts moved under
+  // it. The next pass judges the pair again and REPLACES the row when it
+  // finds the conflict again; a pair it no longer finds in conflict (this
+  // pass writes a proposal only for a conflict at its confidence floor)
+  // leaves the row stale, and that one is the reviewer's: --list stale,
+  // --reject.
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.stale ? `, ${q.stale} stale (a text moved — the next pass replaces one it finds in conflict again; --list stale / --reject settles one it does not)` : ""} — --list shows them; --accept / --reject decides one`);
 }
 
 async function printFailures(limit = 10): Promise<void> {

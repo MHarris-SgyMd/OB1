@@ -1,5 +1,7 @@
 # Migrate to the MCP TypeScript SDK v2 (SMD-2275)
 
+> **Amended 2026-09-27 by `docs/operator-surface-tiers.md` (SMD-2282).** The staging below still holds, and stage 1 (SMD-2278) has landed. But server-portable is no longer the long-term canonical surface. The REST core (SMD-2284) is the contract, and the MCP surface becomes a new SDK-v2 server that is a client of it (SMD-2287). Where this record calls server-portable "the canonical one-HTTP-process server" or "the canonical surface", read it as true until SMD-2287's cutover. Stage 2 (SMD-2279) is mostly retirement under SMD-1931.
+
 An architecture decision record. **Decided 2026-09-27: GO — migrate the fork
 onto the MCP TypeScript SDK v2 scoped packages (`@modelcontextprotocol/core` +
 `@modelcontextprotocol/server`), retiring the v1 single package

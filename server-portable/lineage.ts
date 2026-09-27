@@ -21,9 +21,9 @@
  *     parameters the pair was found under;
  *   - a structured pass (`source:<system>`): deterministic, the system.
  *
- * `deterministic` is what SMD-1732's rebuild will read: a recipe it can re-run
- * to the same rows (a split, a vector at a fixed model, a parse of a source's
- * own structure) against one it can only re-run (a model's answer). The
+ * `deterministic` is what rebuild_derived (migration 063, SMD-1732) reads: a
+ * recipe that re-runs to the same rows (a split, a vector at a fixed model, a
+ * parse of a source's own structure) against one a model answers anew. The
  * vector's own recipe — model and width — is the row trigger's, read from the
  * row, and has no builder here.
  *

@@ -1,0 +1,7 @@
+[
+  { "id": "fx-001", "title": "Pooling decision", "body": "One connection per worker, the pool at the edge; the orchestration kit's fixture export, entry one.", "date": "2026-08-01T09:00:00Z" },
+  { "id": "fx-002", "title": "Backup rehearsal", "body": "The restore was walked from the doc and the counts matched; fixture entry two.", "date": "2026-08-02T09:00:00Z" },
+  { "id": "fx-003", "title": "Retention window", "body": "Run history is kept a day, which bounds the copies a workflow leaves behind; fixture entry three.", "date": "2026-08-03T09:00:00Z" },
+  { "id": "fx-004", "title": "Egress probe", "body": "The sealed network showed every packet was a question to the resolver or a call to the brain; fixture entry four.", "date": "2026-08-04T09:00:00Z" },
+  { "id": "fx-005", "title": "Key custody", "body": "Each key does one job, and a rotation revokes the key it replaces; fixture entry five.", "date": "2026-08-05T09:00:00Z" }
+]

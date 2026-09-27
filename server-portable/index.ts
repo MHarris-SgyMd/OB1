@@ -5,8 +5,7 @@ import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, t
 import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
 import { captureLineage } from "./lineage.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPTransport } from "@hono/mcp";
+import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type AuditChange, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
@@ -1462,12 +1461,12 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "List Supersession Proposals",
       description:
-        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted or rejected ones, or all.",
+        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all.",
       annotations: {
         readOnlyHint: true,
       },
       inputSchema: {
-        status: z.enum(["pending", "accepted", "rejected", "all"]).optional().default("pending"),
+        status: z.enum(["pending", "accepted", "rejected", "stale", "all"]).optional().default("pending"),
         limit: z.number().int().min(1).max(200).optional().default(10),
       },
     },
@@ -3088,16 +3087,30 @@ app.on(MCP_METHODS, "*", async (c) => {
   principal.agentId = identity.agentId;
   principal.agentUnresolved = identity.unresolved;
 
-  // The label, read through Hono's request, which caches the body for the
-  // transport's own read of it — the same text, the same rejection: a body
-  // that cannot be read (the client gone mid-upload) is `?` here and the
-  // transport's 400 there, as before this read existed.
-  label = requestLabel(await c.req.text().catch(() => null));
+  // The label, read once from the request body. v2's transport reads the raw
+  // Request stream (v1's @hono/mcp read Hono's cached body, so a double-read was
+  // harmless), so we cache the text here and hand a reconstructed Request to the
+  // transport below — otherwise its parse sees an empty stream and every call
+  // returns -32700 (SMD-2278). A body that cannot be read (the client gone
+  // mid-upload) is `?` here and the transport's 400 there, as before.
+  const rawBody = await c.req.text().catch(() => null);
+  label = requestLabel(rawBody);
 
   const server = buildServer(principal);
-  const transport = new StreamableHTTPTransport();
+  const transport = new WebStandardStreamableHTTPServerTransport();
   await server.connect(transport);
-  const response = await transport.handleRequest(c);
+  // Hand the transport the body reconstructed from the cached text above. The
+  // client-abort signal is deliberately not carried onto it: this route already
+  // observes a disconnect through `c.req.raw.signal` at entry (the
+  // abandoned-request log, and `withSseKeepalive` below), and the server runs a
+  // started tool to completion (the keepalive comment below), so the transport
+  // is not handed a signal that would cancel it mid-run.
+  const mcpRequest = new Request(c.req.raw.url, {
+    method: c.req.raw.method,
+    headers: c.req.raw.headers,
+    body: rawBody ?? undefined,
+  });
+  const response = await transport.handleRequest(mcpRequest);
   if (!response) {
     settled = true;
     return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);

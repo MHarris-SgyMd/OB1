@@ -148,7 +148,8 @@ the repo root, with whatever `-f` files the stack was started with:
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
-| `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
+| `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
+| `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` and the model provider | Nothing | Nothing |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -675,25 +676,35 @@ the same contract on the same port.
 
 The fork's orchestration tool is n8n (`../docs/orchestration-tool.md`,
 SMD-1863). It runs workflows that need state — a schedule, a trigger, a retry,
-a cursor — and captures through the brain's MCP endpoint with a capture-scope
-key, never a table and never a write key. The `orchestration` profile runs it
-beside the stack (SMD-2210). The image is n8n's, pinned by digest and never
-vendored. OB1's part is the provisioning step in `orchestration/` and the
-templates it loads (SMD-2212 ships the first).
+a cursor. The `orchestration` profile runs it beside the stack (SMD-2210).
+The image is n8n's, pinned by digest and never vendored.
+
+n8n itself reaches the brain only through its MCP endpoint, with a
+capture-scope key, and holds no write key. The one exception is the profile's
+import runner (SMD-2212, below). It writes brain tables directly, the way the
+pipeline does from a checkout, and a workflow holding its key can cause those
+writes. That is the ADR's decision 4, amended, and the runner's key is
+bounded by its allowlist. OB1's part is the provisioning step in
+`orchestration/`, the templates it loads from `orchestration/templates/`, and
+the runner.
+
+Below, `compose` stands for `podman compose -f deploy/compose.yaml --profile
+orchestration`, or docker compose.
 
 ```bash
 bun deploy/orchestration/provision.ts --init   # once: the profile's secrets into deploy/.env (it never replaces one)
-# the brain key n8n captures with, a CAPTURE key:
-cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
-#   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS
-podman compose -f deploy/compose.yaml --profile orchestration up -d   # restart the server too, for the new key
+podman compose -f deploy/compose.yaml --profile orchestration up -d
 bun deploy/orchestration/provision.ts        # --env-file for another file; --rotate for a new API key
+# Optional, for a template that captures into the brain (none ships yet): a CAPTURE key
+cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
+#   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS,
+#   then recreate the server (compose up -d server; a restart keeps the old keys) and provision again
 ```
 
 `--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
 hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
-`$`s as variables), `N8N_MCP_KEY` and `N8N_WEBHOOK_KEY`, where the file has
-none. n8n sets its owner from the email and the hash at every start
+`$`s as variables), `N8N_MCP_KEY`, `N8N_WEBHOOK_KEY` and the import runner's
+`OB1_RUNNER_KEY`, where the file has none. n8n sets its owner from the email and the hash at every start
 (`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
 boot, and nobody who reaches the port before provisioning can claim the
 instance. To change the password, edit it, run `--init` again, and recreate
@@ -709,7 +720,7 @@ or `N8N_PORT` would split the two.
 The provisioning step runs from a checkout against the loopback port. It
 signs in as the owner and keeps n8n's API key in `deploy/.env` with its id,
 its scopes and the file's tag (`N8N_API_KEY`, `_ID`, `_SCOPES`, `_TAG`), all
-written at once. The key carries eight of n8n's 106 scopes, the credential
+written at once. The key carries ten of n8n's 106 scopes, the credential
 and workflow calls the step makes, and it expires after `N8N_API_KEY_DAYS`
 (90). A run mints a new key when that one has less than a week left, or on
 `--rotate`. Every run deletes every other key this env file minted, and
@@ -731,7 +742,25 @@ anything, it refuses:
 - a brain key at write scope, or one `MCP_ACCESS_KEYS` does not list,
   wherever in a credential it sits: a header, `Bearer <key>`, a URL's `?key=`;
 - a key whose scope is not the one its credential declares (`brainScope`);
-- a template naming a credential no template declares.
+- one of OB1's own keys (the inbound keys, the runner's) in any other
+  credential, a vendor's included, or inside a longer value: each does one
+  job;
+- a template naming a credential no template declares, or a workflow
+  (`ob1wf:<template>`) no template is.
+
+A credential marked `optional` whose value is unset is skipped, and so is
+every workflow that needs it. Without `N8N_LINEAR_API_KEY` the act tool is
+not loaded, and the run says so. A run also unloads what it no longer
+produces:
+- a workflow skipped that way, and an import instance whose pipeline left
+  `pipelines.json`, are unpublished (their endpoint, webhook and schedule
+  stop; the workflow stays, with its history);
+- a skipped optional credential is deleted, with the key it held.
+
+A workflow counts as a template's when its name fits the template's and it
+carries one of the template's node ids. So a workflow of your own is never
+touched, but a copy of an OB1 workflow renamed to an instance's name counts
+as that instance.
 
 No secret sits in n8n's environment but the encryption key and the owner's
 hash, and no workflow can read one from there
@@ -739,7 +768,7 @@ hash, and no workflow can read one from there
 so several runs in a row can meet a 429. The step says so.
 
 **An AI client** connects to an MCP endpoint a template publishes, at
-`http://127.0.0.1:5678/mcp/<path>` with the header `x-n8n-key: $N8N_MCP_KEY`
+`http://127.0.0.1:5678/mcp/<path>` (the port is `N8N_PORT`) with the header `x-n8n-key: $N8N_MCP_KEY`
 (Claude Code: `claude mcp add --transport http n8n <url> --header
 "x-n8n-key: …"`). What that endpoint exposes is workflow-shaped: an act tool
 that is a multi-step flow, or a trigger an agent may pull. The brain's own
@@ -747,6 +776,136 @@ tools stay on the brain's endpoint, under the client's own key (decision 7).
 **An on-demand run** is a POST to `/webhook/<path>` with the header
 `x-n8n-run-key: $N8N_WEBHOOK_KEY`. The two keys are separate: the MCP key
 starts no run, and the run key opens no MCP endpoint (both measured).
+
+**The act tool** (`templates/act-mcp.json`). `/mcp/ob1-act` lists one tool,
+`linear_file_issue`. It is a multi-step flow in its own workflow
+(`templates/act-linear-file-issue.json`):
+1. find the team by its key, and the label by its name;
+2. create the label if the team lacks it;
+3. create the issue, and answer its identifier and URL.
+
+It holds a Linear key of its own, `N8N_LINEAR_API_KEY`, which needs write
+access and is pinned to `api.linear.app`. Everything the AI client passes is
+sent to Linear, and n8n keeps a copy in its run history for the window
+below. Leave the key unset and the endpoint is not loaded, or is unloaded on
+the next run if it was.
+
+**Imports** (`templates/import.per-pipeline.json` and
+`import-on-demand.per-pipeline.json`, the runner `orchestration/runner.ts`).
+An import recipe converted to an emitter of ingestion-contract items
+(SMD-2147–2150, SMD-2021) runs as one instance of the import template, one
+per line of `orchestration/pipelines.json`. That file is empty until the
+first recipe is converted. Each pipeline owns one source (its `system`): two
+lines naming the same one are refused.
+- **The schedule.** Each instance runs on a schedule of the pipeline's own,
+  `everyHours`: 1 to 23 hours, or whole days (24, 48, … 168), since n8n
+  counts an hourly schedule within one day. An hourly 24 ran once and never
+  again (measured in n8n 2.40.6's own code). n8n counts days of the year, so
+  a weekly run can come a day late at the end of a leap year.
+- **On demand**, an instance runs through a POST to
+  `/webhook/ob1-import-<pipeline>` with the run key. The door is a workflow
+  of its own that saves no runs. It drops the request, headers and all, and
+  calls the import, so the run key never lands in n8n's saved runs. It answers
+  the report with 200, or the runner's reason with the runner's status (409
+  when a run of that pipeline is already going, 422 refused, 500 failed).
+  It answers 502 when the runner did not answer, or refused the door itself:
+  a runner key out of step with n8n's copy, or a pipeline the runner lacks.
+- **The runner.** n8n's image has neither Bun nor python3, so the import asks
+  the runner, `orchestration-runner`, over the compose network, with
+  `OB1_RUNNER_KEY`. The runner publishes no port, and it:
+  1. runs the pipeline's emitter over `deploy/imports/<pipeline>/`, mounted
+     read-only (`IMPORTS_DIR` moves it). Each pipeline's emitter runs as a
+     uid of its own, derived from the pipeline's name (so a renamed pipeline
+     has a new one), with no database URL or key in its environment. Its
+     HOME is `/`, which it cannot write, and Python's user site is off.
+     - It cannot read the runner's, the ingester's or another emitter's
+       environment, or reach another emitter's process.
+     - Whatever it leaves running is killed when it finishes.
+     - A parser an export exploits holds no secret, and cannot plant code
+       for, or lines into, another pipeline's emitter.
+     - The export must be readable by the pipeline's uid. A directory it
+       cannot read is refused as that (422, naming the uid and the path),
+       not taken for an empty export.
+     - Two limits:
+       - Every emitter can read every pipeline's exports that are
+         world-readable. `deploy/imports/README.md` has how to keep one
+         pipeline's to its own uid, on a host that enforces file modes.
+         Docker Desktop and podman-machine do not.
+       - Emitters have the runner's network, which the live-API emitters
+         need. That includes the host's Ollama, unauthenticated, admin
+         API and all; Postgres (a password is still needed); and on a VPS
+         the cloud metadata endpoint. SMD-2289 takes the network away from
+         any pipeline that does not ask for a host. Meanwhile the runner is
+         bounded to 512 processes and 2 GB;
+  2. refuses the whole batch if any line is not the pipeline's one source
+     and scope;
+  3. runs `db/ingest-records.ts --source items --items -` under the actor
+     `orchestration-runner`, then `db/reembed.ts`, both as `bun`, without
+     the runner's key.
+     - reembed embeds every row the brain holds without a vector at its
+       model, oldest first, not only this run's. That is normally just this
+       run's. After a model switch it is the whole brain, and imports then
+       run to their deadline for as long as that takes.
+- **Success** means every row of the pipeline's source has a vector.
+  reembed's own exit code (1 for any failed row in its job, or another
+  pass's leases) does not decide it.
+  - A row still pending is embedded by the next run.
+  - A row the provider refused waits for a retry, run in the runner:
+    `compose exec orchestration-runner su-exec bun bun db/reembed.ts
+    --retry-failed`.
+  - A row it refuses every time is an item to fix or remove in the export,
+    and then its thought to delete.
+  - When reembed refuses to run at all, the report quotes reembed's reason,
+    and says which kind of refusal it is:
+    - a model switch it was not told of, a width that does not match, or
+      an egress policy refusing everything: no run embeds anything until
+      that is fixed;
+    - a provider that did not answer, or a start that met another claimer:
+      the next run tries again.
+  - The runner takes the server's model and egress settings when it is
+    created. After changing them, recreate it with the server: `compose up
+    -d --force-recreate server orchestration-runner`.
+- **The deadline.** One run, emitter to reembed, is bounded by
+  `OB1_RUNNER_TIMEOUT_S` (3600), the wait for another pipeline's reembed
+  included. n8n waits that long and a minute more. The runner reads the
+  knob at start, and provisioning reads it from `deploy/.env`. After
+  changing it, recreate the runner (`compose up -d orchestration-runner`),
+  then provision. A step past the deadline, or running when the runner is
+  stopped or recreated, gets two SIGTERMs and then SIGKILL, so reembed hands
+  back the rows it was holding.
+
+The run's answer is the ingester's count line and the items it named
+(skipped, stale, held). A URL's password in anything a step printed is
+masked. Drop an export into the pipeline's directory and the next run
+ingests it, and a rerun writes nothing. The export never passes through
+n8n. The request names the pipeline and nothing else, so n8n's run history
+holds the report, not the export. The report does name items by identity,
+and a refusal can quote the value it refused.
+
+The runner's key is a write capability bounded by the allowlist (the ADR's
+decision 4, amended), and not a brain key. To change it, edit
+`OB1_RUNNER_KEY`, recreate the runner (`compose up -d orchestration-runner`),
+and provision, which patches n8n's copy.
+
+**Adding a pipeline.** A pipeline is a line in `pipelines.json` plus its
+emitter, and the emitter has to be in the runner's image. For a converted
+recipe, its conversion ships the pieces (SMD-2147–2150, SMD-2021):
+1. the emitter under `recipes/<recipe>/`;
+2. a `COPY` of it in `orchestration/runner.Dockerfile`, beside its pinned
+   packages (the file shows the lines);
+3. a `!recipes/<recipe>/<emitter>` line in the repo root's `.dockerignore`,
+   which otherwise keeps `recipes/` out of every image;
+4. its line in `pipelines.json`.
+
+Then rebuild the runner (`compose up -d --build orchestration-runner`), put
+the export in `imports/<pipeline>/`, and provision. A line whose emitter the
+image lacks fails that build, naming the two files. An image started with
+such a line refuses to start, which stops every pipeline, not just that
+one: every door answers 502 until it is fixed.
+
+**Removing a pipeline.** Take its line out, recreate the runner (`compose up
+-d --force-recreate orchestration-runner`; a plain `up -d` sees no change
+in a mounted file), and provision, which unpublishes its instance.
 
 **Custody and backups.**
 - **The owner password** is the profile's standing secret, stronger than the
