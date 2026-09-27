@@ -163,7 +163,7 @@ const norm = async (s: string) => ((await sql`SELECT normalize_entity_name(${s})
 
 /** `calls` is every model call the thought cost — entities.ts's callsOf, the worker's own count, or what a thrown thought had made (fourth and fifth review passes). */
 /** `abortedMs` is how far into its call a runaway was aborted on the stream — the longest call's, when several were (SMD-1960); absent when none was. */
-/** `partial`: the thought was over the per-thought bound and only its prefix was extracted (SMD-2240) — ok, but its counts are the prefix's. */
+/** `partial`: the thought was over the per-thought bound and only its prefix was extracted (SMD-2240), or some windows' answers were malformed and left out (SMD-2260) — ok, but its counts are the windows that parsed. */
 type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean; abortedMs?: number; partial?: Coverage };
 const outcomes: Outcome[] = [];
 
@@ -260,7 +260,7 @@ for (const arm of ARMS) {
   for (const d of docs) {
     process.stderr.write(`  … ${arm.name} ${d.id.slice(0, 8)} (${estimateTokens(d.content)} tokens)\n`);
     const { out } = await runOne(arm, d);
-    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.retried ? "  retried" : ""}${out.abortedMs !== undefined ? `  aborted at ${(out.abortedMs / 1000).toFixed(1)} s` : ""}${out.partial ? `  PARTIAL ${out.partial.windows} of ${out.partial.of} windows` : ""}${out.error ? `  ${out.error}` : ""}`);
+    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.retried ? "  retried" : ""}${out.abortedMs !== undefined ? `  aborted at ${(out.abortedMs / 1000).toFixed(1)} s` : ""}${out.partial ? `  PARTIAL ${out.partial.windows - (out.partial.malformed?.length ?? 0)} of ${out.partial.of} windows${out.partial.malformed ? ` (${out.partial.malformed.length} malformed, left out)` : ""}` : ""}${out.error ? `  ${out.error}` : ""}`);
   }
 }
 
@@ -277,9 +277,16 @@ for (const arm of ARMS) {
   );
 }
 // Until SMD-2240 a thought over the bound was a failure here; now it is a
-// prefix, extracted — counted in "extracted", so say how many were (review pass 1).
+// prefix, extracted — counted in "extracted", so say how many were (review
+// pass 1). Until SMD-2260 a thought with one malformed window was counted
+// malformed; now it is extracted with the window left out, so say how many
+// were, and how many windows: the malformed column plus these is the old one.
 for (const arm of ARMS) {
-  const partial = outcomes.filter((o) => o.arm === arm.name && o.partial).length;
-  if (partial) console.log(`  ${arm.name}: ${partial} of the extracted thought(s) were over the per-thought bound and read as a prefix only — their entity and edge counts are the prefix's`);
+  const mine = outcomes.filter((o) => o.arm === arm.name && o.partial);
+  // A prefix with windows left out is counted on the second line, as the worker counts it (review pass 2).
+  const prefix = mine.filter((o) => !o.partial!.malformed?.length && (o.partial!.windows < o.partial!.of || o.partial!.cut)).length;
+  if (prefix) console.log(`  ${arm.name}: ${prefix} of the extracted thought(s) were over the per-thought bound and read as a prefix only — their entity and edge counts are the prefix's`);
+  const leftOut = mine.filter((o) => o.partial!.malformed?.length);
+  if (leftOut.length) console.log(`  ${arm.name}: ${leftOut.length} of the extracted thought(s) had ${leftOut.reduce((n, o) => n + o.partial!.malformed!.length, 0)} window(s) answered malformed and left out — counted malformed before SMD-2260; their counts are the windows that parsed`);
 }
 await sql.close();

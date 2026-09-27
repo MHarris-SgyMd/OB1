@@ -61,6 +61,15 @@
  * text, and --retry-partial re-extracts such rows once the bound is raised.
  * The prefix is the note's opening, the part the header already treats as
  * what the note is about; what it misses is stated on the row, not guessed at.
+ *
+ * ── A malformed window is left out, not the thought (SMD-2260) ─────────────
+ * A windowed thought some of whose windows the model answered with something
+ * other than JSON of the expected shape is the answer of the windows that
+ * parsed, and `coverage.malformed` names the rest; only a thought with no
+ * window parsed — a one-window thought's one answer included — is a malformed
+ * answer. Until SMD-2260 one malformed window failed the whole thought: on
+ * the stable brain, three research papers kept nothing because the model
+ * could not answer their reference lists, 15 to 22 windows of 24 parsed.
  */
 
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
@@ -108,12 +117,18 @@ export type Extraction = {
   relations: ExtractedRelation[];
   /** Items the model returned that the rules rejected — for the eval's structural score. */
   rejected: { entities: number; relations: number };
-  /** True when the model's answer was not parseable JSON of the expected shape — in ANY window. */
+  /**
+   * True when the answer is no extraction: the model's answer was not
+   * parseable JSON of the expected shape — in EVERY window sent. A windowed
+   * thought some of whose windows parsed is the parsed windows' answer, and
+   * `coverage.malformed` names the rest (SMD-2260).
+   */
   malformed: boolean;
   /**
    * How many windows were sent: 1 for a thought within the window, the window
-   * count above it — a prefix's, a cut window included, when `coverage` is set
-   * (SMD-2240). callsOf adds the runaway retries.
+   * count above it — a prefix's, a cut window included, when the thought is
+   * over the bound (SMD-2240). Malformed windows are counted: they were sent.
+   * callsOf adds the runaway retries.
    */
   windows: number;
   /** Per window, when there was more than one: what each call returned before the merge. */
@@ -130,16 +145,20 @@ export type Extraction = {
    */
   abortedMs?: number;
   /**
-   * Set when the thought was over the per-thought bound and only its prefix
-   * was extracted (SMD-2240, boundedWindows): `windows` of its `of` windows
-   * were sent, and `cut` says the last of them was cut short at the text
-   * bound, which runs chunk.ts cannot split (SMD-1974) had used up. Absent
-   * on a whole extraction. The worker records a thought with it succeeded
-   * with the caveat partialCaveat writes.
+   * Set when the answer covers less than the whole thought. Either the thought
+   * was over the per-thought bound and only its prefix was extracted
+   * (SMD-2240, boundedWindows): `windows` of its `of` windows were sent, and
+   * `cut` says the last of them was cut short at the text bound, which runs
+   * chunk.ts cannot split (SMD-1974) had used up. Or some windows' answers
+   * were malformed while others parsed, and `malformed` names them
+   * (SMD-2260). Or both. Absent on a whole extraction. The worker records a
+   * thought with it, and not `malformed`, succeeded, with the caveat
+   * partialCaveat writes; a malformed prefix keeps its coverage and fails.
    */
   coverage?: Coverage;
 };
-export type Coverage = { windows: number; of: number; cut: boolean };
+/** `malformed`: the sent windows, by index from 0, whose answers were not JSON of the expected shape and are not in the answer — never every window sent, which is a malformed answer. */
+export type Coverage = { windows: number; of: number; cut: boolean; malformed?: number[] };
 
 /**
  * One user message holding the rules and the wrapped thought — upstream's
@@ -241,7 +260,7 @@ export type ExtractWindowing = {
    * measured for SMD-1879 are one entity or relation repeated to the budget,
    * visible on the stream long before it (SMD-1960). A call aborted so is a
    * runaway: retried under the penalty when retryRunaway says so, else the
-   * thought's malformed answer. The budget stays the bound. Off, the answer is
+   * call's malformed answer. The budget stays the bound. Off, the answer is
    * read whole, as before. Presumes outputBudget: windowingFor turns the two
    * off together (reasoning on), and a harness that streams without a budget
    * gets an aborted call retried without one — its own arm to describe.
@@ -646,20 +665,24 @@ function relationKey(relation: Relation, from: string, to: string): string {
  * is one entity in the payload; relations merge on (relation, from, to) the
  * same way. The database's rule (`normalize_entity_name`) then merges what
  * this cannot see — "clinician-portal" beside "clinician portal" — exactly as
- * it does within one answer. Rejected counts add up; one malformed window
- * makes the thought's answer malformed, so a thought is never recorded
- * terminal on a partial reading (`db/extract-entities.ts` records it failed,
- * retryable). `windows` is the window count; `parts` keeps each window's own
- * answer for the derivation record.
+ * it does within one answer. Rejected counts add up. A malformed window
+ * contributes nothing, and the thought's answer is malformed only when every
+ * window's was: until SMD-2260 one malformed window made it malformed and the
+ * worker failed the thought, its parsed windows with it — a research paper
+ * whose reference list the model could not answer in JSON kept nothing,
+ * where one over the bound kept its prefix (SMD-2240). The windows left out
+ * are the caller's to name (extractEntities sets `coverage.malformed`).
+ * `windows` is the window count; `parts` keeps each window's own answer for
+ * the derivation record.
  */
 export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
   const entities = new Map<string, ExtractedEntity>();
   const relations = new Map<string, ExtractedRelation>();
   const rejected = { entities: 0, relations: 0 };
-  let malformed = false;
+  // No parts is no answer, as no window parsing is.
+  const malformed = parts.every((p) => p.malformed);
   let abortedMs: number | undefined;
   for (const p of parts) {
-    malformed ||= p.malformed;
     if (p.abortedMs !== undefined) abortedMs = Math.max(abortedMs ?? 0, p.abortedMs);
     rejected.entities += p.rejected.entities;
     rejected.relations += p.rejected.relations;
@@ -991,22 +1014,69 @@ function cutToTokens(text: string, tokens: number): string {
 export const PARTIAL_CAVEAT_PREFIX = "partial: ";
 
 /**
- * The caveat a thought extracted over its prefix is recorded with — the claim
- * row's last_error on a succeeded row, migration 028's rule (SMD-2240). It
- * names the coverage and the knob, so the row says what a raised bound would
- * add; the worker's --retry-partial returns such rows to the pool.
+ * What a partial extraction's caveat holds when windows were left out as
+ * malformed (SMD-2260), and a prefix's never does: the worker tells the two
+ * kinds of partial row apart by it.
+ */
+export const MALFORMED_WINDOWS_MARK = "not JSON of the expected shape";
+
+/**
+ * What a partial extraction's caveat holds when the thought was over the
+ * per-thought bound — the knob it names — windows left out or not, and one of
+ * windows left out alone never does: the worker's --retry-partial and
+ * --retry-left-out say what a prefix gets by it (review pass 1: a row of both
+ * kinds was told it would be read whole).
+ */
+export const OVER_BOUND_MARK = "OB1_EXTRACT_MAX_WINDOWS (";
+
+/** Window indices, from 0, as the numbers a reader counts from 1, a run of three or more as a range: 13, 15–21, 23. The worker's failed-row error lists its windows by it too. */
+export function windowList(indices: number[]): string {
+  const out: string[] = [];
+  for (let i = 0; i < indices.length; ) {
+    let j = i;
+    while (j + 1 < indices.length && indices[j + 1] === indices[j] + 1) j++;
+    if (j - i >= 2) out.push(`${indices[i] + 1}–${indices[j] + 1}`);
+    else for (let k = i; k <= j; k++) out.push(String(indices[k] + 1));
+    i = j + 1;
+  }
+  return out.join(", ");
+}
+
+/**
+ * The caveat a partial extraction is recorded with — the claim row's
+ * last_error on a succeeded row, migration 028's rule. A thought extracted
+ * over its prefix (SMD-2240) gets the coverage and the knob, so the row says
+ * what a raised bound would add. A thought some of whose windows were
+ * malformed (SMD-2260) gets those windows named, with MALFORMED_WINDOWS_MARK;
+ * every caveat of a prefix, windows left out or not, names the knob
+ * (OVER_BOUND_MARK). The worker's --retry-partial returns either kind to the
+ * pool, and --retry-left-out the second alone.
  */
 export function partialCaveat(c: Coverage, w: Pick<ExtractWindowing, "windowTokens" | "maxWindows">): string {
   const bound = `OB1_EXTRACT_MAX_WINDOWS (${w.maxWindows})`;
   // Only large windows use the text bound up (boundedWindows), and the window
   // cut or stopped at need not be one of them: say what used it (review pass 3).
   const text = `the text bound, ${w.maxWindows * w.windowTokens} estimated tokens (${w.maxWindows} windows' worth under ${bound}), which runs chunk.ts cannot split (SMD-1974) used up`;
-  // A cut window was sent in part, so it is "sent", not "extracted" — "24 of
-  // 24 extracted" beside "the rest is not in the graph" read as a contradiction
-  // (review pass 2). A prefix that ended short of the count ended at the text
-  // bound, whether or not anything of the next window fitted.
-  const how = c.cut ? `sent, the last cut short at ${text}` : c.windows < w.maxWindows ? `extracted, stopped at ${text}` : `extracted, the thought is over ${bound}`;
-  return `${PARTIAL_CAVEAT_PREFIX}${c.windows} of ${c.of} window${c.of === 1 ? "" : "s"} ${how}; the rest of the thought is not in the graph`;
+  const of = `${c.of} window${c.of === 1 ? "" : "s"}`;
+  const bad = c.malformed ?? [];
+  if (!bad.length) {
+    // A cut window was sent in part, so it is "sent", not "extracted" — "24 of
+    // 24 extracted" beside "the rest is not in the graph" read as a contradiction
+    // (review pass 2). A prefix that ended short of the count ended at the text
+    // bound, whether or not anything of the next window fitted.
+    const how = c.cut ? `sent, the last cut short at ${text}` : c.windows < w.maxWindows ? `extracted, stopped at ${text}` : `extracted, the thought is over ${bound}`;
+    return `${PARTIAL_CAVEAT_PREFIX}${c.windows} of ${of} ${how}; the rest of the thought is not in the graph`;
+  }
+  // The count is of the windows whose answers are in the graph; a cut window
+  // that parsed is one of them.
+  const answers = bad.length === 1 ? `the model's answer for window ${windowList(bad)}` : `the model's answers for windows ${windowList(bad)}`;
+  const were = bad.length === 1 ? "was" : "were";
+  // A cut window that parsed is in the count, and only in part (review pass 1).
+  const inPart = c.cut && !bad.includes(c.windows - 1) ? ", the last of them in part" : "";
+  const head = `${PARTIAL_CAVEAT_PREFIX}${c.windows - bad.length} of ${of} extracted${inPart}; ${answers}`;
+  if (c.windows === c.of && !c.cut) return `${head} ${were} ${MALFORMED_WINDOWS_MARK}, and ${bad.length === 1 ? "its" : "their"} text is not in the graph`;
+  const over = c.cut ? `the last sent was cut short at ${text}` : c.windows < w.maxWindows ? `the prefix stopped at ${text}` : `the thought is over ${bound}`;
+  return `${head} of the ${c.windows} sent ${were} ${MALFORMED_WINDOWS_MARK}, and ${over}; the rest of the thought is not in the graph`;
 }
 
 /**
@@ -1019,7 +1089,9 @@ export function partialCaveat(c: Coverage, w: Pick<ExtractWindowing, "windowToke
  * the worker's --timeout — so a long thought's budget grows with its windows
  * rather than sharing one deadline across them. A thought over the
  * windowing's bound is extracted over its prefix, and the answer's `coverage`
- * says so (boundedWindows, SMD-2240). `windowing` is the
+ * says so (boundedWindows, SMD-2240); so it does of a window whose answer was
+ * malformed, left out when at least one other window parsed (SMD-2260).
+ * `windowing` is the
  * configuration's unless a harness measures another (evals/eval-extract-windows.ts).
  */
 export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg)): Promise<Extraction> {
@@ -1060,7 +1132,13 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
       retriedAny ||= ex.retried;
       parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {}), ms: Date.now() - t0 });
     }
-    return { ...mergeExtractions(parts), retried: retriedAny || undefined, ...(coverage ? { coverage } : {}) };
+    const merged = mergeExtractions(parts);
+    // The windows that parsed are the answer and the rest are named on it, as
+    // a prefix is (SMD-2260); every window malformed is a malformed answer,
+    // which already names its windows in `parts`.
+    const bad = merged.malformed ? [] : parts.filter((p) => p.malformed).map((p) => p.index);
+    const covered = bad.length ? { ...(coverage ?? { windows: windows.length, of, cut: false }), malformed: bad } : coverage;
+    return { ...merged, retried: retriedAny || undefined, ...(covered ? { coverage: covered } : {}) };
   } catch (e) {
     (e as Error & { callsMade?: number }).callsMade = made;
     throw e;

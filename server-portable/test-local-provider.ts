@@ -397,6 +397,8 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const reqs: Req[] = [];
   const CEILING = 700; // estimated tokens of thought text the stub accepts per call
   let prose = false;
+  /** Set, a window whose text it matches is answered in prose, and the others as usual (SMD-2260). */
+  let proseIf: RegExp | null = null;
   const providerD = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -407,7 +409,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
       const text = part ? inner.slice(part.length).trimStart() : inner;
       reqs.push({ text, maxTokens: body.max_tokens, part });
       if (estimateTokens(text) > CEILING) return new Response(JSON.stringify({ error: { message: `input too long: ${estimateTokens(text)} tokens` } }), { status: 400 });
-      if (prose) return Response.json({ choices: [{ message: { content: "I cannot help with that." } }] });
+      if (prose || proseIf?.test(text)) return Response.json({ choices: [{ message: { content: "I cannot help with that." } }] });
       // The subject "Open Brain" is in every window; each window also names one
       // person of its own — Anita in the first, Dev in the second, and so on.
       const person = /(Anita|Dev|Priya|Sam)/.exec(text)?.[1];
@@ -569,12 +571,61 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(mid.windows.length === 2 && mid.coverage?.cut === true && mid.coverage.of === 3 && estimateTokens(mid.windows.map((w) => w.content).join("")) <= 900 && mid.windows[1].content.startsWith("yyy"),
          `a run over the text bound mid-thought ends the prefix there, cut to what the bound left (${JSON.stringify(mid.coverage)}, ${mid.windows[1]?.content.length} characters of the run)`);
 
-  // One window answering prose fails the thought, not the window.
+  // A window answering prose is left out, not the thought (SMD-2260): the
+  // windows that parsed are the answer, and its coverage names the rest.
+  const { MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK } = await import("./entities.ts");
+  reqs.length = 0;
+  proseIf = /Priya wrote|Sam wrote/;
+  const some = await extractEntities(long, cfgD, undefined, { kind: "extraction" });
+  proseIf = null;
+  assert(reqs.length === 4 && !some.malformed && some.windows === 4,
+         `two of four windows answered in prose: the thought's answer is not malformed, all four sent (${reqs.length} calls, malformed ${some.malformed})`);
+  assert(some.entities.map((e) => e.name).sort().join(",") === "Anita,Dev,Open Brain" && some.relations.length === 2,
+         `…it is the parsed windows' answer — their people and edges, not the prose windows' (${some.entities.map((e) => e.name).join(",")}; ${some.relations.length} edges)`);
+  assert(JSON.stringify(some.coverage) === JSON.stringify({ windows: 4, of: 4, cut: false, malformed: [2, 3] }) && some.parts?.map((q) => q.malformed).join(",") === "false,false,true,true",
+         `…and its coverage names the windows left out, as the per-window record does (${JSON.stringify(some.coverage)})`);
+  const someCaveat = partialCaveat(some.coverage!, windowingFor(cfgD));
+  assert(someCaveat === `${PARTIAL_CAVEAT_PREFIX}2 of 4 windows extracted; the model's answers for windows 3, 4 were ${MALFORMED_WINDOWS_MARK}, and their text is not in the graph`,
+         `the caveat counts the windows in the graph and names those left out, from 1 (${someCaveat})`);
+  // Every window, and a one-window thought's one answer, is still a malformed answer, recorded failed.
   reqs.length = 0;
   prose = true;
   const bad = await extractEntities(long, cfgD, undefined, { kind: "extraction" });
+  const badOne = await extractEntities(short, cfgD, undefined, { kind: "extraction" });
   prose = false;
-  assert(bad.malformed && bad.windows === reqs.length, "a malformed window makes the thought's answer malformed — it is recorded failed, not terminal on a partial reading");
+  assert(bad.malformed && bad.windows === 4 && bad.coverage === undefined && bad.entities.length === 0,
+         `every window in prose of a thought within the bound is a malformed answer, with no coverage to record it succeeded by (${JSON.stringify(bad.coverage)})`);
+  assert(badOne.malformed && badOne.coverage === undefined, "…and so is a one-window thought's one prose answer");
+  // Over the bound and a window malformed: both on the one coverage, and the caveat says both.
+  reqs.length = 0;
+  proseIf = /Dev wrote/;
+  const both = await extractEntities(long, cfgD, undefined, { kind: "extraction" }, { ...windowingFor(cfgD), maxWindows: 3 });
+  proseIf = null;
+  assert(reqs.length === 3 && JSON.stringify(both.coverage) === JSON.stringify({ windows: 3, of: 4, cut: false, malformed: [1] }) && !both.entities.some((e) => e.name === "Dev" || e.name === "Sam"),
+         `a prefix of three with its second window in prose: sent three, left out one (${JSON.stringify(both.coverage)})`);
+  const bothCaveat = partialCaveat(both.coverage!, { windowTokens: 600, maxWindows: 3 });
+  assert(bothCaveat === `${PARTIAL_CAVEAT_PREFIX}2 of 4 windows extracted; the model's answer for window 2 of the 3 sent was ${MALFORMED_WINDOWS_MARK}, and the thought is over OB1_EXTRACT_MAX_WINDOWS (3); the rest of the thought is not in the graph`,
+         `…and its caveat names the window and the bound (${bothCaveat})`);
+  // The windows as a reader counts them, runs of three or more as ranges — the stable pool's two papers.
+  const cav = (malformed: number[], c: Partial<{ windows: number; of: number; cut: boolean }> = {}) =>
+    partialCaveat({ windows: 24, of: 24, cut: false, ...c, malformed }, { windowTokens: 600, maxWindows: 24 });
+  assert(cav([12, 14, 15, 16, 17, 18, 19, 20, 22], { of: 28 }).startsWith(`${PARTIAL_CAVEAT_PREFIX}15 of 28 windows extracted; the model's answers for windows 13, 15–21, 23 of the 24 sent were`)
+         && cav([22, 23], { of: 26 }).includes("windows 23, 24 of the 24 sent"),
+         `a run of three or more is a range, two are two (${cav([12, 14, 15, 16, 17, 18, 19, 20, 22], { of: 28 }).slice(0, 110)})`);
+  assert(/^partial: 1 of 3 windows extracted; the model's answer for window 2 of the 2 sent was not JSON of the expected shape, and the last sent was cut short at the text bound/.test(cav([1], { windows: 2, of: 3, cut: true })),
+         "a cut window left out says the cut, as a prefix's caveat does");
+  assert(cav([0], { windows: 2, of: 3, cut: true }).startsWith(`${PARTIAL_CAVEAT_PREFIX}1 of 3 windows extracted, the last of them in part; the model's answer for window 1 of the 2 sent was`),
+         `…and a cut window that parsed is counted in part, as a prefix's caveat says "sent" of it (${cav([0], { windows: 2, of: 3, cut: true }).slice(0, 100)})`);
+  // The worker tells the two kinds of partial row apart by the marks alone:
+  // every caveat naming malformed windows carries the one, and no prefix's
+  // does; every prefix's carries the other, windows left out or not, and no
+  // caveat of windows left out alone does.
+  const prefixForms = [{ windows: 24, of: 30, cut: false }, { windows: 3, of: 30, cut: false }, { windows: 5, of: 30, cut: true }];
+  const caveatOf = (c: { windows: number; of: number; cut: boolean; malformed?: number[] }) => partialCaveat(c, { windowTokens: 600, maxWindows: 24 });
+  assert(prefixForms.every((c) => !caveatOf(c).includes(MALFORMED_WINDOWS_MARK) && caveatOf(c).includes(OVER_BOUND_MARK))
+         && prefixForms.every((c) => caveatOf({ ...c, malformed: [0] }).includes(MALFORMED_WINDOWS_MARK) && caveatOf({ ...c, malformed: [0] }).includes(OVER_BOUND_MARK))
+         && caveatOf({ windows: 24, of: 24, cut: false, malformed: [0] }).includes(MALFORMED_WINDOWS_MARK) && !caveatOf({ windows: 24, of: 24, cut: false, malformed: [0] }).includes(OVER_BOUND_MARK),
+         "MALFORMED_WINDOWS_MARK is in every caveat with windows left out and in no prefix's, OVER_BOUND_MARK in every prefix's and in none of windows left out alone — the worker's partition holds");
 
   // A runaway — an answer cut at its budget — is the answer under the shipped
   // windowing, and is made once more with the frequency penalty when the

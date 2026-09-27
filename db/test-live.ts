@@ -3074,6 +3074,10 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   let calls = 0;
   let ledgerCalls = 0;
   let hemlockIsProse = true;
+  /** A window whose prompt holds one of these is answered in prose (SMD-2260). */
+  const proseKeys = new Set<string>();
+  /** The model each call named, in order: the escalation's calls must name the larger one (SMD-2260). */
+  const modelsAsked: string[] = [];
   // While set, every answer takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
   let slowMs = 0;
@@ -3082,10 +3086,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       calls++;
+      modelsAsked.push(body.model ?? "");
       // The thought is the user message; the rules are the system message.
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       await Bun.sleep(5 + slowMs);
-      if (hemlockIsProse && /hemlock/.test(prompt)) {
+      if ((hemlockIsProse && /hemlock/.test(prompt)) || [...proseKeys].some((k) => prompt.includes(k))) {
         return Response.json({ choices: [{ message: { content: "I'm sorry, I can't help with that." } }] });
       }
       const key = Object.keys(answers).find((k) => prompt.includes(k));
@@ -3272,9 +3277,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // A thought over the per-thought bound (SMD-2240) is extracted over its
   // prefix and released succeeded with a caveat — not failed — its prefix's
   // rows in the graph and its tail's not; --retry-partial under a wider bound
-  // reads it whole. The closing key is listed first: every window after the
-  // first carries the opening line as its header, so the last window's prompt
-  // holds both words and the stub answers the first key it finds.
+  // reads it whole. Each window is a paragraph, and with the window header off
+  // (db/config.mjs's EXTRACT_WINDOW_HEADER) a window's prompt holds only its
+  // own text, so each key reaches only its own window.
   answers["tome-closing"] = { entities: [{ name: "Inkwell", type: "tool", confidence: 0.9 }], relationships: [] };
   answers["tome-opening"] = {
     entities: [{ name: "Quill", type: "tool", confidence: 0.9 }, { name: "Quentin", type: "person", confidence: 0.9 }],
@@ -3302,9 +3307,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          && new RegExp(`extracted over a prefix only \\(1 of 1\\)[^\\n]*--retry-partial re-extracts them over at most 24 windows \\(OB1_EXTRACT_MAX_WINDOWS unset\\)[^\\n]*\\n\\s+${tome}  partial: 2 of`).test(partialStatus.out),
          `--status counts the partial row apart from the full ones and the failures, and lists it with its caveat (${partialStatus.out.split("\n").filter((l) => /prefix/.test(l)).join(" | ").slice(0, 300)})`);
   const partialDry = await extract("--dry-run", "--retry-partial");
-  assert(partialDry.code === 0 && /return 1 row\(s\) extracted over a prefix to the pool; /.test(partialDry.out) && /send 1 thought\(s\)/.test(partialDry.out), "--dry-run --retry-partial says it would return the one partial row and send one thought");
+  assert(partialDry.code === 0 && /return 1 row\(s\) extracted in part to the pool \(1 over a prefix only\); /.test(partialDry.out) && /send 1 thought\(s\)/.test(partialDry.out), "--dry-run --retry-partial says it would return the one partial row and send one thought");
   const widenedRun = await extract("--retry-partial");
-  assert(widenedRun.code === 0 && /--retry-partial: 1 row\(s\) extracted over a prefix returned to the pool, to be extracted over at most 24 window\(s\) \(OB1_EXTRACT_MAX_WINDOWS unset\) — a row read under a smaller bound gains coverage/.test(widenedRun.out)
+  assert(widenedRun.code === 0 && /--retry-partial: 1 row\(s\) extracted in part returned to the pool \(1 over a prefix only\); a prefix is extracted over at most 24 window\(s\) \(OB1_EXTRACT_MAX_WINDOWS unset\) — a row read under a smaller bound gains coverage/.test(widenedRun.out) && !/sent again/.test(widenedRun.out)
          && /1 extracted, 0 failed/.test(widenedRun.out),
          `--retry-partial under the default bound returns the row and extracts it whole (exit ${widenedRun.code})`);
   const [tomeAfter] = await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${tome}::uuid AND work_type = ${KEY}`;
@@ -3312,6 +3317,95 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          `…the caveat cleared and the tail's entity added to the graph (${tomeAfter.last_error}; ${JSON.stringify(await tomeTools())})`);
   const noPartial = await extract("--status");
   assert(/12 extracted, 0 failed/.test(noPartial.out) && !/over a prefix/.test(noPartial.out), "…and --status no longer counts or lists a partial row");
+
+  // A windowed thought the model answers one window of in prose (SMD-2260) —
+  // a research paper's reference list, on the stable brain — is extracted
+  // over the windows that parsed and released succeeded with a caveat naming
+  // the one left out: a second kind of partial row, apart from a prefix in
+  // the summary and --status. The folio is that kind alone; the codex, read
+  // under a bound of two, is both — a prefix with a window left out, as the
+  // stable brain's papers were — and counts with the windows left out. One
+  // none of whose windows parsed — its key in every paragraph — is still
+  // failed. The tome is read to a prefix again beside them, so both kinds
+  // stand at once. Each paragraph is a window, as the tome's are.
+  answers["codex-references"] = { entities: [{ name: "Bram", type: "person", confidence: 0.9 }], relationships: [] };
+  answers["codex-opening"] = {
+    entities: [{ name: "Vellum", type: "tool", confidence: 0.9 }, { name: "Cora", type: "person", confidence: 0.9 }],
+    relationships: [{ from: "Cora", to: "Vellum", relation: "uses", confidence: 0.8 }],
+  };
+  answers["folio-references"] = { entities: [{ name: "Quire", type: "tool", confidence: 0.9 }], relationships: [] };
+  answers["folio-opening"] = {
+    entities: [{ name: "Parchment", type: "tool", confidence: 0.9 }, { name: "Pell", type: "person", confidence: 0.9 }],
+    relationships: [{ from: "Pell", to: "Parchment", relation: "uses", confidence: 0.8 }],
+  };
+  proseKeys.add("codex-references");
+  proseKeys.add("folio-references");
+  proseKeys.add("codex-garbled");
+  const codexPara = (lead: string, who: string, p: number) => `${lead} ${Array.from({ length: 24 }, (__, i) => `${who} noted point ${p}.${i} about the book.`).join(" ")}`;
+  const codex = await seed([codexPara("The codex-opening chapter.", "Cora", 0), codexPara("The codex-references list.", "Cora", 1), codexPara("Chapter 2.", "Cora", 2)].join("\n\n"));
+  const folio = await seed([codexPara("The folio-opening chapter.", "Pell", 0), codexPara("The folio-references list.", "Pell", 1)].join("\n\n"));
+  const garbled = await seed([codexPara("The codex-garbled note.", "Gil", 0), codexPara("More codex-garbled text.", "Gil", 1)].join("\n\n"));
+  await sql`SELECT requeue_thought_work(${KEY}, ${tome}::uuid)`;
+  const mixed = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!], { env: { ...env, OB1_EXTRACT_MAX_WINDOWS: "2" } as Record<string, string>, cwd: HERE });
+  assert(mixed.code === 1 && /\n  3 extracted \(1 over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS \(2\); each row's caveat says how much; 2 with 2 window\(s\) left out, the model's answers for them not JSON of the expected shape; each row's caveat names them\), 1 failed/.test(mixed.out),
+         `the run extracts the tome's prefix and the folio's and codex's parsed windows, counts each kind apart, and fails the garbled note (exit ${mixed.code}: ${mixed.out.split("\n").find((l) => /extracted/.test(l) && /failed/.test(l))?.trim()})`);
+  const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null };
+  const folioClaim = await claimOf(folio);
+  assert(folioClaim.status === "succeeded" && folioClaim.last_error === "partial: 1 of 2 windows extracted; the model's answer for window 2 was not JSON of the expected shape, and its text is not in the graph",
+         `…the folio's claim succeeded with the window left out as its caveat (${folioClaim.status}: ${folioClaim.last_error})`);
+  const codexClaim = await claimOf(codex);
+  assert(codexClaim.status === "succeeded" && codexClaim.last_error === "partial: 1 of 3 windows extracted; the model's answer for window 2 of the 2 sent was not JSON of the expected shape, and the thought is over OB1_EXTRACT_MAX_WINDOWS (2); the rest of the thought is not in the graph",
+         `…and the codex's with both, the window left out and the bound (${codexClaim.status}: ${codexClaim.last_error})`);
+  const namesOf = async (id: string) => (await sql`
+    SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${id}::uuid ORDER BY e.name`).map((r: { name: string }) => r.name);
+  const edgesOf = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${id}::uuid`)[0].c);
+  assert(JSON.stringify(await namesOf(folio)) === '["Parchment","Pell"]' && (await edgesOf(folio)) === 1 && JSON.stringify(await namesOf(codex)) === '["Cora","Vellum"]',
+         `…the parsed windows' entities and edge are in the graph, and the prose windows' are not (${JSON.stringify(await namesOf(folio))}, ${await edgesOf(folio)} edge(s); ${JSON.stringify(await namesOf(codex))})`);
+  const garbledClaim = await claimOf(garbled);
+  assert(garbledClaim.status === "failed" && /^the model's answer was not JSON of the expected shape \(window 1, 2 of 2\)/.test(garbledClaim.last_error ?? "") && (await namesOf(garbled)).length === 0,
+         `…while a thought none of whose windows parsed is failed as before, naming them, with nothing in the graph (${garbledClaim.status}: ${garbledClaim.last_error})`);
+  assert((await claimOf(tome)).last_error?.startsWith("partial: 2 of 6 windows extracted, the thought is over OB1_EXTRACT_MAX_WINDOWS (2)") === true, "…and the tome is a prefix again, its caveat the prefix's");
+  // A capture pending beside them: --status names it beside the printed
+  // escalation, and --limit keeps the larger model off it — the returned rows
+  // are older in the queue (review pass 4).
+  const later = await seed("A later capture, still pending in the pool.");
+  const kinds = await extract("--status");
+  // Each heading's section, up to the next heading or the failures: its own rows, and not the other kind's.
+  const section = (heading: string) => kinds.out.split(heading)[1]?.split(/\n  \S/)[0] ?? "";
+  const prefixList = section("extracted over a prefix only (1 of 1)");
+  const leftOutList = section("extracted with windows left out (2 of 2)");
+  assert(kinds.code === 0 && /14 extracted \(1 over a prefix only, 2 with windows left out as malformed, 1 of those also over the bound\), 1 failed/.test(kinds.out)
+         && kinds.out.includes(`--retry-left-out re-extracts them, and another model kept to this pool may be worth trying (OB1_METADATA_MODEL=<model> … --job ${KEY} --retry-left-out --limit 2, no other worker of this pool running; 1 pending row(s) of this pool may be claimed by that model in place of some of these — drain them first)`)
+         && prefixList.includes(`${tome}  partial: 2 of 6`) && !prefixList.includes(codex) && !prefixList.includes(folio)
+         && leftOutList.includes(`${codex}  partial: 1 of 3`) && leftOutList.includes(`${folio}  partial: 1 of 2`) && !leftOutList.includes(tome),
+         `--status counts the two kinds of partial row apart from each other and from the failure, and lists each under its own heading, a row of both among the windows left out (${kinds.out.split("\n").filter((l) => /prefix|left out/.test(l)).join(" | ").slice(0, 400)})`);
+  const kindsDry = await extract("--dry-run", "--retry-partial");
+  const leftOutDry = await extract("--dry-run", "--retry-left-out");
+  assert(kindsDry.code === 0 && /return 3 row\(s\) extracted in part to the pool \(1 over a prefix only, 2 with windows left out as malformed, 1 of those also over the bound\); /.test(kindsDry.out)
+         && leftOutDry.code === 0 && /return 2 row\(s\) with windows left out to the pool \(2 with windows left out as malformed, 1 of those also over the bound\); [^\n]*send 3 thought\(s\)/.test(leftOutDry.out),
+         "--dry-run counts both kinds among the rows --retry-partial would return, and the windows-left-out rows alone for --retry-left-out");
+  // A larger model now answers the reference lists, run as --status advises —
+  // another OB1_METADATA_MODEL kept to this pool with --job, which a changed
+  // model's own key would refuse or empty (review pass 2): --retry-left-out
+  // takes the folio and the codex and not the tome, and says the codex is a
+  // prefix too.
+  proseKeys.delete("codex-references");
+  proseKeys.delete("folio-references");
+  const askedBefore = modelsAsked.length;
+  const leftOutRun = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--job", KEY, "--retry-left-out", "--limit", "2"], { env: { ...env, OB1_METADATA_MODEL: "stub-larger" } as Record<string, string>, cwd: HERE });
+  const escalated = modelsAsked.slice(askedBefore);
+  const [{ key: keyAfter }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  assert(/--retry-left-out: 2 row\(s\) with windows left out returned to the pool \(2 with windows left out as malformed, 1 of those also over the bound\); a prefix is extracted over at most 24 window\(s\)[^\n]*; a row with windows left out is sent again to stub-larger/.test(leftOutRun.out)
+         && /\n  2 extracted, 0 failed/.test(leftOutRun.out) && escalated.length === 5 && escalated.every((m) => m === "stub-larger") && keyAfter === KEY && (await claimOf(later)).status === "pending",
+         `--retry-left-out returns the rows with windows left out, saying the one over the bound is a prefix too; its five calls name the larger model, the later capture is left pending under --limit, and the recorded key is left as it was (exit ${leftOutRun.code}; ${escalated.length} call(s): ${[...new Set(escalated)].join(",")}; key ${keyAfter}: ${leftOutRun.out.split("\n").find((l) => /--retry-left-out:/.test(l))?.slice(0, 200)})`);
+  const [codexAfter, folioAfter, tomeStill] = [await claimOf(codex), await claimOf(folio), await claimOf(tome)];
+  assert(codexAfter.last_error === null && folioAfter.last_error === null && JSON.stringify(await namesOf(codex)) === '["Bram","Cora","Vellum"]' && JSON.stringify(await namesOf(folio)) === '["Parchment","Pell","Quire"]'
+         && tomeStill.last_error?.startsWith("partial: 2 of 6") === true,
+         `…their caveats cleared and the windows the model now answers added to the graph, the tome's prefix untouched (${codexAfter.last_error}; ${JSON.stringify(await namesOf(codex))}; ${JSON.stringify(await namesOf(folio))}; tome ${tomeStill.last_error?.slice(0, 20)})`);
+  const prefixRun = await extract("--retry-partial");
+  assert(/--retry-partial: 1 row\(s\) extracted in part returned to the pool \(1 over a prefix only\); a prefix is extracted over at most 24 window\(s\)[^\n]*; a reading that fails \(a window timing out, or none parsing\) records its row failed, the earlier reading's entities left in the graph until a later one succeeds/.test(prefixRun.out) && !/sent again/.test(prefixRun.out)
+         && (await claimOf(tome)).last_error === null,
+         `…and --retry-partial then takes the tome alone, a prefix, and reads it whole (${prefixRun.out.split("\n").find((l) => /--retry-partial:/.test(l))?.slice(0, 200)})`);
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
