@@ -17,6 +17,7 @@
 
 import type { SQL } from "bun";
 import type { Identity, Ingested } from "./ingest-contract.ts";
+import { structuredRecipe } from "../server-portable/lineage.ts";
 
 /** What a record that came through an adapter carries beside its row: the canonical, the links and the structured mentions. */
 export type Structure = Pick<Ingested, "identity" | "canonical" | "links" | "mentions">;
@@ -66,7 +67,9 @@ export async function recordStructure(sql: SQL, thoughtId: string, s: Structure,
   const [lnk] = (await sql`SELECT record_source_links(${thoughtId}::uuid, ${s.identity.system}, ${JSON.stringify(s.links)}::text::jsonb) AS r`) as { r: { ok: boolean; added: number; closed: number; kept: number; dropped: number; error?: string } }[];
   if (!lnk.r.ok) throw new Error(`record_source_links on ${thoughtId}: ${lnk.r.error}`);
   const entities = s.mentions.map((m) => ({ name: m.name, type: m.type, confidence: 1 }));
-  const [ent] = (await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${`source:${s.identity.system}`}, ${JSON.stringify(entities)}::text::jsonb, '[]'::jsonb, NULL, NULL) AS r`) as { r: { ok: boolean; mentions?: number; error?: string } }[];
+  // 061: a structured pass's recipe — the source's own structure, no model,
+  // deterministic — recorded with its rows (SMD-1731).
+  const [ent] = (await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${`source:${s.identity.system}`}, ${JSON.stringify(entities)}::text::jsonb, '[]'::jsonb, NULL, NULL, ${structuredRecipe(s.identity.system)}::jsonb) AS r`) as { r: { ok: boolean; mentions?: number; error?: string } }[];
   if (!ent.r.ok) throw new Error(`record_thought_entities(source:${s.identity.system}) on ${thoughtId}: ${ent.r.error}`);
   return { canonical: src.r.outcome ?? "unchanged", links: { added: lnk.r.added, closed: lnk.r.closed, kept: lnk.r.kept, dropped: lnk.r.dropped }, mentions: ent.r.mentions ?? 0 };
 }

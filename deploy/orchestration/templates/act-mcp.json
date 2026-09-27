@@ -1,0 +1,58 @@
+{
+  "name": "OB1 act — MCP tools",
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "4e8b6a1c-0001-4f2d-9a70-000000000001",
+      "name": "MCP Server Trigger",
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "4e8b6a1c-aaaa-4f2d-9a70-0000000000ac",
+      "parameters": {
+        "authentication": "headerAuth",
+        "path": "ob1-act"
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "ob1inboundMcp001", "name": "OB1 inbound — MCP clients" }
+      }
+    },
+    {
+      "id": "4e8b6a1c-0002-4f2d-9a70-000000000002",
+      "name": "linear_file_issue",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [0, 220],
+      "parameters": {
+        "description": "File a Linear issue: finds the team by its key, creates the label if the team lacks it, then creates the issue. Returns the new issue's identifier and URL. Everything passed here is sent to Linear.",
+        "source": "database",
+        "workflowId": { "__rl": true, "mode": "id", "value": "ob1wf:act-linear-file-issue" },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "team": "={{ $fromAI('team', 'The Linear team key, e.g. SMD', 'string') }}",
+            "title": "={{ $fromAI('title', 'The issue title', 'string') }}",
+            "description": "={{ $fromAI('description', 'The issue description, in Markdown; may be empty', 'string') }}",
+            "label": "={{ $fromAI('label', 'One label name to put on the issue, created if the team lacks it; empty for none', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "team", "displayName": "team", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "type": "string" },
+            { "id": "title", "displayName": "title", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "type": "string" },
+            { "id": "description", "displayName": "description", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "type": "string" },
+            { "id": "label", "displayName": "label", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "type": "string" }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      }
+    }
+  ],
+  "connections": {
+    "linear_file_issue": {
+      "ai_tool": [[{ "node": "MCP Server Trigger", "type": "ai_tool", "index": 0 }]]
+    }
+  }
+}

@@ -77,59 +77,25 @@ import {
   versionAtLeast,
 } from "./config.mjs";
 import { migrationSha, versionForMigration, readReleases } from "./version.mjs";
+import { commandLine } from "./cli.ts";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
 
-const args = process.argv.slice(2);
-const flag = (name: string): string | undefined => {
-  const i = args.indexOf(`--${name}`);
-  return i >= 0 ? args[i + 1] : undefined;
-};
-const has = (name: string) => args.includes(`--${name}`);
+// Every argument accounted for (db/cli.ts): a flag the runner does not have, a
+// value where no flag takes one, a flag that takes a value followed by none,
+// or a flag given twice (`--url A --url B` would run against A), is refused
+// rather than dropped — `--reapply=021`, or a misspelt flag, would otherwise be
+// a silent plain run that exits 0. The refusal names the flag or the
+// argument's position, never the argument: a URL carries a password.
+const cli = commandLine("migrate.ts", {
+  url: "one", grant: "one", "dry-run": "none", baseline: "none", reapply: "none", force: "none",
+}, { hints: { url: "<postgres://…>", grant: "<role>", force: "(with --baseline)" } });
 
-// Every argument accounted for: a flag the runner does not have, a value where
-// no flag takes one, a flag that takes a value followed by none, or a flag
-// given twice (flag() reads the first; `--url A --url B` would run against A),
-// is refused rather than dropped — `--reapply=021`, or a misspelt flag, would
-// otherwise be a silent plain run that exits 0. reembed.ts scans its arguments
-// the same way, with more shapes; the two are not yet one function.
-{
-  const TAKES_ONE = new Set(["url", "grant"]);
-  const TAKES_NONE = new Set(["dry-run", "baseline", "reapply", "force"]);
-  const USAGE = "  flags: --url <postgres://…>, --dry-run, --baseline, --force (with --baseline), --reapply, --grant <role>";
-  const seen = new Set<string>();
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    const name = a.startsWith("--") ? a.slice(2) : null;
-    if (name !== null && (TAKES_ONE.has(name) || TAKES_NONE.has(name))) {
-      if (seen.has(name)) {
-        console.error(`--${name} given twice.\n${USAGE}`);
-        process.exit(2);
-      }
-      seen.add(name);
-    }
-    if (name !== null && TAKES_ONE.has(name)) {
-      if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
-        console.error(`--${name} takes a value.\n${USAGE}`);
-        process.exit(2);
-      }
-      i++;
-      continue;
-    }
-    if (name !== null && TAKES_NONE.has(name)) continue;
-    // Echo the shape, not the value: `--url=postgres://user:PASSWORD@host/db`
-    // or a bare URL would otherwise put a password in the log.
-    const shown = name !== null ? (name.includes("=") ? `--${name.split("=")[0]}=… (a value joined with "="; give it as --${name.split("=")[0]} <value>)` : a) : /:\/\//.test(a) ? "<a URL>" : a;
-    console.error(`unknown argument: ${shown}${name === null ? " (a value where no flag takes one)" : ""}\n${USAGE}`);
-    process.exit(2);
-  }
-}
-
-const url = flag("url") ?? process.env.DATABASE_URL;
-const dryRun = has("dry-run");
-const baseline = has("baseline");
-const reapply = has("reapply");
-const force = has("force");
+const url = cli.value("url") ?? process.env.DATABASE_URL;
+const dryRun = cli.has("dry-run");
+const baseline = cli.has("baseline");
+const reapply = cli.has("reapply");
+const force = cli.has("force");
 
 if (!url) {
   console.error("No database URL. Pass --url or set DATABASE_URL.");
@@ -162,7 +128,7 @@ if (force && !baseline) {
 // role now holds each privilege and rolls back if not: a grantor that holds a
 // privilege without grant option "grants" it with a WARNING and no effect,
 // which the driver does not surface (SMD-1796, third review pass).
-const grantRole = flag("grant");
+const grantRole = cli.value("grant");
 if (grantRole !== undefined) {
   if (baseline || reapply) {
     console.error("--grant issues privileges; it does not apply or record migrations. Run it on its own.");
@@ -333,7 +299,7 @@ await sql.unsafe(`SET lock_timeout = '${LOCK_TIMEOUT_S}s'`);
 /**
  * A transaction under READ COMMITTED with the run's lock_timeout set inside it,
  * as its first statements. READ COMMITTED whatever the database's default:
- * the migrations are written for it — 060's seed reads the rows after
+ * the migrations are written for it — 066's seed reads the rows after
  * CREATE TRIGGER's lock, and under REPEATABLE READ its snapshot would predate
  * the writes that lock waited for (SMD-2256, second review pass).
  */
@@ -806,7 +772,9 @@ if (reapply) {
       "  recorded rows stay as they are, pending ones are recorded. Stop the server and any re-embed or extraction worker first:\n" +
       "  001 and 003 take ACCESS EXCLUSIVE locks on thoughts, 011 builds the trigram index if OB1_TRGM_INDEX is on and it is absent,\n" +
       "  023's and 050's backfill calls take thoughts EXCLUSIVE, 055's locks the audit rows it fills (OB1_BACKFILL_LIMIT bounds each, as on a first apply),\n" +
-      "  025 re-validates its constraints, 055 builds its partial index on thought_audit after its pass (SHARE, tens of milliseconds)."
+      "  025 re-validates its constraints, 055 builds its partial index on thought_audit after its pass (SHARE, tens of milliseconds),\n" +
+      "  060 seeds the vector snapshot from thoughts (a read; ON CONFLICT DO NOTHING on a re-apply),\n" +
+      "  061 backfills the lineage table from the proposals, the mentions and edges, the chunks and the vectors (reads; ON CONFLICT DO NOTHING on a re-apply)."
   );
 }
 

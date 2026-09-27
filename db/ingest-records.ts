@@ -57,6 +57,7 @@
  *   bun db/ingest-records.ts --url … --source markdown --markdown ~/vault --allow ~/vault
  *   bun db/ingest-records.ts --url … --source items --items out.jsonl --allow chatgpt:export
  *   python3 import-x.py export.zip | bun db/ingest-records.ts --url … --source items --items - --allow x:export
+ *   … --source items --items - --allow x:export --actor orchestration-runner   # writes under another tool's name (the import runner, SMD-2212)
  *   bun db/ingest-records.ts --url … --memory-dir ~/.claude/…/memory
  *   bun db/ingest-records.ts --url … --since <ref>         # commit range start (default the pin tag)
  *   bun db/ingest-records.ts --self-check                  # the pure parsers, no DB
@@ -92,6 +93,7 @@ import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY 
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { ItemsRefusal, parseItems, PIPELINE_META_KEYS, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
 import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
+import { commandLine } from "./cli.ts";
 
 // The structure writer lives in ingest-structure.ts so db/sync-linear.ts can
 // import it without this file's evals/ and scripts/ imports (its container
@@ -445,6 +447,22 @@ function isFingerprintCollision(e: unknown): boolean {
  */
 export const INGEST_ACTOR = { name: "ingest-records", via: "ingest-records" } as const;
 
+/**
+ * `--actor <name>`: the envelope's name when a tool runs the ingester on its
+ * own behalf. The orchestration profile's import runner writes as
+ * `orchestration-runner` (SMD-2212), so its rows are told apart from an
+ * operator's run from a checkout. The door stays the ingester's: 046's audit
+ * rows still say which code wrote the row. The name is a label the operator
+ * classifies with set_agent_kind, so it is lower-case and short.
+ */
+export const ACTOR_NAME_RE = /^[a-z][a-z0-9._:-]{0,62}$/;
+export type IngestActor = { readonly name: string; readonly via: string };
+export function ingestActor(name?: string): IngestActor {
+  if (name === undefined) return INGEST_ACTOR;
+  if (!ACTOR_NAME_RE.test(name)) throw new Error(`--actor must be a lower-case label of up to 63 characters (${ACTOR_NAME_RE.source})`);
+  return { name, via: INGEST_ACTOR.via };
+}
+
 /** The two keys 050's trigger owns: never compared, never merged — the trigger stamps them from the envelope. */
 const ACTOR_KEYS = ["actor_kind", "actor_name"] as const;
 
@@ -502,7 +520,7 @@ export type RecordResult = {
  * sync's next pass lands the rename from its census, so the cost is a delay
  * and an overstated count, never a lost write (second review pass).
  */
-export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()): Promise<RecordResult> {
+export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), actor: IngestActor = INGEST_ACTOR): Promise<RecordResult> {
   const meta = { ...doc.meta, source: doc.source };
   for (const k of ACTOR_KEYS) delete (meta as Record<string, unknown>)[k];
   const created = doc.createdAt ?? null;
@@ -511,7 +529,7 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
   const asOf = doc.watermark?.asOf ?? null;
   try {
     return await sql.begin(async (tx) => {
-      await tx`SELECT set_config('ob1.actor', ${JSON.stringify(INGEST_ACTOR)}, true)`;
+      await tx`SELECT set_config('ob1.actor', ${JSON.stringify(actor)}, true)`;
       // Another thought already IS this item — the board sync's row for a
       // ticket, found by identity (thought_sources; on a brain the sync filled
       // before 053, its metadata.issue claim). Asked BEFORE the write: with one
@@ -579,7 +597,12 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
       }
       // The chunk rows were the old text's windows (022's rule: nothing vouches
       // for them now); reembed.ts writes the new ones with the vector.
-      if (outcome === "updated") await tx`DELETE FROM thought_chunks WHERE thought_id = ${doc.id}::uuid`;
+      if (outcome === "updated") {
+        await tx`DELETE FROM thought_chunks WHERE thought_id = ${doc.id}::uuid`;
+        // …and the set's lineage row with them (061): no artifact, no row
+        // (cold read, SMD-1731's second review pass).
+        await tx`DELETE FROM derivations WHERE artifact_kind = 'chunks' AND artifact_id = ${doc.id}::uuid`;
+      }
       if (!doc.structure) return { outcome };
       return { outcome, structure: await recordStructure(tx, doc.id, doc.structure, run) };
     });
@@ -715,6 +738,11 @@ function selfCheck(): number {
   ok(applyAllowlist([{ ...doc, source: "future" }], allowlistFrom("")).docs.length === 0, "a record an adapter mapped is gated whatever its source label — the structure is the tell, not a list of names");
   ok(allowlistOf("./vault, linear:corpus").has(resolve("./vault")) && allowlistOf("./vault, linear:corpus").has("linear:corpus"), "an allow entry that names a path is resolved as the markdown scope is; the rest are taken as written");
   ok(runName("t", new Date("2026-09-23T00:00:00.000Z")) === "t@2026-09-23T00:00:00.000Z", "a run is named by tool and moment");
+  const runner = ingestActor("orchestration-runner");
+  ok(ingestActor() === INGEST_ACTOR && runner.name === "orchestration-runner" && runner.via === INGEST_ACTOR.via, "--actor names the envelope, and the door stays the ingester's");
+  let actorRefusal = "";
+  try { ingestActor("Runner; DROP"); } catch (e) { actorRefusal = (e as Error).message; }
+  ok(/^--actor must be a lower-case label/.test(actorRefusal) && !ACTOR_NAME_RE.test("") && !ACTOR_NAME_RE.test(`a${"b".repeat(63)}`), `--actor refuses a name that is not a short lower-case label (${actorRefusal.slice(0, 50)})`);
 
   if (bad === 0) console.log("ingest-records.ts self-check PASS");
   return bad === 0 ? 0 : 1;
@@ -725,65 +753,43 @@ function selfCheck(): number {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const flag = (name: string): string | undefined => {
-    const i = args.indexOf(`--${name}`);
-    return i >= 0 ? args[i + 1] : undefined;
-  };
-  const has = (name: string) => args.includes(`--${name}`);
+  // Every argument accounted for (db/cli.ts): a flag the runner does not have,
+  // a value where none is expected, a one-value flag with nothing after it or
+  // an empty value (`--items "$OUT"` with the variable unset would read as the
+  // flag absent and write nothing, exit 0), or a flag given twice, is refused
+  // rather than silently dropped.
+  const cli = commandLine("ingest-records.ts", {
+    url: "one", source: "one", linear: "one", "memory-dir": "one", markdown: "one", items: "one", allow: "one", actor: "one", tier: "one", since: "one",
+    "dry-run": "none", "self-check": "none",
+  }, { hints: { url: "<postgres://…>", source: "<all|fork|commit|linear|memory|markdown|items>", linear: "<dump.json>", "memory-dir": "<path>", markdown: "<vault root>", items: "<file.jsonl | ->", allow: "<scope,scope> (or OB1_INGEST_ALLOW)", actor: "<name>", tier: "<stable|canary|working>", since: "<ref>" } });
 
-  // Every argument accounted for, the way migrate.ts does it: a flag the runner
-  // does not have, a value where none is expected, a one-value flag with nothing
-  // after it, or a flag given twice, is refused rather than silently dropped.
-  {
-    const TAKES_ONE = new Set(["url", "source", "linear", "memory-dir", "markdown", "items", "allow", "tier", "since"]);
-    const TAKES_NONE = new Set(["dry-run", "self-check"]);
-    const USAGE = "  flags: --url <postgres://…>, --source <all|fork|commit|linear|memory|markdown|items>, --linear <dump.json>, --memory-dir <path>, --markdown <vault root>, --items <file.jsonl | ->, --allow <scope,scope> (or OB1_INGEST_ALLOW), --tier <stable|canary|working>, --since <ref>, --dry-run, --self-check";
-    const seen = new Set<string>();
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      const name = a.startsWith("--") ? a.slice(2) : null;
-      if (name !== null && (TAKES_ONE.has(name) || TAKES_NONE.has(name))) {
-        if (seen.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); }
-        seen.add(name);
-      }
-      if (name !== null && TAKES_ONE.has(name)) {
-        // An empty value is no value: `--items "$OUT"` with the variable unset would otherwise read as the flag absent and the run would write nothing, exit 0 (third review pass, cold read).
-        if (i + 1 >= args.length || args[i + 1].startsWith("--") || args[i + 1] === "") { console.error(`--${name} takes a value${i + 1 < args.length && args[i + 1] === "" ? " (an empty one was given)" : ""}.\n${USAGE}`); process.exit(2); }
-        i++;
-        continue;
-      }
-      if (name !== null && TAKES_NONE.has(name)) continue;
-      const shown = name !== null ? a : /:\/\//.test(a) ? "<a URL>" : a;
-      console.error(`unknown argument: ${shown}${name === null ? " (a value where no flag takes one)" : ""}\n${USAGE}`);
-      process.exit(2);
-    }
-  }
+  if (cli.has("self-check")) process.exit(selfCheck());
 
-  if (has("self-check")) process.exit(selfCheck());
-
-  const dryRun = has("dry-run");
-  const sourceArg = flag("source") ?? "all";
+  const dryRun = cli.has("dry-run");
+  const sourceArg = cli.value("source") ?? "all";
   if (sourceArg !== "all" && !SOURCES.includes(sourceArg as Source)) {
     console.error(`--source must be all or one of ${SOURCES.join(", ")}.`);
     process.exit(2);
   }
   const wanted = sourceArg === "all" ? new Set<Source>(SOURCES) : new Set<Source>([sourceArg as Source]);
 
-  // Whitespace is unset (the fork's string-knob rule), defaulting to stable; an empty value is refused above, as every one-value flag's is.
-  const tier = ((flag("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
+  // A blank OB1_TIER is unset (the fork's string-knob rule), defaulting to stable; a blank --tier is refused by the scanner, as every flag's blank value is.
+  const tier = ((cli.value("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
   if (!TIERS.includes(tier)) {
     console.error(`--tier / OB1_TIER must be one of ${TIERS.join(", ")}.`);
     process.exit(2);
   }
 
-  const since = flag("since") ?? "upstream-pin-9543c29";
-  const linearPath = flag("linear");
-  const memoryDir = flag("memory-dir") ?? process.env.OB1_MEMORY_DIR;
-  const markdownDir = flag("markdown") ?? process.env.OB1_MARKDOWN_DIR;
-  const itemsPath = flag("items");
+  const since = cli.value("since") ?? "upstream-pin-9543c29";
+  const linearPath = cli.value("linear");
+  const memoryDir = cli.value("memory-dir") ?? process.env.OB1_MEMORY_DIR;
+  const markdownDir = cli.value("markdown") ?? process.env.OB1_MARKDOWN_DIR;
+  const itemsPath = cli.value("items");
   // SMD-1813's allowlist: the flag, else the environment; empty clears nothing.
-  const allow = allowlistOf(flag("allow") ?? process.env.OB1_INGEST_ALLOW);
+  const allow = allowlistOf(cli.value("allow") ?? process.env.OB1_INGEST_ALLOW);
+  let actor: IngestActor;
+  try { actor = ingestActor(cli.value("actor")); }
+  catch (e) { console.error((e as Error).message); process.exit(2); }
 
   // Gather. A source in the wanted set with no input to read is skipped with a
   // word on stderr, not an error — `--source all` on a bare checkout ingests
@@ -904,7 +910,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const url = flag("url") ?? process.env.DATABASE_URL;
+  const url = cli.value("url") ?? process.env.DATABASE_URL;
   if (!url) { console.error("No database URL. Pass --url or set DATABASE_URL."); process.exit(2); }
 
   const sql = new SQL({ url, max: 1 });
@@ -916,7 +922,7 @@ async function main(): Promise<void> {
   const ITEM_OUTCOME_WHY = { skipped: "another row already holds this text", stale: "the row carries a newer watermark, or the same one written after this view was taken" } as const;
   try {
     for (const doc of docs) {
-      const r = await upsertRecord(sql, doc, run);
+      const r = await upsertRecord(sql, doc, run, actor);
       tally[r.outcome]++;
       if (r.outcome === "held") heldBy.set(doc.source, (heldBy.get(doc.source) ?? 0) + 1);
       // An item counted but not named is a line the emitter cannot find (fifth review pass, run-it).

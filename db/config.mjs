@@ -1444,11 +1444,13 @@ export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, json
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
 export const SEARCH_THOUGHTS_CURRENT_SIGNATURE = "search_thoughts_current(vector, text, float, int, jsonb, float, float)";
 /**
- * update_thought's signature since migration 046 (SMD-1730): a tenth,
- * defaulted parameter, `p_event`, the write event {stance, cites, valid_from,
- * valid_until, trust, actor_kind} the audit trigger stamps on the row — after
- * 032's ninth, `p_provenance`, the envelope that sets or clears `supersedes`
- * and `derived_from`, and 021's eighth, `p_embedding_model`, the model that
+ * update_thought's signature since migration 061 (SMD-1731): an eleventh,
+ * defaulted parameter, `p_lineage`, the lineage envelope {chunks, metadata}
+ * naming the recipes of the windows and the tags an edit carries — after
+ * 046's tenth, `p_event`, the write event {stance, cites, valid_from,
+ * valid_until, trust, actor_kind} the append stamps on the row, 032's ninth,
+ * `p_provenance`, the envelope that sets or clears `supersedes` and
+ * `derived_from`, and 021's eighth, `p_embedding_model`, the model that
  * produced the vector being written. Each dropped the form before it first,
  * for the reason above: CREATE OR REPLACE with a new parameter leaves the old
  * form beside it, and every call with fewer arguments is then "function is
@@ -1456,7 +1458,12 @@ export const SEARCH_THOUGHTS_CURRENT_SIGNATURE = "search_thoughts_current(vector
  * 018's sentinel), and preflight's `edit signature` check reads the forms
  * beside it.
  */
-export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb)";
+export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb, jsonb)";
+/**
+ * 046's form, the one 061 replaced: what a brain at 060 still carries, what
+ * reembed.ts and preflight probe for to name 061 as the missing file.
+ */
+export const UPDATE_THOUGHT_SIGNATURE_10 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb)";
 /**
  * 032's form, the one 046 replaced: what a brain at 044 still carries, what
  * reembed.ts probes for to name 046 as the missing file, and what a test that
@@ -1467,9 +1474,9 @@ export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vecto
  */
 export const UPDATE_THOUGHT_SIGNATURE_9 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)";
 /**
- * The forms 020, 021, 032 and 046 dropped. Still owned: a bench's "before"
- * arm re-applies 014 or 017, and a test re-applies 018, 021, 032 or 033,
- * re-creating them, so a schema reset must drop them too.
+ * The forms 020, 021, 032, 046 and 061 dropped. Still owned: a bench's
+ * "before" arm re-applies 014 or 017, and a test re-applies 018, 021, 032,
+ * 033, 046, 055 or 060, re-creating them, so a schema reset must drop them too.
  */
 export const SUPERSEDED_SIGNATURES = Object.freeze([
   "match_thoughts(vector, float, int, jsonb)",
@@ -1477,6 +1484,7 @@ export const SUPERSEDED_SIGNATURES = Object.freeze([
   "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)",
   "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)",
   UPDATE_THOUGHT_SIGNATURE_9,
+  UPDATE_THOUGHT_SIGNATURE_10,
 ]);
 
 /**
@@ -1670,7 +1678,14 @@ export const ROLE_GRANTS = Object.freeze({
   capture: Object.freeze([
     Object.freeze({ table: "thoughts",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "001" }),
     Object.freeze({ table: "thought_chunks", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "007" }),
-    Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["INSERT"]),                                since: "008" }),
+    // 055's ob1_append_thought_event reads the audit row it inserts (INSERT
+    // ... RETURNING needs SELECT on the returned column) on every write, so
+    // SELECT has been a hard capture privilege since 055 — this list had no
+    // row for it from 055 to 058, and a role granted then could not write at
+    // all (run-it, SMD-2116's fourth review pass); since 060 the audit
+    // trigger's check and the projector read the event too. INSERT alone
+    // before 055 (008).
+    Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["SELECT", "INSERT"]),                      since: "008" }),
     // 042's guard runs as the caller on EVERY delete of a thought: it reads the
     // citations that name the row and, detaching, writes them. A role without
     // these cannot delete any thought, cited or not.
@@ -1681,13 +1696,29 @@ export const ROLE_GRANTS = Object.freeze({
     // trigger — so SELECT is hard here, while the writes resolve_agent makes
     // stay soft, in `server` below (SMD-1730, first review pass).
     Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT"]),                               since: "046" }),
-    // 060's triggers run as the caller on every write of a row carrying an
+    // 060's snapshot trigger runs as the caller on EVERY write of a vector,
+    // a label or a key: it upserts the row's vector under its key. A role
+    // without these fails every capture that carries a vector inside the
+    // trigger — so the writes are hard here (SMD-2116).
+    Object.freeze({ table: "ob1_embedding_snapshot", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "060" }),
+    // 061's lineage rows are written as the caller on EVERY capture and edit:
+    // the vector trigger upserts (and, a vector cleared, deletes) the vector's
+    // row; the write functions upsert the windows' and the tags' rows and
+    // delete a replaced set's. A role without these fails EVERY capture and
+    // every content edit inside the trigger — a vectorless capture too, since
+    // the trigger drops the vector's row when none is carried; a tags-only
+    // edit that moves no vector touches the table only under the extractor's
+    // recipe (run-it, third review pass; fourth) — so all four are hard here
+    // (SMD-1731). The workers' passes write through the same table, and
+    // --grant issues every group.
+    Object.freeze({ table: "derivations",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "061" }),
+    // 066's triggers run as the caller on every write of a row carrying an
     // issue key or a supersedes pointer, and reconcile the node_state
     // projection; node_lifecycle() and node_state() read it. A role without
     // these cannot write a ticket row or a pointer, nor read a lifecycle
     // (SMD-2256).
-    Object.freeze({ table: "ob1_ticket_head",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "060" }),
-    Object.freeze({ table: "ob1_superseded_by", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "060" }),
+    Object.freeze({ table: "ob1_ticket_head",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "066" }),
+    Object.freeze({ table: "ob1_superseded_by", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "066" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
@@ -1726,6 +1757,13 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_work_claims",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
     Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["INSERT", "UPDATE"]),                     since: "006" }),
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
+    // 063's rebuild_derived (SMD-1732), run by db/rebuild.ts or by SMD-1723's
+    // forget: the forget arm removes the snapshot rows at a leaving thought's
+    // fingerprints — the one DELETE on 060's table, and this file's arm of the
+    // forgetting rule. In the worker group, not capture, so no server role
+    // granted before 063 fails preflight's write privileges over it; SMD-1723
+    // decides the capture group when forget lands on the server.
+    Object.freeze({ table: "ob1_embedding_snapshot", privileges: Object.freeze(["DELETE"]),                              since: "063" }),
   ]),
   // The entity-extraction worker, additionally, writes the entity graph — and
   // so does a structured pass (`source:` mentions). UPDATE on the mention and
@@ -1753,7 +1791,7 @@ export const ROLE_GRANTS = Object.freeze({
   // 058's node_state(), which reads `thought_sources` too, so a reader running
   // it needs SELECT on it — this group's, or the server group's since 059
   // (SMD-2255); its default modes read node_lifecycle() — `thoughts` and,
-  // since 060, `ob1_ticket_head`, both the capture group's (SMD-2074,
+  // since 066, `ob1_ticket_head`, both the capture group's (SMD-2074,
   // SMD-2256).
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
@@ -1768,6 +1806,25 @@ export const ROLE_GRANTS = Object.freeze({
   // check as "log off; grant needed if you enable it".
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
+  ]),
+  // The page store (064, SMD-1812): a page is a thought (its id, its render as
+  // the content — written through the capture group's functions, so a role
+  // that writes pages holds `capture` too), and the sections, their pending
+  // drafts and their revisions are these three tables, written only through
+  // upsert_page, write_page_section, accept_page_section and
+  // release_page_section, reject_page_section, lock_page_section, delete_page_section
+  // (SECURITY INVOKER, PUBLIC's EXECUTE as every core function). No DELETE
+  // on pages (a page goes with its thought's delete, the capture group's) or
+  // on the revisions (they go with their section's cascade, which runs as the
+  // tables' owner); DELETE on page_sections, since delete_page_section deletes
+  // the row as the caller. The revisions take INSERT alone, and a trigger
+  // refuses UPDATE, a DELETE while the section stands, and TRUNCATE, for the
+  // owner too. The identity column needs no sequence grant (test-schema [59]
+  // measures it).
+  pages: Object.freeze([
+    Object.freeze({ table: "pages",                  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "064" }),
+    Object.freeze({ table: "page_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "064" }),
+    Object.freeze({ table: "page_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),           since: "064" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
@@ -1834,13 +1891,6 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/typed-reasoning-edges" }),
     Object.freeze({ sequence: "thought_edges_id_seq", privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/typed-reasoning-edges" }),
     Object.freeze({ function: "thought_edges_upsert(uuid, uuid, text, numeric, integer, text, timestamptz, timestamptz, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/typed-reasoning-edges" }),
-    // schemas/wiki-pages (revisions are append-only; the three RPCs are REVOKEd FROM PUBLIC; the identity id needs no sequence grant)
-    Object.freeze({ table: "wiki_pages",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ table: "wiki_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ table: "wiki_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),                     since: "schemas/wiki-pages" }),
-    Object.freeze({ function: "wiki_upsert_page(text, text, text, jsonb, text)",                               privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ function: "wiki_write_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ function: "wiki_accept_pending(uuid, text)",                                                privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
     // schemas/crm-person-tiers
     Object.freeze({ table: "crm_persons",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/crm-person-tiers" }),
     Object.freeze({ table: "crm_person_mentions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/crm-person-tiers" }),
@@ -1947,7 +1997,7 @@ export const ROLE_GRANTS = Object.freeze({
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "pages", "community", "extensions", "recipes"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs

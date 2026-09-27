@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1863 assertions: 1863 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty (60) migrations applied, and
+`bun test-schema.ts` prints `2213 assertions: 2213 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports sixty-six (66) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,8 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074, 059 SMD-2255, 060 SMD-2256).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300,
+066 SMD-2256).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -215,7 +216,8 @@ baseline `0.0.0+upstream.9543c29`), and every release cut appends the migration
 that writes its version as the last file of the range it freezes: 048 writes
 `1.0.0+upstream.9543c29`, the first release (`001..048`), and 051 writes
 `1.1.0+upstream.9543c29`, the second (`049..051`), and 057 writes
-`1.2.0+upstream.9543c29`, the third (`052..057`). `preflight` prints the
+`1.2.0+upstream.9543c29`, the third (`052..057`), and 062 writes
+`1.3.0+upstream.9543c29`, the fourth (`058..062`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -225,10 +227,13 @@ The decision that `thought_audit` is the write-side source of truth and the
 `thoughts` row its projection — the write functions appending the event first
 and one projector writing the row, the audit trigger becoming the check, the
 table kept for the community's DDL — is `../docs/event-log-as-truth.md`
-(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and the
-first has landed as migration 055 (below); at 055 the row is still written
-first and the trigger derives the event from it, as the paragraphs below
-describe — what 055 changes is what the event carries.
+(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117); the first
+landed as migration 055 (what the event carries) and the second as 060 (below):
+since 060 the three write functions append the event first and one projector
+writes the row, the audit trigger checking the row against its event — the
+paragraphs on 046, 050 and 055 below describe the trigger's raw path, which a
+raw writer (`db/ingest-records.ts`, the backfills, a community schema) still
+takes, and the event shape every path writes.
 
 Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
 beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
@@ -424,7 +429,7 @@ INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 schema knows, and the two that settle a node); `node_lifecycle()` (per thought:
 status, status_type, the source watermark `synced_at` and `created_at` — a row
 carrying `ticket` or `issue` reads its ticket's head; it read `thoughts`
-alone until 060 stored the heads); `node_dependencies()` (one row per
+alone until 066 stored the heads); `node_dependencies()` (one row per
 `blocks` / `blocked_by` link facet, active or closed, with whether its system
 gates — SMD-2218's rule); and
 `node_state(ids)` (every thought, or those named: the lifecycle beside `open`,
@@ -433,7 +438,7 @@ gates — SMD-2218's rule); and
 lifecycle when `open` is not NULL; its freshness is `synced_at`, never
 `updated_at` — so each consumer counts over what it ranks. At 058 the ids
 narrowed the rows returned, not the work: the whole brain was computed and
-filtered last (060 stores the heads and superseders, below).
+filtered last (066 stores the heads and superseders, below).
 `graph-centrality.ts` is the first reader, its reports byte for byte what they
 were; search is the second (`search_thoughts`' opt-in `prefer_current`, through
 059). `metadata.status_type` is a
@@ -478,14 +483,219 @@ MRR +0.052, live-ticket MRR +0.194; costs disclosed — topical −0.127, a note
 under a Done ticket −0.292, a settled key −0.750); the query log records such a
 search as arm `current` (the CHECK widened), and `db/tier.ts` replays it. The
 server group gains SELECT on `thought_sources`, which `node_state` reads for
-its dependency columns (since 060 the search's columns do not); the wrapper
+its dependency columns (since 066 the search's columns do not); the wrapper
 is dropped before it is created, as 058's three are. At 059 it cost what
 `node_state` cost — the whole brain's lifecycle per call: +10.7 ms
 at 10,000 thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the
-budget pre-registered for it; shipped opt-in on the maintainer's call, and 060
+budget pre-registered for it; shipped opt-in on the maintainer's call, and 066
 made it a lookup.
 
-Migration 060 stores what `node_state` read per call (SMD-2256):
+Migration 060 has the write functions append then project (SMD-2116, step 2 of
+`../docs/event-log-as-truth.md`). `upsert_thought` (2- and 3-argument),
+`update_thought` and `delete_thought` keep 046's and 042's bodies up to the
+write — the same locks in the same order, every refusal before any append —
+then compute the after-image with 055's functions, append the event through
+`ob1_append_thought_event` and call `ob1_project_thought_event(event, vector,
+model, replay)`, which writes the row: capture → INSERT, update → UPDATE by the
+event's afters, delete → DELETE; faithful, not corrective (a key the event does
+not move stays; a capture's key is derived from its content, the one thing the
+event does not carry). `thoughts_write_audit` under `ob1.projecting` is the
+check — the row must be the event's AFTER image, a tombstone's `previous_*`
+included, and move only columns the event names, SQLSTATE `OB002` otherwise; a
+foreign row is accepted as a bump or as a tombstone's nulled successor pointer
+(appended live, skipped on a replay); without the setting it appends as before,
+so a raw write is audited, never refused. Live, the projected event must be the
+thought's latest by `seq`. `ob1_refresh_thought_vector` writes a vector onto a
+row that has one with no event and no `updated_at`; `ob1_embedding_snapshot`
+holds every vector by (key, model), seeded once from the rows and fed by
+`thoughts_snapshot_embedding` on live writes alone, so a fold rebuilds vectors
+without the provider (no row leaves it by itself — the decision's forgetting
+rule is the removal path: 063's `rebuild_derived` with `p_input_gone` deletes
+the rows at a leaving thought's fingerprints, and SMD-1723's forget calls
+it); 001's
+`update_updated_at` yields for the projected row. A role granted before this
+file lacks `SELECT` on `thought_audit` and every privilege on the snapshot:
+run `migrate.ts --grant` for it again before the server writes, as
+SMD-2216's note above says for its rows (preflight refuses, naming them).
+The `SELECT` has been needed since 055 — `ob1_append_thought_event` reads the
+row it inserts (`INSERT … RETURNING`) — and the grant set had no row for it
+from 055 to 058, so a role granted then could not write at all; the row lands
+here (SMD-2116's fourth review pass).
+Six deltas against 055 — five the decision accepted, a sixth the write path
+forced: an identical re-capture, a no-op edit and a vector refresh write nothing and move no stamp; the
+stale-read guard is the pre-check alone; the 2-argument form locks the row it
+lands on; a raw writer committing the same text inside a fresh capture's window
+is merged as a re-capture (046's `ON CONFLICT` did it; 060 catches the unique
+violation). A fold replays the log in 055's order — `seq` since
+`ob1_config.audit_seq_exact_since`, `(created_at, seq)` before it — never by
+the clock alone, which inverts a row's history. The capture role gains SELECT
+on `thought_audit` and the snapshot's writes (the grants table). Additive, no
+arity moves, idempotent; a re-apply re-seeds nothing. test-schema [56],
+test-live [28], test-upgrade [20m]; the redaction arm is SMD-1723's, the fold
+SMD-2117's.
+
+Migration 061 gives every derived artifact its lineage (SMD-1731, Phase 1b of
+SMD-1729; the projections table in `../docs/event-log-as-truth.md`). One
+table, `derivations`: a row per artifact per producing pass — `artifact_kind`
+in chunks / entities / proposal / vector / metadata (and section since 064), `artifact_id` (the
+thought's id, or the proposal's), `input_ids` and `input_fingerprints`
+(parallel, no NULL element), `produced_by` (the pass), `recipe` (a JSON object
+with a boolean `deterministic`, what 063's rebuild reads, and the
+producer's own record — model, prompt version and hash, window parameters),
+`produced_at`, 010's agent — keyed UNIQUE on (kind, artifact, pass), the unit
+each producer replaces, with a GIN index on `input_ids` for the forward walk
+and no foreign key (two AFTER DELETE triggers drop what a deleted thought or
+proposal keyed). Every producer records in the transaction that writes its
+rows, through `ob1_record_derivation`, which refuses a bad shape: the vector by
+a trigger on the row store (`thoughts_record_vector_lineage`, 060's snapshot
+trigger's shape — no column list, nothing under a replay, nothing while the
+vector and its label stand: a text edit alone leaves the row naming the text
+the vector came from, stale for the census to read), so a raw or vendored
+writer is covered; the windows and the tags by the
+3- and 4-argument `upsert_thought` and `update_thought` from a lineage envelope
+(`p_payload.lineage`, `update_thought`'s new eleventh argument `p_lineage`;
+the 10-argument form is dropped with its ACL carried, as 046 and 060 did) — a
+caller that sends no recipe gets no tags' row, since its tags are not a
+derivation, and the windows' row from the label alone marked undeclared; the
+extraction by `record_thought_entities`, now seven arguments (`p_recipe`; the
+six-argument form dropped), which stores the fingerprint it checked — the
+graph's half a key, closed — and follows its own replacement rule (an
+extraction's row replaces every extracted row's, a structured pass's its own
+key's; no rows standing under the key, no row); the proposal by
+`record_supersession_proposal`, now eleven arguments, with both fingerprints
+as the row takes them. The backfill records every artifact standing — every
+proposal (the judge key parsed where it has 029's shape), every (thought, key)
+pair over the mentions and edges at the thought's current fingerprint, every
+chunk set, every vector — marked `legacy: true`; the tags are not backfilled
+(nothing on a row says the extractor tagged it), and preflight's new `lineage`
+check counts them as coverage, fails on a derived row without a lineage row
+(naming the kind and the ids), and reports the legacy and stale counts. The
+capture role gains every privilege on `derivations` (the grants table): run
+`migrate.ts --grant` again for a role granted before this file. Additive; three
+arities move under their own DROP; a re-apply re-seeds nothing. test-schema
+[57], test-live [30], test-upgrade [20n]; the rebuild that walks the table is
+063's (below), the forget SMD-1723's.
+
+Migration 063 is the rebuild (SMD-1732, Phase 1c of SMD-1729):
+`rebuild_derived(p_input, p_reason, p_input_gone, p_fingerprints, p_force, p_orphans_only)`
+walks `derivations` forward from a thought (`derivation_descendants`, 026's
+iterative walk with a walk-global seen set — one GIN probe per level, the
+`derived_from` children listed as prose and not expanded) and acts on every
+row: a row whose artifact is gone (windows deleted raw, a vector cleared
+under a replay) is deleted; a stale row — an input's fingerprint moved, or
+`--force` — is re-derived where the database can (a vector whose current text
+has a snapshot row at the model, by `ob1_refresh_thought_vector`; a snapshot
+vector identical to the row's is 060's copy of the old vector under the new
+key and is not a rebuild; under `--force` a vector whose text did not move is
+re-recorded, not re-embedded — the record is what force renews) and otherwise
+handed to the worker that owns the recipe through 016's `requeue_thought_work`
+under the worker's CURRENT key (the reembed pool for a vector or the windows,
+`ob1_config`'s extraction key for an `extract:` pass), with the reason
+marked on the lineage row (`stale_since`, `stale_reason`, two new columns the
+writer's next upsert clears; the first request standing is kept); a `source:`
+pass and a decided proposal are kept; a pending proposal whose texts moved
+takes the new `stale` status — its status is its mark, its lineage row is
+left alone — and its newer thought is requeued under the judge's key (029's
+CHECKs widened; `consolidation_candidates` yields the pair again;
+`record_supersession_proposal` replaces the stale row in place, back to
+pending, when the pass finds the conflict again; a pair the pass no longer
+finds in conflict leaves the row stale for a reviewer — `consolidate.ts
+--list stale`, `--reject`; a reviewer may also accept it with `p_force`); the
+tags are marked with no pool to feed (no worker re-tags a thought). With
+`p_input_gone` —
+SMD-1723's forget, called BEFORE the row delete, in one transaction — the
+windows, the input's mentions and edges (the entities locked first, then the
+orphans pruned: 016's rule) and their lineage rows go, the snapshot rows at
+the input's own fingerprints and the caller's `p_fingerprints` go where no
+standing thought holds them (060's "removal path, not built", built), and
+the proposals and the vector's and tags' rows are counted for the cascade the
+row delete runs. The walk is held whole before anything moves; the locks are
+delete_thought's (the supersession advisory lock first, then the row); under
+`ob1.projecting_replay` the call answers `REPLAYING`; `p_orphans_only` (the
+sweep's mode) runs the orphan rule alone. The report:
+`{rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept,
+current, legacy, at_cap, irreproducible: [ids], cascading, pools}`.
+Preflight's `lineage` check counts the marked rows, warns on orphans naming
+`rebuild.ts --orphans`, and warns when 061 or 029 is re-applied by hand over
+063 (the three bodies it redefines read as older). The
+operator's door is `rebuild.ts` (its own section below); the worker group
+gains `DELETE` on the snapshot (the grants table). Additive; three bodies
+redefined on their own text with no arity change. test-schema [58], test-live
+[31], test-upgrade [20o].
+
+Migration 064 is the page store (SMD-1812, the store half of SMD-949): a
+durable, named document a human and a machine both edit, without the next run
+of its generator shredding what the human wrote. **A page is a thought.**
+`pages.id` is the page thought's id (a foreign key, cascade), and the thought's
+content is the page's *render* — `# title`, then each section by order with its
+`## heading` — written only through `update_thought` after every live change,
+so every render is an event in `thought_audit` (the page's own history, title
+included), stamped with the key that wrote it, searchable once the re-embed
+worker fills the vector 021 clears (`bun reembed.ts` — its pool is every row
+without a vector or at another label), and extracted like any thought. Its
+`derived_from` is the union of the live sections' evidence, so 025's
+`trace_provenance` and `find_derivatives` read a page unchanged; `supersedes`
+passes through and archives the superseded page. The structure is the store's
+own: `page_sections` (each with an **owner** — `origin` `generated` is the
+machine's, `manual` or `locked` a human's — the live body, the machine's
+evidence and recipe, and the **pending buffer** a parked draft waits in with
+the evidence and recipe *it* was made from) and `page_section_revisions`
+(append-only by trigger: body, heading and order — everything the render reads —
+per change and per ownership move). One door for a section's text,
+`write_page_section` (the regen guard, `ob1:page-regen-guard`): a generated
+write onto a human-owned section parks, the live text byte-identical; any
+other write updates in place — a manual write takes ownership — and snapshots
+a revision. `accept_page_section` promotes a parked draft (the section stays
+human-owned: the machine proposes next time too); `release_page_section` hands
+one back; `reject_page_section` discards a parked draft; `lock_page_section`
+sets the lock; `delete_page_section` removes a section, the render following.
+A generated write that says what the live text says is `unchanged` and
+withdraws an older draft it had parked. `render_page(page, at)` and
+`page_sections_as_of(page, at)` render any prior state of the sections byte for
+byte from the revisions, under the current title (a revision is written per
+change to body, heading or order and per ownership or lock move; a deleted
+section's revisions go with it; every full render, title included, is in the
+page thought's audit log). A slug is one word and a title or heading one line —
+the render is line-structured. A generated section is a derived artifact under
+SMD-1729's rule: its `derivations` row (the sixth kind, `section` — 061's CHECK
+widened, its writer redefined on its own body plus the value) names the
+evidence at the fingerprints read and the generator's recipe, in the section's
+transaction; the section's `generation_source` holds the same recipe, so "a
+machine wrote this text" is one predicate whatever the owner. A generated write
+without evidence is refused (and a page is never its own evidence); a parked
+draft parks its evidence's fingerprints as generated from, and accept records
+those; a manual write that moves the body drops the row and empties the recipe;
+a deleted section's rows go by trigger; preflight's `lineage` check counts
+sections carrying a recipe without a row (regenerating such a section records
+it, unchanged or not) and, when no row is missing, warns on a page whose
+thought does not hold its render (a raw write; `ob1_render_page_thought(page)`
+repairs it). Every writer locks the page thought, then the page, then the
+section — the order `delete_thought`'s cascade takes, so a write racing a
+page's delete waits rather than deadlocking — and a writer given `supersedes`
+takes 029's supersession lock before any row, as every writer of that pointer
+does. The signatures, positional or named (`p_…`): `upsert_page(slug, title,
+page_kind DEFAULT 'topic', metadata DEFAULT '{}', actor DEFAULT NULL,
+supersedes DEFAULT NULL)`; `write_page_section(page_id, section_key, body_md,
+origin DEFAULT 'generated', heading, generation_source DEFAULT '{}',
+evidence_thought_ids, display_order, actor)`; `accept_page_section(section_id,
+actor)`, `release_page_section(section_id, actor)`,
+`reject_page_section(section_id, actor)`,
+`lock_page_section(section_id, locked, actor)`,
+`delete_page_section(section_id, actor)`; `render_page(page_id, at DEFAULT
+NULL)`, `page_sections_as_of(page_id, at)`. A SQL caller that wants the page
+thought stamped with its key sets the session's envelope first — `SELECT
+set_config('ob1.actor', '{"name": "<key name>"}', false)` — as the servers do
+(008, 050); `actor` is the name the page's own history records. Names differ
+from upstream's `schemas/wiki-pages` (`pages`, not `wiki_pages`), whose
+directory retires with this file: a brain that applied it by hand keeps its
+tables untouched. The new `pages` grant group is what a role needs beside
+`capture` (the grants table). Additive; no arity moves; no seed row; a
+re-apply is idempotent (it re-validates the kind CHECK and moves no row).
+test-schema [59], test-live [32], test-upgrade [20p];
+`server-portable/test-preflight.ts` drives the census, the remedy and the
+repair arms.
+
+Migration 066 stores what `node_state` read per call (SMD-2256):
 `ob1_ticket_head`, every issue key a row carries with its head (058's rule) and
 the head's status, status_type and watermark, and `ob1_superseded_by`, every
 superseded thought with its newest successor. Three statement triggers on
@@ -540,10 +750,10 @@ them still fills their transition tables — and is in `changes/smd-2256.md`.
 when exact) and `ob1_rebuild_node_projection()` repairs them after a write made
 with the triggers disabled (`DISABLE TRIGGER`, `session_replication_role =
 replica`); it refuses to run outside READ COMMITTED, and `migrate.ts` now runs
-every file under READ COMMITTED, so 060's seed is right on a brain whose default
+every file under READ COMMITTED, so 066's seed is right on a brain whose default
 is not. Preflight fails a connection whose default is REPEATABLE READ. The
 triggers run as the writer, so the **capture** group gains the writes on both
-tables: a role granted before 060 fails preflight until `migrate.ts --grant`
+tables: a role granted before 066 fails preflight until `migrate.ts --grant`
 runs again, and a reader of `node_lifecycle()` needs SELECT on
 `ob1_ticket_head`. On PostgreSQL 16 and 17 the search's lifecycle columns no
 longer read `thought_sources` (a removed join's tables are not
@@ -601,25 +811,31 @@ issues every group at once.
 | --- | --- | --- |
 | **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
-| | `thought_audit` (008) | `INSERT` |
+| | `thought_audit` (008) | `SELECT, INSERT` — since 055 `ob1_append_thought_event` reads the row it inserts (`INSERT … RETURNING`), and since 060 the audit trigger's check and the projector read the event; the row lacked `SELECT` from 055 to 058 (SMD-2116) |
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
-| | `ob1_ticket_head` (060) | `SELECT, INSERT, UPDATE, DELETE` — 060's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
-| | `ob1_superseded_by` (060) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
+| | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
+| | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
+| | `ob1_ticket_head` (066) | `SELECT, INSERT, UPDATE, DELETE` — 066's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
+| | `ob1_superseded_by` (066) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
-| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 060 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
+| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 066 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
+| | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
+| **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
+| | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
+| | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -634,9 +850,6 @@ issues every group at once.
 | | `thought_edges` (schemas/typed-reasoning-edges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | sequence `thought_edges_id_seq` (schemas/typed-reasoning-edges; `BIGSERIAL` id) | `USAGE, SELECT` |
 | | function `thought_edges_upsert(uuid, uuid, text, numeric, integer, text, timestamptz, timestamptz, jsonb)` (schemas/typed-reasoning-edges; `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
-| | `wiki_pages`, `wiki_sections` (schemas/wiki-pages) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `wiki_section_revisions` (schemas/wiki-pages; append-only — upstream's intent, kept) | `SELECT, INSERT` |
-| | functions `wiki_upsert_page(text, text, text, jsonb, text)`, `wiki_write_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)`, `wiki_accept_pending(uuid, text)` (schemas/wiki-pages; `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
 | | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
@@ -666,11 +879,12 @@ key — but three community schemas use `BIGSERIAL` ids, and an `INSERT` into su
 a table needs `USAGE` on the sequence (`permission denied for sequence …` with
 the table fully granted),
 so the **community** group names those six sequences; an identity column
-(`wiki_section_revisions.id`) needs none. Both are measured, not recalled:
+(064's `page_section_revisions.seq`) needs none. Both are measured, not recalled:
 test-schema [40] grants the tables alone and watches which inserts are still
-refused. Functions are executable by `PUBLIC` by default, so only the community
-functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones, and the
-wiki RPCs — are listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,
+refused, and [59] inserts a revision under the `pages` group with no sequence
+granted. Functions are executable by `PUBLIC` by default, so only the community
+functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones — are
+listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,
 readwise and CRM RPCs) need nothing. `ob1_config` appears twice — `SELECT` for
 the server's own read, `INSERT, UPDATE` for a worker's job key — as does
 `thought_audit` (`INSERT` for the capture path, upstream's `SELECT` beside it),
@@ -694,7 +908,8 @@ create the role first. `--grant --dry-run` prints the statements without running
 them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
-entity extraction, and **structure** as well for a structured pass. The
+entity extraction, **structure** as well for a structured pass, and **pages**
+for a role that writes pages (064). The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
@@ -723,6 +938,28 @@ privileges` check detects the trigger (and reads the key) and enforces exactly
 these when they apply, so the gap surfaces at start-up rather than on the first
 capture. The simplest answer is to grant the server role the **worker** group as
 well on an extraction brain.
+
+**Another cross-cutting exception (055's capture read).** Migration 055 (SMD-2115)
+makes the write functions read `thought_audit` — they append the capture event and
+derive its diff before the row exists — so from 055 on a capturing role needs
+`SELECT` on `thought_audit`, not only the `INSERT` the capture path always had.
+`--grant` issues both, but a role provisioned by `--grant` **before** 055 was
+granted only the `INSERT`: **after upgrading a brain past 055, run
+`bun migrate.ts --grant <role>` again for every role that captures, or its writes
+fail on the audit table's `SELECT`.** The role `migrate.ts` and the reference
+deploy connect as is the objects' owner, which holds it already — only a
+separately `--grant`-provisioned scoped role is affected.
+
+**And 061's lineage writes.** Migration 061 (SMD-1731) adds `derivations`, which
+the vector-lineage trigger and the write functions upsert **as the caller on
+every capture and edit** — and `ob1_record_derivation`'s `INSERT … RETURNING`
+needs the `SELECT`, 055's trap again. A role provisioned by `--grant` before 061
+holds no privilege on it, so **every capture and every content edit fails
+inside the trigger — a vectorless capture too, since the trigger drops the
+vector's row when none is carried: after upgrading a brain past 061, run `bun
+migrate.ts --grant <role>` again for every role that captures or runs a
+worker.** Preflight's
+`write privileges` row names the table until it is granted.
 
 ## Chunk context, and why it is off
 
@@ -1150,7 +1387,9 @@ bun extract-entities.ts --url … --limit 25              # a trial: this many, 
 bun extract-entities.ts --url … --status                # the pass, and the graph so far
 bun extract-entities.ts --url … --dry-run               # what a run would do; writes nothing
 bun extract-entities.ts --url … --retry-failed          # failed rows back into the pool first
-bun extract-entities.ts --url … --retry-partial         # rows extracted over a prefix back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
+bun extract-entities.ts --url … --retry-partial         # rows extracted in part back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
+bun extract-entities.ts --url … --retry-left-out        # …only those with windows left out as malformed — after a change of model, kept to this pool with --job (below)
+OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 ```
@@ -1168,7 +1407,14 @@ running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
 taxes the repetition the runaways were measured to be: on the fork's brain that
 retry, with the budget sized to both measured models, extracted all 32 thoughts
-one call could not finish, where windows alone reached 10 to 13. The answer is
+one call could not finish, where windows alone reached 10 to 13. Set
+`OB1_EXTRACT_ESCALATE_MODEL` and a runaway is instead remade once on that larger
+local model with no penalty (SMD-2000) — the pass key on the rows stays the
+first model's, and the dump line records which model answered. The 27B never
+looped on the thoughts the 7B could not finish, so the escalation spends the
+large model only where the small one has failed; it loads it beside the embedder
+(28 GB on the dogfood Mac, and `OLLAMA_MAX_LOADED_MODELS=2` can evict the
+embedder mid-pass), so it is a per-brain choice, not the default. The answer is
 streamed, and a call is aborted the moment its answer holds three copies of one
 item (`RunawayDetector`, `RUNAWAY_REPEATS`; SMD-1960) — the loop is visible on
 the stream long before the budget, so a runaway costs seconds rather than the
@@ -1178,8 +1424,11 @@ retry rule, so 32 of 32 is derived, not re-measured whole) — and a call
 aborted so is retried as a cut one is, the retry read whole, since a penalised
 answer was measured to repeat an item three times and recover; an
 answer that enumerates distinct ids is not a loop by that rule and runs to the
-budget, which stays the bound. A thought whose retry also runs away is recorded
-failed, retryable. The window is the **metadata model's**, not the embedding
+budget, which stays the bound. A call whose retry also runs away is a
+malformed answer: a window's is left out of a thought at least one of whose
+other windows parsed (SMD-2260, below), and a thought none of whose windows
+parsed is recorded failed, retryable.
+The window is the **metadata model's**, not the embedding
 model's: `OB1_EXTRACT_CHUNK_TOKENS` when set, else derived from the model's
 served context (`KNOWN_CHAT_MODEL_WINDOW`, measured as `KNOWN_MODEL_WINDOW` is)
 and held at the size the default model was measured to finish reliably; a model
@@ -1187,7 +1436,8 @@ the table does not list gets that default. The banner's `window:` line and
 preflight's `extraction window` row print the same sentence. The prompt version
 is 2 — a pass under it re-extracts a brain whose thoughts were cut at 8,000
 characters under p1 — so the first run after upgrading needs `--switch-key`.
-`--dump`'s line carries `windows`, `retried` and `abortedMs` — how far into
+`--dump`'s line carries `windows`, `retried` (or `escalated: <model>` when the
+runaway went to the larger model, SMD-2000) and `abortedMs` — how far into
 the call a runaway was aborted on the stream — and, for a windowed thought,
 each window's own answer in `parts` beside the merged one. Why, measured:
 `evals/README.md`, "Entity extraction in windows".
@@ -1224,6 +1474,44 @@ version is unchanged: a whole extraction is what it was. What changes is a
 thought over the count, which stored nothing and now stores its opening, and a
 thought whose runs pass the text bound, which was sent whole and is now cut at
 it.
+
+**A malformed window is left out, not the thought (SMD-2260).** A windowed
+thought some of whose windows the model answers with something other than JSON
+of the expected shape is written from the windows that parsed, and its claim is
+released succeeded with a caveat naming the rest: `partial: 2 of 3 windows
+extracted; the model's answer for window 2 was not JSON of the expected shape,
+and its text is not in the graph` (`… of the N sent …`, and the bound, for a
+prefix with windows left out). Only a thought none of whose windows parsed — a
+one-window thought's one answer included — is failed as malformed, as before; a
+window that times out still fails its thought. Until this,
+one malformed window failed the thought, its parsed windows with it: on the
+stable brain three research papers kept nothing because the model could not
+answer their reference lists, 15 to 22 of 24 windows parsed, and a larger model
+mangled the same windows. These rows are the second kind of partial row, which
+the summary and `--status` count and list apart from a prefix
+(`13 extracted (1 over a prefix only, 1 with windows left out as malformed), 1
+failed`) — a row with windows left out is closer to a failure, since the model
+decided it, not the bound; a row of both kinds, a prefix with windows left out
+as the papers were, counts with the windows left out, and the counts say how
+many of those are over the bound too. `--retry-partial` returns every partial
+row and `--retry-left-out` those with windows left out alone — the lever for
+them is the model, and re-reading every prefix to the place it already reached
+under a larger model would cost up to the bound's calls each for nothing. A
+changed `OB1_METADATA_MODEL` is another extraction key, so the retry keeps to
+this pool with `--job`, and to the returned rows with `--limit` and no other
+worker of the pool running, since the workers claim pending rows by queue time
+and a returned row keeps its own, so an older pending row is claimed in its
+place (`--status` prints the command, and the pool's pending count beside it).
+`OB1_EXTRACT_ESCALATE_MODEL` (SMD-2000, above) is not this: it remakes a call
+that ran away, within the pass, and a window answered in prose never ran away,
+so a window left out beside it was either not a runaway or failed the larger
+model too. Either
+flag reads a row again under the bound and the model in force: whole, or, over
+the bound, to it; a reading that fails outright — a window timing out, none
+parsing — records the row failed, and the earlier reading's entities stay in
+the graph until a later reading succeeds, since a failure writes nothing. A run that leaves partial rows and
+no failure exits 0, the partial rows listed on stdout: a job watching the exit
+code or stderr sees them only as `--status` counts them.
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
@@ -1379,7 +1667,7 @@ thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
 thoughts weighed in. The status, and every rule below, is migration 058's
 `node_state` (SMD-2074): `node_lifecycle()` without a dependency flag, which
-reads `thoughts` and, since 060, `ob1_ticket_head` (both the capture group's),
+reads `thoughts` and, since 066, `ob1_ticket_head` (both the capture group's),
 and `node_state()` with one, which reads `thought_sources` too (the
 `structure` group); when SMD-1997 folds
 `thought_audit`'s transitions, the functions' bodies change and this script
@@ -1590,6 +1878,57 @@ end against a stub judge — the audited accept under the key's name, the reject
 that clears, a cleared claim table not re-proposing a decided pair, the pool
 picking up a thought extracted since. `test-store-sql`/`-postgrest` [10] cover
 the tool's read on both stores; `test-preflight` the line.
+
+## Rebuilding derived artifacts (SMD-1732)
+
+Migration 063's `rebuild_derived` is the one operation over the lineage table
+061 built (its paragraph under "The migrations" says what it does per kind).
+The rule it carries: the database re-derives only what it holds the inputs
+for — a vector whose current text already has a snapshot row at the model —
+and hands everything else to the worker that owns the recipe, through 016's
+`requeue_thought_work`, under the worker's CURRENT key (what `db/reembed.ts`,
+`db/extract-entities.ts` and `db/consolidate.ts` drain), with the reason
+written on the lineage row (`stale_since`, `stale_reason`) until the
+producer's next write clears it. A row whose artifact is gone is deleted. A
+`derived_from` child is listed as irreproducible — prose no recipe re-runs —
+and left standing. The tags have no pool: no worker re-tags a thought, so a
+stale tags row is marked and waits for a re-capture or an edit that carries
+the extractor's recipe.
+
+### `rebuild.ts`
+
+```bash
+bun rebuild.ts --url … --input <id> [--reason <text>] [--force] [--dry-run]
+bun rebuild.ts --url … --input <id> --gone [--fingerprints fp1,fp2] [--dry-run]
+bun rebuild.ts --url … --orphans [--limit N] [--dry-run]
+bun rebuild.ts --url … --status
+```
+
+`--input` calls the function once and prints its report — `rebuilt`,
+`enqueued` (distinct (thought, pool) claims), `deleted`, `marked` (and how
+many of those wait for no pool), `kept`, `current` (with the legacy count:
+061 backfilled at the thought's current text, so a legacy row reads current
+until `--force`), the irreproducible children, and every pool that gained
+rows with the command that drains it. `--reason` defaults to
+`operator: edit` / `operator: force` / `operator: forget`; say a better one —
+it is what the marked rows carry. `--gone` is SMD-1723's shape (the input is
+leaving): the row must still stand when it runs, since 061's drop trigger
+leaves nothing to walk after a delete; the tool deletes no row and says so;
+`--fingerprints` hands in the earlier texts' fingerprints the log holds, and
+the function removes the snapshot rows at them where no standing thought
+holds the same text. `--orphans` finds the lineage rows whose artifact is
+gone while the thought stands — preflight's `lineage` WARN names this flag —
+and calls the function once per thought. `--status` is the census: rows per
+kind, the stale-by-fingerprint count, the marked count, the orphans, the
+legacy rows, the stale proposals, and the pools with pending rows.
+`--dry-run` runs the call inside a transaction and rolls it back: the report
+is the function's own and nothing is kept. The tool calls no model and holds
+no lease. Exit 0 ran; 1 the function refused as a value (`NOT_FOUND`,
+`REPLAYING`) or a run failed; 2 usage, no URL, or a brain without 063. It
+runs `SECURITY INVOKER` code over four groups' tables (capture, worker,
+extraction, and the server group's `SELECT` on `ob1_config`), so the role needs
+every group `migrate.ts --grant` issues — the worker group gained `DELETE`
+on the snapshot for it (the grants table). test-live [31] drives it.
 
 ## Extensions
 
@@ -2115,7 +2454,11 @@ the row's value newer, or the same and written after `asOf`) or `held`
 (another thought is this identity) is named the same way. A facet under
 `actor_kind` or `actor_name` is refused — those are 050's trigger's, stamped
 from the ingester's envelope — and a `facets.source` is overwritten with the
-system. A facet integer at or past 2^53, or a magnitude JSON cannot hold, is
+system. So is a facet naming another source's ticket (`issue`, `ticket`,
+`linear_updated_at`): node_state, `source_thought` and the board sync read a
+row carrying one as that ticket's, whatever its source, so an item names a
+ticket as a link or a mention instead. A `createdAt` more than a day ahead of
+now is refused too (SMD-2212). A facet integer at or past 2^53, or a magnitude JSON cannot hold, is
 refused rather than stored as its neighbour or as `null`: write it as a
 string (a Python emitter's `json.dumps` writes a snowflake id exactly;
 `JSON.parse` does not read it so). The emitter an
@@ -2492,11 +2835,24 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1863 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 774 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or [26]'s four sweep cases are, on a machine with a recipes/lint-sweep/.env or .env.local)
+bun test-schema.ts                          # 2213 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 865 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
+bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
+
+Every script here reads its arguments through `cli.ts` (SMD-2134), one table
+per script of what each flag takes, scanned before anything else runs. A flag
+the script does not have, one given twice, one that takes a value followed by nothing, another flag or a
+blank, a value joined with `=`, or a value where no flag takes one exits 2 with
+the script's flag list; `--help` prints the list and exits 0; a number is
+decimal digits only. A refusal names the argument's position, never its text —
+an argument can be a password or a key. Before it, `consolidate.ts`
+and `extract-entities.ts` ignored a flag they did not know, so `--K 10` ran the
+default `--k` and exited 0 (SMD-2015). `test-cli.ts` holds the scanner's rules,
+that every entry point imports `cli.ts` and nothing else reads `process.argv`,
+and runs each entry point with a flag it does not have and with `--help`.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
@@ -2819,7 +3175,17 @@ first assumed. See FORK.md's SMD-1632 section.
   `OB1_EXTRACT_MAX_WINDOWS=2` is released succeeded with a `partial:` caveat,
   its opening's entities and edge in the graph and its closing's entity not, `--status` counting
   and listing it apart; `--retry-partial` under the default bound reads it
-  whole and clears the caveat (SMD-2240).
+  whole and clears the caveat (SMD-2240). Then, under a bound of two, a
+  two-window thought whose second window the stub answers in prose is released
+  succeeded with that window named in its caveat, the other window's entities
+  and edge in the graph, a three-window thought so is released with the window
+  and the bound both named, and a two-window thought answered in prose
+  throughout is failed; `--status` counts and lists the two kinds of partial
+  row apart, the row of both among the windows left out and counted over the
+  bound too; `--retry-left-out`, run as `--status` advises — another model,
+  `--job` this pool's key — the stub answering now, takes those two and not the prefix, saying one is a
+  prefix too, and clears their caveats and adds the windows' entities, and
+  `--retry-partial` then takes the prefix (SMD-2260).
 
 ### What test-schema.ts asserts
 

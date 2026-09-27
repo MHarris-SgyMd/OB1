@@ -11,7 +11,9 @@ re-embedding the world?") and the write functions can append the event first
 and project the row in the same transaction with an empty contributor delta
 (SMD-1999, § "Does the extension contract survive the move?"). This page is
 the decision, the shape it commits to, what it declines, and the path from
-053 to it in three additive steps (SMD-2115, SMD-2116, SMD-2117). Step 1
+053 to it in three additive steps (SMD-2115, SMD-2116, SMD-2117). Step 2 is
+migration 060 (SMD-2116): the three write functions append the event and one
+projector writes the row, the audit trigger the check. Step 1
 is migration 055 (SMD-2115): the capture event carries
 the content and a backdating writer's `created_at`, the update event the
 key's move, the rules are functions, and the backfill filled every capture
@@ -67,8 +69,8 @@ two-thirds of an event-sourced system and not named it as one.
 6. **Everything derived is a projection with a recorded key, and the
    expensive ones are snapshotted.** The vector by `(content_fingerprint,
    embedding_model)` in a snapshot table the replay reads; the graph, the
-   chunks, the proposals, the facets and the capture-time metadata by the
-   lineage rows SMD-1731 specifies. Nothing derived is authoritative; anything
+   chunks, the proposals, the facets, the capture-time metadata and a page's
+   generated sections (064) by the lineage rows SMD-1731 specifies. Nothing derived is authoritative; anything
    derived can be rebuilt; the rebuild is incremental by its key, never total.
 7. **Two clocks.** Transaction time is the event's `created_at` and `seq`
    (050); valid time is its `valid_from` / `valid_until` (046). The as-of read
@@ -185,7 +187,7 @@ did not apply it; SMD-1697's bench decides when, and SMD-1947 benches
 | **Ingested** | an external observation handed in through an adapter (SMD-1867's contract; `db/ingest-records.ts`, `db/sync-linear.ts`) — source-faithful, with its observed-at and its trust | first in precedence: `trust = 'ingested'` (an operator's key handing in a page is `actor_kind = 'operator'`, `trust = 'ingested'` — the case that settled two columns in 046). The trust comes from the key's registered kind or a declared lowering, never from the door: the ingester and the board sync declare none, so their rows read as Ingested only once the operator has classified their keys (`set_agent_kind`), which 046 makes the operator's act |
 | **Comprehended, on the row** | the brain's own cognition landing on the thought row: a supersession or derivation pointer (025, 029's accept), a kind label (SMD-1951); a re-embed's vector flip is one until step 2 and a projection refresh with no event after it | second: `action = 'update'` from a worker's door — `origin` names it and the sub-type is the door. Not executable today: no column says which door is a worker's, and each writer passes its own string — `consolidate`, `db/reembed.ts`, `db/sync-linear.ts`, `ingest-records`, the servers' names, and `backfill_thought_actors`, a SQL function's own name set as its `via` by 050 — while the labelling pass left none. A normalised door vocabulary is the gap this read needs closed (below, "Not decided here") |
 | **Expressed** | a direct capture or edit by a person or an agent: "I assert this" | otherwise: `action in ('capture', 'update')` from a server's door, `trust in ('operator', 'agent')`; the `stance`, when declared, says how it was asserted (`stated`, `retrieved`, `inferred`) and moves the verb not at all |
-| **Comprehended, off the row** | extraction (entities, edges), chunking, proposals, calibration | not rows of this log — projections with their own lineage row (SMD-1731's `derivations`: inputs, recipe, `artifact_kind`), rebuilt by `rebuild_derived` (SMD-1732; neither built yet) |
+| **Comprehended, off the row** | extraction (entities, edges), chunking, proposals, calibration, a page's generated sections (064) | not rows of this log — projections with their own lineage row in `derivations` (migration 061, SMD-1731: `input_ids` and `input_fingerprints`, `recipe` with its `deterministic` flag, `artifact_kind`, `produced_by`), written in the transaction that writes the artifact; `rebuild_derived` (migration 063, SMD-1732) walks them forward from an input — re-deriving what the database can, handing the rest to the leased workers with the reason marked on the row, deleting a row whose artifact is gone, and listing the derived prose it cannot reproduce |
 
 A tombstone carries no verb of its own: the delete is the end of the
 aggregate, and the verb of the thought is the verb of the write that made
@@ -250,14 +252,14 @@ its stamp is the snapshot's `taken_at`. Today's re-embed goes through
 holding an `if_unchanged_since`; the decision treats that as the defect. The
 snapshot is fed by a trigger on the row store; step 2 makes it record live
 writes only (under `ob1.projecting_replay` it does nothing, so a fold never
-moves a `taken_at` — the prototype's trigger has no such exclusion) and seeds
+moves a `taken_at` — the prototype's trigger had no such exclusion) and seeds
 it once from every row holding key, model and vector. A raw writer's vector
 enters it like any other, since the row store is what the snapshot trusts
 today. What the seed buys, exactly: one pair per thought, for its current
 text. A fold lands each thought's capture text first and its later texts
 after, so an edited thought misses at capture and hits at its final text;
 the fold calls no provider — a miss leaves the vector NULL or keeps the one
-before, as the prototype does — and after the fold each thought's final
+before, as the prototype did — and after the fold each thought's final
 text has the vector the seed held for it, the thoughts with an 018 NULL key
 or no vector re-embed under 015's pass as they would today. Gate 1's reuse
 holds for every thought's final text, not for the intermediate states the
@@ -267,7 +269,7 @@ dump of the log without it is a dump that re-embeds.
 
 **"No event, no write" — the deltas against 053, accepted.** SMD-1999's
 record (`changes/smd-1999.md`) named four and its bodies' header
-(`evals/writable-projection/option2-functions.sql`) a fifth; the decision
+(the prototype's `option2-functions.sql`, retired with 060) a fifth; the decision
 takes all five: an
 identical re-capture no longer bumps `updated_at` (053's `ON CONFLICT DO
 UPDATE` does — a write that changes nothing is not a write; `thought_changes`
@@ -290,7 +292,7 @@ step 1, which carries no key move (that is one of the three additions): for
 those the projector derives the key from the content it lands under 018's
 own rule — NULL when another live row already holds it, since 003's partial
 unique index admits one holder — and counts them; this is SMD-2117's arm,
-the prototype keeps the row's key today. A replayed tombstone never refuses
+the prototype kept the row's key. A replayed tombstone never refuses
 (042's guard runs in detach mode; the citations are a projection rebuilt
 apart). A projector that
 corrected the log on the way would make the row disagree with its event and
@@ -301,14 +303,15 @@ the check would refuse it; that is the point of the check.
 | Projection | Table | Key it records at 053 | Rebuild | What the decision requires |
 | --- | --- | --- | --- | --- |
 | the thought row | `thoughts` | `id` — it is the aggregate | the fold: replay the log through the projector (SMD-2117) | steps 1–3 |
-| the vector | `thoughts.embedding`, `embedding_model` | `(content_fingerprint, embedding_model)` — recorded; the prompt template and the requested width ride on the model name by convention (`db/config.mjs`'s `EMBEDDING_PROMPTS` and `KNOWN_MODEL_DIMS`) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and gate 1's cosine bar is the check for that | from the snapshot by key; the fold calls no provider — a miss leaves the vector NULL or keeps the one before (the prototype's rule), and 015's re-embed fills a final state the snapshot lacks afterwards | `ob1_embedding_snapshot (content_fingerprint, embedding_model) → embedding, taken_at` is the prototype's table; step 2 adds the one-time **seed** from every row holding all three (without it a fold wipes the rows the vectors sit on and every thought re-embeds), the replay exclusion on the feeding trigger, and `dims` beside the row (SMD-2116). The seed holds each thought's current text, so gate 1's reuse holds for every thought's final text after a fold, not for the intermediate states; the recipe on the lineage row (SMD-1731) |
-| the chunk rows | `thought_chunks` | the parent's label vouches (022); no recipe of their own | re-chunk, re-embed the windows | the recipe (tokens, overlap, context, blurb model) on a lineage row (SMD-1731) |
-| the graph | `thought_entities`, `ob1_entities`, `ob1_entity_edges` | `extraction_key` — half a key: no fingerprint of the input | re-extract from the surviving input — the dearest projection (hours, not minutes) | the input's fingerprint beside the key (SMD-1731); a "done" keyed by the payload's fingerprint, not by the pass (gate 1's staleness pattern) |
-| capture-time metadata | `thoughts.metadata` (`type`, `topics`, `people`) | none — no model, no prompt version | re-run the extractor | a lineage row from the fifth producer (SMD-1731, SMD-1254) |
-| supersession proposals | `supersession_proposals` | `older_fingerprint`, `newer_fingerprint`, `judge_key` — recorded | re-judge on a key change | none; the shape to copy |
+| the vector | `thoughts.embedding`, `embedding_model` | `(content_fingerprint, embedding_model)` — recorded; the prompt template and the requested width ride on the model name by convention (`db/config.mjs`'s `EMBEDDING_PROMPTS` and `KNOWN_MODEL_DIMS`) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and gate 1's cosine bar is the check for that | from the snapshot by key; the fold calls no provider — a miss leaves the vector NULL or keeps the one before (the prototype's rule), and 015's re-embed fills a final state the snapshot lacks afterwards | `ob1_embedding_snapshot (content_fingerprint, embedding_model) → embedding, taken_at` was the prototype's table; step 2 added the one-time **seed** from every row holding all three (without it a fold wipes the rows the vectors sit on and every thought re-embeds), the replay exclusion on the feeding trigger, and `dims` beside the row (SMD-2116). The seed holds each thought's current text, so gate 1's reuse holds for every thought's final text after a fold, not for the intermediate states; the recipe on the lineage row — landed by 061 (SMD-1731): a `vector` row per thought, model and width, written by a trigger on every live write of the row store |
+| the chunk rows | `thought_chunks` | the parent's label vouches (022); no recipe of their own | re-chunk, re-embed the windows | the recipe (tokens, overlap, threshold, the blurb model and its prompt's hash) on a lineage row — landed by 061 (SMD-1731): a `chunks` row per set from the writer's envelope, dropped with the set |
+| the graph | `thought_entities`, `ob1_entities`, `ob1_entity_edges` | `extraction_key` — half a key: no fingerprint of the input | re-extract from the surviving input — the dearest projection (hours, not minutes) | the input's fingerprint beside the key — landed by 061 (SMD-1731): an `entities` row per (thought, key) storing the fingerprint the writer checked and the recipe (model, prompt version and hash, the windows); a "done" keyed by the payload's fingerprint, not by the pass (gate 1's staleness pattern), is the read over that row |
+| capture-time metadata | `thoughts.metadata` (`type`, `topics`, `people`) | none — no model, no prompt version | re-run the extractor | a lineage row from the fifth producer — landed by 061 (SMD-1731; SMD-1254's model label is this row): a `metadata` row when the server's extractor tagged the row, its model, prompt version and hash; none for tags a caller sent, and none backfilled — nothing on a row from before 061 says who tagged it |
+| supersession proposals | `supersession_proposals` | `older_fingerprint`, `newer_fingerprint`, `judge_key` — recorded | re-judge on a key change | none; the shape to copy — and a `proposal` lineage row beside it since 061, both fingerprints as the row takes them and the judge's recipe |
 | the facets | `thought_facets` | derived from `thought_sources.canonical` (053), whose `canonical_hash` is beside it | re-derive from the canonical | none; the shape to copy |
 | the change feed | `thought_changes` (052) | a read over the log | none — it is the log | reads a capture's head from the event (SMD-2117) |
-| `node_state` | 058's functions (SMD-2074) over two tables 060 stores (SMD-2256): `ob1_ticket_head` (each issue key's head and its status) and `ob1_superseded_by` (each thought's newest successor), kept current by statement triggers on `thoughts` — graph-centrality and search's opt-in `prefer_current` (059) read it | none — `metadata.status_type`, the lossy scalar, is read as it stands | `ob1_rebuild_node_projection()` recomputes both tables from the rows, `ob1_node_projection_drift()` checks them against 058's formulas; the fold of status transitions from the log can feed `ob1_ticket_head`'s status (not `ob1_superseded_by`, which orders by `created_at`, a move no update event carries), and with the link facets replace `node_dependencies()`' gate | the first read-model fold to build on this log; its signatures and its tables are what the fold keeps |
+| a page's sections | `page_sections` (064, SMD-1812) — the page itself is a thought whose content is the render, so the page is the aggregate's own row | a generated section: `section` lineage row — the evidence at the fingerprints read, the generator's recipe (`generation_source`, `deterministic` false unless declared); a human's section: none — it is an assertion, not a derivation | re-run the generator over the evidence, through `write_page_section`, which parks on a human-owned section rather than overwriting it | landed by 064 with the store: the row written in the section's transaction, a generated write without evidence refused, a parked draft carrying its evidence's fingerprints as generated from, a manual write that moves the body dropping the row and emptying the recipe, preflight's `lineage` check counting sections carrying a recipe without one |
+| `node_state` | 058's functions (SMD-2074) over two tables 066 stores (SMD-2256): `ob1_ticket_head` (each issue key's head and its status) and `ob1_superseded_by` (each thought's newest successor), kept current by statement triggers on `thoughts` — graph-centrality and search's opt-in `prefer_current` (059) read it | none — `metadata.status_type`, the lossy scalar, is read as it stands | `ob1_rebuild_node_projection()` recomputes both tables from the rows, `ob1_node_projection_drift()` checks them against 058's formulas; the fold of status transitions from the log can feed `ob1_ticket_head`'s status (not `ob1_superseded_by`, which orders by `created_at`, a move no update event carries), and with the link facets replace `node_dependencies()`' gate | the first read-model fold to build on this log; its signatures and its tables are what the fold keeps |
 
 The rule the table applies: a projection's key names everything its value is
 a function of — the input's fingerprint and the recipe — or the rebuild
@@ -323,7 +326,7 @@ and it reads status from the scalar the log replaces
 `thought_audit` since 046). Its read form has landed ahead of the fold:
 migration 058's `node_lifecycle()`, `node_dependencies()` and `node_state()`
 state the rules once for graph-centrality and search, over the scalar as it
-stands, and 060 stores the heads and superseders they read, fed by triggers on
+stands, and 066 stores the heads and superseders they read, fed by triggers on
 the row store (every writer reaches it, raw ones included, and the log carries
 no `created_at` move) — so the fold can feed the heads' status and
 `node_dependencies()`' gate, which reads a source row's own status, under
@@ -338,8 +341,11 @@ is `valid_from` / `valid_until` (046), declared by the write, nullable and
 honest about it. Zep/Graphiti's four timestamps are these two pairs.
 
 The **as-of read over transaction time** is the replay with a bound: fold the
-log in `(created_at, seq)` order to the last event at or before the time
-asked and the rows are the brain as it stood — the same code as the rebuild,
+log in its order — `seq` since `ob1_config.audit_seq_exact_since`, `(created_at,
+seq)` before it (055's rule, `ob1_thought_events_in_order` since 060; never the
+clock alone, which inverts a row's history when an older transaction wins the
+row lock later) — to the last event at or before the time asked, and the rows
+are the brain as it stood — the same code as the rebuild,
 `db/fold.ts --as-of` (SMD-2117; `db/test-replay.ts` is the query-log replay
 gate of SMD-1295, so the fold takes a name of its own), into a working tier
 or a named schema, never over the live rows. The bound is the pair and
@@ -384,14 +390,35 @@ leaving the log to fight it:
 - **Forgetting exists before the log is the truth.** The log holds text today
   in every content-moving update's before/after and every tombstone (217 of
   440 live thoughts at gate 1's census) with no path to remove it; step 1
-  makes that every thought. So SMD-1723's redaction lands no later than
-  step 2 — SMD-2116 is blocked by it — and step 1's row in the path says the
-  text is unremovable until it does.
+  makes that every thought. The decision ordered SMD-1723's redaction no
+  later than step 2 and made SMD-2116 blocked by it; step 1's row in the path
+  says the text is unremovable until it lands. **Waived at step 2's merge
+  (maintainer, 2026-09-26):** step 1 put every thought's text in the log, and
+  step 2 adds no text to it — the functions append the same events the
+  trigger appended, and the snapshot holds vectors, not text — so the
+  text exposure the order guarded was made by 055, already on main, and 060
+  widens it by nothing; the one durable store 060 adds is
+  `ob1_embedding_snapshot` — a vector for every text ever keyed, edited-away
+  and deleted texts included, no FK — which holds no text, and whose rows'
+  removal is SMD-1732's arm of the same rule (the next bullet): since
+  migration 063 `rebuild_derived(id, reason, input_gone => true, fingerprints)`
+  deletes the snapshot rows at a leaving thought's fingerprints — its current
+  one, the ones its own lineage rows recorded, and the earlier texts' the
+  caller reads from the log — where no standing thought holds them. The order moves one step: the redaction lands no
+  later than step 3, SMD-2117's fold, which is where a copied log first
+  carries text to a server that cannot remove it, and SMD-2117 is blocked by
+  SMD-1723 as SMD-2116 was. SMD-1723 itself stands behind SMD-1793 (the raw
+  deletes), SMD-1731 and SMD-1732.
 - **Forgetting reaches the projections through the rebuild.** After the
-  amendment, `rebuild_derived` (SMD-1732, not built) will walk the lineage
-  forward and re-derive or delete every descendant — chunks, entities,
-  proposals, the snapshot row for that fingerprint — and report what it
-  could not reproduce.
+  amendment and BEFORE the row delete (061's drop trigger leaves nothing to
+  walk after it), `rebuild_derived(id, 'forget', input_gone => true,
+  fingerprints)` (migration 063, SMD-1732) walks the lineage forward and
+  deletes every mechanical descendant the thought keyed — its windows, its
+  mentions and edges (the entities left with no evidence pruned), their
+  lineage rows, the snapshot rows at its fingerprints — counts the proposals
+  and the vector's and tags' rows the cascade takes at the row delete, and
+  reports the `derived_from` children as irreproducible: derived prose no
+  recipe re-runs, the limit named.
 - **Declined: cryptographic shredding** (a key per thought, forgetting by
   discarding the key). A single-operator brain on one Postgres with an
   amendment gate the trigger enforces does not need it, and a key store is a
@@ -408,9 +435,10 @@ SMD-1729's rule, made concrete:
   a raw write is audited in the same transaction as today.
 - The off-row projections lag by seconds or hours behind their leased
   workers (015, 031) and say so where they are read; `rebuild_derived`
-  (SMD-1732) is what will make the lag safe.
-- **The projector is idempotent by the check, and exactly-once is not
-  needed.** Replaying an event already applied recomputes the same AFTER
+  (migration 063, SMD-1732) is what makes the lag safe: any stale projection
+  is a call away from its worker's pool, with the reason on the row.
+- **The projector is idempotent by the check under a replay, and exactly-once
+  is not needed.** Replaying an event already applied recomputes the same AFTER
   image; the check verifies and nothing moves. A fold from a bound resumes
   without re-folding. This is what "The Idempotency Crisis" asks of an
   event-stream consumer, answered by the comparison the trigger already makes
@@ -434,9 +462,9 @@ exist.
 
 | Step | Ticket | What lands | What coexists | Rollback |
 | --- | --- | --- | --- | --- |
-| 1 | SMD-2115 | the capture event carries `content` and, when set by the writer, `created_at`; the update event carries the key's move; 046's diff rule, its append and 050's stamp become functions the trigger calls; a backfill fills the payload on earlier capture rows — the third named amendment, which needs a third arm in 046's immutability gate (today an UPDATE of `diff` is refused even under the setting, and test-schema asserts so; the arm runs under its own value of `ob1.audit_amend`, removes `diff` from 046's byte-equal comparison as a fifth column under that value alone, fills `diff.content` and `diff.created_at` where absent and nothing else, key by key inside the trigger, and the assertion moves with it; the text comes from the first content-moving update's `before`, else the tombstone's `previous_content`, else the live row, else it is unrecoverable and counted) — or the replay seeds from the row store, decided there after the pass is measured | everything: the trigger still derives the event after the write; no function changes what it returns | none needed for the shape — readers of 046's shape ignore the added keys; the text written into the log is not removable until SMD-1723's redaction exists, which is why that lands no later than step 2 |
-| 2 | SMD-2116 | the three write functions append then project; the trigger checks under `ob1.projecting` and appends otherwise; the vector snapshot table, seeded once from the rows and fed by live writes from then on, and `ob1_refresh_thought_vector`; the five accepted deltas; `update_thought`'s COMMENT moves with its body (046's says the predicate is in the UPDATE); blocked by SMD-1723's redaction as well as by step 1 | the raw in-tree writers (`review_supersession_proposal`, the backfills, 042's guard) and every community schema's raw write — trigger-audited, so the log stays complete | re-apply 046's bodies (`db/migrate.ts --reapply`, SMD-1193); the log written in between is complete and shaped as before |
-| 3 | SMD-2117 | `db/fold.ts` — the fold in `(created_at, seq)` order, bounded, into a tier or a named schema, with a verify mode; its input the log and the snapshot, both copied for a fold onto another server; it rebuilds the thought rows and nothing else — the chunks, claims, citations, facets and graph are the workers' and the rebuild primitive's, and the report names them as not rebuilt (gate 2's replay landed in a database with no chunks, claims or citations) — 060's node_state projection is kept by triggers on the rows, so a fold into `thoughts` drives it like any writer, and one with the triggers disabled is followed by `ob1_rebuild_node_projection()`; defined over the events written since step 1 until step 1's backfill has run on the brain (a fold that meets a capture with no content stops and names it), and faithful from step 1 on (earlier update events carry no key move, so their key is derived under 018's rule and counted); the verify mode folds a sample beside its rows and tolerates two kinds of difference and no other — a raw insert's NULL key filled, a pre-step update's derived key, each under its own count; a function-borne capture must carry a backdating writer's `created_at` once the ingester moves onto the functions (today only the trigger's raw path fills it; the form is this step's to decide); the raw in-tree writers append their own event first; `thought_changes` reads a capture's head from the event | a community schema's raw write, still trigger-audited: the contract is unchanged | none needed — a tool and moved callers |
+| 1 | SMD-2115 | the capture event carries `content` and, when set by the writer, `created_at`; the update event carries the key's move; 046's diff rule, its append and 050's stamp become functions the trigger calls; a backfill fills the payload on earlier capture rows — the third named amendment, which needs a third arm in 046's immutability gate (today an UPDATE of `diff` is refused even under the setting, and test-schema asserts so; the arm runs under its own value of `ob1.audit_amend`, removes `diff` from 046's byte-equal comparison as a fifth column under that value alone, fills `diff.content` and `diff.created_at` where absent and nothing else, key by key inside the trigger, and the assertion moves with it; the text comes from the first content-moving update's `before`, else the tombstone's `previous_content`, else the live row, else it is unrecoverable and counted) — or the replay seeds from the row store, decided there after the pass is measured | everything: the trigger still derives the event after the write; no function changes what it returns | none needed for the shape — readers of 046's shape ignore the added keys; the text written into the log is not removable until SMD-1723's redaction exists, which is why that was ordered no later than step 2 (waived at step 2's merge — Deletion and forgetting) |
+| 2 | SMD-2116 | the three write functions append then project; the trigger checks under `ob1.projecting` and appends otherwise; the vector snapshot table, seeded once from the rows and fed by live writes from then on, and `ob1_refresh_thought_vector`; the six accepted deltas (the sixth the write path forced: a raw writer's row landing in a fresh capture's window is merged as 046's `ON CONFLICT` merged it); `update_thought`'s COMMENT moves with its body (046's says the predicate is in the UPDATE); blocked by step 1 alone — the decision also ordered SMD-1723's redaction ahead of it, waived at this step's merge (2026-09-26, Deletion and forgetting) | the raw in-tree writers (`review_supersession_proposal`, the backfills, 042's guard) and every community schema's raw write — trigger-audited, so the log stays complete | re-apply 046's bodies (`db/migrate.ts --reapply`, SMD-1193); the log written in between is complete and shaped as before |
+| 3 | SMD-2117 | `db/fold.ts` — the fold in the log's order (`ob1_thought_events_in_order`: `seq` since the boundary, `(created_at, seq)` before it), bounded, into a tier or a named schema, with a verify mode; its input the log and the snapshot, both copied for a fold onto another server; it rebuilds the thought rows and nothing else — the chunks, claims, citations, facets, graph and the pages with their sections (064 — cascade-deleted with their thought row by a replayed tombstone, rebuilt only by the store's writers) are the workers' and the rebuild primitive's, and the report names them as not rebuilt (gate 2's replay landed in a database with no chunks, claims or citations) — 066's node_state projection is kept by triggers on the rows, so a fold into `thoughts` drives it like any writer, and one with the triggers disabled is followed by `ob1_rebuild_node_projection()`; defined over the events written since step 1 until step 1's backfill has run on the brain (a fold that meets a capture with no content stops and names it), and faithful from step 1 on (earlier update events carry no key move, so their key is derived under 018's rule and counted); the verify mode folds a sample beside its rows and tolerates two kinds of difference and no other — a raw insert's NULL key filled, a pre-step update's derived key, each under its own count; a function-borne capture must carry a backdating writer's `created_at` once the ingester moves onto the functions (today only the trigger's raw path fills it; the form is this step's to decide); the raw in-tree writers append their own event first; `thought_changes` reads a capture's head from the event; blocked by SMD-1723's redaction, whose order moved here from step 2 at that step's merge (2026-09-26) — a fold copies the log, and text the log holds with no removal path must have one before it travels | a community schema's raw write, still trigger-audited: the contract is unchanged | none needed — a tool and moved callers |
 
 What does not change on any step, and is the contract this record holds:
 
@@ -513,8 +541,12 @@ bounded fold into a tier that writes on (SMD-2118, Low, blocked by step 3).
 - **The redaction amendment's exact shape** (which keys of `diff` blank, what
   the saying-so row carries) — SMD-1723, on the gate 046 built; what the
   projector does with a redacted thought is decided above.
-- **The graph's fingerprint and every recipe** — SMD-1731, whose table the
-  projections table above depends on.
+- **The graph's fingerprint and every recipe** — decided and landed after this
+  record by SMD-1731 (migration 061): `derivations`, the table the projections
+  table above depends on; the rebuild that walks it landed as migration 063
+  (SMD-1732). What stays open is the tags: written before 061 no row can
+  attribute them, and after it no worker re-tags a thought, so a stale tags
+  row is marked by the rebuild and waits for a pool that does not exist yet.
 - **Where a pre-step capture's text comes from on a replay** — the backfill
   or the row store; SMD-2115 measures the backfill on the dogfood log before
   choosing, and leans to the backfill. Until it lands the fold is defined
@@ -540,13 +572,12 @@ bounded fold into a tier that writes on (SMD-2118, Low, blocked by step 3).
 
 Nothing in this page is enforced by this page. What holds the decision:
 
-- the two gates' runners in CI — "Projection-replay rules" and
-  "Writable-projection rules" in the portable-server job (the pure rules,
-  self-checked), "Projection-replay fixture" and "Writable-projection
-  prototype" in the data-layer job (gate 1's rules on a seeded Postgres; the
-  prototype applied to a real Postgres at 053, held to a recorded matrix of
-  outcomes and probe counts; drift fails) — until SMD-2116 ships the bodies
-  and their criteria move into test-schema and test-update-delete;
+- gate 1's runner in CI — "Projection-replay rules" in the portable-server
+  job (the pure rules, self-checked) and "Projection-replay fixture" in the
+  data-layer job (the rules on a seeded Postgres; drift fails). Gate 2's
+  runner was retired when SMD-2116 shipped the bodies it prototyped as
+  migration 060: its contract criteria are `db/test-schema.ts` [56], its
+  behaviours `db/test-live.ts`, its cost line 060's header;
 - test-schema's sentinel reads and preflight's recognisers, which pin the
   write functions' bodies and move with them at every step;
 - the SQL-safety rule (`scripts/check-fork-consistency.ts` check 21): no
@@ -577,7 +608,9 @@ every write and consolidation deciding the row.
 - `evals/README.md` § "Can the read model be rebuilt without re-embedding
   the world?" (SMD-1998) and § "Does the extension contract survive the
   move?" (SMD-1999) — the two gates, their reports verbatim
-- `evals/writable-projection/` — the prototype SQL SMD-2116 ships from
+- `db/migrations/060_append_then_project.sql` — step 2, the prototype's
+  bodies shipped (the prototype SQL under `evals/writable-projection/` was
+  retired with it)
 - `db/migrations/046_thought_audit_event_shape.sql`,
   `050_thought_actor_on_the_row.sql`, `052_thought_changes.sql` — the log as
   it stands

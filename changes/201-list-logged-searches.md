@@ -1,0 +1,75 @@
+# 201. `list_logged_searches` — a read surface for a brain's query_log, so the cross-brain compare replays what a brain actually searched (SMD-2245)
+
+**What changed.** `tier.ts --compare --replay` (SMD-2109) was HTTP-only and
+`query_log` was not on the read surface, so its retrieval diff replayed only a
+SUPPLIED query set — not SMD-2109's item 3, "run stable's logged queries against
+both." This adds the surface and sources the replay from it. With SMD-2244, both
+of SMD-2109's once-deferred HTTP-only limits are now closed.
+
+- **`list_logged_searches`** (new read tool, `server-portable/index.ts`; scope
+  `read` in `tools.ts`, so a capture-only key never sees it). Returns the
+  `query_log` search rows — `query`, `arm`, `tier`, `logged_at`, `match_count`,
+  `threshold`, `recency_weight`, `filter` — most recent first, windowed by `since`,
+  bounded by `limit` (default 200, max 1000) with a `truncated` flag. A replay is
+  two search calls per row, so a window is the unit, not a full-log cursor walk.
+  `query_log` is opt-in (`OB1_QUERY_LOG`); empty when it was never on. No thought
+  content, no keys, no `result_ids` (the compare replays fresh — see below).
+  `tools.json` regenerated.
+- **`ThoughtStore.listLoggedSearches`** on both stores (SQL and the PostgREST
+  shim): `kind = 'search'`, most recent first, `since`-windowed, `limit + 1` to set
+  `truncated`; `logged_at` through the shared timestamp normaliser so both stores
+  hand back one form.
+- **`db/tier.ts --compare … --from-log <brain> [--since <iso>]`**
+  (`db/brain-compare.ts`): resolve the source brain, fetch its logged searches,
+  build a replay plan of `{query, arm}` pairs — each logged search on the arm that
+  ran it, a null-arm (pre-045) row skipped, an empty query skipped, and identical
+  pairs collapsed — and replay it against both brains through the same per-row
+  fail-soft loop the supplied path uses. `--from-log` refuses combining with
+  `--query`/`--queries-file` (two sources) or `--hybrid` (the arm comes from the
+  log), and needs `--replay`; `--since` only applies with it. The report names the
+  source ("from the log of &lt;label&gt;"), says when the log is empty, and flags a
+  truncated window.
+
+**Why no result_ids on the surface.** The compare replays each query FRESH against
+both brains and diffs those, so the historically recorded ids are not needed, and a
+`uuid[]` would diverge across the two stores' drivers for no gain.
+
+**Not taken.**
+- Full cursor pagination of the log (as `list_thought_ids` has). The replay cost is
+  two search calls per row, so replaying a whole large log is impractical; a bounded
+  most-recent window with a `truncated` flag is the honest unit.
+- Filtering to `tier = 'stable'` in the surface (as `readLoggedSearches` does for
+  the tier pipeline). The tool is "this brain's logged searches", general; the
+  operator points `--from-log` at the brain whose searches they want.
+
+**Caveat carried in the output.** A log-sourced replay inherits SMD-2234's noise
+sources (paged keyword searches, corpus drift, a wrong embed model) and, on the
+hybrid arm, SMD-2037's HNSW-GUC drift — the retrieval section already prints the
+GUC caveat.
+
+**Tested.**
+- `server-portable/test-store-sql.ts` [5d] / `test-store-postgrest.ts` [8d]: the
+  search rows most-recent-first, the arguments and filter intact, `logged_at` ISO,
+  the action row and a `since` window excluded, `limit`/`truncated`.
+- `server-portable/test-e2e-sql.ts` [6c]: a search made over HTTP reads back through
+  the tool with its arm and no thought content/result ids.
+- `server-portable/test-server.ts` / `test-auth.ts`: the manifest, `readOnlyHint`
+  and capture-only invisibility, from `tools.ts`.
+- `db/test-brain-compare.ts`: `replayPlanFromLog` (dedup, null-arm/empty skip),
+  `fetchLoggedSearches`, a from-log plan replayed per-arm with the diff, an empty
+  log reported, and `runCompare --from-log` end to end; the CLI refusals.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | A `--from-log` fetch hard-aborted the whole compare: `runCompare`'s resolve+fetch was unwrapped, so a source that lacks the tool (an older brain) or is unreachable threw and killed everything — no identity, freshness, id-set or verdict. It now degrades like the id-set path: a bad ref still aborts (a usage error, as a bad `--a` does), but a resolved source whose log cannot be read becomes a `sourceError` — "could not read the log of <label>" — and the rest of the compare prints (mutant-confirmed) | cold-read, automated, mutant | pass 1 |
+| 1 | The plan refactor made `retrieval.queries` count query-arm PAIRS, so the report said "over 2 queries" for one query on two arms (`--hybrid`). The count is now labelled "replays"; the supplied source reads "the supplied queries", not "from queries" | cold-read, automated | pass 1 |
+| 1 | Minor CLI: an empty `--from-log ""` reached `claude mcp get ""`, and a malformed `--since` surfaced as a Postgres cast error. Both refused up front (the `--since` shape also checked in the tool handler for a direct MCP caller) | automated | pass 1 |
+| 2 | Key-safety tidy (pre-existing, reachable via `--a`/`--b` too): `resolveBrain`'s invalid-URL error echoed the raw reference, so a malformed `http://…?key=SECRET` would print the key. It now shows only the part before the query string | cold-read, automated | pass 2 |
+| 2 | Store hardening: `since=""` errored on the SQL store (`''::timestamptz`) while the PostgREST store treated it as no window — a direct-caller divergence (the tool and CLI already reject a non-time `since`). The SQL store now normalises `""` to no window, matching PostgREST; and [8d] now pins `threshold`/`recency_weight`/`tier` so both stores' field mapping has teeth | automated | pass 2 |
+| 2 | Stop signal: the second reviewer verified the pass-1 fixes and found no MEDIUM+ — store parity, key-safety, the `sourceError` render order and `anyDelta` all hold. Held: a `--from-log` replay is up to 200×2 server-side searches (bounded, `--since`-windowable, truncation reported); a `--from-log --limit` knob is a reasonable follow-up | automated, cold-read; held: replay-cost knob | pass 2 |
+| 3 | `deploy/README.md`'s "Compare two live brains" section was stale: it still said the exact id-set difference and a `query_log`-sourced replay "are out of reach … a DB-backed mode can add them" — both closed now (SMD-2244's `list_thought_ids`, this ticket's `--from-log`). Updated: a `--from-log` example, the id-set difference named, and only the board-sync watermark left as deferred | cold-read | pass 3 |
+| 3 | Consistency: `parseCompareArgs` silently took the last of a repeated single-value flag (`--from-log`/`--since`/`--a-key`/…), where the SQL-verb parser refuses "given twice"; it now refuses too. And the pass-1 "replays" relabel reached the fallback render lines (was "all N queries were skipped" / "for every query and arm") | automated, cold-read | pass 3 |
+| 3 | Stop signal held: a third reviewer verified the CLI grammar (order-independent, every combine-refusal), the full `renderComparison` (six shapes, no `undefined`/`[object Object]`, `1 replay` singular), `--json` (no key), and the docs. Held (pre-existing): the Verdict is scoped to migration/freshness, so it can read "current" while the separate Retrieval section shows a ranking move — the two sections are distinct | automated, cold-read, run-it; held: verdict scope | pass 3 |
+| boyscout | Tidy only, output unchanged (90/90): the retrieval "arms:" line inlined the hybrid caveat where its sibling `trunc` was already a named const — extracted it to a `hybridNote` const to match. A fourth review pass (own cold read of the whole diff) found no defect; three reviewers had converged | — | boyscout |

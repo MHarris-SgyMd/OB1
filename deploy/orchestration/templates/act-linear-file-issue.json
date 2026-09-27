@@ -1,0 +1,227 @@
+{
+  "name": "OB1 act — Linear: file an issue",
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "nodes": [
+    {
+      "id": "9c2d1e4f-0001-4a5b-8c60-000000000001",
+      "name": "Called as a tool",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "team",
+              "type": "string"
+            },
+            {
+              "name": "title",
+              "type": "string"
+            },
+            {
+              "name": "description",
+              "type": "string"
+            },
+            {
+              "name": "label",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "9c2d1e4f-0002-4a5b-8c60-000000000002",
+      "name": "Find the team and label",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linear.app/graphql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "linearApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: 'query($key: String!, $label: String!) { teams(first: 1, filter: { key: { eq: $key } }) { nodes { id key } } issueLabels(first: 20, filter: { name: { eqIgnoreCase: $label }, or: [{ team: { key: { eq: $key } } }, { team: { null: true } }] }) { nodes { id name team { id } } } }', variables: { key: String($json.team ?? '').trim().toUpperCase(), label: String($json.label ?? '').trim() } }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "linearApi": {
+          "id": "ob1linearAct0001",
+          "name": "OB1 vendor — Linear (act tool)"
+        }
+      }
+    },
+    {
+      "id": "9c2d1e4f-0003-4a5b-8c60-000000000003",
+      "name": "Pick the team and label",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const ask = $('Called as a tool').first().json;\nconst res = $input.first().json;\nif (res.errors?.length) throw new Error(`Linear refused the lookup: ${res.errors[0].message}`);\nconst title = String(ask.title ?? '').trim();\nif (!title) throw new Error('title is required');\nconst team = res.data?.teams?.nodes?.[0];\nif (!team) throw new Error(`no Linear team with key ${String(ask.team ?? '').trim().toUpperCase() || '(none given)'}`);\nconst want = String(ask.label ?? '').trim();\n// A workspace label, or one of this team's; another team's label cannot go on this team's issue.\nconst label = want ? (res.data?.issueLabels?.nodes ?? []).find((l) => !l.team || l.team.id === team.id) : undefined;\nreturn [{ json: { teamId: team.id, teamKey: team.key, title, description: String(ask.description ?? ''), labelName: want, labelId: label?.id ?? null, needLabel: Boolean(want && !label) } }];"
+      }
+    },
+    {
+      "id": "9c2d1e4f-0004-4a5b-8c60-000000000004",
+      "name": "Ensure the label",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linear.app/graphql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "linearApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.needLabel ? JSON.stringify({ query: 'mutation($teamId: String!, $name: String!) { issueLabelCreate(input: { teamId: $teamId, name: $name }) { success issueLabel { id } } }', variables: { teamId: $json.teamId, name: $json.labelName } }) : JSON.stringify({ query: '{ viewer { id } }' }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "linearApi": {
+          "id": "ob1linearAct0001",
+          "name": "OB1 vendor — Linear (act tool)"
+        }
+      }
+    },
+    {
+      "id": "9c2d1e4f-0005-4a5b-8c60-000000000005",
+      "name": "Build the issue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const p = $('Pick the team and label').first().json;\nconst res = $input.first().json;\nif (res.errors?.length) throw new Error(`Linear refused the label: ${res.errors[0].message}`);\nconst labelId = p.labelId ?? res.data?.issueLabelCreate?.issueLabel?.id ?? null;\nif (p.needLabel && !labelId) throw new Error(`the label ${p.labelName} could not be created`);\nconst input = { teamId: p.teamId, title: p.title, description: p.description, ...(labelId ? { labelIds: [labelId] } : {}) };\nreturn [{ json: { body: { query: 'mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { identifier title url } } }', variables: { input } } } }];"
+      }
+    },
+    {
+      "id": "9c2d1e4f-0006-4a5b-8c60-000000000006",
+      "name": "Create the issue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linear.app/graphql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "linearApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "credentials": {
+        "linearApi": {
+          "id": "ob1linearAct0001",
+          "name": "OB1 vendor — Linear (act tool)"
+        }
+      }
+    },
+    {
+      "id": "9c2d1e4f-0007-4a5b-8c60-000000000007",
+      "name": "Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const res = $input.first().json;\nconst made = res.data?.issueCreate;\nif (res.errors?.length || !made?.success) throw new Error(`Linear did not create the issue: ${res.errors?.[0]?.message ?? 'no success flag'}`);\nreturn [{ json: { identifier: made.issue.identifier, title: made.issue.title, url: made.issue.url } }];"
+      }
+    }
+  ],
+  "connections": {
+    "Called as a tool": {
+      "main": [
+        [
+          {
+            "node": "Find the team and label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find the team and label": {
+      "main": [
+        [
+          {
+            "node": "Pick the team and label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick the team and label": {
+      "main": [
+        [
+          {
+            "node": "Ensure the label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure the label": {
+      "main": [
+        [
+          {
+            "node": "Build the issue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build the issue": {
+      "main": [
+        [
+          {
+            "node": "Create the issue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create the issue": {
+      "main": [
+        [
+          {
+            "node": "Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

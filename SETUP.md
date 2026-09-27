@@ -321,7 +321,16 @@ The short version:
   re-embedding when you change your mind, which is exactly why it is not the
   default. The supersession judge (`db/consolidate.ts`) is the harder task and
   has its own knob, `OB1_JUDGE_MODEL`, so it alone can run on the larger model
-  while every capture's tagging stays on the default. Reasoning is off by
+  while every capture's tagging stays on the default. Extraction has the mirror
+  knob, `OB1_EXTRACT_ESCALATE_MODEL`: a call the default runs away on — one it
+  cannot finish (`finish_reason: length`) — is remade once on the larger model
+  with no penalty, rather than retried on the default under one. The 27B never
+  looped on the thoughts the 7B could not finish, and a whole-pass 27B run was
+  no faster than the 7B's (44–47 s a call against 33), so the escalation spends
+  it only on the failures, not as the default. It loads the 27B beside the 4B
+  embedder — 28 GB on the dogfood Mac, and with `OLLAMA_MAX_LOADED_MODELS=2` a
+  capture mid-pass can evict one and pay its reload — so leave it unset on a box
+  that cannot hold both. Reasoning is off by
   default: `think: false` is silently ignored on the OpenAI-compatible endpoint, so
   the server sends `reasoning_effort: "none"` — without it a thinking model
   multiplies capture latency with no warning.
@@ -495,13 +504,24 @@ new thought's id, which is what the other two take.
 
 For ingestion that runs on its own — a mailbox polled on a schedule, a
 tracker synced — the `orchestration` profile runs n8n beside the stack
-(`docs/orchestration-tool.md`). Its workflows capture through the brain's
-MCP endpoint with a capture-scope key. No workflow template ships yet
-(SMD-2212 brings the first), so today the steps below leave n8n
-provisioned, with its credentials and keys and no workflows. Once, `--init` writes its secrets
-into `deploy/.env`. The capture key is yours to mint (`bun keygen.ts --name
-n8n --scope capture`: the key as `N8N_BRAIN_CAPTURE_KEY`, the line it prints
-into `MCP_ACCESS_KEYS`). Then:
+(`docs/orchestration-tool.md`). n8n reaches the brain through its MCP
+endpoint, with no write key. The profile's import runner is the one part that
+writes brain tables, as the pipeline does from a checkout, behind a key its
+allowlist bounds. Two kinds of template ship (SMD-2212):
+- **An act tool:** `linear_file_issue` on `/mcp/ob1-act`. It loads when
+  `N8N_LINEAR_API_KEY` is set.
+- **The import template:** one instance per pipeline in
+  `deploy/orchestration/pipelines.json`, run by the profile's import runner
+  over `deploy/imports/<pipeline>/`. The allowlist is empty until the
+  first import recipe is converted.
+
+Once, `--init` writes its secrets into `deploy/.env`. For the act tool, put a
+Linear key with write access in `deploy/.env` as `N8N_LINEAR_API_KEY` (a key
+of its own, not board-sync's) before provisioning, or provision again after.
+A capture key is optional until a template captures into the brain; none
+ships yet. It is made with `cd server-portable && bun keygen.ts --name n8n
+--scope capture && cd ..`: the key goes in as `N8N_BRAIN_CAPTURE_KEY`, and
+the line it prints is appended to `MCP_ACCESS_KEYS`, comma-separated. Then:
 
 ```bash
 bun deploy/orchestration/provision.ts --init
@@ -509,8 +529,9 @@ podman compose -f deploy/compose.yaml --profile orchestration up -d
 bun deploy/orchestration/provision.ts
 ```
 
-Once a template publishes an MCP endpoint, an AI client reaches it at
-`http://127.0.0.1:5678/mcp/<path>`, with the header
+With `N8N_LINEAR_API_KEY` set, an AI client reaches the act tool at
+`http://127.0.0.1:5678/mcp/ob1-act` (5678 is `N8N_PORT`'s default; any
+template's endpoint is at `/mcp/<path>`), with the header
 `x-n8n-key: <N8N_MCP_KEY>`. That endpoint carries workflow tools; the
 brain's own tools stay on the connector above. `deploy/README.md`,
 "Orchestration", has the keys, backups, the run-history window and upgrades.
@@ -538,7 +559,7 @@ no backups, no resource limits. For something durable:
 
 | | |
 | --- | --- |
-| **Container + managed Postgres** | RDS, Aurora, Neon, Cloud SQL, or Timescale with pgvector 0.8.0 or later; the server as a container. `DATABASE_URL` — the SQL store, the default (FORK.md change 97). The simplest data path. If the provider installs pgvector into a schema off the connection's `search_path` (Supabase uses `extensions`), the migrator heals its own session and preflight fails with the exact `ALTER ROLE … SET search_path` to run for the server — see `FORK.md` change 43. |
+| **Container + managed Postgres** | RDS, Aurora, Neon, Cloud SQL, or Timescale with pgvector 0.8.0 or later; the server as a container. `DATABASE_URL` — the SQL store, the default (FORK.md change 97). The simplest data path. If the provider installs pgvector into a schema off the connection's `search_path` (Supabase uses `extensions`), the migrator heals its own session and preflight fails with the exact statement to run for the server — the login role's `ALTER ROLE … IN DATABASE … SET search_path`, its own path kept and the schema added, or the connection string's `options=` value where the connection sets the path — see `FORK.md` change 43 and SMD-2238. |
 | **Cloudflare Workers** | `server-portable` builds for Workers (`server-portable/README.md` has the bundle size). Workers cannot pool Postgres connections, so `wrangler.toml` selects the PostgREST store there (`OB1_STORE=postgrest`, the one target that still needs a PostgREST endpoint); a Workers-capable Postgres driver is SMD-1847's measurement. |
 
 ## Two things this does not fix

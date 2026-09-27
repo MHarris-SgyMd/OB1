@@ -45,6 +45,11 @@ const TABLES = [
   "ob1_entity_edges",
   "thought_entities",
   "ob1_entities",
+  // 064's page store (SMD-1812): the revisions reference the sections, the
+  // sections the pages, the pages `thoughts` — so all three before it.
+  "page_section_revisions",
+  "page_sections",
+  "pages",
   "thoughts",
   "ob1_agent_keys",
   "ob1_agents",
@@ -55,7 +60,15 @@ const TABLES = [
   // schema "without 034" and found the previous section's table standing —
   // the reset had carried it across every boundary since 034 landed.
   "query_log",
-  // 060's node_state projection (SMD-2256): no foreign key either way, so its
+  // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
+  // embedding_model), no foreign key either way — a row outlives the
+  // thought it came from on purpose — so its place in the order is free.
+  "ob1_embedding_snapshot",
+  // 061's lineage table (SMD-1731): polymorphic artifact_id, no foreign key
+  // either way — two row triggers drop what a deleted thought or proposal
+  // keyed — so its place in the order is free.
+  "derivations",
+  // 066's node_state projection (SMD-2256): no foreign key either way, so its
   // place is free too.
   "ob1_ticket_head",
   "ob1_superseded_by",
@@ -119,7 +132,11 @@ const FUNCTIONS = [
   "normalize_entity_name(text)",
   "content_fingerprint_of(text)",
   "backfill_content_fingerprints(integer)",
+  // 061 dropped the six-argument form for the seven-argument one (p_recipe);
+  // both named, since test-schema re-applies 053 and 056 by hand and each
+  // re-creates the six-argument form beside it.
   "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)",
+  "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)",
   "merge_entities(uuid, uuid)",
   "prune_orphan_entities()",
   "requeue_thought_work(text, uuid)",
@@ -128,7 +145,10 @@ const FUNCTIONS = [
   "extract_search_needles(text)",
   // 029 (SMD-1294)
   "consolidation_candidates(uuid, int, float)",
+  // 061 dropped the ten-argument form for the eleven-argument one (p_recipe);
+  // both named, for a re-apply of 029 by hand.
   "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text)",
+  "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)",
   "review_supersession_proposal(uuid, text, text, text, jsonb, boolean)",
   "list_supersession_proposals(text, int)",
   "thought_changes(timestamptz, uuid, text, text, text[], int)",
@@ -149,7 +169,7 @@ const FUNCTIONS = [
   // 059 (SMD-2255)
   "search_thoughts_current(vector, text, float, int, jsonb, float, float)",
   "search_demote_weight()",
-  // 060 (SMD-2256): the triggers go with thoughts; their function is named here.
+  // 066 (SMD-2256): the triggers go with thoughts; their function is named here.
   "ob1_node_projection_sync()",
   "ob1_node_projection_truncate()",
   "ob1_node_projection_drift()",
@@ -176,8 +196,9 @@ const FUNCTIONS = [
   "thoughts_guard_citation_sources()",
   "thought_facet_active(thought_facets)",
   "record_citation(uuid, uuid, text, text)",
-  // 046 (SMD-1730); update_thought's 10-argument form is UPDATE_THOUGHT_SIGNATURE
-  // above and the 9-argument one it dropped is in SUPERSEDED_SIGNATURES.
+  // 046 (SMD-1730); update_thought's 11-argument form is UPDATE_THOUGHT_SIGNATURE
+  // above (061's), and the 10- and 9-argument ones 061 and 046 dropped are in
+  // SUPERSEDED_SIGNATURES.
   "set_agent_kind(text, text)",
   "validate_write_event(jsonb)",
   "backfill_thought_audit_events(integer)",
@@ -197,6 +218,45 @@ const FUNCTIONS = [
   "ob1_actor_stamp_kept(jsonb, jsonb)",
   "ob1_capture_payload(uuid, timestamptz, bigint)",
   "backfill_thought_payloads(integer)",
+  // 060 (SMD-2116): the projector, the refresh, the snapshot's feeding
+  // trigger function and the log's order; the three write functions and the
+  // audit trigger it redefines are named above.
+  "ob1_project_thought_event(uuid, vector, text, boolean)",
+  "ob1_refresh_thought_vector(uuid, vector, text)",
+  "ob1_snapshot_embedding()",
+  "ob1_thought_events_in_order(uuid[])",
+  // 061 (SMD-1731): the lineage writer, the agent it reads, the vector
+  // trigger's function and the two drop triggers' functions; the five bodies
+  // it redefines are named above under both signatures where the arity moved.
+  "ob1_actor_agent_id()",
+  "ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)",
+  "ob1_record_vector_lineage()",
+  "ob1_drop_thought_derivations()",
+  "ob1_drop_proposal_derivation()",
+  // 063 (SMD-1732): the forward walk and the rebuild primitive; the three
+  // bodies it redefines (the writer, consolidation_candidates,
+  // record_supersession_proposal) keep their signatures and are named above.
+  "derivation_descendants(uuid, int, int)",
+  "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)",
+  // 064 (SMD-1812): the page store's nine functions, its four helpers, the
+  // page-thought writer, the revisions' refusal trigger and the section drop
+  // trigger; ob1_record_derivation, redefined on 063's body, is named above.
+  "upsert_page(text, text, text, jsonb, text, uuid)",
+  "write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)",
+  "accept_page_section(uuid, text)",
+  "release_page_section(uuid, text)",
+  "reject_page_section(uuid, text)",
+  "lock_page_section(uuid, boolean, text)",
+  "delete_page_section(uuid, text)",
+  "render_page(uuid, timestamptz)",
+  "page_sections_as_of(uuid, timestamptz)",
+  "ob1_render_page_thought(uuid, uuid)",
+  "ob1_page_actor(text)",
+  "ob1_page_lock(uuid, text)",
+  "ob1_page_evidence(uuid[], text, uuid)",
+  "ob1_page_recipe(jsonb, text)",
+  "page_section_revisions_refuse_mutation()",
+  "ob1_drop_section_derivations()",
 ];
 
 /**
@@ -454,6 +514,27 @@ export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
 /** A specifier of one of STACK's packages — the bare name or a subpath of it. No name holds a regex metacharacter. */
 export const PACKAGES = new RegExp(`^(${STACK.join("|")})(/|$)`);
+
+/**
+ * The MCP stack server-portable runs on since SMD-2278 — stage 1 of the SDK v2
+ * migration (docs/mcp-sdk-v2-migration.md). The v1 single package
+ * `@modelcontextprotocol/sdk` and the third-party `@hono/mcp` gave way to the v2
+ * scoped packages `@modelcontextprotocol/core` + `@modelcontextprotocol/server`;
+ * `hono` and `zod` are shared with STACK. The vendored servers (extensions) and
+ * the Kubernetes image stay on STACK until stages 2 and 3 (SMD-2279, SMD-2281), so
+ * during the window the two stacks coexist and extensions/test-auth.ts's pin guard
+ * holds each install to its own.
+ */
+export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextprotocol/core", "@modelcontextprotocol/server"];
+/**
+ * The v2 packages' pinned versions — the independent truth the drift guard holds
+ * server-portable to while it is the sole v2 install. Stage 3 (SMD-2281) moves the
+ * Kubernetes image onto these too and the cross-install version check resumes.
+ */
+export const SERVER_V2_PINS: Readonly<Record<string, string>> = {
+  "@modelcontextprotocol/core": "2.1.0",
+  "@modelcontextprotocol/server": "2.1.0",
+};
 
 /**
  * A counting assert. Returned as an object rather than module state so two suites

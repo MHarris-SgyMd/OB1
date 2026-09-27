@@ -231,18 +231,6 @@ jobs:
         working-directory: evals
         run: bun eval-projection-replay.ts --self-check
 
-      # The writable-projection spike's rules (SMD-1999): the four options and
-      # fourteen criteria, the judgement of probes, the pre-registered verdict
-      # (GO only when every contract criterion PASSes and every behaviour
-      # holds), the recommendation's tie-break, the differential's
-      # normalisation, the replay rule and its one tolerated kind of difference, the
-      # recorded matrix and the drift from it, the report — probed with
-      # hand-known observations. No database; the prototype runs in the
-      # data-layer job.
-      - name: Writable-projection rules
-        working-directory: evals
-        run: bun eval-writable-projection.ts --self-check
-
       # The entity-gate spike's rules (SMD-1937): the deterministic baselines
       # on the shapes SMD-1935 names and the ones they must keep, AUROC,
       # balanced accuracy, the dev threshold, the temperature and Platt refits
@@ -260,8 +248,9 @@ jobs:
       #   under any field seen);
       # - --init's secrets and bcrypt hash;
       # - the env writer's quoting and modes;
-      # - every credential a shipped template names declared (the kit's
-      #   templates, until SMD-2212 ships the profile's);
+      # - every credential a shipped template names declared (the profile's
+      #   and the kit's), optional credentials, no key in two credentials,
+      #   workflow references, and the per-pipeline instancing (SMD-2212);
       # - compose's owner block;
       # - the key decisions against a fake n8n on loopback: reuse, renewal,
       #   rotation, the sweep, a copied or moved file (--adopt), a symlinked
@@ -272,6 +261,27 @@ jobs:
       - name: Orchestration provisioning rules
         working-directory: deploy/orchestration
         run: bun provision.ts --self-check
+
+      # SMD-2212: the import runner's rules against stand-in commands, with no
+      # database:
+      # - the allowlist's checks, the one-source rule, and the key's 401/403;
+      # - success judged by the pipeline's rows having vectors, not by
+      #   reembed's exit;
+      # - a stray line refused before the ingester runs, and an emitter
+      #   environment with no secret in it;
+      # - the run's deadline, including the wait for another pipeline's
+      #   reembed; SIGKILL for a step that ignores SIGTERM; a leftover child
+      #   that cannot hold the pipeline; and the sweep after every emitter;
+      # - the schedule mapping (hours to 23, then whole days) and a URL's
+      #   password masked in the report;
+      # - an export its uid cannot read, and an imports root the runner cannot
+      #   search, refused; reembed's refusals told apart, by phrases the check
+      #   finds in reembed's own source; live steps stopped with the runner.
+      # Each emitter's own uid, and its leftovers killed, are the image's, and
+      # the kit's I check holds them live.
+      - name: Orchestration import runner rules
+        working-directory: deploy/orchestration
+        run: bun runner.ts --self-check
 
       - name: Orchestration egress judge
         working-directory: evals
@@ -433,6 +443,14 @@ jobs:
         working-directory: db
         run: bun test-brain-compare.ts
 
+      # SMD-2134. Every db/ script reads its arguments through db/cli.ts: the
+      # scanner's rules, every entry point importing it, and each entry point
+      # run with a flag it does not have (exit 2) and --help (exit 0), before
+      # any database URL is resolved. No database, no model.
+      - name: Flag scanner (every db/ script, no database)
+        working-directory: db
+        run: bun test-cli.ts
+
   db-live:
     name: Schema against real Postgres
     runs-on: ubuntu-24.04
@@ -575,28 +593,6 @@ jobs:
       - name: Projection-replay fixture
         working-directory: evals
         run: bun eval-projection-replay.ts --fixture-check
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          OB1_FIXTURE_RESET: "1"
-
-      # The writable-projection spike's prototype (SMD-1999): the schema reset
-      # to 053 four times — as it stands, with option 2's functions (append
-      # the event, project the row), with a view named thoughts over a renamed
-      # table and 053's functions, with the view and option 2's functions —
-      # and the same scripted writes run against each: the vendored capture as
-      # readwise sends it, the 2- and 4-argument forms, the server's and the
-      # integrations' update_thought calls, delete_thought plain and refused,
-      # a raw INSERT, ingest-records' statement, the community DDL verbatim,
-      # the three concurrency behaviours, the trigger counts, read-your-writes
-      # with the drop-the-projector control, the replay of the whole log.
-      # --check holds the run to the matrix the spike recorded, so a Postgres
-      # or prototype change that moves a cell is named. No provider (vectors at
-      # width 8). It DROPS the schema and refuses a database holding thoughts
-      # unless told; this one is a throwaway. Runs after the fixture above,
-      # which leaves its rows; every suite after this resets for itself.
-      - name: Writable-projection prototype
-        working-directory: evals
-        run: bun eval-writable-projection.ts --check
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
           OB1_FIXTURE_RESET: "1"
@@ -781,20 +777,93 @@ jobs:
         with:
           persist-credentials: false
 
-      # For the three dashboards at the end of this job (SMD-1801): Bun installs
-      # and builds them, and drives the SvelteKit one against the stack.
+      # For the three dashboards (SMD-1801): Bun installs and builds them, and
+      # drives the SvelteKit one against the stack at the end of this job.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
+      # SMD-2251. The three dashboards need nothing from the stack, and built in
+      # series after it they added 35 s to this job. So they build here, in the
+      # background, one after another while the stack comes up (mostly waiting
+      # on health checks, not CPU), and "The three dashboards build" below
+      # waits for them and reports each. The two Next dashboards read their env
+      # at build time — the gateway URL and a session secret, any values. Each
+      # dashboard writes its log and exit code under $RUNNER_TEMP beside the
+      # one limit, which the wait step reads for its labels and cap; a hang
+      # ends as 124 and the next dashboard still builds. The subshell's output
+      # goes to files: otherwise this step would wait for the whole build.
+      - name: The three dashboards start building, in the background
+        id: dashboards
+        env:
+          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
+          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
+        run: |
+          out="$RUNNER_TEMP/dashboards"
+          mkdir -p "$out"
+          limit_s=240
+          echo "$limit_s" > "$out/limit"
+          (
+            for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
+              check=""
+              if [ "$d" = open-brain-dashboard ]; then check=" && bun run check"; fi
+              start=$SECONDS
+              rc=0
+              (cd "dashboards/$d" && exec timeout --kill-after=10s "${limit_s}s" sh -c "bun install --frozen-lockfile && bun run build$check") > "$out/$d.log" 2>&1 || rc=$?
+              echo "$rc $((SECONDS - start))" > "$out/$d.rc"
+            done
+            touch "$out/done"
+          ) > "$out/runner.log" 2>&1 < /dev/null &
+          echo "$!" > "$out/pid"
+
       # The other container this repository ships (SMD-1800): kubernetes-deployment's
       # image, Bun's base with its pinned install, built from integrations/ so the
-      # shared auth module is in the context. Built, not run — its database is its
-      # own (k8s/init.sql) and extensions/test-auth.ts starts the server itself.
+      # shared auth module is in the context. Built, and run only to be stopped
+      # (the step after) — its database is its own (k8s/init.sql) and
+      # extensions/test-auth.ts starts the server itself.
       # First, before the compose stack: a bring-up or smoke failure below must not
       # hide whether this image builds.
       - name: The Kubernetes image builds
         run: docker build -f integrations/kubernetes-deployment/Dockerfile -t ob1-k8s-mcp:ci integrations
+
+      # Run for this alone (SMD-2250): the server is the container's PID 1, which
+      # ignores a signal it has no handler for, so before its handler every
+      # `docker stop` and pod deletion waited out the grace period and was
+      # killed (exit 137). A search is in flight when the stop lands: its
+      # embedding endpoint is a stub that answers 503 after 2 s, so the call
+      # ends with the tool's error and never reaches the database, which is
+      # never dialled. The stop has to wait for it and count it — an idle stop
+      # passed a handler that exits at once, or that never got the server
+      # (review pass 1). The stub runs from the image just built, which has
+      # Bun, so nothing is pulled. The stop lands once the stub logs the
+      # server's request, so the call is in flight however loaded the runner
+      # is (the dashboards build beside this step, SMD-2251).
+      - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
+        run: |
+          KEY=$(openssl rand -hex 32)
+          HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
+          docker network create ob1-k8s-stop > /dev/null
+          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { console.log("embedding request"); await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
+          docker run -d --name ob1-k8s-stop --network ob1-k8s-stop -p 127.0.0.1:8099:8000 -e DB_PASSWORD=unused -e EMBEDDING_API_BASE=http://ob1-k8s-embed:8080 -e "MCP_ACCESS_KEYS=ci:read:$HASH" ob1-k8s-mcp:ci > /dev/null
+          up=""
+          for _ in $(seq 1 40); do curl -s -m 2 -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
+          curl -s -N --max-time 10 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts","arguments":{"query":"stop probe"}}}' http://127.0.0.1:8099/ > /tmp/k8s-call.out &
+          seen=""
+          for _ in $(seq 1 40); do grep -q 'embedding request' <<< "$(docker logs ob1-k8s-embed 2>&1)" && { seen=1; break; }; sleep 0.1; done
+          t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
+          wait
+          code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
+          log=$(docker logs ob1-k8s-stop 2>&1)
+          docker rm -f ob1-k8s-stop ob1-k8s-embed > /dev/null
+          docker network rm ob1-k8s-stop > /dev/null
+          echo "$log"
+          echo "docker stop: ${ms} ms, exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
+          [ -n "$up" ] || { echo "the Kubernetes image never answered" >&2; exit 1; }
+          [ -n "$seen" ] || { echo "the server never called the embedding stub, so no call was in flight when the stop landed" >&2; exit 1; }
+          if ! { [ "$code" = 0 ] && [ "$ms" -ge 1000 ] && [ "$ms" -lt 5000 ]; }; then echo "expected exit 0 once the call in flight answered, in 1–5 s (137 near 10 s is the grace period's kill; under 1 s it did not wait)" >&2; exit 1; fi
+          grep -q '^SIGTERM: no longer accepting; 1 in flight' <<< "$log" || { echo "the handler did not count the call in flight" >&2; exit 1; }
+          grep -q '"id":1' /tmp/k8s-call.out || { echo "the call in flight got no answer" >&2; exit 1; }
 
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
@@ -836,9 +905,12 @@ jobs:
           # /tmp/provider-stub-wrong exists it is a provider serving another
           # model: each vector turned mostly onto dimension 0, which no word
           # reaches, so a text still ranks its own thought first but at about
-          # 30%, under the canary smoke's 50% floor, on every run.
+          # 30%, under the canary smoke's 50% floor, on every run. While
+          # /tmp/provider-stub-slow exists GET /models answers after 2 s, inside
+          # preflight's 2.5 s probe, so a server started then is still in
+          # preflight 2 s on (the SIGTERM step, SMD-2250).
           nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
-          import json, math, os, re, zlib
+          import json, math, os, re, time, zlib
           from http.server import BaseHTTPRequestHandler, HTTPServer
           def embed(text):
               text = (text or "").split("\nQuery: ", 1)[-1]
@@ -856,6 +928,7 @@ jobs:
               def reply(self, body):
                   self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
               def do_GET(self):
+                  if os.path.exists("/tmp/provider-stub-slow"): time.sleep(2)
                   self.reply(b'{"object":"list","data":[]}')
               def do_POST(self):
                   req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
@@ -910,8 +983,9 @@ jobs:
       # to say `preflight OK` and fail the first capture on it (getaddrinfo
       # ENOTFOUND ollama). The
       # built image, the running database, one environment line changed, and
-      # preflight alone (the image's entrypoint is `sh -c "bun preflight.ts &&
-      # exec bun index.ts"`, so the command is replaced through --entrypoint).
+      # preflight alone (the image's entrypoint is an `sh -c` that runs
+      # preflight and then execs the server, so the command is replaced
+      # through --entrypoint).
       # Exit 1, the `provider endpoint` row failed, the remedy naming the
       # profile; and the same run with the reachable address (the runner's
       # listener from the first step, still up) passes, so the step proves
@@ -953,11 +1027,20 @@ jobs:
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3) and .services.server.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
           # SMD-2210: the orchestration profile adds n8n's one port, also on
-          # loopback, with its image pinned by digest. Without the profile a
-          # plain config names exactly the three services it did before.
+          # loopback, with its image pinned by digest. Its import runner
+          # (SMD-2212) publishes none. Without the profile a plain config
+          # names exactly the three services it did before.
           docker compose -f compose.yaml --profile orchestration config --format json \
-            | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$"))'
+            | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "migrate postgres server " ]
+
+      # SMD-2212: the import runner's image copies the ingestion pipeline's
+      # import graph file by file, and its build resolves every import. So a
+      # module the pipeline gains that the Dockerfile does not copy fails
+      # here, not at an operator's first import.
+      - name: The import runner's image builds
+        working-directory: deploy
+        run: docker compose -f compose.yaml --profile orchestration build orchestration-runner
 
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.
@@ -1188,23 +1271,65 @@ jobs:
 
       # SMD-1801. The three dashboards build from their pinned installs, with no
       # Supabase package among them (check 22 holds the imports; this holds the
-      # builds). The two Next dashboards read their env at build time — the
-      # gateway URL and a session secret, any values — and are built, not run:
-      # they speak to the open-brain-rest gateway, which this stack does not
-      # serve (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP
-      # to the server this stack serves, so it is driven too, below.
+      # builds). The two Next dashboards are built, not run: they speak to the
+      # open-brain-rest gateway, which this stack does not serve
+      # (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP to
+      # the server this stack serves, so it is driven too, below.
+      # They build in the background from the job's start (SMD-2251); this step
+      # waits for that and reports it — each dashboard's log folded when it
+      # passed and open under an error when it failed, and a line per dashboard
+      # of exit code and seconds. It runs when a stack step failed too, so a
+      # broken build is never hidden behind one. The wait ends when the
+      # background shell writes its done mark or dies without it, or at a cap
+      # a minute past the three limits and their kill-after grace. A dead shell
+      # nothing has reaped yet is a zombie, which `kill -0` counts as alive, so
+      # its state is read instead (review pass 1). timeout TERMs a build's
+      # process group, and its child, the `sh -c` running the chain, dies on
+      # it (dash does not exec the last command of an && list), so a hang is
+      # 124 and a process that ignores TERM outlives the limit; a 137 is a KILL
+      # from outside.
       - name: The three dashboards build
-        env:
-          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
-          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
+        if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
         run: |
+          out="$RUNNER_TEMP/dashboards"
+          pid=$(cat "$out/pid")
+          limit_s=$(cat "$out/limit")
+          cap=$((3 * (limit_s + 10) + 60))
+          running() {
+            local state
+            state=$(cut -d' ' -f3 "/proc/$1/stat" 2> /dev/null) && [ -n "$state" ] && [ "$state" != Z ]
+          }
+          start=$SECONDS
+          while [ ! -e "$out/done" ] && running "$pid" && [ $((SECONDS - start)) -lt "$cap" ]; do sleep 1; done
+          echo "waited $((SECONDS - start)) s for the background build"
+          if [ ! -e "$out/done" ]; then
+            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past $cap s) — its logs follow"
+            for rc in "$out"/*.rc; do [ -e "$rc" ] && echo "finished: $(basename "$rc" .rc), exit and seconds $(cat "$rc")"; done
+            for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
+            exit 1
+          fi
+          failed=0
+          summaries=""
           for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-            echo "::group::$d"
-            # The group closed on failure too, or the rest of the log nests under it.
-            if ! ( cd "dashboards/$d" && bun install --frozen-lockfile && bun run build ); then echo "::endgroup::"; exit 1; fi
-            echo "::endgroup::"
+            read -r rc secs < "$out/$d.rc"
+            why=$rc
+            case $rc in
+              124) why="124, over the $limit_s s limit" ;;
+              137) why="137, killed from outside, most likely out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::$d — built"
+              cat "$out/$d.log"
+              echo "::endgroup::"
+            else
+              echo "::error title=The three dashboards build::$d failed (exit $why) — its log follows"
+              cat "$out/$d.log"
+              failed=1
+            fi
+            summaries+="  $d: exit $rc in $secs s"$'\n'
           done
-          ( cd dashboards/open-brain-dashboard && bun run check )
+          printf '\n%s' "$summaries"
+          [ "$failed" = 0 ]
 
       # The SvelteKit dashboard as a browser uses it, against the stack that is
       # up: a wrong key refused at /signin, the write key signed in and the JSON
@@ -1218,6 +1343,42 @@ jobs:
         env:
           MCP_URL: http://127.0.0.1:8010/
         run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
+
+      # SMD-2250. The server stops on SIGTERM once what is in flight is
+      # answered (server-portable/shutdown.ts), and a stop during preflight
+      # ends the container (the Dockerfile's traps): before, each waited out
+      # the 10 s grace period and was killed, exit 137 — about 30 s of this
+      # job, over the canary's stops and the teardown. Last of the steps that
+      # use the server: it is left stopped. The serving stop is given 5 s:
+      # on the PR's first run the server logged `stopped in 0.0 s` and
+      # `docker compose stop` still took 2,476 ms on the runner, against a
+      # 10 s kill the gate exists to tell apart. The second stop lands inside
+      # preflight because the stub holds GET /models 2 s, and must end inside
+      # 1 s: the traps alone, with preflight in the foreground, end it only
+      # when the 2 s hold does (review pass 1). The log is read once, into a
+      # variable: `grep -q` on a pipe closes it early, which pipefail fails.
+      - name: The server stops on SIGTERM, serving and in preflight
+        working-directory: deploy
+        run: |
+          stop() {
+            t0=$(date +%s%3N); docker compose -f compose.yaml stop server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose -f compose.yaml ps -aq server)")
+            echo "$1: stopped in ${ms} ms, exit $code"
+            if ! { [ "$code" = "$2" ] && [ "$ms" -lt "$3" ]; }; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 within $3 ms (137 near 10 s is the grace period's kill)" >&2; exit 1; fi
+          }
+          # A keyed call first, so the pool this stop closes is this step's to
+          # open, whatever ran before it (review pass 2).
+          curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/
+          stop serving 0 5000
+          last=$(docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: stopped' | tail -1 || true)
+          echo "$last"
+          [[ "$last" =~ ^SIGTERM:\ stopped\ in\ [0-9.]+\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || { echo "the stop's line does not say the pool closed and exit 0" >&2; exit 1; }
+          touch /tmp/provider-stub-slow
+          docker compose -f compose.yaml start server > /dev/null 2>&1
+          sleep 0.5
+          stop "in preflight" 143 1000
+          rm -f /tmp/provider-stub-slow
 
       - name: Logs on failure
         if: failure()

@@ -29,16 +29,19 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
-import { consolidateKey } from "../server-portable/consolidate.ts";
+import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES } from "../server-portable/consolidate.ts";
+import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
+import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
+import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
-import { corpusIngested, docOf, docsOf, INGEST_ACTOR, recordId, recordStructure, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
@@ -2398,6 +2401,16 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(first.code === 1, `the run exits 1 because rows failed (exit ${first.code})`);
   assert(/35 re-embedded, 3 failed/.test(first.out), `…and says so: 35 re-embedded, 3 failed (${first.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(/stub: refused this text/.test(first.out), "…naming the provider's error for the poisoned row");
+  // 061: every vectored row's lineage names the label it carries and the
+  // column's width — the rows the pass moved to stub-embed through the
+  // trigger, the three that failed under the model they kept (SMD-1731).
+  const vectored = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE embedding IS NOT NULL`)[0].c);
+  // IS NOT DISTINCT FROM: an unlabelled row (021's unknown model) has no
+  // `model` key on its row, and NULL = NULL would count it as disagreeing.
+  const vlin = (await sql`SELECT count(*)::int AS rows, count(*) FILTER (WHERE d.recipe->>'model' IS NOT DISTINCT FROM t.embedding_model AND (d.recipe->>'dims')::int = ${DIM})::int AS agreeing, count(*) FILTER (WHERE t.embedding_model = 'stub-embed')::int AS moved
+                             FROM thoughts t JOIN derivations d ON d.artifact_kind = 'vector' AND d.artifact_id = t.id WHERE t.embedding IS NOT NULL`)[0] as { rows: number; agreeing: number; moved: number };
+  assert(Number(vlin.rows) === vectored && Number(vlin.agreeing) === vectored && Number(vlin.moved) >= 35,
+    `every vectored row has a vector lineage row naming its label (or none, unlabelled) and the column's width, the 35 re-embedded among those at the new model (${JSON.stringify(vlin)} of ${vectored})`);
   assert(/whole-content embedding failed transiently \(.*429 .*stub: rate limited/.test(first.out), "…and, for the throttled long thought, that its head window stands in until a retry, with the 429 named");
   assert(/timed out after 2 s \(OB1_LLM_TIMEOUT\)/.test(first.out), "…and, for the tarpit, that its call timed out, naming the setting");
   assert(/1 succeeded row\(s\) carry a caveat/.test(first.out) && /413 .*stub: input too long/.test(first.out),
@@ -2445,8 +2458,12 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(refusedClaim?.status === "succeeded" && /refused by the provider \(.*413 .*stub: input too long/.test(refusedClaim?.err ?? "") && /--retry-fallbacks/.test(refusedClaim?.err ?? ""),
     `…and its claim is succeeded with the refusal as its caveat, naming the flag (${refusedClaim?.status}: ${refusedClaim?.err})`);
   assert(axisOf(byContent.get(tarpitText)!.e) === 0, "the tarpit row keeps its old vector");
-  assert(shorts.every((s) => byContent.get(s)!.u > updatedBefore.get(s)!), "updated_at moved on every re-embedded row");
-  assert(byContent.get(poisonText)!.u === updatedBefore.get(poisonText), "…and not on the one that failed");
+  // 060 (SMD-2116): a vector onto a row that has one is a projection refresh
+  // — no event, no updated_at — so the pass moves no stamp; until then every
+  // re-embedded row's updated_at moved and a client's if_unchanged_since read
+  // it as an edit.
+  assert(shorts.every((s) => byContent.get(s)!.u === updatedBefore.get(s)!), "updated_at moved on no re-embedded row — a vector onto a row that has one is a refresh, not an edit (060)");
+  assert(byContent.get(poisonText)!.u === updatedBefore.get(poisonText), "…nor on the one that failed");
 
   // The legacy twins: both re-embedded, whichever worker reached which first;
   // one gained the fingerprint 003 never backfilled and the other was told
@@ -2550,9 +2567,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const combined = await reembed("--accept-failed", poisonId, "--retry-failed");
   assert(combined.code === 2 && /do not combine/.test(combined.out), "…and it does not combine with a run's flags");
   const stray = await reembed("--accept-failed", poisonId, "--dry-run", lateId);
-  assert(stray.code === 2 && /not understood: /.test(stray.out) && stray.out.includes(lateId), "…and an id after another flag is refused rather than dropped");
+  assert(stray.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(stray.out) && /--accept-failed <thought-id …> \(right after it, before any other flag\)/.test(stray.out), "…and an id after another flag is refused rather than dropped");
   const twice = await reembed("--accept-failed", poisonId, "--accept-failed", lateId);
-  assert(twice.code === 2 && /--accept-failed is given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
+  assert(twice.code === 2 && /--accept-failed given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
   const jobless = await reembedIn({}, "--job", "--switch-model");
   assert(jobless.code === 2 && /--job needs a value/.test(jobless.out) && (await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = '--switch-model'`)[0].c === 0,
     `a flag that takes a value followed by another flag is refused, not read as the value — no pass runs under the key "--switch-model" (exit ${jobless.code})`);
@@ -2586,7 +2603,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `…and --all passes over it, saying so (exit ${allDry.code})`);
   await sql`DELETE FROM thoughts WHERE id = ${vectorlessId}::uuid`;
   const allAndIds = await reembed("--accept-failed", "--all", poisonId);
-  assert(allAndIds.code === 2 && /not understood: /.test(allAndIds.out) && allAndIds.out.includes(poisonId) && (await claimCounts()).failed === 3,
+  assert(allAndIds.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(allAndIds.out) && (await claimCounts()).failed === 3,
     `…nor does --all take ids beside it — an id after it is a stray argument, refused (exit ${allAndIds.code})`);
   const idsAndAll = await reembed("--accept-failed", poisonId, "--all");
   assert(idsAndAll.code === 2 && /--all takes no ids beside it/.test(idsAndAll.out) && (await claimCounts()).failed === 3,
@@ -3074,6 +3091,10 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   let calls = 0;
   let ledgerCalls = 0;
   let hemlockIsProse = true;
+  /** A window whose prompt holds one of these is answered in prose (SMD-2260). */
+  const proseKeys = new Set<string>();
+  /** The model each call named, in order: the escalation's calls must name the larger one (SMD-2260). */
+  const modelsAsked: string[] = [];
   // While set, every answer takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
   let slowMs = 0;
@@ -3082,10 +3103,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       calls++;
+      modelsAsked.push(body.model ?? "");
       // The thought is the user message; the rules are the system message.
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       await Bun.sleep(5 + slowMs);
-      if (hemlockIsProse && /hemlock/.test(prompt)) {
+      if ((hemlockIsProse && /hemlock/.test(prompt)) || [...proseKeys].some((k) => prompt.includes(k))) {
         return Response.json({ choices: [{ message: { content: "I'm sorry, I can't help with that." } }] });
       }
       const key = Object.keys(answers).find((k) => prompt.includes(k));
@@ -3181,6 +3203,16 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const [{ attributed, total }] = await sql`
     SELECT count(*) FILTER (WHERE canonical_agent_id = ${agent.id}::uuid)::int AS attributed, count(*)::int AS total FROM thought_entities`;
   assert(Number(total) > 0 && Number(attributed) === Number(total), `every mention carries that agent id (${attributed} of ${total})`);
+  // 061: one lineage row per extracted thought under the job key — the input's
+  // fingerprint as checked, the agent, and lineage.ts's recipe: the stub
+  // model, the prompt's version and hash, the windows sent (SMD-1731).
+  const lin = (await sql`SELECT d.artifact_id::text AS id, d.input_fingerprints[1] AS fp, d.recipe, t.content_fingerprint AS current, d.canonical_agent_id::text AS agent
+                           FROM derivations d JOIN thoughts t ON t.id = d.artifact_id WHERE d.artifact_kind = 'entities' AND d.produced_by = ${KEY}`) as { id: string; fp: string; recipe: Record<string, unknown>; current: string; agent: string | null }[];
+  const extractedThoughts = Number((await sql`SELECT count(DISTINCT thought_id)::int AS c FROM thought_entities WHERE extraction_key = ${KEY}`)[0].c);
+  assert(lin.length === extractedThoughts && extractedThoughts > 0 && lin.every((l) => l.fp === l.current && l.agent === agent.id && l.recipe.deterministic === false && l.recipe.model === "stub-meta" && l.recipe.prompt_version === ENTITY_PROMPT_VERSION && l.recipe.prompt_hash === promptHash(ENTITY_EXTRACTION_PROMPT)),
+    `every extracted thought has its lineage row under the job key — the input's fingerprint as checked, the agent, the stub model, the prompt's version and hash (${lin.length} of ${extractedThoughts})`);
+  const ledgerLin = lin.find((l) => l.id === ledger);
+  assert(ledgerLin !== undefined && ledgerLin.recipe.windows === ledgerCalls && ledgerLin.recipe.parts === ledgerCalls, `…and the windowed thought's row counts its ${ledgerCalls} windows (${JSON.stringify(ledgerLin?.recipe)})`);
   const g1 = await graph();
   // Anita, Open Brain, PostgreSQL, Dev, Priya, Redis, observability, Ledger =
   // 8 entities; mentions 3 + 3 + 2 + 6 + 2 = 16; edges 2 + 2 + 1 + 1 = 6.
@@ -3272,48 +3304,194 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // A thought over the per-thought bound (SMD-2240) is extracted over its
   // prefix and released succeeded with a caveat — not failed — its prefix's
   // rows in the graph and its tail's not; --retry-partial under a wider bound
-  // reads it whole. The closing key is listed first: every window after the
-  // first carries the opening line as its header, so the last window's prompt
-  // holds both words and the stub answers the first key it finds.
+  // reads it whole. Each window is a paragraph, and with the window header off
+  // (db/config.mjs's EXTRACT_WINDOW_HEADER) a window's prompt holds only its
+  // own text, so each key reaches only its own window.
   answers["tome-closing"] = { entities: [{ name: "Inkwell", type: "tool", confidence: 0.9 }], relationships: [] };
   answers["tome-opening"] = {
     entities: [{ name: "Quill", type: "tool", confidence: 0.9 }, { name: "Quentin", type: "person", confidence: 0.9 }],
     relationships: [{ from: "Quentin", to: "Quill", relation: "uses", confidence: 0.8 }],
   };
-  const tomeText = Array.from({ length: 6 }, (_, p) =>
-    `${p === 0 ? "The tome-opening chapter." : p === 5 ? "The tome-closing chapter." : `Chapter ${p}.`} ${Array.from({ length: 24 }, (__, i) => `Quentin noted point ${p}.${i} about the book.`).join(" ")}`).join("\n\n");
-  const tome = await seed(tomeText);
+  // A paragraph of ~130 estimated tokens led by its key: a 300-token window each.
+  const chapter = (lead: string, who: string, p: number) => `${lead} ${Array.from({ length: 24 }, (__, i) => `${who} noted point ${p}.${i} about the book.`).join(" ")}`;
+  const tome = await seed(Array.from({ length: 6 }, (_, p) => chapter(p === 0 ? "The tome-opening chapter." : p === 5 ? "The tome-closing chapter." : `Chapter ${p}.`, "Quentin", p)).join("\n\n"));
+  const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null };
+  const namesOf = async (id: string) => (await sql`
+    SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${id}::uuid ORDER BY e.name`).map((r: { name: string }) => r.name);
+  const edgesOf = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${id}::uuid`)[0].c);
   const [{ r: ledgerCaveat }] = await sql`SELECT last_error AS r FROM thought_work_claims WHERE thought_id = ${ledger}::uuid AND work_type = ${KEY}`;
   assert(ledgerCaveat === null, "under the default bound the windowed ledger thought is a clean success, no caveat — the drop-the-env control");
   const capped = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!], { env: { ...env, OB1_EXTRACT_MAX_WINDOWS: "2" } as Record<string, string>, cwd: HERE });
   assert(capped.code === 0 && /1 extracted \(1 over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS \(2\); each row's caveat says how much\), 0 failed/.test(capped.out),
          `under OB1_EXTRACT_MAX_WINDOWS=2 the long thought is extracted, counted as a prefix, and the run exits 0 (exit ${capped.code}: ${capped.out.split("\n").find((l) => /extracted/.test(l) && /failed/.test(l))?.trim()})`);
   assert(/window: [^\n]*a thought over 2 windows \(from OB1_EXTRACT_MAX_WINDOWS\), or whose whitespace-free runs take it past 600 estimated tokens, is extracted over its opening/.test(capped.out), "…the banner stating the bound it ran under");
-  const [tomeClaim] = await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${tome}::uuid AND work_type = ${KEY}`;
-  assert(tomeClaim.status === "succeeded" && /^partial: 2 of [3-9] windows extracted, the thought is over OB1_EXTRACT_MAX_WINDOWS \(2\); the rest of the thought is not in the graph$/.test(tomeClaim.last_error),
+  const tomeClaim = await claimOf(tome);
+  assert(tomeClaim.status === "succeeded" && /^partial: 2 of [3-9] windows extracted, the thought is over OB1_EXTRACT_MAX_WINDOWS \(2\); the rest of the thought is not in the graph$/.test(tomeClaim.last_error ?? ""),
          `…its claim succeeded with the coverage as its caveat (${tomeClaim.status}: ${tomeClaim.last_error})`);
-  const tomeTools = async () => (await sql`
-    SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${tome}::uuid ORDER BY e.name`).map((r: { name: string }) => r.name);
-  const tomeEdges = async () => Number((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${tome}::uuid`)[0].c);
-  assert(JSON.stringify(await tomeTools()) === '["Quentin","Quill"]' && (await tomeEdges()) === 1,
-         `…the prefix's entities and its edge are in the graph and the tail's entity is not (${JSON.stringify(await tomeTools())}, ${await tomeEdges()} edge(s))`);
+  assert(JSON.stringify(await namesOf(tome)) === '["Quentin","Quill"]' && (await edgesOf(tome)) === 1,
+         `…the prefix's entities and its edge are in the graph and the tail's entity is not (${JSON.stringify(await namesOf(tome))}, ${await edgesOf(tome)} edge(s))`);
   const partialStatus = await extract("--status");
   assert(partialStatus.code === 0 && /12 extracted \(1 over a prefix only\), 0 failed/.test(partialStatus.out)
          && new RegExp(`extracted over a prefix only \\(1 of 1\\)[^\\n]*--retry-partial re-extracts them over at most 24 windows \\(OB1_EXTRACT_MAX_WINDOWS unset\\)[^\\n]*\\n\\s+${tome}  partial: 2 of`).test(partialStatus.out),
          `--status counts the partial row apart from the full ones and the failures, and lists it with its caveat (${partialStatus.out.split("\n").filter((l) => /prefix/.test(l)).join(" | ").slice(0, 300)})`);
   const partialDry = await extract("--dry-run", "--retry-partial");
-  assert(partialDry.code === 0 && /return 1 row\(s\) extracted over a prefix to the pool; /.test(partialDry.out) && /send 1 thought\(s\)/.test(partialDry.out), "--dry-run --retry-partial says it would return the one partial row and send one thought");
+  assert(partialDry.code === 0 && /return 1 row\(s\) extracted in part to the pool \(1 over a prefix only\); /.test(partialDry.out) && /send 1 thought\(s\)/.test(partialDry.out), "--dry-run --retry-partial says it would return the one partial row and send one thought");
   const widenedRun = await extract("--retry-partial");
-  assert(widenedRun.code === 0 && /--retry-partial: 1 row\(s\) extracted over a prefix returned to the pool, to be extracted over at most 24 window\(s\) \(OB1_EXTRACT_MAX_WINDOWS unset\) — a row read under a smaller bound gains coverage/.test(widenedRun.out)
+  assert(widenedRun.code === 0 && /--retry-partial: 1 row\(s\) extracted in part returned to the pool \(1 over a prefix only\); a prefix is extracted over at most 24 window\(s\) \(OB1_EXTRACT_MAX_WINDOWS unset\) — a row read under a smaller bound gains coverage/.test(widenedRun.out) && !/sent again/.test(widenedRun.out)
          && /1 extracted, 0 failed/.test(widenedRun.out),
          `--retry-partial under the default bound returns the row and extracts it whole (exit ${widenedRun.code})`);
-  const [tomeAfter] = await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${tome}::uuid AND work_type = ${KEY}`;
-  assert(tomeAfter.status === "succeeded" && tomeAfter.last_error === null && JSON.stringify(await tomeTools()) === '["Inkwell","Quentin","Quill"]',
-         `…the caveat cleared and the tail's entity added to the graph (${tomeAfter.last_error}; ${JSON.stringify(await tomeTools())})`);
+  const tomeAfter = await claimOf(tome);
+  assert(tomeAfter.status === "succeeded" && tomeAfter.last_error === null && JSON.stringify(await namesOf(tome)) === '["Inkwell","Quentin","Quill"]',
+         `…the caveat cleared and the tail's entity added to the graph (${tomeAfter.last_error}; ${JSON.stringify(await namesOf(tome))})`);
   const noPartial = await extract("--status");
   assert(/12 extracted, 0 failed/.test(noPartial.out) && !/over a prefix/.test(noPartial.out), "…and --status no longer counts or lists a partial row");
 
+  // A windowed thought the model answers one window of in prose (SMD-2260) —
+  // a research paper's reference list, on the stable brain — is extracted
+  // over the windows that parsed and released succeeded with a caveat naming
+  // the one left out: a second kind of partial row, apart from a prefix in
+  // the summary and --status. The folio is that kind alone; the codex, read
+  // under a bound of two, is both — a prefix with a window left out, as the
+  // stable brain's papers were — and counts with the windows left out. One
+  // none of whose windows parsed — its key in every paragraph — is still
+  // failed. The tome is read to a prefix again beside them, so both kinds
+  // stand at once. Each paragraph is a window, as the tome's are.
+  answers["codex-references"] = { entities: [{ name: "Bram", type: "person", confidence: 0.9 }], relationships: [] };
+  answers["codex-opening"] = {
+    entities: [{ name: "Vellum", type: "tool", confidence: 0.9 }, { name: "Cora", type: "person", confidence: 0.9 }],
+    relationships: [{ from: "Cora", to: "Vellum", relation: "uses", confidence: 0.8 }],
+  };
+  answers["folio-references"] = { entities: [{ name: "Quire", type: "tool", confidence: 0.9 }], relationships: [] };
+  answers["folio-opening"] = {
+    entities: [{ name: "Parchment", type: "tool", confidence: 0.9 }, { name: "Pell", type: "person", confidence: 0.9 }],
+    relationships: [{ from: "Pell", to: "Parchment", relation: "uses", confidence: 0.8 }],
+  };
+  proseKeys.add("codex-references");
+  proseKeys.add("folio-references");
+  proseKeys.add("codex-garbled");
+  const codex = await seed([chapter("The codex-opening chapter.", "Cora", 0), chapter("The codex-references list.", "Cora", 1), chapter("Chapter 2.", "Cora", 2)].join("\n\n"));
+  const folio = await seed([chapter("The folio-opening chapter.", "Pell", 0), chapter("The folio-references list.", "Pell", 1)].join("\n\n"));
+  const garbled = await seed([chapter("The codex-garbled note.", "Gil", 0), chapter("More codex-garbled text.", "Gil", 1)].join("\n\n"));
+  await sql`SELECT requeue_thought_work(${KEY}, ${tome}::uuid)`;
+  const mixed = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!], { env: { ...env, OB1_EXTRACT_MAX_WINDOWS: "2" } as Record<string, string>, cwd: HERE });
+  assert(mixed.code === 1 && /\n  3 extracted \(1 over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS \(2\); each row's caveat says how much; 2 with 2 window\(s\) left out, the model's answers for them not JSON of the expected shape; each row's caveat names them\), 1 failed/.test(mixed.out),
+         `the run extracts the tome's prefix and the folio's and codex's parsed windows, counts each kind apart, and fails the garbled note (exit ${mixed.code}: ${mixed.out.split("\n").find((l) => /extracted/.test(l) && /failed/.test(l))?.trim()})`);
+  const folioClaim = await claimOf(folio);
+  assert(folioClaim.status === "succeeded" && folioClaim.last_error === "partial: 1 of 2 windows extracted; the model's answer for window 2 was not JSON of the expected shape, and its text is not in the graph",
+         `…the folio's claim succeeded with the window left out as its caveat (${folioClaim.status}: ${folioClaim.last_error})`);
+  const codexClaim = await claimOf(codex);
+  assert(codexClaim.status === "succeeded" && codexClaim.last_error === "partial: 1 of 3 windows extracted; the model's answer for window 2 of the 2 sent was not JSON of the expected shape, and the thought is over OB1_EXTRACT_MAX_WINDOWS (2); the rest of the thought is not in the graph",
+         `…and the codex's with both, the window left out and the bound (${codexClaim.status}: ${codexClaim.last_error})`);
+  assert(JSON.stringify(await namesOf(folio)) === '["Parchment","Pell"]' && (await edgesOf(folio)) === 1 && JSON.stringify(await namesOf(codex)) === '["Cora","Vellum"]',
+         `…the parsed windows' entities and edge are in the graph, and the prose windows' are not (${JSON.stringify(await namesOf(folio))}, ${await edgesOf(folio)} edge(s); ${JSON.stringify(await namesOf(codex))})`);
+  const garbledClaim = await claimOf(garbled);
+  assert(garbledClaim.status === "failed" && /^the model's answer was not JSON of the expected shape \(window 1, 2 of 2\)/.test(garbledClaim.last_error ?? "") && (await namesOf(garbled)).length === 0,
+         `…while a thought none of whose windows parsed is failed as before, naming them, with nothing in the graph (${garbledClaim.status}: ${garbledClaim.last_error})`);
+  assert((await claimOf(tome)).last_error?.startsWith("partial: 2 of 6 windows extracted, the thought is over OB1_EXTRACT_MAX_WINDOWS (2)") === true, "…and the tome is a prefix again, its caveat the prefix's");
+  // A capture pending beside them: --status names it beside the printed
+  // escalation, and --limit keeps the larger model off it — the returned rows
+  // are older in the queue (review pass 4).
+  const later = await seed("A later capture, still pending in the pool.");
+  const kinds = await extract("--status");
+  // Each heading's section, up to the next heading or the failures: its own rows, and not the other kind's.
+  const section = (heading: string) => kinds.out.split(heading)[1]?.split(/\n  \S/)[0] ?? "";
+  const prefixList = section("extracted over a prefix only (1 of 1)");
+  const leftOutList = section("extracted with windows left out (2 of 2)");
+  assert(kinds.code === 0 && /14 extracted \(1 over a prefix only, 2 with windows left out as malformed, 1 of those also over the bound\), 1 failed/.test(kinds.out)
+         && kinds.out.includes(`--retry-left-out re-extracts them, and another model kept to this pool may be worth trying (OB1_METADATA_MODEL=<model> … --job ${KEY} --retry-left-out --limit 2, no other worker of this pool running; 1 pending row(s) of this pool may be claimed by that model in place of some of these — drain them first)`)
+         && prefixList.includes(`${tome}  partial: 2 of 6`) && !prefixList.includes(codex) && !prefixList.includes(folio)
+         && leftOutList.includes(`${codex}  partial: 1 of 3`) && leftOutList.includes(`${folio}  partial: 1 of 2`) && !leftOutList.includes(tome),
+         `--status counts the two kinds of partial row apart from each other and from the failure, and lists each under its own heading, a row of both among the windows left out (${kinds.out.split("\n").filter((l) => /prefix|left out/.test(l)).join(" | ").slice(0, 400)})`);
+  const kindsDry = await extract("--dry-run", "--retry-partial");
+  const leftOutDry = await extract("--dry-run", "--retry-left-out");
+  assert(kindsDry.code === 0 && /return 3 row\(s\) extracted in part to the pool \(1 over a prefix only, 2 with windows left out as malformed, 1 of those also over the bound\); /.test(kindsDry.out)
+         && leftOutDry.code === 0 && /return 2 row\(s\) with windows left out to the pool \(2 with windows left out as malformed, 1 of those also over the bound\); [^\n]*send 3 thought\(s\)/.test(leftOutDry.out),
+         "--dry-run counts both kinds among the rows --retry-partial would return, and the windows-left-out rows alone for --retry-left-out");
+  // A larger model now answers the reference lists, run as --status advises —
+  // another OB1_METADATA_MODEL kept to this pool with --job, which a changed
+  // model's own key would refuse or empty (review pass 2): --retry-left-out
+  // takes the folio and the codex and not the tome, and says the codex is a
+  // prefix too.
+  proseKeys.delete("codex-references");
+  proseKeys.delete("folio-references");
+  const askedBefore = modelsAsked.length;
+  const leftOutRun = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--job", KEY, "--retry-left-out", "--limit", "2"], { env: { ...env, OB1_METADATA_MODEL: "stub-larger" } as Record<string, string>, cwd: HERE });
+  const escalated = modelsAsked.slice(askedBefore);
+  const [{ key: keyAfter }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  assert(/--retry-left-out: 2 row\(s\) with windows left out returned to the pool \(2 with windows left out as malformed, 1 of those also over the bound\); a prefix is extracted over at most 24 window\(s\)[^\n]*; a row with windows left out is sent again to stub-larger/.test(leftOutRun.out)
+         && /\n  2 extracted, 0 failed/.test(leftOutRun.out) && escalated.length === 5 && escalated.every((m) => m === "stub-larger") && keyAfter === KEY && (await claimOf(later)).status === "pending",
+         `--retry-left-out returns the rows with windows left out, saying the one over the bound is a prefix too; its five calls name the larger model, the later capture is left pending under --limit, and the recorded key is left as it was (exit ${leftOutRun.code}; ${escalated.length} call(s): ${[...new Set(escalated)].join(",")}; key ${keyAfter}: ${leftOutRun.out.split("\n").find((l) => /--retry-left-out:/.test(l))?.slice(0, 200)})`);
+  const [codexAfter, folioAfter, tomeStill] = [await claimOf(codex), await claimOf(folio), await claimOf(tome)];
+  assert(codexAfter.last_error === null && folioAfter.last_error === null && JSON.stringify(await namesOf(codex)) === '["Bram","Cora","Vellum"]' && JSON.stringify(await namesOf(folio)) === '["Parchment","Pell","Quire"]'
+         && tomeStill.last_error?.startsWith("partial: 2 of 6") === true,
+         `…their caveats cleared and the windows the model now answers added to the graph, the tome's prefix untouched (${codexAfter.last_error}; ${JSON.stringify(await namesOf(codex))}; ${JSON.stringify(await namesOf(folio))}; tome ${tomeStill.last_error?.slice(0, 20)})`);
+  const prefixRun = await extract("--retry-partial");
+  assert(/--retry-partial: 1 row\(s\) extracted in part returned to the pool \(1 over a prefix only\); a prefix is extracted over at most 24 window\(s\)[^\n]*; a reading that fails \(a window timing out, or none parsing\) records its row failed, the earlier reading's entities left in the graph until a later one succeeds/.test(prefixRun.out) && !/sent again/.test(prefixRun.out)
+         && (await claimOf(tome)).last_error === null,
+         `…and --retry-partial then takes the tome alone, a prefix, and reads it whole (${prefixRun.out.split("\n").find((l) => /--retry-partial:/.test(l))?.slice(0, 200)})`);
+
   model.stop(true);
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql`DELETE FROM thoughts`;
+}
+
+console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger model — the dump line and the summary say which (SMD-2000)");
+{
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const big = { entities: [{ name: "Bigfoot", type: "person", confidence: 0.9 }], relationships: [] };
+  // A runaway on the small model's FIRST call only: the larger model answers
+  // whole, and so does the small model's penalised retry (frequency_penalty
+  // set), so the control run below converges without escalation.
+  const escModel = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages?: { role: string; content: string }[] };
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      if (/runaway/.test(prompt) && body.model === "stub-meta" && body.frequency_penalty === undefined) {
+        return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
+      }
+      return Response.json({ choices: [{ message: { content: JSON.stringify(big) }, finish_reason: "stop" }] });
+    },
+  });
+  const rawKey = "b".repeat(64);
+  const { hashKey } = await import("../server-portable/auth.ts");
+  const baseEnv: Record<string, string | undefined> = {
+    ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${escModel.port}/v1`,
+    OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: "stub-meta", OB1_WORKER_KEY: rawKey,
+    MCP_ACCESS_KEYS: `esc-worker:write:${hashKey(rawKey)}`,
+  };
+  const seedOne = async (content: string) => ((await sql`SELECT upsert_thought(${content}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  type DumpLine = { id: string; escalated?: string; retried?: boolean };
+  const dumpLineFor = async (path: string, id: string): Promise<DumpLine | undefined> =>
+    (await Bun.file(path).text()).trim().split("\n").map((l) => JSON.parse(l) as DumpLine).find((l) => l.id === id);
+
+  // Escalated: the runaway is remade on the larger model, unpenalised.
+  const dumpEsc = join(tmpdir(), `ob1-test-live-esc-${process.pid}.jsonl`);
+  const tEsc = await seedOne("The runaway widget report, for escalation.");
+  const escRun = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--dump", dumpEsc],
+    { env: { ...baseEnv, OB1_EXTRACT_ESCALATE_MODEL: "big-stub" } as Record<string, string>, cwd: HERE });
+  assert(escRun.code === 0 && /1 extracted, 0 failed/.test(escRun.out), `the escalated run extracts the runaway (exit ${escRun.code}: ${escRun.out.split("\n").find((l) => /extracted,/.test(l))?.trim()})`);
+  assert(/1 escalated to big-stub/.test(escRun.out) && !/1 retried after a runaway/.test(escRun.out), `the summary counts it escalated, not retried (${escRun.out.split("\n").find((l) => /model call/.test(l))?.trim()})`);
+  const escLine = await dumpLineFor(dumpEsc, tEsc);
+  assert(escLine?.escalated === "big-stub" && escLine.retried === undefined, `the dump line records escalated: big-stub and NOT retried — the derivation record of which model answered (${JSON.stringify(escLine)})`);
+  assert((await sql`SELECT count(*)::int AS c FROM ob1_entities WHERE normalized_name = normalize_entity_name('Bigfoot')`)[0].c === 1, "the larger model's answer is what landed in the graph");
+  try { unlinkSync(dumpEsc); } catch { /* already gone */ }
+
+  // Control: no escalation model — the same runaway is the penalised same-model
+  // retry, dumped and counted `retried`, never `escalated`.
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const dumpCtl = join(tmpdir(), `ob1-test-live-ctl-${process.pid}.jsonl`);
+  const tCtl = await seedOne("The runaway widget report, for the retry.");
+  const ctlRun = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--dump", dumpCtl],
+    { env: baseEnv as Record<string, string>, cwd: HERE });
+  assert(ctlRun.code === 0 && /1 retried after a runaway/.test(ctlRun.out) && !/escalated to/.test(ctlRun.out), `without the knob the runaway is the penalised retry, not an escalation (${ctlRun.out.split("\n").find((l) => /model call/.test(l))?.trim()})`);
+  const ctlLine = await dumpLineFor(dumpCtl, tCtl);
+  assert(ctlLine?.retried === true && ctlLine.escalated === undefined, `the dump line records retried and NOT escalated (${JSON.stringify(ctlLine)})`);
+  try { unlinkSync(dumpCtl); } catch { /* already gone */ }
+
+  escModel.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;
 }
@@ -3844,6 +4022,13 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const p1 = await proposals();
   assert(p1.length === 2 && p1.every((p) => p.status === "pending" && p.judge_key === KEY && p.canonical_agent_id === agent.id),
          `two pending proposals, each carrying the judge key and the agent id (${JSON.stringify(p1.map((p) => [p.verdict, p.confidence, p.judge_key])) })`);
+  // 061: each recorded proposal's lineage row — both thoughts at the
+  // fingerprints the row took, the judge's key, and lineage.ts's recipe: the
+  // stub judge, the prompt's version and hash, the candidate parameters.
+  const plin = (await sql`SELECT d.input_ids::text[] AS inputs, d.input_fingerprints AS fps, d.recipe, d.canonical_agent_id::text AS agent, sp.older_id::text AS o, sp.newer_id::text AS n, sp.older_fingerprint AS ofp, sp.newer_fingerprint AS nfp
+                            FROM derivations d JOIN supersession_proposals sp ON sp.id = d.artifact_id WHERE d.artifact_kind = 'proposal' AND d.produced_by = ${KEY}`) as { inputs: string[]; fps: string[]; recipe: Record<string, unknown>; agent: string | null; o: string; n: string; ofp: string; nfp: string }[];
+  assert(plin.length === 2 && plin.every((l) => l.inputs.join() === `${l.o},${l.n}` && l.fps.join() === `${l.ofp},${l.nfp}` && l.agent === agent.id && l.recipe.deterministic === false && l.recipe.model === "stub-judge" && l.recipe.prompt_version === CONSOLIDATE_PROMPT_VERSION && l.recipe.prompt_hash === promptHash(CONSOLIDATE_PROMPT) && l.recipe.candidates === DEFAULT_CANDIDATES && typeof l.recipe.similarity === "number"),
+    `each proposal has its lineage row: both thoughts at the fingerprints the row took, the agent, the judge's model, prompt version and hash, the candidate parameters (${JSON.stringify(plin.map((l) => l.recipe))})`);
   const directed = p1.find((p) => p.verdict === "newer_supersedes_older")!;
   const undirected = p1.find((p) => p.verdict === "conflict_undirected")!;
   assert(directed?.older_id === decision && directed.newer_id === reversal && Number(directed.confidence) === 0.92, "the billing pair is proposed newer-supersedes-older at the judge's confidence");
@@ -4204,7 +4389,7 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(schemaFiles.length >= 14 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
+      assert(schemaFiles.length >= 13 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core; failed: ${failed.join(" | ") || "none"})`);
       const contribFailed: string[] = [];
       for (const f of contribFiles) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
@@ -4218,7 +4403,7 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
       const grant = await migrate("--grant", ROLE);
       assert(grant.code === 0 && !/not yet present/.test(grant.out) && /over \d+ object\(s\)/.test(grant.out),
              `--grant issues everything, nothing skipped (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
-      assert(/GRANT USAGE, SELECT ON SEQUENCE ingestion_jobs_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION wiki_accept_pending\(uuid, text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
+      assert(/GRANT USAGE, SELECT ON SEQUENCE ingestion_jobs_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION lookup_agent_memory_key\(text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
              "…a sequence, a function with its argument types, and thought_audit's merged capture + community privileges among them");
 
       // The role, connecting as itself. An INSERT of DEFAULT VALUES asks for
@@ -4250,13 +4435,12 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
         if (!ok) fnDenied.push(n);
       }
       assert(fnDenied.length === 0, `…and may EXECUTE each of the ${grantedFunctions(["community"]).length} listed functions (denied: ${fnDenied.join(", ") || "none"})`);
-      // and the one call a community RPC makes for real: wiki_upsert_page, as
-      // the role — SECURITY INVOKER, REVOKEd FROM PUBLIC, writing wiki_pages
-      const page = (await asRole.unsafe(`SELECT wiki_upsert_page('smd-1796', 'Granted', 'topic', '{}'::jsonb, 'test-live') AS r`)) as { r: { page_id: string; created: boolean } }[];
-      assert(typeof page[0]?.r?.page_id === "string", `…and calls wiki_upsert_page through its grant, writing wiki_pages as itself (${JSON.stringify(page[0]?.r)})`);
-      let rewrite = "";
-      try { await asRole.unsafe(`UPDATE wiki_section_revisions SET body_md = '' WHERE false`); } catch (e) { rewrite = (e as Error).message; }
-      assert(/permission denied/.test(rewrite), `…but cannot UPDATE wiki_section_revisions — append-only, as upstream had it (${rewrite.split("\n")[0] || "the UPDATE was allowed"})`);
+      // and the one call a community RPC makes for real: lookup_agent_memory_key,
+      // as the role — SECURITY DEFINER, REVOKEd FROM PUBLIC, reading and touching
+      // agent_memory_keys (the wiki RPCs were this probe until SMD-1812 moved
+      // the page store into core: test-live [32])
+      const lookup = (await asRole.unsafe(`SELECT count(*)::int AS n FROM lookup_agent_memory_key('${"a".repeat(64)}')`)) as { n: number }[];
+      assert(lookup[0]?.n === 0, `…and calls lookup_agent_memory_key through its grant, an unknown hash answering no row (${JSON.stringify(lookup[0])})`);
 
       // The rollback path, over TCP: --grant connected as THIS role — every
       // privilege held, none with grant option — granting a third role. Every
@@ -4401,6 +4585,13 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   assert(namedAudit?.origin === INGEST_ACTOR.via && namedAudit.actor_name === INGEST_ACTOR.name, "…and its audit row names the ingester as writer and door");
   assert((await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === "" || (await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === null, "…and the envelope does not outlive the record's transaction on the connection");
   ids.push(named.id);
+  // SMD-2212: `--actor` — the import runner's rows carry its own name, through the ingester's door.
+  const byRunner = mk("memory", "test-note-r", "Test note R: written by the import runner under its own name.");
+  assert((await upsertRecord(sql, byRunner, runName(), ingestActor("orchestration-runner"))).outcome === "inserted", "a record under another tool's actor name inserts");
+  const [runnerRow] = await sql`SELECT metadata->>'actor_name' AS n FROM thoughts WHERE id = ${byRunner.id}::uuid`;
+  const [runnerAudit] = await sql`SELECT origin, actor_name FROM thought_audit WHERE thought_id = ${byRunner.id}::uuid AND action = 'capture'`;
+  assert(runnerRow.n === "orchestration-runner" && runnerAudit?.actor_name === "orchestration-runner" && runnerAudit.origin === INGEST_ACTOR.via, `…stamped with that name, and its audit row keeps the ingester as the door (${runnerRow.n}/${runnerAudit?.origin})`);
+  ids.push(byRunner.id);
 
   // A record an adapter mapped (SMD-1867): the row, and in its transaction the
   // canonical, the links and the structured mentions; the same record again
@@ -5561,6 +5752,202 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
   }
 }
 
+console.log("\n[28] Migration 060 on a real server: the windowed capture and an edit with windows append then project (PGlite cannot drive the chunk INSERT); two identical captures racing serialise on the fingerprint lock into one row and one event; a fold's replay on one connection beside a live capture on another; a delete racing the successor's edit (SMD-2116)");
+{
+  // Its own pool: the section before closes the shared one.
+  const sql = new SQL({ url: URL_, max: 4 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_embedding_snapshot`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const MODEL = EMBEDDING_MODEL;
+  type Cap = { id: string; existed: boolean; chunks?: number };
+  const audits = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = ${id}::uuid`)[0].c);
+  const rowOf = async (id: string) => (await sql`SELECT content, embedding::text AS vec, embedding_model AS label, supersedes::text AS supersedes, updated_at::text AS u, created_at::text AS c FROM thoughts WHERE id = ${id}::uuid`)[0] as { content: string; vec: string | null; label: string | null; supersedes: string | null; u: string; c: string } | undefined;
+
+  // The 4-argument form: one capture event, the row its image, the windows
+  // written after it with their context; an edit with windows replaces them.
+  const windows = [{ content: "window one", embedding: unit(1), context: "ctx one" }, { content: "window two", embedding: unit(2), context: null }];
+  const w = (await sql`SELECT upsert_thought('060 live: a windowed capture', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(0)}::vector, ${windows}::jsonb) AS r`)[0].r as Cap;
+  const chunks = async (id: string) => (await sql`SELECT content, context FROM thought_chunks WHERE thought_id = ${id}::uuid ORDER BY chunk_index`) as { content: string; context: string | null }[];
+  assert(w.chunks === 2 && (await audits(w.id)) === 1 && (await chunks(w.id)).map((c) => `${c.content}/${c.context}`).join(",") === "window one/ctx one,window two/null",
+    `the 4-argument form delegates to the appending body — one capture event — and writes the caller's windows after it (${w.chunks} windows, ${await audits(w.id)} event)`);
+  const [ev] = await sql`SELECT diff->>'content' AS content, diff->'metadata'->>'actor_kind' AS kind FROM thought_audit WHERE thought_id = ${w.id}::uuid`;
+  assert(ev.content === "060 live: a windowed capture" && ev.kind === "operator" && (await rowOf(w.id))!.content === ev.content, "…the event carrying the content and the stamp, the row its image");
+  const e = (await sql`SELECT update_thought(${w.id}::uuid, '060 live: the windowed capture, edited', NULL, ${unit(3)}::vector, ${[{ content: "window three", embedding: unit(4), context: "ctx three" }]}::jsonb, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL) AS r`)[0].r as { ok: boolean; updated_at: string };
+  assert(e.ok === true && (await audits(w.id)) === 2 && (await chunks(w.id)).map((c) => `${c.content}/${c.context}`).join(",") === "window three/ctx three" && (await rowOf(w.id))!.vec === unit(3),
+    "an edit with windows appends its event, projects the row with the caller's vector, and replaces the windows");
+  const snap = Number((await sql`SELECT count(*)::int AS c FROM ob1_embedding_snapshot WHERE embedding_model = ${MODEL}`)[0].c);
+  assert(snap === 2, `both texts' vectors are in the snapshot under the model (${snap})`);
+
+  // Two identical captures at once, on two connections: the second waits on
+  // the fingerprint lock (033) — seen waiting, not assumed — then reads the
+  // first's committed row and writes nothing: one row, one event, existed
+  // true. (SMD-1043's behaviour, C7, under the appending bodies.)
+  const connA = new SQL({ url: URL_, max: 1 });
+  const connB = new SQL({ url: URL_, max: 1 });
+  let releaseA: () => void = () => {};
+  const held = new Promise<void>((resolve) => { releaseA = resolve; });
+  let aResult: Cap | undefined, aPid = 0;
+  const aDone = connA.begin(async (tx: SQL) => {
+    aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    aResult = ((await tx`SELECT upsert_thought('060 live: the same text twice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(5)}::vector) AS r`) as { r: Cap }[])[0].r;
+    await held;
+  });
+  for (let i = 0; i < 250 && aResult === undefined; i++) await Bun.sleep(20);
+  assert(aResult !== undefined && aResult.existed === false, "the first capture, in an open transaction, has its row");
+  let bPid = 0;
+  const bDone = connB.begin(async (tx: SQL) => {
+    bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    return ((await tx`SELECT upsert_thought('060 live: the same text twice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(5)}::vector) AS r`) as { r: Cap }[])[0].r;
+  });
+  let waitingOnAdvisory = 0;
+  for (let i = 0; i < 250 && waitingOnAdvisory === 0; i++) {
+    if (bPid) waitingOnAdvisory = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${bPid}`)[0].n);
+    if (!waitingOnAdvisory) await Bun.sleep(20);
+  }
+  assert(waitingOnAdvisory === 1, `the second capture waits on the fingerprint advisory lock the first holds (${waitingOnAdvisory})`);
+  releaseA();
+  await aDone;
+  const bResult = await bDone;
+  assert(bResult.existed === true && bResult.id === aResult!.id, "…and once the first commits, the second reads its row and reports existed");
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '060 live: the same text twice'`)[0].c) === 1 && (await audits(aResult!.id)) === 1, "one row, one event — the second wrote nothing, not even a bump");
+  // The 2-argument form's row lock is new (060's delta 5): the same race
+  // through it — the waiter seen on the advisory lock, one row, one event
+  // (cold read, first review pass: held by a source grep alone until here).
+  let releaseA2: () => void = () => {};
+  const held2 = new Promise<void>((resolve) => { releaseA2 = resolve; });
+  let a2: Cap | undefined, b2Pid = 0;
+  const a2Done = connA.begin(async (tx: SQL) => {
+    a2 = ((await tx`SELECT upsert_thought('060 live: the same text twice, no vector', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
+    await held2;
+  });
+  for (let i = 0; i < 250 && a2 === undefined; i++) await Bun.sleep(20);
+  const b2Done = connB.begin(async (tx: SQL) => {
+    b2Pid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    return ((await tx`SELECT upsert_thought('060 live: the same text twice, no vector', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
+  });
+  let waiting2 = 0;
+  for (let i = 0; i < 250 && waiting2 === 0; i++) {
+    if (b2Pid) waiting2 = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${b2Pid}`)[0].n);
+    if (!waiting2) await Bun.sleep(20);
+  }
+  releaseA2();
+  await a2Done;
+  const b2 = await b2Done;
+  assert(waiting2 === 1 && b2.id === a2!.id && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '060 live: the same text twice, no vector'`)[0].c) === 1 && (await audits(a2!.id)) === 1,
+    `the 2-argument form: the second capture waits on the lock, reads the first's row, writes nothing — one row, one event (${waiting2} waiting)`);
+  await connA.close(); await connB.close();
+
+  // The raw-writer window, driven: a raw INSERT of the same text left
+  // UNCOMMITTED on another connection blocks the fresh capture's projected
+  // INSERT on the unique index; when it commits, the capture meets the
+  // violation, rolls its event back and merges into the row that landed —
+  // 046's ON CONFLICT, kept (run-it, second review pass: pass 1 could pin the
+  // arm by a source grep alone, and a grep-satisfying mutant survived).
+  const rawer = new SQL({ url: URL_, max: 1 }), capturer = new SQL({ url: URL_, max: 1 });
+  await rawer.unsafe(`BEGIN`);
+  const [rawRow] = await rawer`INSERT INTO thoughts (content, content_fingerprint, metadata) VALUES ('060 live: a raw row in the window', content_fingerprint_of('060 live: a raw row in the window'), '{"source": "load"}'::jsonb) RETURNING id`;
+  let capPid = 0;
+  const capturing = capturer.begin(async (tx: SQL) => {
+    capPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    return ((await tx`SELECT upsert_thought('060 live: a raw row in the window', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
+  });
+  let blocked = 0;
+  for (let i = 0; i < 250 && blocked === 0; i++) {
+    if (capPid) blocked = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'transactionid' AND NOT granted AND pid = ${capPid}`)[0].n);
+    if (!blocked) await Bun.sleep(20);
+  }
+  await rawer.unsafe(`COMMIT`);
+  const merged = await capturing;
+  const windowRows = await sql`SELECT id::text AS id, metadata FROM thoughts WHERE content = '060 live: a raw row in the window'`;
+  const windowEvents = (await sql`SELECT action, diff FROM thought_audit WHERE thought_id = ${rawRow.id}::uuid ORDER BY seq`) as { action: string; diff: Record<string, unknown> }[];
+  assert(blocked === 1 && merged.id === rawRow.id && windowRows.length === 1 && (windowRows[0].metadata as { source: string }).source === "mcp" && windowEvents.map((e) => e.action).join(",") === "capture,update",
+    `the capture blocked on the raw row's transaction, then merged into the row that landed: one row (the raw writer's id), the metadata merged, the raw capture event and the merge's update event in the log (${blocked} blocked, ${windowRows.length} rows, ${windowEvents.map((e) => e.action).join(",")})`);
+  await rawer.close(); await capturer.close();
+
+  // A fold's replay on one connection beside live captures on another: the
+  // announcing settings are transaction-local, so the live capture is checked
+  // against its own event and the replayed rows against theirs.
+  const p = (await sql`SELECT upsert_thought('060 live: replay P', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(6)}::vector) AS r`)[0].r as Cap;
+  await sql`SELECT update_thought(${p.id}::uuid, '060 live: replay P, edited', NULL, ${unit(7)}::vector, NULL, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL)`;
+  const image = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, supersedes, created_at::text AS c, updated_at::text AS u FROM thoughts WHERE id = ${p.id}::uuid`);
+  const before = await image();
+  // The log's order (055's rule; the migration's header): seq since the
+  // boundary, the clock before it.
+  const ORDERED = (ids: string[]) => sql`SELECT id FROM ob1_thought_events_in_order(${sql.array(ids, "UUID")}::uuid[])`;
+  const evs = (await ORDERED([p.id])) as { id: string }[];
+  const replayer = new SQL({ url: URL_, max: 1 });
+  await replayer.begin(async (tx: SQL) => {
+    await tx`ALTER TABLE thoughts DISABLE TRIGGER USER`;
+    await tx`DELETE FROM thoughts WHERE id = ${p.id}::uuid`;
+    await tx`ALTER TABLE thoughts ENABLE TRIGGER USER`;
+  });
+  const auditsBefore = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const live: Promise<unknown>[] = [];
+  await replayer.begin(async (tx: SQL) => {
+    for (const ev of evs) {
+      await tx`SELECT ob1_project_thought_event(${ev.id}::uuid, NULL, NULL, true)`;
+      // A live capture on the other connection while the replay's transaction is open.
+      live.push(sql`SELECT upsert_thought(${`060 live: beside the replay ${live.length}`}, ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(8 + live.length)}::vector)`.execute());
+    }
+  });
+  await Promise.all(live);
+  assert((await image()) === before, "the replay on its own connection rebuilds the row — every column, the vector from the snapshot");
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === auditsBefore + live.length && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content LIKE '060 live: beside the replay %'`)[0].c) === live.length,
+    `…while the live captures beside it were each appended once and projected — the replay's settings never reached their session (${live.length} captures)`);
+  await replayer.close();
+
+  // created_at is the transaction's clock: a transaction that opened early
+  // and wins the row lock late is stamped before the writer it followed
+  // and numbered after it. A replay by (created_at, seq) inverts that row's
+  // history; by the log's order it rebuilds it (run-it, first review pass:
+  // eight connections' log refused at a tombstone under the clock's order).
+  const contested = (await sql`SELECT upsert_thought('060 live: a contested row', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(30)}::vector) AS r`)[0].r as Cap;
+  const early = new SQL({ url: URL_, max: 1 }), late = new SQL({ url: URL_, max: 1 });
+  await early.unsafe(`BEGIN`);
+  await early.unsafe(`SELECT now()`);  // the transaction's clock is fixed here
+  await Bun.sleep(150);
+  await late`SELECT update_thought(${contested.id}::uuid, NULL, '{"who": "late"}'::jsonb, NULL, NULL, NULL, ${ACTOR}::jsonb, NULL, NULL, NULL)`;
+  await early`SELECT update_thought(${contested.id}::uuid, NULL, '{"who": "early"}'::jsonb, NULL, NULL, NULL, ${ACTOR}::jsonb, NULL, NULL, NULL)`;
+  await early.unsafe(`COMMIT`);
+  await early.close(); await late.close();
+  const bySeq = (await sql`SELECT diff->'metadata'->'after'->>'who' AS who FROM thought_audit WHERE thought_id = ${contested.id}::uuid AND action = 'update' ORDER BY seq`).map((r: { who: string }) => r.who).join(">");
+  const byClock = (await sql`SELECT diff->'metadata'->'after'->>'who' AS who FROM thought_audit WHERE thought_id = ${contested.id}::uuid AND action = 'update' ORDER BY created_at, seq`).map((r: { who: string }) => r.who).join(">");
+  assert(bySeq === "late>early" && byClock === "early>late" && (await rowOf(contested.id))!.content === "060 live: a contested row" && (await sql`SELECT metadata->>'who' AS who FROM thoughts WHERE id = ${contested.id}::uuid`)[0].who === "early",
+    `the two orders disagree on the contested row: seq says ${bySeq} (the row's history — early won the lock last), the clock says ${byClock}`);
+  const cImage = async () => JSON.stringify(await sql`SELECT content, metadata, embedding::text AS e, updated_at::text AS u FROM thoughts WHERE id = ${contested.id}::uuid`);
+  const cBefore = await cImage();
+  const cEvs = (await ORDERED([contested.id])) as { id: string }[];
+  const wiper = new SQL({ url: URL_, max: 1 });
+  await wiper.begin(async (tx: SQL) => { await tx`ALTER TABLE thoughts DISABLE TRIGGER USER`; await tx`DELETE FROM thoughts WHERE id = ${contested.id}::uuid`; await tx`ALTER TABLE thoughts ENABLE TRIGGER USER`; });
+  for (const e of cEvs) await wiper`SELECT ob1_project_thought_event(${e.id}::uuid, NULL, NULL, true)`;
+  assert((await cImage()) === cBefore, "replayed in the log's order the contested row is rebuilt as it stood — the later-locking writer's metadata last");
+  await wiper.begin(async (tx: SQL) => { await tx`ALTER TABLE thoughts DISABLE TRIGGER USER`; await tx`DELETE FROM thoughts WHERE id = ${contested.id}::uuid`; await tx`ALTER TABLE thoughts ENABLE TRIGGER USER`; });
+  const clockEvs = (await sql`SELECT id FROM thought_audit WHERE thought_id = ${contested.id}::uuid ORDER BY created_at, seq`) as { id: string }[];
+  for (const e of clockEvs) await wiper`SELECT ob1_project_thought_event(${e.id}::uuid, NULL, NULL, true)`;
+  assert((await cImage()) !== cBefore && (await sql`SELECT metadata->>'who' AS who FROM thoughts WHERE id = ${contested.id}::uuid`)[0].who === "late", "…and by the clock alone it is rebuilt inverted — the mutant that orders a fold by (created_at, seq) is caught here");
+  await wiper.close();
+
+  // A delete of a thought racing an edit that names it as supersedes (036's
+  // order, SMD-1462's behaviour): both go through the appending bodies; the
+  // edit ends SUPERSEDES_NOT_FOUND or a clean write whose pointer the
+  // tombstone's cascade then nulls — never a raw 23503, never a deadlock.
+  const target = (await sql`SELECT upsert_thought('060 live: a target to supersede', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(20)}::vector) AS r`)[0].r as Cap;
+  const editor = (await sql`SELECT upsert_thought('060 live: the editor', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(21)}::vector) AS r`)[0].r as Cap;
+  const cD = new SQL({ url: URL_, max: 1 }), cE = new SQL({ url: URL_, max: 1 });
+  const outcomes: string[] = [];
+  const del = cD`SELECT delete_thought(${target.id}::uuid, ${ACTOR}::jsonb, false) AS r`.execute().then((r: { r: { ok: boolean } }[]) => outcomes.push(`delete:${r[0].r.ok}`), (e: Error) => outcomes.push(`delete:ERR:${e.message.slice(0, 40)}`));
+  const upd = cE`SELECT update_thought(${editor.id}::uuid, NULL, NULL, NULL, NULL, NULL, ${ACTOR}::jsonb, NULL, ${{ supersedes: target.id }}::jsonb, NULL) AS r`.execute().then((r: { r: { ok: boolean; error?: string } }[]) => outcomes.push(`edit:${r[0].r.ok ? "ok" : r[0].r.error}`), (e: Error) => outcomes.push(`edit:ERR:${e.message.slice(0, 40)}`));
+  await Promise.all([del, upd]);
+  const editorRow = await rowOf(editor.id);
+  assert(outcomes.includes("delete:true") && (outcomes.includes("edit:ok") || outcomes.includes("edit:SUPERSEDES_NOT_FOUND")) && !outcomes.some((o) => /ERR/.test(o)) && editorRow!.supersedes === null,
+    `the delete lands and the edit is a clean write or a named refusal, never an error or a deadlock; the editor's pointer is null either way (${outcomes.join(", ")})`);
+  await cD.close(); await cE.close();
+  await sql`DELETE FROM thoughts`;
+  await sql.close();
+}
+
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
@@ -5629,9 +6016,693 @@ console.log("\n[27] search_thoughts_current against a hand oracle on real Postgr
   await sql.close();
 }
 
-console.log("\n[28] Migration 060's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a row gaining a key while it is superseded holds its own pointer lock; a pointer write waits for a concurrent move of its target's issue; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
+console.log("\n[29] recipes/thought-enrichment on the SQL shim: the type and sensitivity backfills write the planted rows' columns and nothing else, the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, a role granted the README's privileges writes, and no URL, a Supabase URL or a refused connection is one line naming no value (SMD-2139)");
 {
-  // test-schema [56] holds the rules on one connection; what it cannot hold is
+  // The three enrichment scripts SMD-2126 sent to compat/supabase-sql — the
+  // class's first writers — driven as deployed: `bun <file>` in a directory
+  // of their own, SUPABASE_URL the one variable beyond PATH and HOME, against
+  // this database carrying enhanced-thoughts ([18] and [26] left the columns;
+  // the file is idempotent). The planted table is the truth every printed
+  // count is held to, and a snapshot of every row's content, fingerprint and
+  // model label is what the writes are held away from. The enrichment's model
+  // is a Bun.serve stub on the loopback that answers one classification for
+  // every request and counts them — OPENROUTER_BASE_URL is the port's own
+  // seam — so the apply path runs without a key and without a byte leaving
+  // the machine. The scripts read `.env.local` from THEIR OWN directory (the
+  // recipe's, not the cwd — `--no-env-file` stops Bun's loader, not theirs),
+  // so on a machine where a developer keeps one there the no-URL refusals,
+  // which that file would defeat, are skipped by name; every other run puts its
+  // URL in the environment, which the scripts prefer. CI has no such file. The
+  // enrichment's checkpoint goes under ENRICH_STATE_DIR in the scratch, never
+  // the recipe's own data/ (an operator's checkpoint there is left as found —
+  // held by its mtime; review pass 1, cold read).
+  const sql = new SQL({ url: URL_, max: 2 });
+  const catalog27 = async () => ({
+    tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    fns: new Set(((await sql`SELECT p.oid::regprocedure::text AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`) as { n: string }[]).map((r) => r.n)),
+  });
+  const before27 = await catalog27();
+  const RECIPE = join(CONTRIB_DIR, "recipes", "thought-enrichment");
+  const scratch = join(tmpdir(), `ob1-live-2139-${process.pid}`);
+  mkdirSync(scratch, { recursive: true });
+  const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
+  const script = (file: string, extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPE, file), ...flags], { cwd: scratch, env: env(extra) });
+  const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
+  const errorLine = (s: string) => s.split("\n").find((l) => l.startsWith("ERROR:")) ?? firstLine(s);
+  /** Exactly one ERROR line on stderr and no stack frame: the shape every refusal is held to (a second ERROR line, or a retry ladder's lines, fail it). */
+  const errorLines = (s: string) => (s.match(/^ERROR:/gm) ?? []).length;
+  const oneLine = (r: { code: number; out: string }, re: RegExp) => r.code === 1 && re.test(r.out) && !/\n\s+at /.test(r.out) && errorLines(r.out) === 1;
+  const recipeEnvFile = existsSync(join(RECIPE, ".env.local")) ? "recipes/thought-enrichment/.env.local" : null;
+  // The model: a fixed answer, the requests counted, the last body kept for the prompt's shape.
+  let stubCalls = 0;
+  let stubBody = "";
+  const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    stubCalls++;
+    stubBody = await req.text();
+    const content = JSON.stringify({ type: "task", summary: "stub summary", topics: ["stub"], tags: ["t"], people: ["Ada"], action_items: ["do it"], confidence: 0.9, importance: 4, detected_source_type: "generic_import" });
+    return Response.json({ choices: [{ message: { content } }] });
+  } });
+  const stateEnv = { ENRICH_STATE_DIR: join(scratch, "state") };
+  const statePath = join(scratch, "state", "enrichment-state.json");
+  const model = { OPENROUTER_API_KEY: "stub", OPENROUTER_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...stateEnv };
+  const recipeState = join(RECIPE, "data", "enrichment-state.json");
+  const recipeStateBefore = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
+  /** The blank row's id: the lowest uuid, so the enrichment meets it first on every run (review pass 1, cold read — a random id made the dry run's call count a coin toss). */
+  const BLANK_ID = "00000000-0000-0000-0000-000000000001";
+  const ENRICH_FLAGS = ["--provider", "openrouter", "--model", "stub-model", "--max-calls", "10000"];
+  try {
+    await sql`DELETE FROM thoughts`;
+    await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "enhanced-thoughts/schema.sql"), "utf8"));
+    // Thirteen rows, every type 'reference': four with a valid different type in
+    // their metadata, one with a type no allowlist has, one with none, one
+    // already 'reference'; one restricted by pattern (a made-up SSN), one
+    // matching a restricted and a personal pattern (the restricted match must
+    // win alone), two personal (a dosage, a blood-pressure reading), one already
+    // personal — not scanned — and one of whitespace alone, the enrichment's no-model path, at
+    // the lowest id so it is the first row every enrichment run meets. The four
+    // candidates of the type backfill sit at known ids — the decision second
+    // from the bottom, the other three at the top — with the seven non-candidates
+    // at random ids between, so a run stopped by `--limit 1` on pages of one
+    // has read exactly two rows, and a run that scans on to the next candidate
+    // has read ten (review pass 2, mutant: a bound alone let it through).
+    // Tiers NULL, '' and 'standard' among them, the three the sensitivity filter
+    // names. Fingerprint and model label set so the writes can be held away
+    // from them (a raw insert leaves both NULL otherwise).
+    await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model)
+      SELECT COALESCE(i::uuid, gen_random_uuid()), c, m::jsonb, 'reference', t, content_fingerprint_of(c), 'planted-model' FROM (VALUES
+        ('00000000-0000-0000-0000-000000000002', 'a decision was made about the venue', '{"type":"decision","source":"notes"}', 'standard'),
+        ('ffffffff-ffff-ffff-ffff-fffffffffff1', 'a lesson learned about batching', '{"type":"lesson"}', NULL),
+        ('ffffffff-ffff-ffff-ffff-fffffffffff2', 'the standup, three of us', '{"type":"meeting"}', ''),
+        ('ffffffff-ffff-ffff-ffff-fffffffffff3', 'tonight I wrote about the week', '{"type":"journal"}', 'standard'),
+        (NULL, 'bogus type row', '{"type":"bogus"}', ''),
+        (NULL, 'no type key here', '{}', 'standard'),
+        (NULL, 'already reference', '{"type":"reference"}', 'standard'),
+        (NULL, 'SSN 123-45-6789 appears in this text', '{}', 'standard'),
+        (NULL, 'SSN 987-65-4321 on the form, took 50 mg after', '{}', 'standard'),
+        (NULL, 'took metoprolol 50 mg today', '{}', NULL),
+        (NULL, 'blood pressure 120 over 80 this morning', '{}', ''),
+        (NULL, 'already personal, glucose 110 this morning', '{}', 'personal')
+      ) v(i, c, m, t)`);
+    await sql`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES (${BLANK_ID}::uuid, '   ', '{}', 'reference', 'standard', content_fingerprint_of('   '), 'planted-model')`;
+    const N = 13;
+    type Snap = { id: string; content: string; fp: string | null; em: string | null; metadata: Record<string, unknown> };
+    const snapshot = async () => (await sql`SELECT id::text AS id, content, content_fingerprint AS fp, embedding_model AS em, metadata FROM thoughts ORDER BY id`) as Snap[];
+    const planted = await snapshot();
+    const typesNow = async () => (await sql`SELECT id::text AS id, type, metadata->>'type' AS mt FROM thoughts ORDER BY id`) as { id: string; type: string; mt: string | null }[];
+    const tiers = async () => Object.fromEntries(((await sql`SELECT coalesce(sensitivity_tier, '<null>') AS t, count(*)::int AS n FROM thoughts GROUP BY 1`) as { t: string; n: number }[]).map((r) => [r.t, r.n]));
+    const [truth] = (await sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE type = 'reference')::int AS refs,
+      count(*) FILTER (WHERE metadata->>'type' IN ('decision','lesson','meeting','journal'))::int AS valid,
+      count(*) FILTER (WHERE sensitivity_tier IS NULL OR sensitivity_tier IN ('', 'standard'))::int AS scannable,
+      count(*) FILTER (WHERE content_fingerprint IS NULL OR embedding_model IS NULL)::int AS bare FROM thoughts`) as { total: number; refs: number; valid: number; scannable: number; bare: number }[];
+    assert(truth.total === N && truth.refs === N && truth.valid === 4 && truth.scannable === 12 && truth.bare === 0 && planted.length === N,
+      `the planted table: ${N} rows of type 'reference', four with a valid different metadata type, twelve the sensitivity scan reads, every row with a fingerprint and a model label (${JSON.stringify(truth)})`);
+
+    // backfill-type: a dry run reads every page (three rows a page, five pages — one progress line each — the cursor
+    // past each) and writes nothing; a dry run with the limit on one page of thirteen examines the rows up to the
+    // candidate that trips it, ten, and counts those (the row that tripped it counted eleven — review pass 4, mutant).
+    const dry = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--batch-size", "3");
+    const afterDry = await typesNow();
+    const pages = (dry.out.match(/Progress: /g) ?? []).length;
+    const dryLimit = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit", "1", "--batch-size", "13");
+    assert(dry.code === 0 && dry.out.includes(`Total rows with type='reference': ${N}`) && dry.out.includes(`Rows processed:              ${N}`) && dry.out.includes("Rows updated:                4 (dry run, not written)") && dry.out.includes("Skipped (already reference): 1") && dry.out.includes("Skipped (null/empty type):   7") && dry.out.includes("Skipped (invalid type):      1") && /\n  bogus: 1\n/.test(dry.out) && pages === 5 && afterDry.every((r) => r.type === "reference") && dryLimit.code === 0 && dryLimit.out.includes("Rows processed:              10\n") && dryLimit.out.includes("=== BACKFILL STOPPED AT --limit 1 ==="),
+      `backfill-type.mjs --dry-run --batch-size 3 on the shim: the exact count, thirteen rows over five pages, four to update and the three skip counts, the bogus type named, every row still 'reference'; --limit 1 on one page of thirteen examines ten rows (exit ${dry.code}: ${pages} pages; ${dryLimit.code}: ${/Rows processed:\s+\d+/.exec(dryLimit.out)?.[0]})`);
+
+    // A refused write ends the run on its first row: a LOGIN role with SELECT on thoughts alone reads the page and is
+    // refused the update — 42501, exit 1, no row changed — where the REST form counted a 403 and went on (the type
+    // script threw; the sensitivity script counted). [18]'s two guards: skipped where the connection cannot create a
+    // role or carries no credentials to swap.
+    const PROBE_ROLE = "ob1_live_enrich_probe";
+    const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
+    const [{ mayCreate: mayCreateProbe }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    /** The probe role, gone: before each guarded block and in its finally (used twice — the denied cases here, the grant ladder at the end). */
+    const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
+    if (probeUrl === URL_ || !mayCreateProbe) {
+      skip("…a role with SELECT alone: both backfills refused on their first write", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      await dropProbe();
+      try {
+        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
+        const deniedType = await script("backfill-type.mjs", { SUPABASE_URL: probeUrl }, "--limit", "1");
+        const deniedTier = await script("backfill-sensitivity.mjs", { SUPABASE_URL: probeUrl }, "--apply");
+        const afterDenied = await typesNow();
+        assert(oneLine(deniedType, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/Done\./.test(deniedType.out) && oneLine(deniedTier, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== Results ===/.test(deniedTier.out) && afterDenied.every((r) => r.type === "reference") && (await tiers())["personal"] === 1,
+          `…a role with SELECT alone: both backfills read their page and end on the first write with 42501, exit 1, no summary, no row changed (${deniedType.code}: ${errorLine(deniedType.out)}; ${deniedTier.code}: ${errorLine(deniedTier.out)})`);
+        // The enrichment too: past the blank row (--skip 1, the .range() path), one row is classified — one paid call
+        // — and its write is refused, which ends the run: exit 1, one ERROR line, no summary, no row enriched, and a
+        // checkpoint that records nothing (written before the refusal ends the run, so the rows a chunk handled before
+        // it are not lost). Under Promise.allSettled it was a FAIL line per row while every later row still paid its
+        // call and the run exited 0 (review pass 1, both readers). Its own state directory, so the dry run below still
+        // meets none.
+        const mark = stubCalls;
+        const deniedEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...model, ENRICH_STATE_DIR: join(scratch, "state-denied") }, "--apply", "--skip", "1", "--limit", "2", "--concurrency", "1", ...ENRICH_FLAGS);
+        const [{ enrichedDenied }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedDenied" FROM thoughts`) as { enrichedDenied: number }[];
+        const deniedStatePath = join(scratch, "state-denied", "enrichment-state.json");
+        const deniedState = existsSync(deniedStatePath) ? JSON.parse(readFileSync(deniedStatePath, "utf8")) as { totalProcessed: number; failedIds: string[]; lastProcessedId: string | null } : null;
+        assert(oneLine(deniedEnrich, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== ENRICHMENT|FAIL #/.test(deniedEnrich.out) && stubCalls - mark === 1 && enrichedDenied === 0 && deniedState?.totalProcessed === 0 && deniedState.failedIds.length === 0 && deniedState.lastProcessedId === null,
+          `…and the enrichment ends on its first refused write after one model call: exit 1, one ERROR line, no FAIL lines, no summary, no row enriched, a checkpoint recording nothing (${deniedEnrich.code}: ${errorLine(deniedEnrich.out)}; ${stubCalls - mark} call(s), ${enrichedDenied} enriched, state ${JSON.stringify(deniedState)})`);
+      } finally {
+        await dropProbe();
+      }
+    }
+
+    // --limit 1 writes one row — the ticket's Verify — and stops: with a page of one, the rows processed are the
+    // blank row and the decision at the second id, exactly two, never a page more (it had scanned on to the next
+    // candidate, every page between read for nothing — review pass 2, run-it; here that would be ten rows).
+    const one = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--limit", "1", "--batch-size", "1");
+    const afterOne = await typesNow();
+    const changed = afterOne.filter((r) => r.type !== "reference");
+    const processedOne = Number(/Rows processed:\s+(\d+)/.exec(one.out)?.[1] ?? -1);
+    assert(one.code === 0 && one.out.includes("=== BACKFILL STOPPED AT --limit 1 ===") && one.out.includes("Rows updated:                1\n") && changed.length === 1 && changed[0].type === "decision" && changed[0].mt === "decision" && processedOne === 2,
+      `backfill-type.mjs --limit 1 --batch-size 1: the decision at the second id is written, the run says it stopped at the limit and processed exactly two rows — no page past the write (exit ${one.code}: ${changed.map((r) => r.type).join(",") || "none"} changed, ${processedOne} processed)`);
+    const rest = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--batch-size", "3");
+    const afterRest = await typesNow();
+    assert(rest.code === 0 && rest.out.includes(`Total rows with type='reference': ${N - 1}`) && rest.out.includes("Rows updated:                3\n") && rest.out.includes("=== BACKFILL COMPLETE ===") && afterRest.filter((r) => r.type !== "reference").length === 4 && afterRest.every((r) => r.type === (["decision", "lesson", "meeting", "journal"].includes(r.mt ?? "") ? r.mt : "reference")),
+      `…and the full run writes the other three, the bogus type and the typeless rows left 'reference' (exit ${rest.code}: ${afterRest.filter((r) => r.type !== "reference").map((r) => r.type).sort().join(",")})`);
+
+    // backfill-sensitivity: no flag is the usage and no query; the dry run scans the twelve rows at NULL, '' or
+    // 'standard' — the pre-set personal row is not among them — and names the two restricted (the row matching a
+    // dosage too by its SSN alone: the restricted match returns first) and the two personal.
+    const usage = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ });
+    const scan = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dry-run");
+    const tiersAfterScan = await tiers();
+    assert(usage.code === 0 && /^Usage:\n  bun backfill-sensitivity\.mjs --dry-run/.test(usage.out) && scan.code === 0 && scan.out.includes("Scanned:              12") && scan.out.includes("Upgraded to personal: 2") && scan.out.includes("Upgraded to restricted: 2") && (scan.out.match(/RESTRICTED #[0-9a-f-]{36}: ssn_pattern — /g) ?? []).length === 2 && !/RESTRICTED #[0-9a-f-]{36}: ssn_pattern, /.test(scan.out) && /PERSONAL #[0-9a-f-]{36}: medication_dosage, drug_name/.test(scan.out) && /PERSONAL #[0-9a-f-]{36}: health_measurement/.test(scan.out) && tiersAfterScan["personal"] === 1 && !("restricted" in tiersAfterScan),
+      `backfill-sensitivity.mjs: no flag prints the usage; --dry-run scans the twelve rows the filter names, finds two restricted (each by the SSN alone) and two personal by pattern, and writes nothing (${usage.code}/${scan.code}: ${JSON.stringify(tiersAfterScan)})`);
+    const applyTier = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--apply");
+    const tiersAfterApply = await tiers();
+    const [{ ssn }] = (await sql`SELECT sensitivity_tier AS ssn FROM thoughts WHERE content LIKE 'SSN 123%'`) as { ssn: string }[];
+    assert(applyTier.code === 0 && applyTier.out.includes("Mode:                 APPLIED") && tiersAfterApply["restricted"] === 2 && tiersAfterApply["personal"] === 3 && tiersAfterApply["standard"] === 5 && tiersAfterApply["<null>"] === 1 && tiersAfterApply[""] === 2 && ssn === "restricted",
+      `…--apply writes the four rows' tiers and leaves the other eight as they were — NULL and '' included (exit ${applyTier.code}: ${JSON.stringify(tiersAfterApply)})`);
+
+    // enrich-thoughts: the two exact counts of --status are head queries; the dry run calls the model and writes
+    // neither a row nor the checkpoint.
+    const status0 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
+    const markDry = stubCalls;
+    const dryEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "2", ...ENRICH_FLAGS);
+    const [{ enrichedAfterDry }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDry" FROM thoughts`) as { enrichedAfterDry: number }[];
+    assert(status0.code === 0 && status0.out.includes(`Total thoughts:     ${N}`) && status0.out.includes("Enriched:           0 (0.0%)") && status0.out.includes(`Remaining:          ${N}`) && dryEnrich.code === 0 && (dryEnrich.out.match(/^  \[DRY\] #[0-9a-f-]{36}: \{"type":"task"/gm) ?? []).length === 1 && stubCalls - markDry === 1 && enrichedAfterDry === 0 && !existsSync(statePath),
+      `enrich-thoughts.mjs --status counts ${N} thoughts, none enriched; --dry-run --limit 2 meets the blank row and one more — one [DRY] line, one call — and writes no row and no checkpoint (${status0.code}/${dryEnrich.code}: ${stubCalls - markDry} call(s), ${enrichedAfterDry} enriched)`);
+
+    // --apply --limit 5: five rows in id order — the model's answer as the enhanced columns and a metadata OBJECT
+    // that keeps the row's own keys, the whitespace row marked enriched without a call — and the checkpoint written
+    // under the run's directory, not the recipe's.
+    const markApply = stubCalls;
+    const applyEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--limit", "5", "--concurrency", "2", ...ENRICH_FLAGS);
+    type Enriched = { id: string; content: string; type: string; importance: number; source_type: string | null; mt: string; metadata: Record<string, unknown> };
+    const enrichedRows = (await sql`SELECT id::text AS id, content, type, importance, source_type, jsonb_typeof(metadata) AS mt, metadata FROM thoughts WHERE enriched ORDER BY id`) as Enriched[];
+    const blank = enrichedRows[0];
+    const classified = enrichedRows.slice(1);
+    const keepsOwnKeys = (r: Enriched) => Object.entries(planted.find((p) => p.id === r.id)?.metadata ?? {}).every(([k, v]) => k === "type" || JSON.stringify(r.metadata[k]) === JSON.stringify(v));
+    const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; lastProcessedId: string | null; failedIds: string[] } : null;
+    const recipeStateAfter = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
+    assert(applyEnrich.code === 0 && applyEnrich.out.includes("Enriched:       5") && applyEnrich.out.includes("LLM calls made: 4 / 10000") && stubCalls - markApply === 4 && enrichedRows.length === 5 && blank?.id === BLANK_ID && blank.type === "reference" && JSON.stringify(blank.metadata) === "{}" && enrichedRows.every((r) => r.mt === "object") && classified.every((r) => r.type === "task" && r.importance === 4 && r.source_type === "generic_import" && r.metadata.summary === "stub summary" && JSON.stringify(r.metadata.topics) === '["stub"]' && r.metadata.enriched_provider === "openrouter" && r.metadata.enriched_model === "stub-model" && r.metadata.type === "task" && keepsOwnKeys(r)) && /<thought_content>\\n[^]*<\/thought_content>/.test(stubBody) && state?.totalProcessed === 5 && state.lastProcessedId === enrichedRows[4].id && state.failedIds.length === 0 && recipeStateAfter === recipeStateBefore,
+      `…--apply --limit 5 --concurrency 2: the blank row and four more enriched in id order — four calls, the blank row marked with its type and metadata untouched — each classified row carrying the stub's type, importance, source and a metadata object with its own keys kept, the prompt delimited, the checkpoint at the last id under ENRICH_STATE_DIR and the recipe's own left as found (exit ${applyEnrich.code}: ${enrichedRows.length} rows, ${stubCalls - markApply} calls, state ${JSON.stringify(state)})`);
+
+    // --max-calls 1 at concurrency 2 over two rows is one call and the ABORTED banner: the chunk is cut to the calls left
+    // (a chunk of the full concurrency made three calls on a budget of one — review pass 1, run-it; unheld until pass 4).
+    const markBudget = stubCalls;
+    const budget = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model, ENRICH_STATE_DIR: join(scratch, "state-budget") }, "--dry-run", "--skip", "1", "--limit", "2", "--max-calls", "1", "--concurrency", "2", "--provider", "openrouter", "--model", "stub-model");
+    const budgetCalls = stubCalls - markBudget;
+    // --status reads the new split; --retry-failed reads its ids back through one .in() query, enriches them and drops
+    // them from the checkpoint's failedIds.
+    const status1 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
+    const [{ retryId }] = (await sql`SELECT id::text AS "retryId" FROM thoughts WHERE NOT enriched AND btrim(content) <> '' ORDER BY id LIMIT 1`) as { retryId: string }[];
+    writeFileSync(statePath, JSON.stringify({ ...state, failedIds: [retryId], totalFailed: 1 }));
+    const retry = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--retry-failed", ...ENRICH_FLAGS);
+    const [{ retried }] = (await sql`SELECT (enriched AND type = 'task' AND metadata->>'summary' = 'stub summary') AS retried FROM thoughts WHERE id = ${retryId}::uuid`) as { retried: boolean }[];
+    const stateAfterRetry = JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; failedIds: string[] };
+    assert(budget.code === 0 && budgetCalls === 1 && /=== ENRICHMENT ABORTED \(--max-calls reached\) ===/.test(budget.out) && status1.code === 0 && status1.out.includes("Enriched:           5 (38.5%)") && status1.out.includes(`Remaining:          ${N - 5}`) && retry.code === 0 && retry.out.includes(`  OK retry #${retryId} -> task`) && retry.out.includes("Processed: 1, Fixed: 1, Still failing: 0") && retried === true && stateAfterRetry.failedIds.length === 0 && stateAfterRetry.totalProcessed === 6,
+      `…--max-calls 1 at concurrency 2 makes one call and aborts; --status reads 5 of ${N}; --apply --retry-failed fetches the checkpoint's failed id by .in(), enriches it and drops it from failedIds (${budget.code}: ${budgetCalls} call(s); ${status1.code}/${retry.code}: ${errorLine(retry.out)}; state ${JSON.stringify(stateAfterRetry)})`);
+
+    // A model at a closed port is a per-row failure, not a refusal: one FAIL line, exit 1 with the summary, the id in the
+    // checkpoint's failedIds for --retry-failed, no ERROR line, no row written. Bun's fetch gives that error a code
+    // (ConnectionRefused), and pass 1's rule — "a rejection with a code ends the run" — ended the run on it (review
+    // pass 2, both readers). A fresh state directory, so no resume point applies.
+    const dead = { ...model, OPENROUTER_BASE_URL: "http://127.0.0.1:1/v1", ENRICH_STATE_DIR: join(scratch, "state-dead") };
+    const [{ enrichedBeforeDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedBeforeDead" FROM thoughts`) as { enrichedBeforeDead: number }[];
+    const deadRun = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...dead }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
+    const [{ enrichedAfterDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDead" FROM thoughts`) as { enrichedAfterDead: number }[];
+    const deadStatePath = join(scratch, "state-dead", "enrichment-state.json");
+    const deadState = existsSync(deadStatePath) ? JSON.parse(readFileSync(deadStatePath, "utf8")) as { failedIds: string[]; totalFailed: number } : null;
+    const failedLine = /^  FAIL #([0-9a-f-]{36}): /m.exec(deadRun.out);
+    assert(deadRun.code === 1 && failedLine !== null && !/^ERROR:/m.test(deadRun.out) && deadRun.out.includes("Failed:         1") && enrichedAfterDead === enrichedBeforeDead && deadState?.totalFailed === 1 && deadState.failedIds.length === 1 && deadState.failedIds[0] === failedLine?.[1],
+      `…a model at a closed port: the row fails with a FAIL line, the run ends with its summary and exit 1, no ERROR line, no row written, the id in the checkpoint's failedIds (${deadRun.code}: ${firstLine(deadRun.out.split("\n").filter((l) => /FAIL|ERROR/.test(l)).join(" | ") || deadRun.out).slice(0, 160)}; state ${JSON.stringify(deadState)})`);
+
+    // What no script may touch: every row's content, fingerprint and model label are the planted ones, the vector
+    // still absent, every metadata an object.
+    const after = await snapshot();
+    const [{ vectors }] = (await sql`SELECT count(*) FILTER (WHERE embedding IS NOT NULL)::int AS vectors FROM thoughts`) as { vectors: number }[];
+    const untouched = after.length === N && after.every((r, i) => r.id === planted[i].id && r.content === planted[i].content && r.fp === planted[i].fp && r.em === planted[i].em && typeof r.metadata === "object" && r.metadata !== null);
+    assert(untouched && vectors === 0,
+      `after every write: all ${N} rows keep their content, fingerprint and model label, no vector appeared, every metadata is an object (${after.filter((r, i) => r.content !== planted[i].content || r.fp !== planted[i].fp || r.em !== planted[i].em).length} rows differ, ${vectors} vectors)`);
+
+    // Refused before any query, one line each, no stack.
+    if (recipeEnvFile) {
+      skip("…no URL: each of the three ends in one line naming the variable", `${recipeEnvFile} exists on this machine and the scripts read it`);
+    } else {
+      const noUrl = await Promise.all([script("backfill-type.mjs", {}, "--dry-run"), script("backfill-sensitivity.mjs", {}, "--dry-run"), script("enrich-thoughts.mjs", {}, "--status")]);
+      const named = /^ERROR: SUPABASE_URL must be set — the brain's postgres:\/\/ connection string on this fork, in the environment or in \.env\.local beside the scripts\.$/m;
+      assert(noUrl.every((r) => oneLine(r, named) && r.out.trim().split("\n").length === 1),
+        `…no URL: each of the three ends in one line naming the variable, exit 1 (${noUrl.map((r) => `${r.code}: ${firstLine(r.out).slice(0, 60)}`).join("; ")})`);
+    }
+    // A value that is not postgres:// is refused by the recipe's own line, which names the scheme and never the value:
+    // the shim's refusal quotes the first forty characters, which since this port carry the password (review pass 1,
+    // run-it). The mistyped scheme below carries a token that must appear nowhere in the output.
+    const httpsType = await script("backfill-type.mjs", { SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--dry-run");
+    const mistyped = await script("backfill-sensitivity.mjs", { SUPABASE_URL: "mysql://brain:pw-not-real@127.0.0.1:5432/x" }, "--dry-run");
+    const httpsEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: "https://example.supabase.co", ...stateEnv }, "--status");
+    const refused = await script("backfill-type.mjs", { SUPABASE_URL: "postgres://nobody:nothing@127.0.0.1:1/nowhere" }, "--dry-run");
+    const zero = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--dry-run", "--limit", "0");
+    const typo = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dryrun");
+    const both = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--apply");
+    // The = form and a trailing value flag passed the refusal and were then ignored — `--limit=2` ran the whole table
+    // (review pass 2, both readers).
+    const eqForm = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit=1", ...ENRICH_FLAGS);
+    const trailing = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit");
+    const fraction = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit", "1.5");
+    const scheme = /^ERROR: SUPABASE_URL must be a postgres:\/\/ connection string; the value's scheme is "(https|mysql):"/m;
+    assert(oneLine(httpsType, scheme) && !/Starting type backfill|example\.supabase/.test(httpsType.out) && oneLine(mistyped, scheme) && !/pw-not-real|127\.0\.0\.1/.test(mistyped.out) && oneLine(httpsEnrich, scheme) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(refused, /^ERROR: read thoughts after id 0{8}-0{4}-0{4}-0{4}-0{12} → ERR_POSTGRES_CONNECTION_REFUSED /m) && !/\[retry\]/.test(refused.out) && oneLine(fraction, /^ERROR: --limit must be an integer of at least 1; got "1\.5"$/m) && oneLine(zero, /^ERROR: --limit must be an integer of at least 1; got "0"$/m) && oneLine(typo, /^ERROR: unknown flag "--dryrun" \(flags: --dry-run, --apply\)$/m) && (await tiers())["restricted"] === 2 && oneLine(both, /^ERROR: --dry-run and --apply are exclusive/m) && oneLine(eqForm, /^ERROR: --limit takes its value as the next argument, not after "="$/m) && !/\[DRY\]/.test(eqForm.out) && oneLine(trailing, /^ERROR: --limit needs a value$/m) && !/Starting type backfill/.test(trailing.out),
+      `…a Supabase URL and a mistyped scheme are refused before any query by a line naming the scheme and not the value (the password token appears nowhere); a refused connection is one line naming the driver's code with no retry ladder before it; --limit 0 and --limit 1.5, an unknown flag (--dryrun, which wrote a row) and --dry-run beside --apply (which wrote under a DRY RUN banner), --limit=1 and a trailing --limit (both ran unbounded) are one line each (${httpsType.code}: ${errorLine(httpsType.out).slice(0, 80)}; ${mistyped.code}; ${httpsEnrich.code}; ${refused.code}: ${errorLine(refused.out).slice(0, 90)}; ${zero.code}; ${fraction.code}; ${typo.code}: ${errorLine(typo.out)}; ${both.code}; ${eqForm.code}; ${trailing.code})`);
+
+    // The README's grants, proved: SELECT and UPDATE on thoughts write `type` (the audit trigger records no event for it);
+    // a metadata change fires 008/055's audit trigger, which needs SELECT and INSERT on thought_audit — the message
+    // names that table, the README's entry for it, and the grant cures it (review pass 1, cold read: the README had
+    // promised SELECT, UPDATE on thoughts alone; probed, then held here). A fourteenth row, planted after the snapshot
+    // above. The same two guards as the denied block.
+    if (probeUrl === URL_ || !mayCreateProbe) {
+      skip("…a role with the README's grants writes type alone, is refused metadata until thought_audit is granted", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      await dropProbe();
+      try {
+        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT, UPDATE ON thoughts TO ${PROBE_ROLE}`);
+        await sql`INSERT INTO thoughts (content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES ('granted row: a decision', '{"type":"decision"}', 'reference', 'standard', content_fingerprint_of('granted row: a decision'), 'planted-model')`;
+        const enrichedCount = async () => ((await sql`SELECT count(*) FILTER (WHERE enriched)::int AS n FROM thoughts`) as { n: number }[])[0].n;
+        const grantedType = await script("backfill-type.mjs", { SUPABASE_URL: probeUrl }, "--limit", "1");
+        const [{ granted }] = (await sql`SELECT type AS granted FROM thoughts WHERE content LIKE 'granted row%'`) as { granted: string }[];
+        const state2 = { ...model, ENRICH_STATE_DIR: join(scratch, "state2") };
+        const markAudit = stubCalls;
+        const before = await enrichedCount();
+        const auditDenied = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
+        const mid = await enrichedCount();
+        await sql.unsafe(`GRANT SELECT, INSERT ON thought_audit TO ${PROBE_ROLE}`);
+        const auditOk = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
+        const after = await enrichedCount();
+        assert(grantedType.code === 0 && granted === "decision" && oneLine(auditDenied, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thought_audit$/m) && mid === before && stubCalls - markAudit === 2 && auditOk.code === 0 && auditOk.out.includes("Enriched:       1") && after === before + 1,
+          `…a role with SELECT, UPDATE on thoughts writes a type; its first metadata write is refused with 42501 on thought_audit (the audit trigger's table), exit 1; with SELECT, INSERT on thought_audit the same run enriches the row (${grantedType.code}: ${granted}; ${auditDenied.code}: ${errorLine(auditDenied.out).slice(0, 110)}; ${auditOk.code}: ${before} → ${mid} → ${after})`);
+      } finally {
+        await dropProbe();
+      }
+    }
+  } finally {
+    stub.stop(true);
+    rmSync(scratch, { recursive: true, force: true });
+    await sql`DELETE FROM thoughts`;
+    const after27 = await catalog27();
+    for (const v of after27.views) if (!before27.views.has(v)) await sql.unsafe(`DROP VIEW IF EXISTS ${v} CASCADE`);
+    for (const tb of after27.tables) if (!before27.tables.has(tb)) await sql.unsafe(`DROP TABLE IF EXISTS ${tb} CASCADE`);
+    for (const f of after27.fns) if (!before27.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+    await sql.close();
+  }
+}
+
+console.log("\n[30] Migration 061 on a real server: the windowed capture's lineage (PGlite cannot drive the chunk INSERT) — the 4-argument form records the chunk set from the envelope's recipe, or the label alone marked undeclared; an edit with windows replaces the row under 'edit' at the new text, an edit without windows drops it, a re-capture under another label drops it with the windows (022); lineage.ts's recipe builder is the one spelling the server sends (SMD-1731)");
+{
+  // Its own pool, as [28] has: the sections before close the shared one.
+  const sql = new SQL({ url: URL_, max: 2 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const MODEL = EMBEDDING_MODEL;
+  type Lin = { kind: string; by: string; fps: string[]; recipe: Record<string, unknown>; at: string };
+  const rowsOf = async (id: string) => (await sql`SELECT artifact_kind AS kind, produced_by AS by, input_fingerprints AS fps, recipe, produced_at::text AS at FROM derivations WHERE artifact_id = ${id}::uuid ORDER BY artifact_kind`) as Lin[];
+  const chunkRow = async (id: string) => (await rowsOf(id)).find((r) => r.kind === "chunks");
+  const windowsOf = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${id}::uuid`)[0].c);
+  const params = (r: Record<string, unknown> | undefined) => (r?.params ?? {}) as Record<string, unknown>;
+  const windows = [{ content: "window one", embedding: unit(1), context: "ctx one" }, { content: "window two", embedding: unit(2), context: null }];
+
+  // The recipe as the server's embedder would build it — lineage.ts's one
+  // spelling — from the configuration the windows were made under.
+  const cfg = { chunkTokens: 300, chunkOverlap: 37, chunkThreshold: 300, chunkTokensFrom: "flag", chunkContext: true, metadataModel: "stub-meta" } as unknown as Parameters<typeof chunkRecipe>[0];
+  const recipe = chunkRecipe(cfg, { model: MODEL, chunks: windows.map((w) => ({ content: w.content, embedding: [] as number[], ...(w.context ? { context: w.context } : {}) })) });
+  assert(recipe !== undefined && recipe.deterministic === false && recipe.blurbs === 1 && recipe.blurb_model === "stub-meta" && /^sha256:[0-9a-f]{64}$/.test(String(recipe.prompt_hash)) && params(recipe).tokens === 300 && params(recipe).overlap === 37 && params(recipe).estimator === CHUNK_ESTIMATOR && recipe.model === MODEL,
+    `lineage.ts builds the window set's recipe: non-deterministic while a blurb rides a window, the blurb model and its prompt's hash, the split's parameters and estimator, the model (${JSON.stringify(recipe)})`);
+  const bare = chunkRecipe({ ...cfg, chunkContext: false }, { model: MODEL, chunks: [{ content: "w", embedding: [] as number[] }] });
+  assert(bare !== undefined && bare.deterministic === true && !("blurb_model" in bare) && !("prompt_hash" in bare), "…deterministic, with no blurb model and no prompt hash, when the blurbs are off");
+  assert(chunkRecipe(cfg, { model: MODEL, chunks: [] }) === undefined, "…and nothing for a capture that made no windows — no artifact, no recipe");
+  // The tags' recipe over the board sync's shape: tagsOverExisting clears an
+  // earlier marker with `metadata_extraction_failed: null` on a successful
+  // answer — a recipe still; a failure (a string reason) or an egress refusal —
+  // none (cold read, second review pass: the presence test recorded nothing
+  // for every ticket edit).
+  const metaCfg = { metadataModel: "stub-meta", metadataTemperature: 0 };
+  assert(metadataRecipe(metaCfg, tagsOverExisting({ people: [], topics: ["a"], type: "observation" }))?.model === "stub-meta"
+      && metadataRecipe(metaCfg, tagsOverExisting({ topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" })) === undefined
+      && metadataRecipe(metaCfg, metadataRefused()) === undefined
+      && metadataRecipe(metaCfg, { source: "mcp" }) === undefined,
+    "the tags' recipe reads the marker's value: a cleared marker (null) beside the extractor's tags is a recipe, a failure reason or a refusal is none, and tags with none of the extractor's keys are none");
+
+  // The 4-argument form with the envelope: the set's row carries the recipe
+  // as sent plus the count, at the capture's fingerprint; the vector's row beside it.
+  const w = (await sql`SELECT upsert_thought('061 live: a windowed capture', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL, lineage: { chunks: recipe } }}::jsonb, ${unit(0)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string; fingerprint: string; chunks: number };
+  let c = await chunkRow(w.id);
+  assert(w.chunks === 2 && c !== undefined && c.by === "capture" && c.recipe.count === 2 && c.recipe.blurbs === 1 && params(c.recipe).tokens === 300 && c.fps.join() === w.fingerprint && (await rowsOf(w.id)).map((r) => r.kind).join() === "chunks,vector",
+    `the windowed capture records its chunk set from the envelope — the recipe as sent plus the count — and the vector's row beside it (${JSON.stringify(c?.recipe)})`);
+  // Without the envelope: the label alone, marked undeclared.
+  const w2 = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(3)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string };
+  c = await chunkRow(w2.id);
+  assert(c !== undefined && c.recipe.deterministic === true && c.recipe.declared === false && c.recipe.model === MODEL && c.recipe.count === 2 && !("params" in c.recipe), `a 4-argument caller that declares no recipe gets the label alone, marked undeclared (${JSON.stringify(c?.recipe)})`);
+  // An edit with windows and the envelope replaces the row under 'edit', at the new text.
+  const e = (await sql`SELECT update_thought(${w.id}::uuid, '061 live: the windowed capture, edited', NULL, ${unit(4)}::vector, ${[{ content: "window three", embedding: unit(5), context: null }]}::jsonb, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL, ${{ chunks: bare }}::jsonb) AS r`)[0].r as { ok: boolean };
+  c = await chunkRow(w.id);
+  const fpE = (await sql`SELECT content_fingerprint_of('061 live: the windowed capture, edited') AS f`)[0].f as string;
+  assert(e.ok === true && c !== undefined && c.by === "edit" && c.recipe.count === 1 && c.recipe.deterministic === true && c.fps.join() === fpE && (await rowsOf(w.id)).length === 2 && (await windowsOf(w.id)) === 1,
+    `an edit with windows replaces the set and its row under 'edit', at the new text (${JSON.stringify(c)})`);
+  // An edit with content and no windows drops the set and its row; the vector's stands.
+  const e2 = (await sql`SELECT update_thought(${w.id}::uuid, '061 live: edited to one window-less text', NULL, ${unit(6)}::vector, NULL, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
+  assert(e2.ok === true && (await chunkRow(w.id)) === undefined && (await windowsOf(w.id)) === 0 && (await rowsOf(w.id)).map((r) => r.kind).join() === "vector", "an edit with content and no windows drops the set and its row; the vector's stands");
+  // 022's rule: a re-capture under the same label keeps the windows and their
+  // row; under another label both go, and the vector's row follows the label.
+  const same = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(3)}::vector) AS r`)[0].r as { existed: boolean };
+  assert(same.existed === true && (await chunkRow(w2.id)) !== undefined && (await windowsOf(w2.id)) === 2, "a re-capture under the same label keeps the windows and their row");
+  const other = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector) AS r`)[0].r as { existed: boolean };
+  assert(other.existed === true && (await chunkRow(w2.id)) === undefined && (await windowsOf(w2.id)) === 0 && (await rowsOf(w2.id)).find((r) => r.kind === "vector")?.recipe.model === "other-model",
+    "a re-capture under another label drops the windows and their row (022), and the vector's row follows the new label");
+  // The 4-argument form replaces the set: windows again under the new label,
+  // then the same text with an empty set — the windows and their row go, the
+  // vector's stays (run-it, third review pass: the DELETE before the replace
+  // had a textual tooth alone).
+  await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector, ${windows}::jsonb)`;
+  assert((await chunkRow(w2.id)) !== undefined && (await windowsOf(w2.id)) === 2, "a 4-argument re-capture with windows records the set again");
+  await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector, '[]'::jsonb)`;
+  assert((await chunkRow(w2.id)) === undefined && (await windowsOf(w2.id)) === 0 && (await rowsOf(w2.id)).map((r) => r.kind).join() === "vector", "…and the same text with an empty set drops the windows and their row, leaving the vector's");
+  // Two extractions racing under different keys (016's race; the reason the
+  // lineage rows align to what stands — cold read, third review pass; the
+  // run, fourth): a pass under A committed; A re-extracts in an open
+  // transaction; B's extracted-class DELETE finds the row A deleted and waits
+  // on A; A commits; B's DELETE does not see the rows A inserted after its
+  // snapshot, so A's mention stands beside B's. Every standing (thought, key)
+  // pair has its lineage row — under the delete BY KEY, B took A's with it.
+  // Bun's SQL is lazy: B's call is dispatched with execute() and awaited
+  // after A commits, or the two run serially and prove nothing.
+  const cA = new SQL({ url: URL_, max: 1 }), cB = new SQL({ url: URL_, max: 1 });
+  try {
+    const race = (await cA`SELECT upsert_thought('061 live: two extractions racing', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb, ${unit(9)}::vector) AS r`)[0].r as { id: string };
+    const rte = (c: SQL, key: string, name: string) => c`SELECT record_thought_entities(${race.id}::uuid, ${key}, ${[{ name, type: "person", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL) AS r`;
+    await rte(cA, "extract:a@p1", "Alice");
+    await cA`BEGIN`;
+    await rte(cA, "extract:a@p1", "Alice");
+    await cB`BEGIN`;
+    const pB = rte(cB, "extract:b@p1", "Bob").execute();
+    let waited = 0;
+    for (let i = 0; i < 40 && !waited; i++) {
+      await Bun.sleep(50);
+      waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+    }
+    await cA`COMMIT`;
+    await pB;
+    await cB`COMMIT`;
+    const standing = ((await sql`SELECT extraction_key AS key FROM thought_entities WHERE thought_id = ${race.id}::uuid ORDER BY 1`) as { key: string }[]).map((r) => r.key);
+    const lineage = ((await sql`SELECT produced_by AS by FROM derivations WHERE artifact_kind = 'entities' AND artifact_id = ${race.id}::uuid ORDER BY 1`) as { by: string }[]).map((r) => r.by);
+    assert(waited === 1 && standing.join() === "extract:a@p1,extract:b@p1" && lineage.join() === standing.join(),
+      `two extractions racing under different keys: B waited on A's open transaction, both mentions stand (016's race), and each standing key has its lineage row (waited ${waited}; standing ${standing.join()}; lineage ${lineage.join()})`);
+  } finally {
+    await cA.close();
+    await cB.close();
+  }
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql.close();
+}
+
+console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild_derived — a dry run keeps nothing, a run feeds the three pools and sets the proposal stale, --status reads the census, --orphans sweeps a row whose windows a raw delete removed; the walk rides the GIN index; two sessions racing — a rebuild against a reviewer's accept (serialised by the supersession lock), a forget-arm rebuild against a worker's extraction (the entity lock, no deadlock) (SMD-1732)");
+{
+  // Its own pool, as [30] has.
+  const sql = new SQL({ url: URL_, max: 2 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`DELETE FROM ob1_entities`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const MODEL = EMBEDDING_MODEL;
+  const cfg = Object.fromEntries(((await sql`SELECT key, value FROM ob1_config WHERE key IN ('embedding_model', 'embedding_dim')`) as { key: string; value: string }[]).map((r) => [r.key, r.value]));
+  const REEMBED = `reembed:${cfg.embedding_model}@${cfg.embedding_dim}`;
+  const CUR_KEY = "extract:live@p2", JUDGE = "consolidate:live@p1";
+  const rebuildTs = (...extra: string[]) => runScript(["bun", join(HERE, "rebuild.ts"), "--url", URL_!, ...extra], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: HERE });
+  const claimsOf = async (id: string) => ((await sql`SELECT work_type AS w, status AS s FROM thought_work_claims WHERE thought_id = ${id}::uuid ORDER BY 1`) as { w: string; s: string }[]).map((c) => `${c.w}:${c.s}`).join();
+  const marksOf = async (id: string) => ((await sql`SELECT artifact_kind AS k, stale_reason AS r FROM derivations WHERE artifact_id = ${id}::uuid ORDER BY 1`) as { k: string; r: string | null }[]).map((m) => `${m.k}:${m.r ?? "-"}`).join();
+  const status = async (pid: string) => ((await sql`SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid`) as { status: string }[])[0]?.status;
+
+  // The fixture: an older and a newer thought sharing Alice, the newer with
+  // real windows through the 4-argument form (its chunks row from the
+  // envelope's recipe), a pending proposal; the configured extraction key set
+  // after the captures (016's trigger would enqueue them under it).
+  const older = (await sql`SELECT upsert_thought('063 live: the older note about Alice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string; fingerprint: string };
+  await sql`UPDATE thoughts SET created_at = now() - interval '3 days' WHERE id = ${older.id}::uuid`;
+  const windows = [{ content: "window one", embedding: unit(2) }, { content: "window two", embedding: unit(3) }];
+  const newer = (await sql`SELECT upsert_thought('063 live: the newer note about Alice and Bob', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL, lineage: { chunks: { deterministic: true, model: MODEL, params: { tokens: 300 }, count: 2 } } }}::jsonb, ${unit(2)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string; fingerprint: string };
+  for (const [id, ents] of [[older.id, [{ name: "Alice", type: "person", confidence: 0.9 }]], [newer.id, [{ name: "Alice", type: "person", confidence: 0.9 }, { name: "Bob", type: "person", confidence: 0.9 }]]] as const) {
+    const e = (await sql`SELECT record_thought_entities(${id}::uuid, 'extract:old@p1', ${JSON.stringify(ents)}::text::jsonb, '[]'::jsonb, NULL, NULL, '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { ok: boolean };
+    assert(e.ok === true, "the fixture's extractions stand");
+  }
+  const pid = (await sql`SELECT record_supersession_proposal(${older.id}::uuid, ${newer.id}::uuid, 'newer_supersedes_older', 0.9, 'because', 0.8, ${JUDGE}::text, NULL, NULL, NULL, '{"deterministic": false}'::jsonb) AS id`)[0].id as string;
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${CUR_KEY}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+  assert((await marksOf(newer.id)) === "chunks:-,entities:-,vector:-" && Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`)[0].c) === 2, `the newer thought's three rows, none marked, two windows (${await marksOf(newer.id)})`);
+
+  // The walk rides the GIN index (a small table would seq-scan; the planner
+  // is asked with the scan off, as [15]'s plan check does for its index).
+  const plan = JSON.stringify(await sql.unsafe(`SET enable_seqscan = off; EXPLAIN (FORMAT JSON) SELECT * FROM derivations WHERE input_ids && ARRAY['${newer.id}'::uuid]; RESET enable_seqscan`).simple());
+  assert(/idx_derivations_inputs/.test(plan), `the forward probe uses the GIN index on input_ids (${plan.slice(0, 200)})`);
+
+  // A raw text move, then the door: a dry run reports and keeps nothing; a
+  // run feeds the three pools under the workers' keys and sets the proposal
+  // stale; --status reads it back.
+  await sql`UPDATE thoughts SET content = '063 live: the newer note about Alice and Bob, rewritten', content_fingerprint = content_fingerprint_of('063 live: the newer note about Alice and Bob, rewritten') WHERE id = ${newer.id}::uuid`;
+  await sql`DELETE FROM thought_work_claims WHERE thought_id = ${newer.id}::uuid`;
+  const dry = await rebuildTs("--input", newer.id, "--reason", "live: edit", "--dry-run");
+  assert(dry.code === 0 && /dry run: the call runs and rolls back/.test(dry.out) && /enqueued:\s+3 \(thought, pool\) claim\(s\)/.test(dry.out) && (await claimsOf(newer.id)) === "" && (await status(pid)) === "pending" && (await marksOf(newer.id)) === "chunks:-,entities:-,vector:-",
+    `a dry run prints the report the function would give and keeps nothing (exit ${dry.code}: ${dry.out.split("\n").find((l) => /enqueued/.test(l))?.trim()}; claims "${await claimsOf(newer.id)}")`);
+  const live = await rebuildTs("--input", newer.id, "--reason", "live: edit");
+  assert(live.code === 0 && /rebuilt:\s+0/.test(live.out) && /enqueued:\s+3/.test(live.out) && /marked:\s+3 lineage row\(s\)[^\n]*1 pending proposal\(s\) set stale/.test(live.out) && new RegExp(`${REEMBED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+→\\s+bun db/reembed\\.ts --url <url>`).test(live.out) && /extract:live@p2\s+→\s+bun db\/extract-entities\.ts/.test(live.out) && /consolidate:live@p1\s+→\s+bun db\/consolidate\.ts/.test(live.out),
+    `a run hands the windows and the vector to the reembed pool, the extraction to the configured key, the pair to the judge's, and names the command that drains each (exit ${live.code}: ${live.out.trim().split("\n").slice(2, 6).join(" / ").slice(0, 300)})`);
+  assert((await claimsOf(newer.id)) === `${JUDGE}:pending,${CUR_KEY}:pending,${REEMBED}:pending` && (await status(pid)) === "stale" && (await marksOf(newer.id)) === "chunks:live: edit,entities:live: edit,vector:live: edit",
+    `…the claims stand under the three keys, the proposal is stale, the reason is on every row (${await claimsOf(newer.id)}; ${await marksOf(newer.id)})`);
+  const st = await rebuildTs("--status");
+  assert(st.code === 0 && /marked:\s+3 row\(s\) await a re-run/.test(st.out) && /proposals:\s+1 stale/.test(st.out) && /orphans:\s+0 row\(s\)/.test(st.out) && new RegExp(`${CUR_KEY} \\(1 pending\\)`).test(st.out),
+    `--status reads the census back: the marks, the stale proposal, the pools (${st.out.trim().split("\n").slice(0, 7).join(" / ").slice(0, 300)})`);
+  // A raw delete of the windows leaves an orphan row: the sweep deletes it.
+  await sql`DELETE FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`;
+  const sweep = await rebuildTs("--orphans");
+  assert(sweep.code === 0 && /orphans:\s+1 thought\(s\)/.test(sweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\)/.test(sweep.out) && (await marksOf(newer.id)) === "entities:live: edit,vector:live: edit",
+    `--orphans deletes the chunks row whose windows are gone and leaves the rest (exit ${sweep.code}: ${sweep.out.trim().split("\n").slice(0, 2).join(" / ")})`);
+  assert(/orphans: none/.test((await rebuildTs("--orphans")).out), "…and a second sweep finds none");
+  // The door's array bind (first review pass: Bun bound a string[] as the
+  // bare text "a,b" — malformed array literal), and a fresh process on a
+  // thought whose only lineage row is a proposal (the record variable with
+  // no shape, same pass).
+  const gone = await rebuildTs("--input", newer.id, "--gone", "--fingerprints", "live-old-fp,live-\"quoted\"-fp", "--dry-run");
+  assert(gone.code === 0 && /input:\s+[0-9a-f-]{36} \(leaving/.test(gone.out) && /cascade:\s+1 proposal\(s\)/.test(gone.out), `the forget arm through the door with two fingerprints, one carrying a quote, runs dry and reports the cascade (exit ${gone.code}: ${gone.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 240)})`);
+  const P0 = (await sql`SELECT upsert_thought('063 live: a vectorless older note', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`)[0].r as { id: string };
+  await sql`UPDATE thoughts SET created_at = now() - interval '4 days' WHERE id = ${P0.id}::uuid`;
+  const Q0 = (await sql`SELECT upsert_thought('063 live: a vectorless newer note', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`)[0].r as { id: string };
+  await sql`SELECT record_supersession_proposal(${P0.id}::uuid, ${Q0.id}::uuid, 'conflict_undirected', 0.5, 'first', 0.5, ${JUDGE}::text)`;
+  const firstRow = await rebuildTs("--input", Q0.id, "--reason", "live: first");
+  assert(firstRow.code === 0 && /walked:\s+1 lineage row/.test(firstRow.out) && /current:\s+1/.test(firstRow.out), `a fresh process's first rebuild on a thought whose only row is a proposal runs (exit ${firstRow.code}: ${firstRow.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 200)})`);
+  // The fingerprints reach the function for real: two planted snapshot rows
+  // — one with a quote, one with a backslash — go with Q0's forget; a third,
+  // not passed, stays (second review pass: the dry run above proved only the
+  // exit code).
+  for (const f of ['live-"quoted"-fp', "live-back\\slash-fp", "live-unpassed-fp"]) await sql`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES (${f}, ${MODEL}, ${unit(4)}::vector, ${EMBEDDING_DIM}) ON CONFLICT DO NOTHING`;
+  const goneReal = await rebuildTs("--input", Q0.id, "--gone", "--fingerprints", 'live-"quoted"-fp,live-back\\slash-fp');
+  const snapLeft = ((await sql`SELECT content_fingerprint AS f FROM ob1_embedding_snapshot WHERE content_fingerprint LIKE 'live-%' ORDER BY 1`) as { f: string }[]).map((r) => r.f).join();
+  assert(goneReal.code === 0 && /deleted:\s+2 /.test(goneReal.out) && snapLeft === "live-unpassed-fp", `a real forget through the door deletes the snapshot rows at the passed fingerprints, quotes and backslashes intact, and leaves the one not passed (exit ${goneReal.code}; left: ${snapLeft})`);
+  await sql`DELETE FROM ob1_embedding_snapshot WHERE content_fingerprint LIKE 'live-%'`;
+
+  // Two sessions: a rebuild inside an open transaction against a reviewer
+  // accepting the same proposal — the reviewer waits on the supersession
+  // lock the rebuild took first (036's order), then acts on the row the
+  // rebuild left. Bun's SQL is lazy: the blocked call is dispatched with
+  // execute() (test-live [30]'s lesson).
+  await sql`UPDATE supersession_proposals SET status = 'pending' WHERE id = ${pid}::uuid`;
+  const cA = new SQL({ url: URL_, max: 1 }), cB = new SQL({ url: URL_, max: 1 });
+  try {
+    await cA`BEGIN`;
+    const rA = (await cA`SELECT rebuild_derived(${newer.id}::uuid, 'race: rebuild') AS r`)[0].r as { ok: boolean; marked: number };
+    const pB = cB`SELECT review_supersession_proposal(${pid}::uuid, 'accept', 'raced', NULL, ${JSON.stringify(ACTOR)}::text::jsonb, true) AS r`.execute();
+    let waited = 0;
+    for (let i = 0; i < 40 && !waited; i++) {
+      await Bun.sleep(50);
+      waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+    }
+    await cA`COMMIT`;
+    const rB = (await pB)[0].r as { ok: boolean; status?: string; error?: string };
+    assert(rA.ok === true && waited === 1 && rB.ok === true && rB.status === "accepted" && (await status(pid)) === "accepted",
+      `the reviewer waited on the rebuild's lock and then accepted the stale row with p_force (waited ${waited}; ${JSON.stringify(rB)})`);
+
+    // A forget-arm rebuild against a worker writing the same thought's
+    // extraction: the worker holds the entity from its upsert; the rebuild
+    // locks the entities FIRST (016's order) and waits, then deletes the
+    // mentions the worker wrote — no 40P01, the graph empty at the end.
+    await cA`BEGIN`;
+    const eA = (await cA`SELECT record_thought_entities(${newer.id}::uuid, ${CUR_KEY}::text, '[{"name": "Alice", "type": "person", "confidence": 0.9}, {"name": "Carol", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL, '{"deterministic": false}'::jsonb) AS r`)[0].r as { ok: boolean };
+    const pF = cB`SELECT rebuild_derived(${newer.id}::uuid, 'race: forget', true) AS r`.execute();
+    waited = 0;
+    for (let i = 0; i < 40 && !waited; i++) {
+      await Bun.sleep(50);
+      waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+    }
+    await cA`COMMIT`;
+    const rF = (await pF)[0].r as { ok: boolean; deleted: number; cascading: { proposals: number } };
+    const ents = ((await sql`SELECT name FROM ob1_entities ORDER BY name`) as { name: string }[]).map((e) => e.name).join();
+    assert(eA.ok === true && waited === 1 && rF.ok === true && Number((await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${newer.id}::uuid`)[0].c) === 0 && ents === "Alice" && rF.cascading.proposals === 1,
+      `the forget arm waited on the worker's entity lock, then removed the mentions the worker had just written — Carol pruned, Alice (the older's) kept, the proposal counted for the cascade (waited ${waited}; entities ${ents}; ${JSON.stringify(rF)})`);
+  } finally {
+    await cA.close();
+    await cB.close();
+  }
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`DELETE FROM ob1_entities`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql.close();
+}
+
+console.log("\n[32] Migration 064 on a real server: the page store under concurrency — two sessions' first write of one section serialise on the page (one created, one updated), two sessions on two sections of one page leave the render the thought's content, a human's edit and a machine's regeneration racing leave the human's text live whichever commits first, a section write racing delete_thought of the page waits and finds no page (no deadlock), two creates of one slug — one title or two — leave one page and one refusal by name (SMD-1812)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const cA = new SQL({ url: URL_, max: 1 }), cB = new SQL({ url: URL_, max: 1 });
+  try {
+    type R = { action?: string; section_id?: string; page_id?: string; created?: boolean };
+    type Sec = { origin: string; body_md: string; pending: string | null };
+    const e = (await sql`SELECT upsert_thought('064 live: the evidence', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }}::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string };
+    const P = ((await sql`SELECT upsert_page('live-runbook', 'Live runbook', 'topic', '{}'::jsonb, 'alice') AS r`)[0].r as { page_id: string }).page_id;
+    const write = async (c: SQL, key: string, body: string, origin: string, actor: string): Promise<R> =>
+      ((await c`SELECT write_page_section(${P}::uuid, ${key}, ${body}, ${origin}, NULL, '{}'::jsonb, ${origin === "generated" ? sql.array([e.id], "TEXT") : null}::uuid[], NULL, ${actor}) AS r`) as { r: R }[])[0].r;
+    const secOf = async (key: string) => (await sql`SELECT origin, body_md, pending_body_md AS pending FROM page_sections WHERE page_id = ${P}::uuid AND section_key = ${key}`)[0] as Sec | undefined;
+    const revisions = async (key: string) => Number((await sql`SELECT count(*)::int AS c FROM page_section_revisions r JOIN page_sections s ON s.id = r.section_id WHERE s.page_id = ${P}::uuid AND s.section_key = ${key}`)[0].c);
+    const consistent = async () => { const [x] = await sql`SELECT render_page(${P}::uuid) = (SELECT content FROM thoughts WHERE id = ${P}::uuid) AS same`; return x.same === true; };
+
+    // Two first writes of one key, at once: the page lock and the unique key
+    // serialise them — one created, the other falls through to the
+    // existing-section path and updates; one section, two revisions (the
+    // bodies differ), the render the thought's content.
+    const [a1, b1] = await Promise.all([write(cA, "steps", "Machine A's text.", "generated", "gen-a"), write(cB, "steps", "Machine B's text.", "generated", "gen-b")]);
+    const actions = [a1.action, b1.action].sort().join();
+    const sections = Number((await sql`SELECT count(*)::int AS c FROM page_sections WHERE page_id = ${P}::uuid`)[0].c);
+    assert(actions === "created,updated" && a1.section_id === b1.section_id && sections === 1 && (await revisions("steps")) === 2 && (await consistent()),
+      `two sessions' first write of one section: one created, one updated, one section, two revisions, the render the thought's content (${actions}; ${sections} section)`);
+
+    // A human's edit and a machine's regeneration, at once, on the section
+    // the machine owns: if the human commits first the machine parks, if the
+    // machine commits first the human takes ownership over it — the live text
+    // is the human's either way, and the section is the human's.
+    const HUMAN = "The human's text, kept.";
+    const [h, m] = await Promise.all([write(cA, "steps", HUMAN, "manual", "alice"), write(cB, "steps", "The machine's regeneration.", "generated", "gen-b")]);
+    const after = (await secOf("steps"))!;
+    assert(h.action === "updated" && (m.action === "pending" || m.action === "updated") && after.body_md === HUMAN && after.origin === "manual" && (m.action === "pending" ? after.pending === "The machine's regeneration." : after.pending === null) && (await consistent()),
+      `a human and a machine racing on one section: the human's text is live and the section the human's whichever committed first (the machine's write ${m.action}${m.action === "pending" ? ", its draft parked" : ", overtaken"})`);
+    // …and the machine racing the human again now parks: human-owned.
+    // …and again on the now human-owned section: the machine parks whichever
+    // order the lock hands out — parked and left when the machine went first
+    // and the human's in-place write then cleared the buffer, parked and
+    // waiting when the human went first (run-it, first review pass: 17 of 40
+    // rounds took the first branch and a single-outcome assertion flaked).
+    const [h2, m2] = await Promise.all([write(cA, "steps", "The human's second text.", "manual", "alice"), write(cB, "steps", "The machine, again.", "generated", "gen-b")]);
+    const after2 = (await secOf("steps"))!;
+    assert(h2.action === "updated" && m2.action === "pending" && after2.body_md === "The human's second text." && after2.origin === "manual" && (after2.pending === "The machine, again." || after2.pending === null) && (await consistent()),
+      `…on a human-owned section the machine parks in either order and the human's text is live (the draft ${after2.pending === null ? "cleared by the human's later write" : "still waiting"})`);
+    // Two sessions on two DIFFERENT sections of one page: without the page lock
+    // the second writes the render it computed before the first committed, and
+    // the thought holds one section (run-it, first review pass: the mutant
+    // survived every suite). With it, B waits and the render is the content.
+    const t0 = Date.now();
+    const [d1, d2] = await Promise.all([write(cA, "left", "The left column.", "generated", "gen-a"), write(cB, "right", "The right column.", "generated", "gen-b")]);
+    const bothIn = (await sql`SELECT content FROM thoughts WHERE id = ${P}::uuid`)[0].content as string;
+    assert(d1.action === "created" && d2.action === "created" && /The left column\./.test(bothIn) && /The right column\./.test(bothIn) && (await consistent()),
+      `two sections written at once on one page: both in the thought, the render its content (${Date.now() - t0} ms for the pair)`);
+    // A section write racing delete_thought of the page: the writer locks the
+    // thought first, as the delete does, so one waits for the other — the
+    // write lands and the delete takes it, or the delete lands and the write
+    // finds no page — never a deadlock (run-it, first review pass: the
+    // page-first order deadlocked 38 of 40 races).
+    let deadlocks = 0, noPage = 0, landed = 0;
+    for (let i = 0; i < 12; i++) {
+      const pi = ((await sql`SELECT upsert_page(${`raced-delete-${i}`}, ${`Raced delete ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+      await sql`SELECT write_page_section(${pi}::uuid, 'first', 'Standing.', 'generated', NULL, '{}'::jsonb, ${sql.array([e.id], "TEXT")}::uuid[], NULL, 'gen')`;
+      const w = cA`SELECT write_page_section(${pi}::uuid, 'second', 'Racing the delete.', 'generated', NULL, '{}'::jsonb, ${sql.array([e.id], "TEXT")}::uuid[], NULL, 'gen') AS r`.then(() => "landed", (err: Error) => err.message);
+      const dl = cB`SELECT delete_thought(${pi}::uuid, NULL::jsonb) AS r`.then(() => "deleted", (err: Error) => err.message);
+      const [wr, dr] = await Promise.all([w, dl]);
+      if (/deadlock/.test(wr) || /deadlock/.test(dr)) deadlocks++;
+      else if (/no page/.test(wr)) noPage++;
+      else if (wr === "landed") landed++;
+      if (dr !== "deleted") deadlocks++;
+    }
+    const pagesLeft = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug LIKE 'raced-delete-%'`)[0].c);
+    assert(deadlocks === 0 && noPage + landed === 12 && pagesLeft === 0, `twelve section writes racing delete_thought of their page: no deadlock, each write landed first or found no page, every page gone (landed ${landed}, no page ${noPage}, deadlocks ${deadlocks})`);
+
+    // Two creates of one slug, at once: one page, the other refused by name —
+    // the loser's capture waits on 033's fingerprint lock, merges into the
+    // winner's thought, and is refused before it can take the slug.
+    const create = async (c: SQL) => { try { return { ok: ((await c`SELECT upsert_page('raced', 'A raced page') AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
+    const [ra, rb] = await Promise.all([create(cA), create(cB)]);
+    const created = [ra, rb].filter((x) => x.ok?.created === true), refusedOne = [ra, rb].filter((x) => x.ok === null);
+    const pagesRaced = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug = 'raced'`)[0].c);
+    const thoughtsRaced = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '# A raced page'`)[0].c);
+    assert(created.length === 1 && refusedOne.length === 1 && /another writer created with this text meanwhile|holds this page's exact text/.test(refusedOne[0].err) && pagesRaced === 1 && thoughtsRaced === 1,
+      `two creates of one slug: one page, one thought, the other refused by name (${refusedOne[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
+    // Two pages superseding each other at once, and a supersede racing its
+    // target's delete: upsert_page takes 029's supersession lock before any
+    // row, as delete_thought does — the loser of the loop is WOULD_CYCLE by
+    // name, the delete's loser finds no slug and creates the page anew; no
+    // deadlock (run-it, second review pass: 39 of 40 and 7 of 40 deadlocked).
+    const supA = ((await sql`SELECT upsert_page('sup-a', 'Supersedes A') AS r`)[0].r as { page_id: string }).page_id;
+    const supB = ((await sql`SELECT upsert_page('sup-b', 'Supersedes B') AS r`)[0].r as { page_id: string }).page_id;
+    const sup = async (c: SQL, slug: string, title: string, target: string) => { try { await c`SELECT upsert_page(${slug}, ${title}, 'topic', '{}'::jsonb, NULL, ${target}::uuid)`; return "ok"; } catch (err) { return (err as Error).message; } };
+    let loopDeadlocks = 0, loopCycles = 0;
+    for (let i = 0; i < 8; i++) {
+      const [ra2, rb2] = await Promise.all([sup(cA, "sup-a", "Supersedes A", supB), sup(cB, "sup-b", "Supersedes B", supA)]);
+      for (const r of [ra2, rb2]) { if (/deadlock/.test(r)) loopDeadlocks++; else if (/WOULD_CYCLE/.test(r)) loopCycles++; }
+      await sql`SELECT update_thought(${supA}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"supersedes": null}'::jsonb, NULL, NULL)`;
+      await sql`SELECT update_thought(${supB}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"supersedes": null}'::jsonb, NULL, NULL)`;
+    }
+    assert(loopDeadlocks === 0 && loopCycles >= 1, `two pages superseding each other, eight rounds: no deadlock, the loser refused as WOULD_CYCLE by name (${loopCycles} refused)`);
+    let supDeadlocks = 0, recreated = 0, updated = 0;
+    for (let i = 0; i < 8; i++) {
+      const tgt = ((await sql`SELECT upsert_page(${`sup-target-${i}`}, ${`Target ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+      const own = ((await sql`SELECT upsert_page(${`sup-owner-${i}`}, ${`Owner ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+      const s1 = cA`SELECT upsert_page(${`sup-owner-${i}`}, ${`Owner ${i} (second edition)`}, 'topic', '{}'::jsonb, NULL, ${tgt}::uuid) AS r`.then((r) => JSON.stringify((r[0] as { r: unknown }).r), (err: Error) => err.message);
+      const s2 = cB`SELECT delete_thought(${own}::uuid, NULL::jsonb) AS r`.then(() => "deleted", (err: Error) => err.message);
+      const [o1, o2] = await Promise.all([s1, s2]);
+      if (/deadlock/.test(o1) || /deadlock/.test(o2)) supDeadlocks++;
+      else if (/"created":true/.test(o1)) recreated++;
+      else if (/"created":false/.test(o1)) updated++;
+    }
+    assert(supDeadlocks === 0 && recreated + updated === 8, `a supersede racing its own page's delete, eight rounds: no deadlock — the page updated before the delete took it, or created anew after (${updated} updated, ${recreated} created anew)`);
+    // …and under two titles the slug's own unique index is what the loser meets,
+    // said by name rather than as the constraint's error (run-it, first review pass).
+    const createTitled = async (c: SQL, title: string) => { try { return { ok: ((await c`SELECT upsert_page('raced-titles', ${title}) AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
+    const [ta, tb] = await Promise.all([createTitled(cA, "Title A"), createTitled(cB, "Title B")]);
+    const titledOk = [ta, tb].filter((x) => x.ok?.created === true), titledNo = [ta, tb].filter((x) => x.ok === null);
+    const titledThoughts = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content IN ('# Title A', '# Title B')`)[0].c);
+    assert(titledOk.length === 1 && titledNo.length === 1 && /upsert_page: another writer created page 'raced-titles' meanwhile — retry, and the call will update it/.test(titledNo[0].err) && titledThoughts === 1,
+      `two creates of one slug under two titles: one page, the loser refused by name and its thought rolled back (${titledNo[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
+  } finally {
+    await cA.close();
+    await cB.close();
+  }
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql.close();
+}
+
+console.log("\n[33] Migration 066's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a row gaining a key while it is superseded holds its own pointer lock; a pointer write waits for a concurrent move of its target's issue; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
+{
+  // test-schema [60] holds the rules on one connection; what it cannot hold is
   // a second writer's uncommitted row. Each race below goes stale without the
   // lock it names, and drift() — 058's formulas against the
   // tables — is the check.
@@ -5651,8 +6722,8 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
   // waits on R-1's key until A commits and then sees X1's new status — without
   // the lock it would read X1's old one and its upsert, queued behind A's,
   // would overwrite A's head with it.
-  const x1 = await row("[28] R-1's head", { kind: "race2256", issue: "R-1", status_type: "started", linear_updated_at: "2026-09-02" });
-  const x2 = await row("[28] R-1's older row", { kind: "race2256", issue: "R-1", status_type: "started", linear_updated_at: "2026-09-01" });
+  const x1 = await row("[33] R-1's head", { kind: "race2256", issue: "R-1", status_type: "started", linear_updated_at: "2026-09-02" });
+  const x2 = await row("[33] R-1's older row", { kind: "race2256", issue: "R-1", status_type: "started", linear_updated_at: "2026-09-01" });
   {
     const connA = racer(), connB = racer();
     const { p: doneP, open: done } = gate();
@@ -5688,8 +6759,8 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
   // recompute had not seen Y: A-1's head stayed X, completed. Now X's write
   // holds X's pointer bucket (class 22562), Y waits on it, and after X commits
   // Y reads X's issue and recomputes A-1 with X superseded: the head is R.
-  const r1 = await row("[28] A-1's older row", { kind: "race2256", issue: "A-1", status_type: "started", linear_updated_at: "2026-01-01" });
-  const xk = await row("[28] X, joining A-1", { kind: "race2256", status_type: "completed", linear_updated_at: "2026-09-01" });
+  const r1 = await row("[33] A-1's older row", { kind: "race2256", issue: "A-1", status_type: "started", linear_updated_at: "2026-01-01" });
+  const xk = await row("[33] X, joining A-1", { kind: "race2256", status_type: "completed", linear_updated_at: "2026-09-01" });
   {
     const connA = racer(), connB = racer();
     const { p: doneP, open: done } = gate();
@@ -5703,7 +6774,7 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
     const bDone = connB.begin(async (tx: SQL) => {
       await tx`SET LOCAL statement_timeout = '8s'`;
       bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
-      await tx`INSERT INTO thoughts (content, metadata, supersedes) VALUES ('[28] Y, superseding X', ${{ kind: "race2256" }}::jsonb, ${xk}::uuid)`;
+      await tx`INSERT INTO thoughts (content, metadata, supersedes) VALUES ('[33] Y, superseding X', ${{ kind: "race2256" }}::jsonb, ${xk}::uuid)`;
     }).catch((e: Error) => { errors += e.message; });
     await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22562)) === 1);
     const bWaited = bPid > 0 && (await waitingOn(bPid, 22562)) === 1;
@@ -5722,9 +6793,9 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
   // not committed) and commits; B reads P's issue — now M-2 — and recomputes
   // it with P superseded, so M-2's head is Q. Before the first review pass B
   // read P's issue as M-1 and needed a re-read after the grant to find M-2.
-  const p = await row("[28] P, moving to M-2", { kind: "race2256", issue: "M-1", status_type: "started", linear_updated_at: "2026-09-05" });
-  const qRow = await row("[28] Q, M-2's older row", { kind: "race2256", issue: "M-2", status_type: "completed", linear_updated_at: "2026-09-01" });
-  const y = await row("[28] Y, P's successor", { kind: "race2256" });
+  const p = await row("[33] P, moving to M-2", { kind: "race2256", issue: "M-1", status_type: "started", linear_updated_at: "2026-09-05" });
+  const qRow = await row("[33] Q, M-2's older row", { kind: "race2256", issue: "M-2", status_type: "completed", linear_updated_at: "2026-09-01" });
+  const y = await row("[33] Y, P's successor", { kind: "race2256" });
   {
     const connC = racer(), connA = racer(), connB = racer();
     const { p: releaseP, open: release } = gate();
@@ -5759,8 +6830,8 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
 
   // Two successors of one thought written at once: both take its superseder
   // key (class 22562), so the later sees the earlier and the newest wins.
-  const target = await row("[28] a thought superseded twice at once", { kind: "race2256" });
-  const [s1, s2] = [await row("[28] successor one", { kind: "race2256" }), await row("[28] successor two", { kind: "race2256" })];
+  const target = await row("[33] a thought superseded twice at once", { kind: "race2256" });
+  const [s1, s2] = [await row("[33] successor one", { kind: "race2256" }), await row("[33] successor two", { kind: "race2256" })];
   await db`UPDATE thoughts SET created_at = now() - interval '1 hour' WHERE id = ${s1}::uuid`;
   {
     const connA = racer(), connB = racer();
@@ -5796,13 +6867,13 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
   // shares X2's bucket) holding X2's bucket and waiting for D-1's closed a
   // cycle. A test trigger sorting between the two firings pauses the DELETE
   // there; now P's writer waits on X2's bucket instead, and both commit.
-  const xk1 = await row("[28] X1, D-1's row, deleted", { kind: "race2256", issue: "D-1", status_type: "started", linear_updated_at: "2026-09-01" });
-  const xp2 = await row("[28] X2, plain, deleted", { kind: "race2256" });
-  await row("[28] W2, superseding X2", { kind: "race2256" }).then((id) => db`UPDATE thoughts SET supersedes = ${xp2}::uuid WHERE id = ${id}::uuid`);
+  const xk1 = await row("[33] X1, D-1's row, deleted", { kind: "race2256", issue: "D-1", status_type: "started", linear_updated_at: "2026-09-01" });
+  const xp2 = await row("[33] X2, plain, deleted", { kind: "race2256" });
+  await row("[33] W2, superseding X2", { kind: "race2256" }).then((id) => db`UPDATE thoughts SET supersedes = ${xp2}::uuid WHERE id = ${id}::uuid`);
   const [{ b: x2bucket }] = await db`SELECT hashtext(${xp2}) & 255 AS b`;
   let pk = "";
   for (let k = 0; !pk; k++) {
-    const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[28] P candidate ${k}`}, ${{ kind: "race2256" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
+    const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[33] P candidate ${k}`}, ${{ kind: "race2256" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
     if (c.b === x2bucket) pk = c.id;
   }
   await db`UPDATE thoughts SET metadata = metadata || '{"issue": "D-1", "status_type": "started", "linear_updated_at": "2026-08-01"}' WHERE id = ${pk}::uuid`;
@@ -5845,10 +6916,10 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
   // them too (16.15 and 17.8 do not).
   const moved: string[] = [];
   for (const shape of ["cte", "merge"]) {
-    const t = await row(`[28] ${shape} T, deleted`, { kind: "race2256", issue: `G-7-${shape}` });
-    const sRow = await row(`[28] ${shape} S, T's successor`, { kind: "race2256", issue: `G-2-${shape}` });
+    const t = await row(`[33] ${shape} T, deleted`, { kind: "race2256", issue: `G-7-${shape}` });
+    const sRow = await row(`[33] ${shape} S, T's successor`, { kind: "race2256", issue: `G-2-${shape}` });
     await db`UPDATE thoughts SET supersedes = ${t}::uuid WHERE id = ${sRow}::uuid`;
-    await row(`[28] ${shape} B, G-5's older row`, { kind: "race2256", issue: `G-5-${shape}`, status_type: "started", linear_updated_at: "2026-09-01" });
+    await row(`[33] ${shape} B, G-5's older row`, { kind: "race2256", issue: `G-5-${shape}`, status_type: "started", linear_updated_at: "2026-09-01" });
     const patch = { issue: `G-5-${shape}`, status_type: "canceled", linear_updated_at: "2026-09-02" };
     if (shape === "cte") await db`WITH d AS (DELETE FROM thoughts WHERE id = ${t}::uuid RETURNING id) UPDATE thoughts SET metadata = metadata || ${patch}::jsonb WHERE id = ${sRow}::uuid`;
     else await db`MERGE INTO thoughts x USING (VALUES (${t}::uuid, 'delete'), (${sRow}::uuid, 'update')) v(id, op) ON x.id = v.id
@@ -5867,7 +6938,7 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
   // rows read are counted too — of the projection's tables as well, which a
   // hash join over every superseded thought scanned per write (third review
   // pass).
-  await db`INSERT INTO thoughts (content, metadata) SELECT '[28] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
+  await db`INSERT INTO thoughts (content, metadata) SELECT '[33] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
   await db`UPDATE thoughts t SET supersedes = s.id FROM thoughts s
             WHERE t.metadata->>'kind' = 'race2256' AND s.metadata->>'kind' = 'race2256'
               AND (t.metadata->>'n')::int <= 5000 AND (s.metadata->>'n')::int = (t.metadata->>'n')::int + 10000`;

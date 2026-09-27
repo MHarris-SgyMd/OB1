@@ -1358,7 +1358,9 @@ tokens per input token and a 95th percentile of 1.6 over the 262 thoughts the
 answer style, not a property of the task, and the budget shipped is three
 times the text plus 1,536. A runaway ends at the budget as a malformed answer
 the worker records failed in about a minute, where before it held a worker for
-the whole timeout.
+the whole timeout (since SMD-2260 a window's is left out of a thought at least
+one of whose other windows parsed, and the thought recorded succeeded with a
+partial caveat).
 
 ### The planted set: what a window costs in relations, 2026-09-22
 
@@ -1467,6 +1469,23 @@ What the rows say, read together:
   whole-thought retry averages 12.0 mentions where the shipped shape's
   windows, most of which converge first time, average 17.1 — the windows
   keep the rich answer where they can and the retry rescues where they cannot.
+- **Escalation is the alternative to the penalty (SMD-2000).** Where the retry
+  spends the same model again under a penalty that thins the rescued answer,
+  `OB1_EXTRACT_ESCALATE_MODEL` remakes the runaway once on a larger local model
+  with no penalty — the `w1200e` arm here (`--arms w1200e --escalate
+  qwen3.8:27b`). On the dogfood brain the 27B never looped on the thoughts the
+  7B could not finish: draining the p2 backlog on the 7B left nine hard
+  failures, eight of them runaways, and escalating exactly those to the 27B
+  extracted every one, 0 runaways, and dropped no relation for an unlisted
+  entity where the 7B passes dropped hundreds. Its answer is not thinner the
+  way the penalised one is — it is the larger model's whole answer. The cost is
+  the large model, spent only on the failures: ~45 s a call, ~1 h for a brain's
+  ~80 runaways, and the 27B beside the 4B embedder is 28 GB with
+  `OLLAMA_MAX_LOADED_MODELS=2`, so a capture mid-pass can evict the embedder and
+  pay its reload — leave the knob unset on a box that cannot hold both. Precision
+  of the escalated answers against the penalised ones is measured on SMD-1961's
+  labelled corpus once it lands; that number is pending the set, not this
+  section's synthetic one.
 
 **The default is 1200** (`chunk.ts`, `DEFAULT_EXTRACT_WINDOW_TOKENS`) **with
 the retry on** (`EXTRACT_RETRY_RUNAWAY`): 27 of 32 under this budget, 32 of 32
@@ -2610,7 +2629,7 @@ lifecycle on every call. The budget pre-registered (added cost at most the
 hybrid's own median at 10,000) was missed; the flag shipped opt-in on the
 maintainer's call, the cost stated in the flag's description. The numbers are
 one machine's: a review pass measured +18.8 ms over 1.6 at 10,000 — over budget
-either way. Migration 060 (SMD-2256) stores the heads and superseders
+either way. Migration 066 (SMD-2256) stores the heads and superseders
 `node_state` read, kept current by triggers on `thoughts`, and re-creates the
 wrapper in plpgsql: in the bench's run of that code the arm adds +0.50 ms at
 10,000 with no needle (the difference of medians, alternating order — inside
@@ -4993,7 +5012,9 @@ fingerprint on the graph rows, content in the capture event. The record is
 
 ## Does the extension contract survive the move? `thoughts` as a writable projection, prototyped (SMD-1999)
 
-`eval-writable-projection.ts`. Spike 2 of the event-sourcing ADR (SMD-1997):
+`eval-writable-projection.ts` — RETIRED with migration 060 (SMD-2116), which
+shipped the bodies it prototyped; the record stays here, see the note above
+the results. Spike 2 of the event-sourcing ADR (SMD-1997):
 under CQRS-lite the write-side truth is the event log and the `thoughts` row
 is a projection of it — and the entire community surface (recipes, schemas,
 integrations) writes to that row, through `upsert_thought` /
@@ -5066,42 +5087,43 @@ their step's letter; the events' stance, cites, valid window and context (its
 `claimed`) are in the comparison. The cost line is the
 median of 200 captures and 200 edits, baseline against option 2.
 
-**The prototype** is SQL in `evals/writable-projection/`, applied on top of
-053 and thrown away with the database — where check 7 does not look,
-deliberately: the write functions are redefined for the measurement, not
-shipped. `common.sql` lifts 046's diff rule out of the audit trigger into
+**The prototype** was SQL in `evals/writable-projection/` (retired with 060;
+the bodies are `db/migrations/060_append_then_project.sql` now), applied on
+top of 053 and thrown away with the database — where check 7 did not look,
+deliberately: the write functions were redefined for the measurement, not
+shipped. `common.sql` lifted 046's diff rule out of the audit trigger into
 `ob1_thought_diff` (one addition: an update records the fingerprint's
 before/after, since 018 sets it NULL for a text another row holds — a decision
-a replay cannot re-derive), makes the append a function
+a replay cannot re-derive), made the append a function
 (`ob1_append_thought_event`, 046's trigger tail: the kind from the registry,
-the trust ceiling, the door, the claim), adds the projector
+the trust ceiling, the door, the claim), added the projector
 (`ob1_project_thought_event`: capture → INSERT, update → UPDATE by the diff's
 afters, delete → DELETE; a live write passes its vector, a replay takes it
 from `ob1_embedding_snapshot` by `(content_fingerprint, embedding_model)` —
 SMD-1998's key made a table, fed by a trigger on the row store — or leaves it
 NULL for the re-embed pool, so the row is readable while its vector is still
-materialising; a capture event without content is refused), turns the audit
+materialising; a capture event without content is refused), turned the audit
 trigger into the CHECK under `ob1.projecting = <event id>` (the row's diff
 recomputed and held to the event's afters, SQLSTATE `OB002` on a divergence,
 the vector aside; a raw write without the setting is appended as 046 does),
-makes 050's stamp callable so the event carries the stamped metadata and the
-projector writes the row under 050's own pass-through, and lets 001's
+made 050's stamp callable so the event carries the stamped metadata and the
+projector writes the row under 050's own pass-through, and let 001's
 `updated_at` trigger yield to the projector's stamp for the event's own row.
-`option2-functions.sql` redefines the three write functions: everything
-before the row write stays in the same order (005's guard, 025's provenance
+`option2-functions.sql` redefined the three write functions: everything
+before the row write stayed in the same order (005's guard, 025's provenance
 validation, 046's event validation, the actor setting, 003's key, 033's
 advisory lock, 035's row read FOR NO KEY UPDATE, SMD-1323's lock, 018's
 unchanged-content rule, the cycle walk, `STALE_READ`), and the `INSERT … ON
-CONFLICT` / `UPDATE` / `DELETE` becomes: compute the after-image, the diff,
+CONFLICT` / `UPDATE` / `DELETE` became: compute the after-image, the diff,
 append, project with the caller's vector — a vector arriving on a row that
 already has one is a projection refresh with no event, verified as such. The
-contract sentinels preflight and test-schema read stay where the behaviours
-stay. `option1-view.sql` renames the table to `thought_rows`, creates the
+contract sentinels preflight and test-schema read stayed where the behaviours
+did. `option1-view.sql` renamed the table to `thought_rows`, created the
 view `thoughts` and its INSTEAD OF INSERT/UPDATE/DELETE triggers (the same
-append and projector); `option1-undo.sql` reverses it so test-support's
-reset can run again. `writable-projection.ts` holds every rule pure and
-`--self-check` (62 probes) runs in the portable-server job; `--check` runs
-the prototype in the data-layer job and holds it to the matrix recorded
+append and projector); `option1-undo.sql` reversed it so test-support's
+reset could run again. `writable-projection.ts` held every rule pure and
+`--self-check` (62 probes) ran in the portable-server job; `--check` ran
+the prototype in the data-layer job and held it to the matrix recorded
 below (`EXPECTED`, an outcome and a probe count per measured cell), so a
 Postgres or prototype change that moves a cell — or a step that stops
 running — is named.
@@ -5109,11 +5131,18 @@ running — is named.
 ### Results, 2026-09-24 (PostgreSQL 16.15, pgvector 0.8.6, width 8; the program's output, verbatim)
 
 (The run below is the run at 053, as it was. Since migration 055 — SMD-2115,
-step 1 of the decision — the shipped capture event carries the content, the
-baseline passes C1 and the recorded matrix in `evals/writable-projection.ts`
-says so; the prototype SQL calls the shipped diff rule, append and stamp arms
-rather than defining them, and CI's `--check` holds the live run to the
-matrix as recorded now, not to this block.)
+step 1 of the decision — the shipped capture event carries the content and
+the baseline passed C1. Since migration 060 — SMD-2116, step 2 — the shipped
+functions ARE option 2, so the runner's baseline would compare the schema with
+itself and its teardown would drop shipped objects: the runner, its rules
+module and the prototype SQL are retired, and its criteria live on the
+shipped bodies — C1–C6 and C10–C12 in `db/test-schema.ts` [56] (the scripted
+writes, the trigger counts, the forged-row checks, the drop-the-projector
+control, the replay of the log through the projector, the planted community
+triggers), C7–C9 in `db/test-live.ts` (two sessions, read through pg_locks;
+C7 [6f] and 060's section's racing captures, C8 [6d], C9 [6g] and [6h]), C13
+measured in 060's header. This block is
+the spike's report as it was published, not a description of the tree.)
 
 ```
 Writable projection — SMD-1999 (Spike 2 of SMD-1997), PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)
@@ -5322,7 +5351,8 @@ and test-schema's sentinel reads pin the current bodies and move with them.
 Not built here: the production projector, a migration, `thought_changes`
 reading the event, the raw in-tree writers (`review_supersession_proposal`,
 the backfills, the guard's bump — trigger-audited as today), the chunk rows.
-The record is `changes/smd-1999.md`.
+The record is `changes/smd-1999.md`. Steps 1 and 2 have since landed as
+migrations 055 (SMD-2115) and 060 (SMD-2116, `changes/smd-2116.md`).
 
 ## The typed-decision tier beside Ollama, and the entity gate run against it (SMD-2050)
 
@@ -5962,7 +5992,7 @@ a brain that does not report the stamp (below, "Found on the way").
     within a day;
   - the env file must hold exactly one key under its tag in n8n.
 
-  The kit's key carries the profile's eight scopes plus the two run-history
+  The kit's key carries the profile's scopes (ten since SMD-2212) plus the two run-history
   reads it needs. The decisions K does not reach are in
   `provision.ts --self-check` (CI), against a fake n8n: renewal near
   expiry, a busy n8n, missing scopes, the sweep of a key a failed run left,
@@ -6113,6 +6143,120 @@ stale one can be seen. The first sealed attempt
 also failed C1–C3 on 23-second captures. The cause was another session's
 jobs on the host's Ollama (a direct capture then took 18.6 s, then timed out
 on embeddings), not the seal: the re-run above has the host quiet.
+
+## The first templates: the import runner and the act tool (SMD-2212)
+
+Since SMD-2212, `--up n8n` also loads the profile's own templates as they
+ship (`deploy/orchestration/templates/`), and starts the import runner
+(`orchestration-runner`) beside n8n. The runner's shipped allowlist is empty
+until an import recipe is converted. So `compose.n8n.yaml` mounts the kit's
+`orchestration/runner/pipelines.json` over it, with three pipelines:
+- **`fixture`:** a Python emitter (`runner/emit-fixture.py`, standard
+  library) over a five-entry export in `runner/imports/fixture/`;
+- **`stray`:** the same emitter, with its third line claiming another
+  source;
+- **`snoop`:** an emitter an export has taken over. It reads
+  `/proc/<pid>/environ` for the runner and its parent, and fails if either
+  holds `DATABASE_URL` or `OB1_RUNNER_KEY`.
+
+The act tool's Linear key is the kit's one Linear key. Two checks join K, P
+and E:
+
+- **A — the act tool.** `/mcp/ob1-act` must:
+  - list exactly `linear_file_issue`;
+  - refuse a session with no key and one whose key differs in its last
+    character (401/403);
+  - answer a call for a team that does not exist (`ZZQNOPE`) with the flow's
+    own "no Linear team with key ZZQNOPE", reached through its Linear
+    lookup, with nothing filed.
+
+  Sealed, the call must fail, and not with that answer: Linear is
+  unreachable. The create path (label, then issue) writes to a real
+  workspace, so the kit does not run it.
+- **I — the import template, through the runner.** Each run goes through
+  the on-demand door, and its answer is read: the report, or the runner's
+  reason. The fixture's rows are first deleted through `delete_thought`.
+  Then:
+  - the first run must report `inserted 5` and leave five rows labelled
+    `orch-fixture`, all under the actor `orchestration-runner`, each with
+    a vector;
+  - a rerun must report `unchanged 5` and nothing inserted, updated or
+    patched;
+  - `stray` must answer 422, "the runner answered 422: one-source", naming
+    the stray line, with no row of the other source written;
+  - `snoop` must emit nothing, because the emitter runs as its pipeline's
+    uid and can read no process's environment. Run as root in the same
+    container, it reports the runner's (measured, names only);
+  - the child `snoop` leaves (`sleep 900`) must be gone when the run
+    answers. Run unswept, as a spare uid, it stays (measured) (review
+    pass 2);
+  - the fixture instance's schedule must be n8n `days 1`: an hourly 24
+    fires once, then never (review pass 2);
+  - `snoop` also fails if its HOME is writable or Python's user site is on.
+    With a shared writable HOME, one emitter planted code another ran
+    (review pass 3). Each kit pipeline owns its own source;
+  - with the runner stopped, the door must answer 502, "did not answer",
+    and the import's saved run of it may hold neither key (review pass 3).
+    Not under `--with sealed`: a restart can give the runner a new address
+    inside E's window, and E would count the old one as a dial (review
+    pass 4);
+  - neither the run key nor the runner's key may appear in any saved run of
+    the import workflows, the data included. Before the door, the webhook
+    saved its request headers, the run key among them (review pass 1).
+- **E** admits a connection to the runner's `:8090`, its addresses read from
+  the engine, and nothing else of it. The runner joins the sealed network
+  as the server does. The judge holds 39 crafted logs in CI.
+
+**The results** (the dogfood Mac, SQLite, `--wait-schedule`, 2026-09-26/27).
+Every check passed on each review pass's code:
+
+| Code | C1 | C1s seen after | P gone after | Also |
+|---|---|---|---|---|
+| pass 1 | 20.9 s | 601 s | 51 s | I: 5 inserted, all with vectors, then `unchanged 5`; the run key in 0 of 23 saved runs; the runner at 11–12 MiB |
+| pass 2 | 35.4 s (Ollama shared) | 481 s | 61 s | I: `stray` 422 with its line; `snoop` read nothing, none of its children survived; the schedule `days 1` |
+| pass 3 | 22.2 s | 451 s | 40 s | I: `snoop` found its HOME unwritable and the user site off; the runner down answered 502 |
+| pass 4 | 23.3 s | 271 s | 101 s | sealed too (below); an operator walk |
+| pass 5 | 19.8 s | 631 s | 30 s | a walk of adding a pipeline; reembed stopped mid-lease |
+| pass 6 | 20.7 s | 811 s | 40 s | CI's steps from a clean clone |
+| pass 7 | 29.0 s | 331 s | 91 s | the runner bounded (512 processes, 2 GB) |
+
+C1s's wait is where the verify began against the schedule, not a speed.
+
+**Sealed (`--with sealed`), on pass 1's and pass 4's code, every check
+passes.** C1 took 12.9 s and 12.5 s, P 92 s both times. C3's and A's Linear
+calls failed, as sealed they must. I passed as unsealed, and on pass 4
+without its runner-down leg. For E, every packet n8n sent was one of:
+- a question to the network's resolver: `api.linear.app` ×4 (the act
+  tools' host), `server.dns.podman` ×14, `orchestration-runner.dns.podman`
+  ×8 (pass 1);
+- a connection to the brain's `:8000` (7);
+- a connection to the runner's `:8090` (4).
+
+Nothing else was asked for or dialled.
+
+**Walks.** On pass 4's code a reviewer followed `deploy/README.md` on a
+throwaway stack: init, an empty allowlist, a pipeline added and removed, the
+Linear key set and unset, and an upgrade without `OB1_RUNNER_KEY`. On pass
+5's, a reviewer walked the add-a-pipeline sequence, and stopped the runner
+mid-reembed against a provider that hangs: the leased rows came back
+pending, and the next run embedded them. On pass 6's, a reviewer ran CI's
+steps from a clean clone (the self-checks, the typechecks, the loopback
+step, the runner image's build), and all passed.
+
+**What got in the way.** Before pass 5's run, a fresh kit project could not
+reach the host's Ollama through the podman VM's gateway (192.168.127.254)
+at all, though another project on the same VM could. Recreating the
+project's network cleared it, and nothing in this change touches it. Two
+cycles on the same project also overlapped: one's K check rotated the key
+the other's C1 was using, so the verify was re-run alone. Cycles on one
+project must not overlap.
+
+The implementation commit's first run had passed A, I, K and C3. C1, C1s
+and P failed that time because another session's 27B model held the host's
+Ollama. The capture path's metadata model then timed out (the server's log),
+though that path is unchanged by SMD-2212. An earlier attempt met a wedged
+Ollama. The runner then reported its rows written and reembed failed, which
+is its answer to a provider outage.
 
 ## Related
 

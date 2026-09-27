@@ -13,7 +13,8 @@
  * CI runs this suite beside db/test-upgrade.ts, each in its own database of one
  * Postgres, as the same role (SMD-2219). What the cluster shares — a role and
  * its settings, pg_locks, pg_stat_activity — is scoped here to the current
- * database, or named for this suite (ob1_pf_capture, pf_reader).
+ * database, or named for this suite (ob1_pf_capture, pf_reader, pf_nologin,
+ * pf_stray_reader, "pf reader's").
  */
 
 import { join, dirname } from "node:path";
@@ -22,6 +23,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
+import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -163,7 +165,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
   const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
   assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
-  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 19, "…nineteen of them as the catalog-only skip, the rest by their own hand-written rows");
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 20, "…twenty of them as the catalog-only skip (061's lineage among them), the rest by their own hand-written rows");
   // And nothing else: every row between `data layer` and the provider section is
   // `schema` or one of the listed names. A hand-written PostgREST row under a
   // misspelt name would print beside the loop's correctly named skip with every
@@ -291,6 +293,58 @@ console.log("\n[4] Unreachable database fails rather than hanging");
          "…the first carrying the error and the later ones saying they were not reached");
 }
 
+console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242)");
+{
+  // Each as Postgres's SplitIdentifierString resolves it. A connection
+  // string, set_config and FROM CURRENT store the text raw, so every one of
+  // these can reach the schema row's probe.
+  const PG16 = 160000, PG17 = 170000;
+  const cases: [string, number, string[]][] = [
+    ['"$user", public', PG16, ["$user", "public"]],
+    ['""', PG16, []],
+    ["", PG16, []],
+    ["NoWhere", PG16, ["nowhere"]],
+    ["PUBLIC", PG16, ["public"]],
+    ['"Public"', PG16, ["Public"]],
+    ['"a""b" , x', PG16, ['a"b', "x"]],
+    ['"a, public"', PG16, ["a, public"]],
+    ["a,\tpublic", PG16, ["a", "public"]],
+    ["a,\n\r\f public", PG16, ["a", "public"]],
+    ["a,\u00a0public", PG17, ["a", "\u00a0public"]], // NBSP is no whitespace to Postgres
+    ["a,\u000bpublic", PG16, ["a", "\u000bpublic"]], // \v is none to 16…
+    ["a,\u000bpublic", PG17, ["a", "public"]],        // …and is to 17 (scanner_isspace)
+    ["P4A_\u00dc", PG16, ["p4a_\u00dc"]],              // A–Z fold, not Ü
+    ["x;drop/**/table/**/t;--", PG16, ["x;drop/**/table/**/t;--"]],
+  ];
+  /** JSON with every character outside printable ASCII escaped, so an NBSP does not read as a space. */
+  const shown = (v: unknown) => JSON.stringify(v).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  for (const [setting, version, want] of cases) {
+    const got = searchPathSchemas(setting, version);
+    assert(JSON.stringify(got) === JSON.stringify(want), `search_path ${shown(setting)} on ${version / 10000} reads as ${shown(want)} (got ${shown(got)})`);
+  }
+  assert(withPublic([]) === "public" && withPublic(["$user", "public"]) === '"$user", public' && withPublic(['a"b', "x;y"]) === '"a""b", "x;y", public'
+           && withPublic(["public", "a"]) === 'public, "a"',
+         "…and the path with public put on it keeps the rest in order, each quoted, public once — where it stands, or last");
+  // pgvector's schema after them (SMD-2238): once, never public twice, and not
+  // at all when the path has it — the two rows' one statement.
+  assert(withPublic(["$user", "public"], "ext") === '"$user", public, "ext"' && withPublic(["nowhere"], "public") === '"nowhere", public'
+           && withPublic(["ext", "x"], "ext") === '"ext", "x", public' && withPublic(["nowhere"], "Ext x") === '"nowhere", public, "Ext x"'
+           && withPublicInOptions(["$user", "public"], "extensions") === "-csearch_path%3D%22%24user%22%2Cpublic%2C%22extensions%22",
+         "…and with pgvector's schema, it follows public, once, and not when the path has it");
+  {
+    const base = { schemas: ["$user", "public"], extension: "ext", login: "r", role: "r", db: '"d"' };
+    assert(pathFix({ ...base, source: "database" }) === 'ALTER ROLE r IN DATABASE "d" SET search_path = "$user", public, "ext";'
+             && pathFix({ ...base, role: "t", source: "user" }) === 'SET ROLE NONE; ALTER ROLE r IN DATABASE "d" SET search_path = "$user", public, "ext";  (as r, or a superuser)'
+             && pathFix({ ...base, source: null }).endsWith("(unless the connection string sets search_path, which outranks it)")
+             && pathFix({ ...base, source: "session" }).includes("this session's path was SET after login")
+             && pathFix({ ...base, source: "client" }).endsWith("(separated by %20): -csearch_path%3D%22%24user%22%2Cpublic%2C%22ext%22"),
+           "…and the fix is the login role's setting IN DATABASE, SET ROLE NONE first under SET ROLE, the options= value where the connection sets the path, and a caveat where the source is a session's or unread");
+  }
+  assert(withPublicInOptions(["nowhere"]) === "-csearch_path%3D%22nowhere%22%2Cpublic" && decodeURIComponent(withPublicInOptions(["a b,c", "x\\y"])) === '-csearch_path="a\\ b,c","x\\\\y",public'
+           && withPublicInOptions(["it's!(x)"]) === "-csearch_path%3D%22it%27s%21%28x%29%22%2Cpublic",
+         "…and as a connection string's options it has no space between names, escapes a space or backslash inside one, and is percent-encoded, a shell's characters included");
+}
+
 console.log("\n[5] Against a real database");
 if (!LIVE) { skip("healthy configuration passes"); skip("missing schema is distinguished from bad credentials"); }
 else {
@@ -323,15 +377,31 @@ else {
   // a probe that read every schema would find a cause and say otherwise.
   const otherTool = new SQL({ url: LIVE, max: 1 });
   let strayRun: { code: number; out: string };
+  let strayFirst: { code: number; out: string } | null = null;
   try {
     await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE; CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
     strayRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: offPathUrl });
+    // That table first on the path of a role that may not read it: 42501,
+    // and still a brain to migrate — never a GRANT on another tool's table
+    // (SMD-2238, review pass 1).
+    await otherTool.unsafe("DROP ROLE IF EXISTS pf_stray_reader");
+    await otherTool.unsafe("CREATE ROLE pf_stray_reader LOGIN PASSWORD 'stray'");
+    try {
+      await otherTool.unsafe("GRANT USAGE ON SCHEMA pf_stray TO pf_stray_reader");
+      const strayFirstUrl = `${LIVE.replace(/\/\/[^@]*@/, "//pf_stray_reader:stray@")}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dpf_stray%2Cpublic`;
+      strayFirst = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: strayFirstUrl });
+    } finally {
+      await otherTool.unsafe("DROP OWNED BY pf_stray_reader");
+      await otherTool.unsafe("DROP ROLE pf_stray_reader");
+    }
   } finally {
     await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE");
     await otherTool.close();
   }
   assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(strayRun.out),
          `…from the schema row too, with another schema's thoughts beside an empty public off the path (${strayRun.out.split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
+  assert(/✗\s+schema\s+permission denied for table thoughts — thoughts resolves to pf_stray\.thoughts, another tool's table; the brain's public\.thoughts does not exist\n\s+→ Put public ahead of "pf_stray" on this connection's search_path .*, then apply the migrations: cd db && bun migrate\.ts --url \$DATABASE_URL  — the migrator's CREATE TABLE IF NOT EXISTS thoughts would otherwise find pf_stray\.thoughts\./.test(strayFirst?.out ?? "") && !/GRANT SELECT ON pf_stray/.test(strayFirst?.out ?? ""),
+         `…and with it first on the path of a role that may not read it, public put ahead and then the migrations — the migrator would otherwise find that table — never a GRANT on it (${(strayFirst?.out ?? "").split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
   // And the migration ledger row reads the SMD-2237 split by public alone: the
   // probe is pg_class-qualified to schema public, so pf_stray.thoughts (another
   // tool's, off the path) is not a schema to adopt — the row says "nothing has
@@ -347,7 +417,7 @@ else {
   const after = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(after.code === 0, "a migrated database passes");
   assert(/thoughts table reachable/.test(after.out), "…and confirms the table is reachable");
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test(after.out), "…and that atomic capture is available, with the shipped bodies (a warn would also say \"present\")");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(after.out), "…and that atomic capture is available, with the shipped bodies (a warn would also say \"present\")");
   assert(/✓  audit events\s+046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified/.test(after.out), "…and that 046's event shape is present, with no key waiting on a kind (SMD-1730)");
   // The schema is present (applyMigrations installs it) but writes no ledger, so
   // this is the legitimate adoption case: the row offers --baseline, with the full
@@ -944,12 +1014,140 @@ else {
      VALUES ('${tid}'::uuid, 0, 'first window',  ${vec}, 'Situating blurb.'),
             ('${tid}'::uuid, 1, 'second window', ${vec}, NULL)`
   );
+  // …and the set's lineage row, written raw as the rows are: a chunk set
+  // without one is what 061's lineage check refuses to start on (SMD-1731),
+  // and this tooth is about the chunk-context row, not that one.
+  await ctx.unsafe(
+    `INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+     SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`
+  );
 
   const mixed = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
   assert(mixed.code === 0, "a mixed corpus is a warning, not a refusal — every query still works");
   assert(/1 of 2 chunks carry a situating context and 1 do not/.test(mixed.out),
          "…and it is counted from the rows rather than trusted from ob1_config");
 
+  // 061's lineage check, the fail arm — the ticket's mutant, a producer's
+  // write skipped: the chunk set above without its row is refused, naming the
+  // kind and the thought, with the file's re-apply (its backfill) as the
+  // remedy; the row back, ok again (cold read, first review pass: no suite
+  // ran the arm).
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'chunks' AND artifact_id = '${tid}'::uuid`);
+  const noLineage = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noLineage.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 chunk set\\(s\\) \\(thought ${tid}\\) — written by a producer from before 061`).test(noLineage.out) && /Every producer is 061's, so these rows came from a raw writer of the artifact tables .* re-apply the recorded migrations — .*--reapply.* — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation\./.test(noLineage.out),
+         `a chunk set without its lineage row does not start, the kind and the thought named, the raw writer blamed (every producer is current) and the re-apply's backfill the remedy (exit ${noLineage.code}: ${noLineage.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
+  await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and with the row back the check is ok again, counting the one row");
+  // 064's kind (SMD-1812): a generated page section without its lineage row
+  // is refused the same way, the section named. The page is a thought, so
+  // its removal is one delete_thought, which takes the section, its revisions
+  // and the gap with it.
+  const pg064 = (await ctx.unsafe(`SELECT upsert_page('preflight-064', 'Preflight page') AS r`))[0].r as { page_id: string };
+  const sec064 = (await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`))[0].r as { section_id: string };
+  assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "a generated page section with its lineage row is ok, counted beside the chunk set's (two rows)");
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'section' AND artifact_id = '${sec064.section_id}'::uuid`);
+  const noSection = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noSection.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 page section\\(s\\) carrying a recipe \\(${sec064.section_id}\\) — written by a producer from before 061`).test(noSection.out) && /Every producer is 061's, so these rows came from a raw writer/.test(noSection.out) && /A page section's row is written by 064's write_page_section \(or accept_page_section\): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'\./.test(noSection.out),
+         `a section carrying a recipe without its lineage row does not start, the section named, the raw writer blamed, and the remedy names the store's own writer beside 061's (exit ${noSection.code}: ${noSection.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  // The remedy as written: regenerating the section — the same body, evidence
+  // and recipe — records the missing row (walkthrough, second review pass: an
+  // identical regeneration recorded nothing, and the remedy was false).
+  await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\)/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and following the remedy — regenerating the section unchanged — records the row: ok again on two rows");
+  // The second fail branch — a producer body from before 061 beside a section
+  // missing its row — names the section's remedy too (run-it, third review
+  // pass: pass 1 put it in the first branch alone). The vector trigger
+  // disabled is the cheapest "not current" producer; its row deleted raw.
+  await ctx.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_record_vector_lineage`);
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'section' AND artifact_id = '${sec064.section_id}'::uuid`);
+  const olderProducer = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(olderProducer.code === 1 && /✗  lineage\s+derived rows without a lineage row — 1 page section\(s\) carrying a recipe/.test(olderProducer.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(olderProducer.out) && /A page section's row is written by 064's write_page_section/.test(olderProducer.out),
+         `with a producer from before 061 beside it, a section missing its row still gets the store's remedy beside the ledger's (exit ${olderProducer.code}: ${olderProducer.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_record_vector_lineage`);
+  await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`);
+  // A human's section is not a derivation: a manual write that moved the body
+  // emptied the recipe, so releasing it back to the machine leaves nothing
+  // for the census to count (cold read, first review pass: the origin-keyed
+  // census read a released section as a generated one without lineage, and
+  // named 061's backfill — which knows no section — as the remedy).
+  await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'By hand now.', 'manual')`);
+  await ctx.unsafe(`SELECT release_page_section('${sec064.section_id}'::uuid)`);
+  const released = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(released.code === 0 && /✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\)/.test(released.out), `a section a human wrote and then released back to the machine is not a derivation without lineage: the check is ok (exit ${released.code})`);
+  // A raw write of page_sections leaves the page thought without its render:
+  // a warning naming the page and the repair door, not a refusal.
+  await ctx.unsafe(`UPDATE page_sections SET body_md = 'Edited around the store.' WHERE id = '${sec064.section_id}'::uuid`);
+  const stale = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(stale.code === 0 && new RegExp(`!  lineage\\s+every derived row has its lineage row, but 1 page\\(s\\) whose thought does not hold their render \\(${pg064.page_id}\\) — a raw write of page_sections or of the page thought`).test(stale.out) && /SELECT ob1_render_page_thought\('<page id>'\);/.test(stale.out),
+         `a page thought that does not hold its render is a warning naming the page and ob1_render_page_thought as the repair (exit ${stale.code}: ${stale.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  await ctx.unsafe(`SELECT ob1_render_page_thought('${pg064.page_id}'::uuid)`);
+  assert(/✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and re-rendered through the door, the check is ok again");
+  // No actor on the delete: a name nobody classified would be a key with no
+  // kind, which the audit-events legs below count (run-it, the build).
+  await ctx.unsafe(`SELECT delete_thought('${pg064.page_id}'::uuid, NULL::jsonb)`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and the page gone through delete_thought — section, revisions and the gap with it — the check is ok again on the one row");
+  // 063 (SMD-1732): the rows rebuild_derived marked for a re-run are counted
+  // in the coverage; a lineage row whose ARTIFACT is gone while its thought
+  // stands — the direction 061 did not read — is a WARN naming
+  // db/rebuild.ts --orphans, which deletes it; ok again after the sweep.
+  await ctx.unsafe(`SELECT rebuild_derived('${tid}'::uuid, 'pf: force', false, NULL, true)`);
+  const markedRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(markedRun.code === 0 && /✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled by 061 .*, 1 marked for a re-run by rebuild_derived/.test(markedRun.out),
+         `a row the rebuild marked is counted in the coverage, not failed (${markedRun.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 240)})`);
+  await ctx.unsafe(`UPDATE derivations SET stale_since = NULL, stale_reason = NULL WHERE artifact_id = '${tid}'::uuid`);
+  await ctx.unsafe(`DELETE FROM thought_chunks WHERE thought_id = '${tid}'::uuid`);
+  const orphanRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(orphanRun.code === 0 && /!  lineage\s+every derived row has its lineage row, but 1 lineage row\(s\) name an artifact that is gone \(chunks [0-9a-f-]{36}\) — a raw delete of windows or mentions, or a vector cleared under a replay, left the row behind \(SMD-1732\)/.test(orphanRun.out)
+      && /→ Run bun db\/rebuild\.ts --url <url> --orphans: it deletes each such row through rebuild_derived/.test(fix(orphanRun.out, "lineage")),
+         // (`row` here is the capture above, not the top-level helper — this section's shadow.)
+         `a lineage row whose windows are gone is a WARN naming the kind and the row, with the sweep as the fix line (exit ${orphanRun.code}: ${(orphanRun.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)} / ${fix(orphanRun.out, "lineage").trim().slice(0, 120)})`);
+  const sweep = await runScript(["bun", join(HERE, "..", "db", "rebuild.ts"), "--url", LIVE!, "--orphans"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: join(HERE, "..", "db") });
+  assert(sweep.code === 0 && /orphans:\s+1 thought\(s\) carried a lineage row whose artifact is gone/.test(sweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\)/.test(sweep.out),
+         `db/rebuild.ts --orphans deletes the row and says so (exit ${sweep.code}: ${sweep.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 240)})`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 0 lineage row\(s\)/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and the check is ok again with the orphan gone");
+  // The windows and their row back, as planted, for the teeth below.
+  await ctx.unsafe(
+    `INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding, context)
+     VALUES ('${tid}'::uuid, 0, 'first window',  ${vec}, 'Situating blurb.'),
+            ('${tid}'::uuid, 1, 'second window', ${vec}, NULL)`
+  );
+  await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`);
+  // The two bounds (cold read, third review pass: one flag said "the rest not
+  // read" of artifact tables read whole). 10,001 lineage rows and every
+  // artifact table under its bound: the verdict is exact, the headline plain,
+  // and only the counts are qualified as "of the 10,001 read". Then 10,001
+  // tagged thoughts — an ARTIFACT source at its bound: the headline says READ
+  // and that the rest were not, once; the untagged count is "more than
+  // 10,000", not a number a reader takes as exact.
+  // Rows of the CHUNKS kind, whose artifact (the windows above) stands: an
+  // entities row under a key with no mention is an orphan since 063, and
+  // 10,001 of them would be that WARN, not this bound (run-it, 063's build).
+  await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+                      SELECT 'chunks', '${tid}'::uuid, ARRAY['${tid}'::uuid], ARRAY[(SELECT content_fingerprint FROM thoughts WHERE id = '${tid}'::uuid)], 'pf-bound:' || i, '{"deterministic": true, "legacy": true}'::jsonb FROM generate_series(1, 10001) i`);
+  const boundRows = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(boundRows.code === 0 && /✓  lineage\s+every derived row has its lineage row — more than 10,000 lineage rows; of the 10,001 read: 1000[01] backfilled by 061/.test(boundRows.out) && !/READ has its lineage row/.test(boundRows.out) && !/the rest not read/.test(boundRows.out),
+         `the lineage table past its bound qualifies the counts and nothing else: every artifact table was read whole, so the headline is plain (${boundRows.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  await ctx.unsafe(`DELETE FROM derivations WHERE produced_by LIKE 'pf-bound:%'`);
+  await ctx.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'pf bound ' || i, '{"type": "note", "source": "pf-bound"}'::jsonb FROM generate_series(1, 10001) i`);
+  const boundSource = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  const boundLine = boundSource.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "";
+  assert(boundSource.code === 0 && /^\s*✓  lineage\s+every derived row READ has its lineage row — the first 10,001 rows of an artifact table that has more, the rest not read — 1 lineage row\(s\)/.test(boundLine) && /more than 10,000 thought\(s\) carry tags with no tag lineage/.test(boundLine) && (boundLine.match(/not read/g) ?? []).length === 1,
+         `an artifact table at its bound is said READ in the headline, once, with the untagged count as "more than 10,000" (${boundLine.trim().slice(0, 240)})`);
+  await ctx.unsafe(`DELETE FROM thoughts WHERE metadata->>'source' = 'pf-bound'`);
+  // The ticket's own mutant — a producer whose write skipped: 056's
+  // record_thought_entities, from before 061, standing alone (061's form
+  // dropped, 056 re-applied by hand) writes mentions with no lineage; the
+  // census fails naming the pair, and the remedy is the FILE, since a
+  // producer's body is older — not the raw writer (cold read, second review
+  // pass: the pass-1 tooth reached the raw-writer arm alone).
+  await ctx.unsafe(`DROP FUNCTION record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("056") });
+  await ctx.unsafe(`SELECT record_thought_entities('${tid}'::uuid, 'extract:old@p2', '[{"name": "Ada", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL)`);
+  const olderWriter = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(olderWriter.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 extraction\\(s\\) \\(${tid} under extract:old@p2\\) — written by a producer from before 061`).test(olderWriter.out) && /Apply db\/migrations\/061_derivations\.sql\. Its backfill records every artifact standing, at the thought's current text, marked legacy\./.test(olderWriter.out) && !/Every producer is 061's/.test(olderWriter.out),
+         `an extraction written by 056's writer — a producer from before 061 — does not start, the pair named, the file the remedy and not the raw writer (exit ${olderWriter.code}: ${olderWriter.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") || f.startsWith("063") });
+  assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\): 1 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and 061 re-applied records the pair as legacy and leaves the one writer: ok again");
   await ctx.unsafe(`UPDATE thought_chunks SET context = 'Situating blurb.' WHERE context IS NULL`);
   const allCtxOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/all 2 chunks carry a context but OB1_CHUNK_CONTEXT is off/.test(allCtxOff.out),
@@ -1174,6 +1372,20 @@ else {
   const consDone = await run(SQL_ENV);
   assert(/consolidate pass\s+none unfinished; 1 proposal\(s\) pending review — cd db && bun consolidate\.ts --url \$DATABASE_URL --list\s*$/m.test(consDone.out) && !/consolidate pass\s+consolidate:/.test(consDone.out),
          "a finished pass with a proposal waiting is ok — the queue is a reviewer's, not a defect — and the thought never pooled is not a signal");
+  // 063 (SMD-1732): a stale proposal — a text moved under a pending verdict
+  // — is counted beside the pending ones, with the reviewer's command; both
+  // clauses join with "; " when both stand (fourth review pass, cold read:
+  // the clause had no tooth).
+  await claims`UPDATE supersession_proposals SET status = 'stale' WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[1]}::uuid`;
+  const consStale = await run(SQL_ENV);
+  assert(/consolidate pass\s+none unfinished; 1 stale \(a text moved under the verdict; the next pass replaces one it finds in conflict again, a reviewer settles one it does not\) — cd db && bun consolidate\.ts --url \$DATABASE_URL --list stale\s*$/m.test(consStale.out),
+         `a stale proposal alone is counted with the reviewer's command (${consStale.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim().slice(0, 240)})`);
+  await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, ${CONS}, NULL)`;
+  const consBoth = await run(SQL_ENV);
+  assert(/consolidate pass\s+none unfinished; 1 proposal\(s\) pending review — cd db && bun consolidate\.ts --url \$DATABASE_URL --list; 1 stale \(/.test(consBoth.out),
+         `…and pending beside stale reads as two clauses (${consBoth.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim().slice(0, 200)})`);
+  await claims`DELETE FROM supersession_proposals WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[2]}::uuid`;
+  await claims`UPDATE supersession_proposals SET status = 'pending' WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[1]}::uuid`;
   const consOk = JSON.parse((await run(SQL_ENV, "--json")).out) as { checks: { name: string; status: string }[] };
   assert(consOk.checks.some((c) => c.name === "consolidate pass" && c.status === "ok"), "…and --json says ok for it");
   await claims`DELETE FROM supersession_proposals`;
@@ -1203,8 +1415,8 @@ else {
    */
   const noVec = await run(SQL_ENV);
   assert(/vector models\s+no vectors stored yet/.test(noVec.out) && /re-embed pass\s+none unfinished/.test(noVec.out), "with no vectors stored the rows have nothing to say, and say so");
-  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\\): the form the servers and reembed\\.ts call since migration 046 \\(${rx(UPDATE_THOUGHT_SIGNATURE)}\\), alone`).test(noVec.out),
-         "the ten-argument update_thought is the only form");
+  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb,jsonb\\): the form the servers and reembed\\.ts call since migration 061 \\(${rx(UPDATE_THOUGHT_SIGNATURE)}\\), alone`).test(noVec.out),
+         "the eleven-argument update_thought is the only form");
   const VEC = `('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector`;
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = '${EMBEDDING_MODEL}' WHERE id IN ('${ids[0]}', '${ids[1]}')`);
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = 'other-model' WHERE id = '${ids[2]}'`);
@@ -1282,7 +1494,7 @@ else {
   // (asserted further down too) and 046 is the file whose DROP chain reaches
   // it — 032's reaches only 8 and 7 and would leave its own 9-argument form
   // beside the shipped one (SMD-1730).
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("046") || f.startsWith("055") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("046") || f.startsWith("055") || f.startsWith("060") || f.startsWith("061") });
   const restored = await run(SQL_ENV);
   assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
          `021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok (exit ${restored.code}: ${restored.out.split("\n").filter((l) => /vector models|fail/.test(l)).join(" | ").trim()})`);
@@ -1297,7 +1509,7 @@ else {
   // 018 re-applied by hand puts the 7-argument form back BESIDE 032's.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const twoEdits = await run(SQL_ENV);
-  assert(twoEdits.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) — an earlier migration re-applied by hand over 046/.test(twoEdits.out),
+  assert(twoEdits.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) — an earlier migration re-applied by hand over 061/.test(twoEdits.out),
          "018 re-applied over 046 leaves two update_thought forms, and the start is refused naming the extra one");
   assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\);/.test(twoEdits.out), "…with the exact DROP as the remedy");
   // 021 re-applied drops the 7-argument form — and puts its own 8-argument
@@ -1306,7 +1518,7 @@ else {
   // "function is not unique".
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const eightBeside = await run(SQL_ENV);
-  assert(eightBeside.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) — an earlier migration re-applied by hand over 046 — so every call that sends fewer than ten arguments/.test(eightBeside.out),
+  assert(eightBeside.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) — an earlier migration re-applied by hand over 061 — so every call that sends fewer than eleven arguments/.test(eightBeside.out),
          "021 re-applied over 046 leaves the 8-argument form beside the 10-argument one, and the start is refused naming it");
   assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\);/.test(eightBeside.out) && !/timestamp with time zone,jsonb\);/.test(eightBeside.out),
          "…with the 8-argument DROP as the remedy, and only that one");
@@ -1315,12 +1527,12 @@ else {
   // re-apply of 032 or 033 leaves since SMD-1730, refused with the one DROP.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("032") });
   const nineBeside = await run(SQL_ENV);
-  assert(nineBeside.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) — an earlier migration re-applied by hand over 046 — so every call that sends fewer than ten arguments/.test(nineBeside.out) && /DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\);/.test(nineBeside.out),
-         "032 re-applied over 046 leaves its 9-argument form beside the 10-argument one, and the start is refused naming it with its DROP");
+  assert(nineBeside.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) — an earlier migration re-applied by hand over 061 — so every call that sends fewer than eleven arguments/.test(nineBeside.out) && /DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\);/.test(nineBeside.out),
+         "032 re-applied over 061 leaves its 9-argument form beside the 11-argument one, and the start is refused naming it with its DROP");
   await claims.unsafe("DROP FUNCTION update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)");
   const reapplied021 = await run(SQL_ENV);
-  assert(reapplied021.code === 0 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\): the form the servers and reembed\.ts call since migration 046/.test(reapplied021.out),
-         "…which the DROP performs (046 re-applied would too, its chain reaching 9, 8 and 7)");
+  assert(reapplied021.code === 0 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb,jsonb\): the form the servers and reembed\.ts call since migration 061/.test(reapplied021.out),
+         "…which the DROP performs (061 re-applied would too, its chain reaching 10, 9, 8 and 7)");
   // 036 re-applied by hand over 042 puts the two-argument delete_thought back
   // BESIDE 042's three-argument one: every two-argument caller is "not unique".
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
@@ -1328,18 +1540,25 @@ else {
   assert(twoDeletes.code === 1 && /delete signature\s+beside the form the servers call there is an earlier one: delete_thought\(uuid,jsonb\) — 009 or 036 re-applied by hand over 042/.test(twoDeletes.out) && /DROP FUNCTION delete_thought\(uuid,jsonb\);/.test(twoDeletes.out),
          "036 re-applied over 042 leaves two delete_thought forms, and the start is refused naming the extra one with its DROP");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
-  assert(/delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone/.test((await run(SQL_ENV)).out), "…which 042 re-applied performs");
+  // 042 re-applied drops the extra form and puts 042's BODY back over 060's:
+  // one form, the row deleted first and the tombstone derived after it — a
+  // warning naming 060 (SMD-2116); 060 re-applied is the shipped body again.
+  const fortyTwoBody = await run(SQL_ENV);
+  assert(/!  delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone, but its body is from before migration 060 \(migration 060 not yet applied, or 042 re-applied by hand\): the row is deleted first and the trigger derives the tombstone after it/.test(fortyTwoBody.out) && /Apply db\/migrations\/060_append_then_project\.sql\./.test(fortyTwoBody.out),
+         "…which 042 re-applied performs, leaving 042's body: one form, and a warning naming 060 for the body (SMD-2116)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") });
+  assert(/✓  delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone, with 060's body/.test((await run(SQL_ENV)).out), "…and 060 after it is the shipped body, said as such");
   // A brain that stopped at 036 — a server deployed ahead of the migration:
   // the two-argument form alone. Every delete the server sends would fail at
   // the first user call, so the start is refused naming 042 instead.
   await claims.unsafe("DROP FUNCTION delete_thought(uuid, jsonb, boolean)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
   const preFacet = await run(SQL_ENV);
-  assert(preFacet.code === 1 && /delete signature\s+delete_thought\(uuid,jsonb\) is the form from before migration 042; the server sends p_detach, which only 042's form takes — so every delete would fail/.test(preFacet.out),
-         "a brain at 036 does not start: every delete the server sends would fail, and the check says so before a user finds out");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
+  assert(preFacet.code === 1 && /delete signature\s+delete_thought\(uuid,jsonb\) is the form from before migration 042; the server sends p_detach, which only 042's form takes — so every delete would fail/.test(preFacet.out) && /Apply db\/migrations\/042_thought_citations\.sql\. Then apply db\/migrations\/060_append_then_project\.sql — it last defines delete_thought/.test(preFacet.out),
+         "a brain at 036 does not start: every delete the server sends would fail, and the check says so before a user finds out, naming 042 then 060");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") || f.startsWith("060") || f.startsWith("061") });
   // The isolation level every lock-order argument assumes, read from the
-  // connection's default: ok at read committed; since 060 a fail at repeatable
+  // connection's default: ok at read committed; since 066 a fail at repeatable
   // read and a warning at serializable, each with the statement that puts it
   // back where pg_settings says it was set (third review pass). Set on the
   // database, so a fresh session (preflight's) inherits it — the fix line then
@@ -1350,15 +1569,15 @@ else {
   await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
     const rr = await run(SQL_ENV);
-    // Since 060 a fail: the projection's triggers refuse every ticket or
+    // Since 066 a fail: the projection's triggers refuse every ticket or
     // pointer write under repeatable read (SMD-2256, second review pass).
-    assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 060's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
+    assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 066's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
              && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a connection defaulting to repeatable read is refused, naming 060's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
+           `a connection defaulting to repeatable read is refused, naming 066's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''serializable''");
     const ser = await run(SQL_ENV);
-    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /060's node_state projection stays exact only if every writer of ticket rows is serializable/.test(ser.out),
-           `a connection defaulting to serializable starts with a warning that names 060's condition (exit ${ser.code})`);
+    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /066's node_state projection stays exact only if every writer of ticket rows is serializable/.test(ser.out),
+           `a connection defaulting to serializable starts with a warning that names 066's condition (exit ${ser.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
     // …and nowhere else: a session as the same role in `postgres` is still at
     // read committed. The suite's own database is asked of the server, not
@@ -1384,16 +1603,16 @@ else {
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 035 — captures work, search is over-inclusive.
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(004, 005, 008 or 021 re-applied by hand without 046 after them\)/.test(reapplied021.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer; 022's or 025's file alone would leave what the later ones added out\./.test(reapplied021.out) && !/either/.test(reapplied021.out),
-         "021 re-applied over 035 leaves 021's 3-argument upsert_thought, and the start warns naming 035 — the last definer, not 022, 025 or 033 — rather than refusing");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(004, 005, 008 or 021 re-applied by hand without 061 after them\)/.test(reapplied021.out) && /Apply db\/migrations\/061_derivations\.sql — the last definer; 022's or 025's file alone would leave what the later ones added out\./.test(reapplied021.out) && !/either/.test(reapplied021.out),
+         "021 re-applied over the shipped pair leaves 021's 3-argument upsert_thought, and the start warns naming 060 — the last definer, not 022, 025 or 033 — rather than refusing");
   // 022 re-applied by hand over 035: the sentinel is back, the provenance
   // envelope is not — derived_from and supersedes would be dropped silently
   // (SMD-1250). A warning naming 035, told apart from 022's by more than the
   // sentinel.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("022") });
   const reapplied022 = await run(SQL_ENV);
-  assert(reapplied022.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 \(022 re-applied by hand puts it back\)/.test(reapplied022.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied022.out),
-         "022 re-applied over 035 keeps 022's sentinel and loses 025's envelope, and the start warns naming 035");
+  assert(reapplied022.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 \(022 re-applied by hand puts it back\)/.test(reapplied022.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(reapplied022.out),
+         "022 re-applied over the shipped pair keeps 022's sentinel and loses 025's envelope, and the start warns naming 060");
   // 025 re-applied by hand over 035 (SMD-1043): 022's sentinel and 025's
   // envelope are back, 033's lock is not — a capture racing an edit of the
   // same text raises again. A warning naming 035, told by 033's own sentinel.
@@ -1401,8 +1620,8 @@ else {
   // it here and below, so no later "healthy" run carries the provenance warn.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
   const reapplied025 = await run(SQL_ENV);
-  assert(reapplied025.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule and 025's envelope, but it is from before migration 033 \(migrations 033, 035 and 046 are not yet applied, or 025 was re-applied by hand\): it takes no fingerprint lock/.test(reapplied025.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied025.out) && !/either/.test(reapplied025.out),
-         "025 re-applied over 046 keeps 022's rule and 025's envelope and loses the lock, and the start warns naming 046 — the cause hedged, since this schema has no ledger to say whether 035 was ever applied — with the 2-argument body, still 046's, not mentioned");
+  assert(reapplied025.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule and 025's envelope, but it is from before migration 033 \(migrations 033, 035, 046, 060 and 061 are not yet applied, or 025 was re-applied by hand\): it takes no fingerprint lock/.test(reapplied025.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(reapplied025.out) && !/either/.test(reapplied025.out),
+         "025 re-applied over 060 keeps 022's rule and 025's envelope and loses the lock, and the start warns naming 060 — the cause hedged, since this schema has no ledger to say whether 035 was ever applied — with the 2-argument body, still 060's, not mentioned");
   assert(/!  audit events\s+the columns are there but the audit trigger's body is from before 046 \(025 or an earlier file re-applied by hand\): every write records an unknown kind, no door and no event/.test(reapplied025.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied025.out),
          "…and 025 re-applied put 025's audit trigger back over 046's: the event check warns — writes go through, the kind and the event are not recorded — naming 046 (SMD-1730)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
@@ -1410,13 +1629,73 @@ else {
   // whole, the payload is not — a warning naming 055 (SMD-2115); 055
   // re-applied is the shipped body again.
   const pre055 = await run(SQL_ENV);
-  assert(/!  audit events\s+046's event shape present and every key classified, but the audit trigger's body is from before 055 \(migration 055 not yet applied, or 046 re-applied by hand\): a capture records no content and an update no key move/.test(pre055.out) && /Apply db\/migrations\/055_capture_event_payload\.sql\./.test(pre055.out),
-         "…046 re-applied over 055 puts a trigger back that records no payload: the event check warns beside the census — the kind and the event are recorded, the content is not — naming 055 and both causes (SMD-2115)");
+  assert(/!  audit events\s+046's event shape present and every key classified, but the audit trigger's body is from before 055 \(migration 055 not yet applied, or 046 re-applied by hand\): a capture records no content and an update no key move/.test(pre055.out) && /Apply db\/migrations\/055_capture_event_payload\.sql\. Then apply db\/migrations\/060_append_then_project\.sql — it last defines the audit trigger 055 also holds/.test(pre055.out),
+         "…046 re-applied over 055 puts a trigger back that records no payload: the event check warns beside the census — the kind and the event are recorded, the content is not — naming 055 then 060 and both causes (SMD-2115, SMD-2116)");
+  // 046 re-applied over 060 puts 046's WRITERS back too: the row written first,
+  // the trigger deriving the event after it. The capture pair, the edit and
+  // the delete signature each say so, naming 060 (SMD-2116); the delete
+  // signature does not — 046 defines no delete_thought.
+  assert(/!  atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock, writes provenance on a first capture only and sets the write event beside the actor, but it is from before migration 060 \(migrations 060 and 061 are not yet applied, or 046 was re-applied by hand\): the row is written first and the trigger derives the event after it/.test(pre055.out) && /; and the 2-argument body is not 060's either — it is from before migration 060 \(migrations 060 and 061 are not yet applied, or 046 was re-applied by hand\)/.test(pre055.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(pre055.out),
+         "…and the capture pair is 046's, said for both bodies and naming 061 (SMD-2116, SMD-1731)");
+  assert(/✗  edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\) — an earlier migration re-applied by hand over 061/.test(pre055.out) && /✓  delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone, with 060's body/.test(pre055.out),
+         `…the edit signature is refused: 046's 10-argument form stands beside 061's eleven (since 061 the form 046 left is a leftover, not the body); the delete signature, which 046 does not define, stays 060's (${pre055.out.split("\n").filter((l) => /edit signature|delete signature/.test(l)).map((l) => l.trim().slice(0, 160)).join(" | ")})`);
+  // 055 re-applied over it: 055's audit trigger — the payload, no check — over
+  // 060's, and 046's writers still standing: the event check names 060.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("055") });
+  const pre060 = await run(SQL_ENV);
+  assert(/!  audit events\s+046's event shape present and every key classified, 055's payload in the capture event, but the audit trigger's body is from before 060 \(migration 060 not yet applied, or 055 re-applied by hand\): it derives the event after the write and checks no projected row against its event/.test(pre060.out) && /Apply db\/migrations\/060_append_then_project\.sql\./.test(pre060.out),
+         "…055 re-applied over 060 puts a trigger back that checks nothing: the event check warns, naming 060 (SMD-2116)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") });
   const shippedPair = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both set the write event beside the actor \(046\); the 2-argument body refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
-         "…and 046 re-applied is the shipped pair again, said as such");
-  assert(/✓  audit events\s+046's event shape present[^\n]*055's payload in every capture event/.test(shippedPair.out), "…and the event shape is whole again with 055's payload: 046 then 055 re-applied put the trigger's body back");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped — the 3-argument body \(061's\) carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event \(046\) and append it first, projecting the row from it \(060\); the 3-argument body records the tags' lineage with the write \(061\); the 2-argument body \(060's\) refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
+         "…and 060 then 061 re-applied is the shipped pair again, said as such");
+  assert(/✓  audit events\s+046's event shape present[^\n]*055's payload in every capture event[^\n]*060's check on every projected row/.test(shippedPair.out) && /✓  edit signature\s+[^\n]*with 061's body/.test(shippedPair.out), "…and the event shape is whole again with 055's payload and 060's check: 046, 055, 060 then 061 re-applied put every body back");
+  // 060 re-applied by hand over 061 (SMD-1731): 060's 3-argument body appends
+  // and projects but records no lineage — a warning naming 061 — and 060's
+  // 10-argument update_thought lands BESIDE 061's, refusing the start; 061
+  // after it is the shipped pair again.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") });
+  const pre061 = await run(SQL_ENV);
+  assert(pre061.code === 1 && /!  atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body appends the event first and projects the row \(060\), but it is from before migration 061 \(migration 061 is not yet applied, or 060 was re-applied by hand\): the tags' recipe a capture declares reaches no lineage row and a replaced window set keeps its old row — derived rows without lineage, which the lineage check fails on, and stale rows left behind \(SMD-1731\)/.test(pre061.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(pre061.out),
+         "060 re-applied over 061 is a warning on the capture pair naming 061 — the body appends and projects, and records no lineage — with 061 as the remedy (SMD-1731)");
+  assert(/✗  edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\) — an earlier migration re-applied by hand over 061/.test(pre061.out) && /DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\);/.test(pre061.out),
+         "…and 060's 10-argument update_thought stands beside 061's eleven: the start is refused naming it with its DROP");
+  assert(/!  lineage\s+every derived row has its lineage row, but a producer is missing or stands in two forms \(7 bodies where 061 leaves six — an earlier file re-applied by hand beside 061's\): its next write records no lineage \(SMD-1731\)/.test(pre061.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(pre061.out),
+         "…while the lineage census itself is clean, the check warns on the bodies: 060's 10-argument update_thought stands beside 061's, seven bodies where 061 leaves six (pass 2's cold read: the probe read two of the six)");
+  // 061's form dropped as well — a brain at 060 under this server: the SQL
+  // store sends eleven positional arguments and the PostgREST store names
+  // p_lineage, so every edit fails on the 10-argument form; a refusal naming
+  // 061, not the "every edit resolves" warning 046's 9-argument form earned
+  // when the servers sent nine (cold read, third review pass). The lineage
+  // row says the bodies are older, not that a producer is missing: six
+  // bodies, two of them 060's.
+  await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
+  const tenAlone = await run(SQL_ENV);
+  assert(tenAlone.code === 1 && /✗  edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\) is the form from before migration 061 \(046's, which 060 kept\); the servers send p_lineage \(the windows' and the tags' recipes\), which only 061's form takes — so every edit would fail, and db\/reembed\.ts, which resolves the body by/.test(tenAlone.out) && /Apply db\/migrations\/061_derivations\.sql\. Its DROP chain reaches every older form and leaves the one the servers call\./.test(tenAlone.out),
+         `a 10-argument form alone — a brain at 060 — is a refusal naming 061: the servers send eleven arguments (exit ${tenAlone.code})`);
+  assert(/!  lineage\s+every derived row has its lineage row, but a producer's body is from before 061 \(013, 029, 056 or 060 re-applied by hand\), or lost its record line: its next write records no lineage/.test(tenAlone.out),
+         "…and the lineage row names the older bodies — six bodies, 060's two among them — not a missing producer");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") });
+  // 061 alone over 063 (SMD-1732): 061's writer and proposal writer carry
+  // 061's sentinel, so the producer probe stays green — while a rebuild's mark
+  // is never cleared and a stale pair never replaced. The check reads the
+  // three bodies 063 redefines and warns naming 063 (063's second review
+  // pass, cold read: this very ladder printed a clean census in that state).
+  const pre063 = await run(SQL_ENV);
+  assert(pre063.code === 0 && /!  lineage\s+every derived row has its lineage row, but ob1_record_derivation and record_supersession_proposal are from before 063 \(061 or 029 re-applied by hand over it\): a rebuild's mark is never cleared/.test(pre063.out) && /Apply db\/migrations\/063_rebuild_derived\.sql\./.test(fix(pre063.out, "lineage")),
+         `061 re-applied over 063 is a warning on the two bodies 061 puts back, naming 063 as the remedy (${(pre063.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("063") });
+  // The older bodies this ladder ran by hand (056's and 060's extraction
+  // writer) replaced mention rows without sweeping their lineage rows, and
+  // 061's backfill recorded pairs that later passes replaced — lineage rows
+  // whose artifact is gone, the direction 063's check warns on. The sweep
+  // clears them, and the census below is the clean one (run-it, 063's build:
+  // this tooth read the orphan WARN as an unclean census).
+  const sweepLadder = await runScript(["bun", join(HERE, "..", "db", "rebuild.ts"), "--url", LIVE!, "--orphans"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: join(HERE, "..", "db") });
+  assert(sweepLadder.code === 0 && /deleted:\s+[1-9]\d* lineage row\(s\)/.test(sweepLadder.out), `the older bodies' passes left lineage rows whose mentions are gone; the sweep deletes them (exit ${sweepLadder.code}: ${sweepLadder.out.trim().split("\n").slice(0, 2).join(" / ").slice(0, 200)})`);
+  const shipped061 = await run(SQL_ENV);
+  assert(shipped061.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(shipped061.out) && /✓  edit signature\s+[^\n]*with 061's body/.test(shipped061.out) && /✓  lineage\s+every derived row has its lineage row/.test(shipped061.out),
+         `…and 061 then 063 after it is the shipped pair, the one update_thought and a clean lineage census again (exit ${shipped061.code}: ${shipped061.out.split("\n").filter((l) => /^\s*[✗!]\s/.test(l)).map((l) => l.trim().slice(0, 260)).join(" | ")})`);
   // 033 re-applied by hand over 035 (SMD-1453): 033's lock and sentinel are
   // back, and with them 025's fill of a NULL pointer on a re-capture and the
   // supersession lock on every capture naming one — 035's sentinel is what
@@ -1428,18 +1707,18 @@ else {
   // 033 defines update_thought too, so its 9-argument form lands beside 046's
   // 10-argument one and the start is refused for that (exit 1, the edit
   // signature naming it); the capture-body verdict is read from the same run.
-  assert(reapplied033.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) — an earlier migration re-applied by hand over 046/.test(reapplied033.out),
+  assert(reapplied033.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) — an earlier migration re-applied by hand over 061/.test(reapplied033.out),
          "033 re-applied over 046 also puts its 9-argument update_thought beside the shipped one, and the start is refused naming it (SMD-1730)");
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope and the fingerprint lock, but it is from before migration 035 \(migrations 035 and 046 are not yet applied, or 033 was re-applied by hand\): a re-capture naming supersedes fills a NULL pointer without walking the chain, so a dedup can write a two-row loop, and every capture naming supersedes holds the supersession lock through its insert.*; and the 2-argument body is not 046's either — it is from before migration 046 \(migration 046 is not yet applied, or 033 or 035 was re-applied by hand\): it sets no write event beside the actor/.test(reapplied033.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied033.out),
-         "033 re-applied over 035 puts the fill and the supersession lock back, and the start warns naming 035 — the cause hedged with no ledger — with the 2-argument body, 035's and so without the write event, said beside it");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope and the fingerprint lock, but it is from before migration 035 \(migrations 035, 046, 060 and 061 are not yet applied, or 033 was re-applied by hand\): a re-capture naming supersedes fills a NULL pointer without walking the chain, so a dedup can write a two-row loop, and every capture naming supersedes holds the supersession lock through its insert.*; and the 2-argument body is not 060's either — it is from before migration 046 \(migrations 046, 060 and 061 are not yet applied, or 033 or 035 was re-applied by hand\): it sets no write event beside the actor/.test(reapplied033.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(reapplied033.out),
+         "033 re-applied over the shipped pair puts the fill and the supersession lock back, and the start warns naming 060 — the cause hedged with no ledger — with the 2-argument body, 035's and so without the write event, said beside it");
   // The query-log check reads the same verdict (SMD-1719): a body from before
   // 035 answers no `existed`, so no cite row is ever logged on this brain, and
   // the line says so rather than reporting the log as complete.
   assert(/query log\s+present; .*Cite rows \(a write naming a returned id as its source, SMD-1719\) need migration 035's upsert_thought and will NOT be logged on this brain/.test(reapplied033.out) && /!  query log/.test(reapplied033.out),
          "…and the query-log line warns that cite rows will not be logged under the pre-035 body");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") || f.startsWith("060") || f.startsWith("061") });
   const shippedAgain = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test(shippedAgain.out), "…and 046 after it is the shipped pair again");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(shippedAgain.out), "…and 060 after it is the shipped pair again");
   assert(/✓  query log\s+present; /.test(shippedAgain.out) && !/will NOT be logged/.test(shippedAgain.out), "…and the query-log line is ok again, without the cite warning");
   // 035 re-applied by hand over 046 (sixth review pass): both capture bodies
   // are 035's — locked, no fill, and no write event set beside the actor. The
@@ -1449,89 +1728,92 @@ else {
   // so the start is not refused for a 9-argument form.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("035") });
   const reapplied035 = await run(SQL_ENV);
-  assert(reapplied035.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock and writes provenance on a first capture only, but it is from before migration 046 \(migration 046 is not yet applied, or 035 was re-applied by hand\): the write event a capture declares — stance, cites, the valid window, trust — is dropped silently, so no audit row carries it.*; and the 2-argument body is not 046's either — it is from before migration 046 \(migration 046 is not yet applied, or 033 or 035 was re-applied by hand\): it sets no write event beside the actor/.test(reapplied035.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied035.out),
-         "035 re-applied over 046 is a warning naming 046 for both bodies: neither sets the write event, and a capture's declaration would be dropped silently (SMD-1730, sixth review pass)");
+  assert(reapplied035.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock and writes provenance on a first capture only, but it is from before migration 046 \(migrations 046, 060 and 061 are not yet applied, or 035 was re-applied by hand\): the write event a capture declares — stance, cites, the valid window, trust — is dropped silently, so no audit row carries it.*; and the 2-argument body is not 060's either — it is from before migration 046 \(migrations 046, 060 and 061 are not yet applied, or 033 or 035 was re-applied by hand\): it sets no write event beside the actor/.test(reapplied035.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(reapplied035.out),
+         "035 re-applied over 060 is a warning naming 060 for both bodies: neither sets the write event, and a capture's declaration would be dropped silently (SMD-1730, sixth review pass)");
   assert(/✓  edit signature/.test(reapplied035.out), "…and the edit signature is untouched by it — 035 defines no update_thought");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test((await run(SQL_ENV)).out), "…and 046 after it is the shipped pair again");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") || f.startsWith("060") || f.startsWith("061") });
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test((await run(SQL_ENV)).out), "…and 060 after it is the shipped pair again");
   // The 2-argument form from before 005 — what the getting-started guide, the
   // fingerprint recipe's Step 2 and upstream's enhanced-thoughts schema all
   // carry — over 035's (SMD-1250): 003 re-applied is that statement. A warning
   // naming 035, the last definer of the 2-argument form as well.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("003") });
   const reapplied003 = await run(SQL_ENV);
-  assert(reapplied003.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present and the 3-argument body is 046's, but the 2-argument body is not 005's — it does not refuse a non-object payload/.test(reapplied003.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer of the 2-argument form as well\./.test(reapplied003.out),
-         "an earlier 2-argument body over 046's is a warning naming 046, the last definer of that form too");
+  assert(reapplied003.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present and the 3-argument body is 061's, but the 2-argument body is not 005's — it does not refuse a non-object payload/.test(reapplied003.out) && /Apply db\/migrations\/061_derivations\.sql — the last definer of the 2-argument form as well\./.test(reapplied003.out),
+         "an earlier 2-argument body over 060's is a warning naming 061, the last definer of that form too");
   // Both bodies stale at once — 003's 2-argument and 021's 3-argument: one
-  // warning says both, and the remedy is 035, once. 032 follows 021 here so
-  // `edit signature` stays ok and only `atomic capture` speaks.
+  // warning says both, and the remedy is 061, once on the capture pair. 032
+  // follows 021 here so `edit signature` stays ok; the lineage row warns too
+  // (021's body is a seventh where 061 leaves six) and names the same file.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("032") });
   const bothStale = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and it takes no fingerprint lock; and the 2-argument body is not 005's either — it does not refuse a non-object payload/.test(bothStale.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer; 022's or 025's file alone/.test(bothStale.out) && (bothStale.out.match(/046_thought_audit_event_shape/g) ?? []).length === 1,
-         "both bodies stale is one warning naming both, with 046 as the one remedy");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and it takes no fingerprint lock; and the 2-argument body is not 005's either — it does not refuse a non-object payload/.test(bothStale.out) && /Apply db\/migrations\/061_derivations\.sql — the last definer; 022's or 025's file alone/.test(bothStale.out) && (bothStale.out.split("\n").filter((l, i, ls) => !/^\s*!\s+lineage\s/.test(l) && !/^\s*!\s+lineage\s/.test(ls[i - 1] ?? "")).join("\n").match(/061_derivations/g) ?? []).length === 1
+         && /^\s*!\s+lineage\s+.*7 bodies where 061 leaves six.*\n\s*→ Apply db\/migrations\/061_derivations\.sql\./m.test(bothStale.out),
+         "both bodies stale is one warning naming both, with 061 as the one remedy on the capture pair — and the lineage row warns on the same stale bodies, naming the same file (SMD-1731)");
   // 005 re-applied alone: a pre-022 3-argument body, and the 2-argument body
   // 005's — the guard back, no lock. The warning says which of the two stale
   // states the 2-argument body is in.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("005") });
   const fiveAlone = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and the 2-argument body is not 046's either — it is from before migration 033 \(migrations 033, 035 and 046 are not yet applied, or 005 was re-applied by hand\): it takes no fingerprint lock/.test(fiveAlone.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer/.test(fiveAlone.out),
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and the 2-argument body is not 060's either — it is from before migration 033 \(migrations 033, 035, 046, 060 and 061 are not yet applied, or 005 was re-applied by hand\): it takes no fingerprint lock/.test(fiveAlone.out) && /Apply db\/migrations\/061_derivations\.sql — the last definer/.test(fiveAlone.out),
          "…and 005 re-applied alone leaves a pre-022 3-argument body and a 2-argument body with the guard and no lock, said as such");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test((await run(SQL_ENV)).out), "…and 046 after it is the shipped pair again");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") || f.startsWith("060") || f.startsWith("061") });
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test((await run(SQL_ENV)).out), "…and 060 after it is the shipped pair again");
   // The 3-argument form gone from a 035 database: the remedy is the last
   // definer, not 004, 022 or 025 — whose bodies would drop 005's guard, 008's
   // actor, 021's label, 022's rule, 025's envelope, 033's lock and 035's rule, or the
   // last of those.
   await claims.unsafe("DROP FUNCTION upsert_thought(text, jsonb, vector)");
   const noThree = await run(SQL_ENV);
-  assert(noThree.code === 1 && /atomic capture\s+2 upsert_thought overload\(s\) — the 3-argument form, the atomic capture, is missing/.test(noThree.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer of both forms/.test(noThree.out) && !/Apply db\/migrations\/00[24]_/.test(noThree.out) && !/Apply db\/migrations\/02[25]_/.test(noThree.out),
-         "the 3-argument form missing is a refusal whose remedy is 046, the last definer — not 004, 022 or 025");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
-  assert((await run(SQL_ENV)).code === 0, "…which 046 re-applied performs");
+  assert(noThree.code === 1 && /atomic capture\s+2 upsert_thought overload\(s\) — the 3-argument form, the atomic capture, is missing/.test(noThree.out) && /Apply db\/migrations\/061_derivations\.sql — the last definer of both forms/.test(noThree.out) && !/Apply db\/migrations\/00[24]_/.test(noThree.out) && !/Apply db\/migrations\/02[25]_/.test(noThree.out),
+         "the 3-argument form missing is a refusal whose remedy is 061, the last definer — not 004, 022 or 025");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") || f.startsWith("060") || f.startsWith("061") });
+  assert((await run(SQL_ENV)).code === 0, "…which 060 re-applied performs");
   // A database whose update_thought predates 032: 018's form alone, then
   // 021's alone — each named by its signature, 032 the remedy.
   await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const pre021 = await run(SQL_ENV);
-  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032; the server sends p_provenance/.test(pre021.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre021.out),
-         "a 018-era update_thought under this server does not start, and is named by its signature with 046 — whose DROP chain reaches every older form — as the remedy");
+  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032; the server sends p_provenance/.test(pre021.out) && /Apply db\/migrations\/061_derivations\.sql\. Its DROP chain reaches every older form/.test(pre021.out),
+         "a 018-era update_thought under this server does not start, and is named by its signature with 061 — whose DROP chain reaches every older form — as the remedy");
   // The ledger recording 046 makes the remedy the re-run — and the re-run
   // still says what 046's DROP chain drops, as the apply text does (cold
   // read, fourth review pass: the sentence rode the apply text alone, and a
   // ledgered brain with stale forms was not told what re-applying does).
   const led046 = new SQL({ url: LIVE, max: 1 });
   await led046.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
-  await led046.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('046_thought_audit_event_shape.sql', 'test')`);
+  await led046.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('061_derivations.sql', 'test')`);
   const ledgered = await run(SQL_ENV);
   await led046.unsafe(`DROP TABLE schema_migrations`);
   await led046.close();
   // The remedy prints on the line after the finding, so the whole output is read, as the arms above read it.
-  assert(ledgered.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032/.test(ledgered.out) && /re-apply the recorded migrations with the migrator/.test(ledgered.out) && /Re-applied, 046's DROP chain reaches every older form and leaves the one the servers call\./.test(ledgered.out) && !/Apply db\/migrations\/046/.test(ledgered.out),
-         `with 046 recorded in the ledger the edit-signature remedy is the re-run alone, and it says what 046's DROP chain drops (exit ${ledgered.code}: ${ledgered.out.split("\n").filter((l) => /edit signature|re-apply the recorded|DROP chain/.test(l)).join(" | ").trim().slice(0, 400)})`);
+  assert(ledgered.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032/.test(ledgered.out) && /re-apply the recorded migrations with the migrator/.test(ledgered.out) && /Re-applied, 061's DROP chain reaches every older form and leaves the one the servers call\./.test(ledgered.out) && !/Apply db\/migrations\/046/.test(ledgered.out),
+         `with 061 recorded in the ledger the edit-signature remedy is the re-run alone, and it says what 061's DROP chain drops (exit ${ledgered.code}: ${ledgered.out.split("\n").filter((l) => /edit signature|re-apply the recorded|DROP chain/.test(l)).join(" | ").trim().slice(0, 400)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const pre032 = await run(SQL_ENV);
-  assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre032.out),
-         "…and a 021-era one — a brain at 031 — likewise, with 046 as the remedy");
+  assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/061_derivations\.sql\. Its DROP chain reaches every older form/.test(pre032.out),
+         "…and a 021-era one — a brain at 031 — likewise, with 061 as the remedy");
   // 032 re-applied on that brain leaves its 9-argument form ALONE — a brain at
-  // 044 under this server: every edit resolves, a warning naming what is lost
-  // and 046. Then 021 re-applied beside it: two older forms and none the
-  // servers call — the remedy is 046, whose DROP chain reaches both, not 032,
-  // which would leave its own 9 to be named on the next start (second review
-  // pass).
+  // 044 under this server: the servers send p_lineage, which only 061's form
+  // takes, so every edit fails there — a refusal naming 061, as the pre-032
+  // form is (until SMD-1731 the servers sent nine by name and this was a
+  // warning naming 046; pass 3's cold read). Then 021 re-applied beside it:
+  // two older forms and none the servers call — the remedy is 061, whose
+  // DROP chain reaches both (second review pass of SMD-1730).
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("032") });
   const nineAlone = await run(SQL_ENV);
-  assert(nineAlone.code === 0 && /!  edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) is the form from before migration 046: every edit resolves, but no write event \(p_event — stance, cites, the valid window, trust\) reaches the audit row, and db\/reembed\.ts, which resolves the body by/.test(nineAlone.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(nineAlone.out),
-         `a 9-argument form alone — a brain at 044 — is a warning naming 046, not a refusal (exit ${nineAlone.code})`);
+  assert(nineAlone.code === 1 && /✗  edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) is the form from before migration 046; the servers send p_lineage \(the windows' and the tags' recipes\), which only 061's form takes — so every edit would fail, and db\/reembed\.ts, which resolves the body by/.test(nineAlone.out) && /Apply db\/migrations\/061_derivations\.sql\. Its DROP chain reaches every older form and leaves the one the servers call\./.test(nineAlone.out) && !/Apply db\/migrations\/046/.test(nineAlone.out),
+         `a 9-argument form alone — a brain at 044 — is a refusal naming 061: the servers send eleven arguments (exit ${nineAlone.code})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const eightAndNine = await run(SQL_ENV);
   const editLine = eightAndNine.out.split("\n").find((l) => /edit signature/.test(l)) ?? "";
-  assert(eightAndNine.code === 1 && /^✗  edit signature/.test(editLine.trim()) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\)/.test(editLine) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\)/.test(editLine) && / are forms from before migration 046 with none the servers call/.test(editLine) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches the 9-, 8- and 7-argument forms/.test(eightAndNine.out) && !/032_update_thought_provenance/.test(eightAndNine.out),
-         `the 8- and 9-argument forms with no 10 are refused with 046 as the one remedy, not 032 (exit ${eightAndNine.code})`);
+  assert(eightAndNine.code === 1 && /^✗  edit signature/.test(editLine.trim()) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\)/.test(editLine) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\)/.test(editLine) && / are forms from before migration 061 with none the servers call/.test(editLine) && /Apply db\/migrations\/061_derivations\.sql\. Its DROP chain reaches the 10-, 9-, 8- and 7-argument forms/.test(eightAndNine.out) && !/032_update_thought_provenance/.test(eightAndNine.out),
+         `the 8- and 9-argument forms with no 10 or 11 are refused with 061 as the one remedy, not 032 or 046 (exit ${eightAndNine.code})`);
   // 021 put the column back; 046 puts the shipped bodies back over 021's
   // (022, 025, 033 or 035 alone would leave the later ones' out, warnings
   // above) — 032 and 033 first, so the 9-argument update_thought 046 drops is
   // there to drop, the ACL crossing as it did at the upgrade.
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("026") || f.startsWith("032") || f.startsWith("033") || f.startsWith("046") || f.startsWith("055") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("026") || f.startsWith("032") || f.startsWith("033") || f.startsWith("046") || f.startsWith("055") || f.startsWith("060") || f.startsWith("061") });
   const restoredAll = await run(SQL_ENV);
   assert(/provenance\s+trace_provenance and find_derivatives present; trace_provenance's body is 026's, the walk bounded/.test(restoredAll.out),
          "…and trace_provenance is 026's again: every 025 re-applied above was followed by 026, so no later healthy run carries the provenance warn");
@@ -1600,8 +1882,8 @@ else {
   const pre046 = await run(SQL_ENV);
   assert(pre046.code === 0 && /!  audit events\s+thought_audit lacks 1 of 046's eight columns \(backfilled_at\) — the brain predates migration 046: writes go through, and every row records no kind, trust, door or event until it is applied/.test(pre046.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(pre046.out),
          "…while the same column missing under 025's trigger — a brain before 046 — is a warning that writes go through, naming 046");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
-  assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and 046 then 055 re-applied put the column and the trigger back (055's body over 046's — SMD-2115)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") || f.startsWith("060") || f.startsWith("061") });
+  assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and 046, 055 then 060 re-applied put the column and the trigger back (060's body over 055's over 046's — SMD-2115, SMD-2116)");
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
   await claims.unsafe("DROP TABLE thought_work_claims");
@@ -1644,7 +1926,7 @@ else {
       await claims.unsafe("GRANT USAGE ON SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
-      // 060's projection writes, held from the start so the steps below name
+      // 066's projection writes, held from the start so the steps below name
       // only what they revoke; its own step follows the base set (SMD-2256).
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
 
@@ -1659,12 +1941,30 @@ else {
              /INSERT, DELETE on thought_chunks; INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingBoth.out)) &&
              /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingBoth.out),
              `a role missing the chunk, audit and facet writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
-      assert(/a windowed capture, an edit with content, or 008's audit trigger, and every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(missingBoth.out)),
-             "…and says what each missing privilege breaks: the capture path for the chunk and audit writes, every delete for the facet one");
-      assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
+      assert(/a windowed capture, an edit with content, or 008's audit trigger \(060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector\) \(061's vector lineage trigger and the write functions record derivations as the caller on every capture and edit, and drop a replaced set's row\), and every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(missingBoth.out)),
+             "…and says what each missing privilege breaks: the capture path for the chunk, audit, snapshot and lineage writes (060's and 061's triggers named), every delete for the facet one");
+      assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
+      // 060's snapshot writes are named too, with the trigger that makes them
+      // (SMD-2116); they are granted with the chunk writes below so the arms
+      // after read as before, and revoked again at the end.
+      assert(/INSERT, UPDATE on ob1_embedding_snapshot/.test(writeLine(missingBoth.out)) && /060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector/.test(writeLine(missingBoth.out)) && /GRANT INSERT, UPDATE ON ob1_embedding_snapshot TO ob1_pf_capture;/.test(missingBoth.out),
+             "…and the snapshot writes are named with 060's trigger (SMD-2116)");
 
-      // Grant the chunk writes by hand; the audit INSERT and the facet UPDATE remain named.
-      await claims.unsafe("GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture");
+      // 061's lineage writes are named too (SMD-1731), with the trigger and
+      // the writers that make them; granted with the chunk writes below.
+      assert(/INSERT, UPDATE, DELETE on derivations/.test(writeLine(missingBoth.out)) && /GRANT INSERT, UPDATE, DELETE ON derivations TO ob1_pf_capture;/.test(missingBoth.out),
+             "…and the lineage writes are named with 061's trigger and writers (SMD-1731)");
+      // A role that cannot READ derivations: the lineage census is a skip
+      // naming the GRANT and the group's row, not a bare "could not verify"
+      // (run-it, second review pass; the tooth from the third).
+      await claims.unsafe("REVOKE SELECT ON derivations FROM ob1_pf_capture");
+      const noRead = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(/·  lineage\s+not checked — this role cannot read derivations \(permission denied for table derivations\)/.test(noRead.out) && /GRANT SELECT ON derivations TO <the connector's role>; — the capture group's row since 061, which migrate\.ts --grant issues/.test(noRead.out) && /SELECT, INSERT, UPDATE, DELETE on derivations/.test(writeLine(noRead.out)),
+             `a role without SELECT on derivations gets a skip naming the GRANT and the group's row, beside the write-privileges refusal (${noRead.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+      await claims.unsafe("GRANT SELECT ON derivations TO ob1_pf_capture");
+
+      // Grant the chunk writes (and 060's snapshot writes, and 061's lineage writes) by hand; the audit INSERT and the facet UPDATE remain named.
+      await claims.unsafe("GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture; GRANT INSERT, UPDATE ON ob1_embedding_snapshot TO ob1_pf_capture; GRANT INSERT, UPDATE, DELETE ON derivations TO ob1_pf_capture");
       const missingAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(missingAudit.code === 1 &&
              /INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingAudit.out)) &&
@@ -1685,7 +1985,7 @@ else {
       assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);
 
-      // 060's triggers reconcile the node_state projection as the caller on a
+      // 066's triggers reconcile the node_state projection as the caller on a
       // write that moves a key, a status, a watermark or a pointer, and the
       // lifecycle reads read it. Split by privilege (first review pass): with
       // SELECT held and the writes missing, the check names those writes and
@@ -1694,10 +1994,10 @@ else {
       await claims.unsafe("REVOKE INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
       const projectionWrites = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(projectionWrites.code === 1 &&
-             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included \(060's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionWrites.out)) &&
+             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included \(066's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionWrites.out)) &&
              !/windowed capture|every delete|lifecycle read/.test(writeLine(projectionWrites.out)) &&
              /GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;\s+GRANT INSERT, UPDATE, DELETE ON ob1_superseded_by TO ob1_pf_capture;/.test(projectionWrites.out),
-             `without 060's projection writes the check names the writes that move a key or a pointer — not lifecycle reads, not a plain capture, not every delete — each table with its GRANT (exit ${projectionWrites.code})`);
+             `without 066's projection writes the check names the writes that move a key or a pointer — not lifecycle reads, not a plain capture, not every delete — each table with its GRANT (exit ${projectionWrites.code})`);
       await claims.unsafe("REVOKE SELECT ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
       const projectionAll = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(projectionAll.code === 1 &&
@@ -1769,22 +2069,59 @@ else {
       const pre046Agents = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(/write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(pre046Agents.out) && !/ob1_agents/.test(writeLine(pre046Agents.out)),
              `under 025's audit trigger the same role holds the capture set — SELECT on ob1_agents is required only while the body that reads it is installed (exit ${pre046Agents.code})`);
-      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") || f.startsWith("060") || f.startsWith("061") });
       // 046 re-applied requires the SELECT again, and grants it to nobody: the
       // grant is the operator's, by the convention every privilege has landed
       // under — a ROLE_GRANTS row, this check naming what is missing, --grant
       // (ninth review pass cut an in-file grant after three passes of edges).
       assert(/SELECT on ob1_agents/.test(writeLine((await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL })).out)), "…and 046's body back, it is required again — and named, not granted, by the apply");
       await claims.unsafe("GRANT SELECT ON ob1_agents TO ob1_pf_capture");
-      // The census SELECTs the log; the hard capture set grants INSERT only. A
-      // role granted exactly that set is told the census was not checked, and
-      // where the SELECT is — not warned about its brain (run-it, second review
-      // pass); the role's SELECT-on-all otherwise held it.
+      // The census SELECTs the log. So does 055's append on every write —
+      // its INSERT ... RETURNING reads the row it inserts — and since 060 the
+      // audit trigger's check and the projector, as the caller: SELECT on
+      // thought_audit is in the hard capture set (SMD-2116 put it there; it
+      // had been needed since 055 with no row in the grant set — run-it,
+      // SMD-2116's fourth review pass), so a role without it is refused for
+      // the writes, and the census is skipped beside that with its own GRANT
+      // (run-it, SMD-1730's second review pass placed the skip; the role's
+      // SELECT-on-all otherwise held it).
       await claims.unsafe("REVOKE SELECT ON thought_audit FROM ob1_pf_capture");
+      const asWriter = new SQL({ url: CAPTURE_URL, max: 1 });
+      let deniedInCheck = "";
+      try { await asWriter`SELECT upsert_thought('preflight: a capture without SELECT on thought_audit', ${{ metadata: {}, actor: { name: "laptop" } }}::jsonb)`; }
+      catch (e) { deniedInCheck = (e as Error).message; }
+      finally { await asWriter.close(); }
+      assert(/permission denied for table thought_audit/.test(deniedInCheck), `a capture as a role without SELECT on thought_audit fails inside 060's projector, the log's first reader in a write (${deniedInCheck.slice(0, 80)})`);
       const noCensus = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(noCensus.code === 0 && /·  audit events\s+not checked — this role cannot read the census \(permission denied for table thought_audit\); the shape is checked, the waiting keys are not/.test(noCensus.out) && /GRANT SELECT ON thought_audit TO <the connector's role>; — the community group's row/.test(noCensus.out),
-             `a role that cannot read thought_audit is told the census was skipped, with the community group's GRANT (exit ${noCensus.code})`);
+      assert(noCensus.code === 1 && /SELECT on thought_audit/.test(writeLine(noCensus.out)) && /055's ob1_append_thought_event reads the audit row it inserts — INSERT … RETURNING — and since 060 the audit trigger's check and the projector read the event, as the caller/.test(writeLine(noCensus.out)) && /GRANT SELECT ON thought_audit TO ob1_pf_capture;/.test(noCensus.out),
+             `a role lacking SELECT on thought_audit is refused, 060's readers of the log named (exit ${noCensus.code})`);
+      assert(/·  audit events\s+not checked — this role cannot read the census \(permission denied for table thought_audit\); the shape is checked, the waiting keys are not/.test(noCensus.out) && /GRANT SELECT ON thought_audit TO <the connector's role>; — the community group's row/.test(noCensus.out),
+             "…and the census is skipped beside it, naming the table");
+      // Before 055 nothing on the write path read the log (046's trigger
+      // inserted with no RETURNING), so the SELECT is asked of a brain with
+      // 055's append alone: the function set aside, the role is not refused
+      // for it (run-it, fourth review pass: the requirement dates from 055,
+      // not 060; the audit-events check reads the missing function as its
+      // own finding, so only the write line is held here).
+      await claims.unsafe("ALTER FUNCTION ob1_append_thought_event(uuid, text, text, jsonb, jsonb) RENAME TO ob1_append_thought_event_aside");
+      const pre055Role = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(/write privileges/.test(writeLine(pre055Role.out)) && !/SELECT on thought_audit/.test(writeLine(pre055Role.out)),
+             `a brain without 055's append is not asked for SELECT on thought_audit among the writes (${writeLine(pre055Role.out).slice(0, 120)})`);
+      await claims.unsafe("ALTER FUNCTION ob1_append_thought_event_aside(uuid, text, text, jsonb, jsonb) RENAME TO ob1_append_thought_event");
       await claims.unsafe("GRANT SELECT ON thought_audit TO ob1_pf_capture");
+      // 060's snapshot writes alone missing: refused, the trigger named, and a
+      // capture that carries a vector fails inside it as the role (SMD-2116).
+      await claims.unsafe("REVOKE INSERT, UPDATE ON ob1_embedding_snapshot FROM ob1_pf_capture");
+      const asVectorWriter = new SQL({ url: CAPTURE_URL, max: 1 });
+      let deniedInSnapshot = "";
+      try { await asVectorWriter`SELECT upsert_thought('preflight: a capture with a vector and no snapshot write', ${{ metadata: {}, actor: { name: "laptop" }, embedding_model: EMBEDDING_MODEL }}::jsonb, ${`[${[1, ...new Array(EMBEDDING_DIM - 1).fill(0)].join(",")}]`}::vector)`; }
+      catch (e) { deniedInSnapshot = (e as Error).message; }
+      finally { await asVectorWriter.close(); }
+      assert(/permission denied for table ob1_embedding_snapshot/.test(deniedInSnapshot), `a capture with a vector as a role without the snapshot writes fails inside 060's snapshot trigger (${deniedInSnapshot.slice(0, 80)})`);
+      const noSnapshot = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(noSnapshot.code === 1 && /INSERT, UPDATE on ob1_embedding_snapshot — so a windowed capture, an edit with content, or 008's audit trigger \(060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector\) would fail/.test(writeLine(noSnapshot.out)),
+             `with only the snapshot writes missing, the check names 060's trigger (exit ${noSnapshot.code})`);
+      await claims.unsafe("GRANT INSERT, UPDATE ON ob1_embedding_snapshot TO ob1_pf_capture");
 
       // Enable entity extraction: 016's trigger now upserts a work claim as the
       // caller on every capture, so the capture path needs thought_work_claims
@@ -1963,6 +2300,50 @@ else {
     assert(new RegExp(`!\\s+migration ledger\\s+the ledger reaches 999, past this server's tree \\(${last}\\) — a newer tree migrated this brain`).test(ahead.out),
            `a ledger past the tree's last file warns the other way (${row(ahead.out, "migration ledger")})`);
 
+    // Refused before any query (SMD-2238): a database that is not there
+    // (3D000) names the connection string, not the migrations alone; a role
+    // that may not log in (28000) names the role.
+    const missingDb = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/[^/?]+(\?|$)/, "/pf_no_such_database$1") });
+    assert(/✗\s+schema\s+database "pf_no_such_database" does not exist\n\s+→ Correct the database name in \$DATABASE_URL — or, for a new brain, create it/.test(missingDb.out),
+           `a missing database names the connection string's database (${row(missingDb.out, "schema")} ${fix(missingDb.out, "schema")})`);
+    await claims.unsafe("DROP ROLE IF EXISTS pf_nologin");
+    await claims.unsafe("CREATE ROLE pf_nologin NOLOGIN PASSWORD 'nologin'");
+    try {
+      const noLogin = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_nologin:nologin@") });
+      assert(/✗\s+schema\s+role "pf_nologin" is not permitted to log in\n\s+→ Check the role in \$DATABASE_URL: the server refused it before any query/.test(noLogin.out),
+             `a role refused at login names the role, not the migrations (${row(noLogin.out, "schema")} ${fix(noLogin.out, "schema")})`);
+      // A refusal at connection that is 42501 too — a setting in the
+      // connection string this role may not make — is named as one, never
+      // as the table's grant (review pass 2).
+      await claims.unsafe("ALTER ROLE pf_nologin LOGIN");
+      const noConnect = await run({ ...SQL_ENV, DATABASE_URL: `${LIVE!.replace(/\/\/[^@]*@/, "//pf_nologin:nologin@")}${LIVE!.includes("?") ? "&" : "?"}options=-crole%3Dpg_monitor` });
+      assert(/✗\s+schema\s+permission denied to set role "pg_monitor"\n\s+→ The server refused this role at connection, before any query: grant it CONNECT on the database \(GRANT CONNECT ON DATABASE "[^"]+" TO "pf_nologin";  as its owner\), take out a setting \$DATABASE_URL makes that the role may not \(a parameter, or -c in options=\), or, on PostgreSQL 17, see the login event triggers\./.test(noConnect.out)
+               && !/GRANT SELECT ON public\.thoughts|Grant this role SELECT/.test(fix(noConnect.out, "schema")),
+             `a 42501 at connection names the connection, not the table's grant (${row(noConnect.out, "schema")} ${fix(noConnect.out, "schema")})`);
+      // No CONNECT on the database, told by the probe meeting the same
+      // refusal, never by the error's severity, which a translated
+      // lc_messages changes (review pass 3). The printed GRANT CONNECT, run,
+      // lets the role in: its next failure is the table's grant.
+      const [{ publicConnect }] = await claims`SELECT has_database_privilege('public', current_database(), 'CONNECT') AS "publicConnect"`;
+      await claims.unsafe(`DO $r$ BEGIN EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC, pf_nologin', current_database()); END $r$`);
+      try {
+        const nologinUrl = LIVE!.replace(/\/\/[^@]*@/, "//pf_nologin:nologin@");
+        const barredDb = await run({ ...SQL_ENV, DATABASE_URL: nologinUrl });
+        const printedConnect = /\((GRANT CONNECT ON DATABASE "[^"]+" TO "pf_nologin";)  as its owner\)/.exec(barredDb.out)?.[1];
+        assert(!!printedConnect && /✗\s+schema\s+permission denied for database/.test(barredDb.out),
+               `no CONNECT on the database names the GRANT CONNECT (${row(barredDb.out, "schema")} ${fix(barredDb.out, "schema")})`);
+        if (printedConnect) await claims.unsafe(printedConnect);
+        const connected = await run({ ...SQL_ENV, DATABASE_URL: nologinUrl });
+        assert(!!printedConnect && /✗\s+schema\s+permission denied for table thoughts — role pf_nologin has no SELECT on public\.thoughts/.test(connected.out),
+               `…and that GRANT, run as printed, lets the role in: what fails next is the table's grant (${row(connected.out, "schema")})`);
+      } finally {
+        await claims.unsafe(`DO $r$ BEGIN EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM pf_nologin', current_database()); END $r$`);
+        if (publicConnect) await claims.unsafe(`DO $r$ BEGIN EXECUTE format('GRANT CONNECT ON DATABASE %I TO PUBLIC', current_database()); END $r$`);
+      }
+    } finally {
+      await claims.unsafe("DROP ROLE pf_nologin");
+    }
+
     // A role that may read the corpus and neither the ledger nor ob1_config
     // (review pass 1): the ledger row says the table is there and unreadable —
     // information_schema hid it from such a role, and the row told it to adopt
@@ -1972,19 +2353,120 @@ else {
     await claims.unsafe("CREATE ROLE pf_reader LOGIN PASSWORD 'reader'");
     await claims.unsafe("GRANT USAGE ON SCHEMA public TO pf_reader");
     await claims.unsafe("GRANT SELECT ON thoughts TO pf_reader");
+    const readerUrl = LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@");
     try {
-      const asReader = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      const asReader = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/migration ledger\s+schema_migrations present, not readable by this role \(permission denied for table schema_migrations\)/.test(asReader.out) && !/no schema_migrations table/.test(asReader.out),
              `a role without SELECT on the ledger is told it is unreadable, not absent (${row(asReader.out, "migration ledger")})`);
       assert(/schema version\s+could not verify: permission denied for table ob1_config/.test(asReader.out),
              `…and the version row names the refused ob1_config read (${row(asReader.out, "schema version")})`);
+      // information_schema shows a role no column of a table it holds no
+      // privilege on; pg_attribute shows them all (SMD-2238). A migrated
+      // brain is never told to re-apply 046 or 021, or to apply 013.
+      assert(!/audit events\s+thought_audit lacks/.test(asReader.out) && /audit events\s+not checked — this role cannot read the census \(permission denied for table/.test(asReader.out),
+             `…the audit row finds 046's columns and names the refused census read, not a --reapply (${row(asReader.out, "audit events")})`);
+      assert(!/embedding_model does not exist/.test(asReader.out) && /[✓!]\s+vector models/.test(asReader.out),
+             `…the vector-models row finds 021's column (${row(asReader.out, "vector models")})`);
+      const ctxReader = await run({ ...SQL_ENV, DATABASE_URL: readerUrl, OB1_CHUNK_CONTEXT: "on" });
+      assert(/!\s+chunk context\s+could not verify: permission denied for table thought_chunks/.test(ctxReader.out) && !/013_chunk_context/.test(ctxReader.out),
+             `…and with OB1_CHUNK_CONTEXT on, the chunk-context row names the refused read, not 013 (${row(ctxReader.out, "chunk context")})`);
+
+      // No SELECT on thoughts, public on the path (SMD-2238): 42501 on the
+      // count names the grant, never the network. The printed GRANT, run,
+      // makes the row pass.
+      await claims.unsafe("REVOKE SELECT ON thoughts FROM pf_reader");
+      const noSelect = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+      assert(/✗\s+schema\s+permission denied for table thoughts — role pf_reader has no SELECT on public\.thoughts\n\s+→ GRANT SELECT ON public\.thoughts TO pf_reader;  — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate\.ts --url <the owner's connection string> --grant pf_reader /.test(noSelect.out)
+               && !/Check credentials and network/.test(fix(noSelect.out, "schema")),
+             `a role without SELECT on thoughts is told the grant (${row(noSelect.out, "schema")} ${fix(noSelect.out, "schema")})`);
+      assert(!/embedding_model does not exist/.test(noSelect.out) && /!\s+vector models\s+could not verify: permission denied for table thoughts/.test(noSelect.out),
+             `…and the vector-models row names the refused read, not 021's column missing (${row(noSelect.out, "vector models")})`);
+      // With the probe refused its connection (the count holds the role's one
+      // slot), the refusal still names the grant, not the network (review pass 1).
+      await claims.unsafe("ALTER ROLE pf_reader CONNECTION LIMIT 1");
+      try {
+        const oneSlot = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/✗\s+schema\s+permission denied for table thoughts\n\s+→ Grant this role SELECT on public\.thoughts — or, for the server's role/.test(oneSlot.out),
+               `…and with no connection for the probe, the refusal still names the grant (${fix(oneSlot.out, "schema")})`);
+      } finally {
+        await claims.unsafe("ALTER ROLE pf_reader CONNECTION LIMIT -1");
+      }
+      const printedGrant = /→ (GRANT SELECT ON public\.thoughts TO pf_reader;)/.exec(noSelect.out)?.[1];
+      if (printedGrant) await claims.unsafe(printedGrant);
+      const granted = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+      assert(!!printedGrant && /✓\s+schema\s+thoughts table reachable/.test(granted.out),
+             `…and that GRANT, run as printed, makes thoughts readable (${row(granted.out, "schema")})`);
+      // Restored whatever was printed, so a broken grant branch fails its own assertions, not the legs after it.
+      await claims.unsafe("GRANT SELECT ON thoughts TO pf_reader");
+      // Another schema's thoughts ahead of public on the path, which the role
+      // may not read: another tool's table, never a GRANT on it — that GRANT,
+      // run, passed this row against it (review pass 1). The common shape: a
+      // schema named for the role, first on the default "$user", public
+      // (review pass 2). Public put ahead, as the row says, reads the brain's.
+      try {
+        await claims.unsafe("DROP SCHEMA IF EXISTS pf_reader CASCADE; CREATE SCHEMA pf_reader; CREATE TABLE pf_reader.thoughts (id int)");
+        await claims.unsafe("GRANT USAGE ON SCHEMA pf_reader TO pf_reader");
+        await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
+        const shadowed = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/✗\s+schema\s+permission denied for table thoughts — thoughts resolves to pf_reader\.thoughts, not the brain's public\.thoughts\n\s+→ Put public ahead of "pf_reader" \(the path's "\$user"\) on this connection's search_path — the role's setting, or the connection string's where it sets one — or take "pf_reader" off it: the server reads/.test(shadowed.out)
+                 && !/GRANT SELECT ON pf_reader\./.test(shadowed.out),
+               `another schema's thoughts first on the path is named, never granted on (${row(shadowed.out, "schema")} ${fix(shadowed.out, "schema")})`);
+        // The path naming the schema itself, not through "$user": no "$user"
+        // note, which would be untrue (review pass 3).
+        await claims.unsafe("ALTER ROLE pf_reader SET search_path = pf_reader, public");
+        const literal = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/→ Put public ahead of "pf_reader" on this connection's search_path/.test(literal.out),
+               `…and with the path naming it, not "$user", no "$user" note (${fix(literal.out, "schema")})`);
+        await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
+        // With no USAGE on public too, the GRANT comes first; both, run, read it.
+        const [{ shadowPublicUsage }] = await claims`SELECT has_schema_privilege('public', 'public', 'USAGE') AS "shadowPublicUsage"`;
+        await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader, PUBLIC");
+        try {
+          const barred = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+          const usageGrant = /→ (GRANT USAGE ON SCHEMA public TO pf_reader;)  then put public ahead of "pf_reader"/.exec(barred.out)?.[1];
+          assert(!!usageGrant, `…and with no USAGE on public, the GRANT USAGE comes first (${fix(barred.out, "schema")})`);
+          if (usageGrant) await claims.unsafe(usageGrant);
+          await claims.unsafe("ALTER ROLE pf_reader SET search_path = public, \"$user\"");
+          const unshadowed = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+          assert(/✓\s+schema\s+thoughts table reachable/.test(unshadowed.out),
+                 `…and that GRANT, with public put ahead of it as printed, reads the brain's table (${row(unshadowed.out, "schema")})`);
+        } finally {
+          await claims.unsafe("GRANT USAGE ON SCHEMA public TO pf_reader");
+          if (shadowPublicUsage) await claims.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC");
+        }
+      } finally {
+        await claims.unsafe("ALTER ROLE pf_reader RESET search_path");
+        await claims.unsafe("DROP SCHEMA IF EXISTS pf_reader CASCADE");
+      }
+      // --grant takes the role's name raw, so a name the shell would split is
+      // printed shell-quoted; the command, run through sh as printed with the
+      // owner's connection string put in, grants it.
+      await claims.unsafe(`DROP ROLE IF EXISTS "pf reader's"`);
+      await claims.unsafe(`CREATE ROLE "pf reader's" LOGIN PASSWORD 'reader'`);
+      try {
+        const oddUrl = LIVE!.replace(/\/\/[^@]*@/, `//${encodeURIComponent("pf reader's")}:reader@`);
+        const odd = await run({ ...SQL_ENV, DATABASE_URL: oddUrl });
+        const printedCmd = /(bun migrate\.ts --url <the owner's connection string> --grant '(?:[^']|'\\'')*')  \(db\/README/.exec(odd.out)?.[1];
+        assert(/→ GRANT SELECT ON public\.thoughts TO "pf reader's";/.test(odd.out) && printedCmd === `bun migrate.ts --url <the owner's connection string> --grant 'pf reader'\\''s'`,
+               `a role whose name the shell would split gets --grant shell-quoted (${fix(odd.out, "schema")})`);
+        if (printedCmd) {
+          const sh = await runScript(["sh", "-c", printedCmd.replace("<the owner's connection string>", '"$OWNER_URL"')],
+                                     { env: { ...process.env, OWNER_URL: LIVE! } as Record<string, string>, cwd: join(HERE, "..", "db") });
+          const after = await run({ ...SQL_ENV, DATABASE_URL: oddUrl });
+          assert(sh.code === 0 && /✓\s+schema\s+thoughts table reachable/.test(after.out),
+                 `…and that command, run through sh as printed, grants the role (exit ${sh.code}; ${row(after.out, "schema")})`);
+        }
+      } finally {
+        await claims.unsafe(`DROP OWNED BY "pf reader's"`);
+        await claims.unsafe(`DROP ROLE "pf reader's"`);
+      }
 
       // The same role with public off its search path (review pass 2): the
       // ledger exists and does not resolve for it. Never "no schema_migrations
       // table" and never the --baseline remedy, which on a partly migrated
       // brain would record pending migrations as applied.
       await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
-      const lost = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      const lost = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/!\s+migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(lost.out)
                && !/no schema_migrations table/.test(lost.out) && !/Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(lost.out),
              `a ledger off the role's search path warns that it does not resolve, and recommends no --baseline (${row(lost.out, "migration ledger")})`);
@@ -1996,7 +2478,7 @@ else {
       // The row now names what the role lacks, every later row runs, and the
       // schema row — thoughts is there, off the path — does not say migrate.
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO pf_reader");
-      const wide = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      const wide = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/✗\s+write privileges\s+this connection's role \(pf_reader\) is missing privileges the capture path's writers need/.test(wide.out),
              `a role that may read ob1_config without public on its path gets the write-privileges row's own result (${row(wide.out, "write privileges")})`);
       assert(!/not checked — the direct connection failed before it/.test(wide.out)
@@ -2004,9 +2486,233 @@ else {
                && /migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(wide.out)
                && /schema version\s+could not verify: ob1_config exists \(schema public\) but does not resolve for this role/.test(wide.out),
              `…and every later direct row runs, the ledger and version rows in their own words (${row(wide.out, "chunk context")} | ${row(wide.out, "schema version")})`);
-      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path\)\n\s+→ Put public on the role's search_path: ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = <the schemas it has>, public;/.test(wide.out)
+      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(wide.out)
                && !/Apply the migrations: cd db/.test(wide.out),
              `…and the schema row names the path, not the migrate command (${row(wide.out, "schema")})`);
+      // pgvector in public, off the path too: the vector row prints the schema
+      // row's statement, public once — before, `"$user", public, public` on the
+      // role's plain setting, which its setting in the database outranks (SMD-2238).
+      const schemaStmt = /→ (ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = [^;]*;)/.exec(fix(wide.out, "schema"))?.[1];
+      const vectorStmt = /(ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = [^;]*;)/.exec(fix(wide.out, "vector extension"))?.[1];
+      assert(!!schemaStmt && schemaStmt === vectorStmt && !/public, public/.test(wide.out),
+             `…and the vector row prints the same statement, public once (${fix(wide.out, "vector extension")})`);
+      // Both say to reconnect: the running server's pooled connections keep the old path (review pass 2).
+      assert(fix(wide.out, "schema").endsWith(`${schemaStmt}  Then reconnect.  The table is there, so migrating would not make it resolve.`),
+             `…and the schema row, like the vector row, says to reconnect after it (${fix(wide.out, "schema")})`);
+
+      // The path's statement is rebuilt from the parsed setting, never
+      // echoed (SMD-2242). An empty path reads back as "" — a zero-length
+      // name, invalid SQL if echoed.
+      /** pf_reader's own setting in this database — a statement the row prints sets one; each leg resets it. */
+      const readerOnThisDatabase = (setting: string) => claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I ${setting}', current_database()); END $r$`);
+      await claims.unsafe("ALTER ROLE pf_reader SET search_path = ''");
+      const empty = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+      assert(/public is not on its search_path, which is empty\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = public;/.test(empty.out),
+             `an empty path is named empty, and the statement sets public alone (${row(empty.out, "schema")})`);
+      {
+        const printed = /→ (ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = public;)/.exec(empty.out)?.[1];
+        let resolves = false;
+        let refused = "";
+        if (printed) {
+          try {
+            await claims.unsafe(printed);
+            const reader = new SQL({ url: readerUrl, max: 1 });
+            try {
+              resolves = ((await reader`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+            } finally {
+              await reader.close();
+            }
+          } catch (e) {
+            refused = (e as Error).message;
+          } finally {
+            await readerOnThisDatabase("RESET search_path");
+          }
+        }
+        assert(resolves, `…and run as printed it makes thoughts resolve for the role (${refused ? `refused: ${refused}` : printed ?? "nothing printed"})`);
+      }
+      // A path stored raw (set_config, then FROM CURRENT): a quoted name with
+      // a doubled quote, $user, an unquoted name to fold, an NBSP that is no
+      // whitespace to Postgres, and a name that is a statement if pasted bare.
+      // The printed statement, run as a superuser, leaves the sentinel standing
+      // and makes thoughts resolve for the role.
+      try {
+        await claims.unsafe("CREATE TABLE IF NOT EXISTS public.pf_sentinel (id int)");
+        const setter = new SQL({ url: LIVE!, max: 1 });
+        try {
+          await setter`SELECT set_config('search_path', ${'"$user", "Odd ""x", NoWhere,\u00a0public, x;drop/**/table/**/pf_sentinel;--'}, false)`;
+          await setter.unsafe("ALTER ROLE pf_reader SET search_path FROM CURRENT");
+        } finally {
+          await setter.close();
+        }
+        const raw = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        const printed = /→ (ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = .*, public;)/.exec(raw.out)?.[1];
+        assert(printed !== undefined && printed.endsWith(' SET search_path = "$user", "Odd ""x", "nowhere", "\u00a0public", "x;drop/**/table/**/pf_sentinel;--", public;'),
+               `a raw stored path is parsed, every name quoted, public added (${printed ?? row(raw.out, "schema")})`);
+        let resolves = false;
+        let refused = "";
+        if (printed) {
+          try {
+            await claims.unsafe(printed);
+            const reader = new SQL({ url: readerUrl, max: 1 });
+            try {
+              resolves = ((await reader`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+            } finally {
+              await reader.close();
+            }
+          } catch (e) {
+            refused = (e as Error).message;
+          }
+        }
+        const [{ standing }] = (await claims`SELECT to_regclass('public.pf_sentinel') IS NOT NULL AS standing`) as { standing: boolean }[];
+        assert(resolves && standing, `…and run as printed it makes thoughts resolve for the role (${refused ? `refused: ${refused}` : resolves}) and runs nothing else — the sentinel stands (${standing})`);
+      } finally {
+        try {
+          await readerOnThisDatabase("RESET search_path");
+        } finally {
+          await claims.unsafe("DROP TABLE IF EXISTS public.pf_sentinel");
+          await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
+        }
+      }
+      // A path the connection string sets — in options, or as Bun's own
+      // search_path= parameter — outranks every ALTER ROLE, so the row says to
+      // replace it there. Followed as printed (the setting replaced, not a
+      // second one appended, which Bun joins with a comma and libpq drops),
+      // thoughts resolves.
+      const q = readerUrl.includes("?") ? "&" : "?";
+      const viaUrl = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${q}options=-csearch_path%3Dnowhere` });
+      const viaParam = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${q}search_path=nowhere` });
+      const advice = /→ The connection string sets search_path \(a search_path= parameter, or -c search_path= in options=\), which outranks any ALTER ROLE: remove that and put this in options=, beside any other -c setting there \(separated by %20\): (-csearch_path%3D%22nowhere%22%2Cpublic) /;
+      const token = advice.exec(viaUrl.out)?.[1];
+      assert(token !== undefined && advice.test(viaParam.out),
+             `a path from the connection string, in options or as search_path=, is replaced there, not overridden by ALTER ROLE (${row(viaUrl.out, "schema")} | ${row(viaParam.out, "schema")})`);
+      {
+        // Beside another -c setting, separated by %20, as the row says.
+        let resolves = false;
+        let timeout = "";
+        if (token) {
+          const followed = new SQL({ url: `${readerUrl}${q}options=-cstatement_timeout%3D5s%20${token}`, max: 1 });
+          try {
+            const [f] = (await followed`SELECT to_regclass('thoughts') IS NOT NULL AS ok, current_setting('statement_timeout') AS timeout`) as { ok: boolean; timeout: string }[];
+            resolves = f.ok;
+            timeout = f.timeout;
+          } finally {
+            await followed.close();
+          }
+        }
+        assert(resolves && timeout === "5s", `…and with the connection string's setting replaced as printed, beside another -c setting, thoughts resolves and the other setting holds (${token ?? "nothing printed"}; statement_timeout ${timeout})`);
+      }
+      // A login role whose settings SET ROLE: the count runs as the role it
+      // becomes, but the settings that load are the login role's, so the
+      // ALTER ROLE names the login role — after SET ROLE NONE, since the role
+      // it becomes may not alter it. Run as printed, over the login role's own
+      // connection, it takes, and thoughts resolves on the next.
+      await claims.unsafe("DROP ROLE IF EXISTS pf_acting");
+      await claims.unsafe("CREATE ROLE pf_acting NOLOGIN");
+      try {
+        await claims.unsafe("GRANT pf_acting TO pf_reader");
+        await claims.unsafe("ALTER ROLE pf_reader SET role = pf_acting");
+        const acting = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        const printed = /→ (SET ROLE NONE; ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;)  \(as pf_reader, or a superuser\)/.exec(acting.out)?.[1];
+        assert(printed !== undefined, `a login role that SETs ROLE is the one the ALTER ROLE names, after SET ROLE NONE (${row(acting.out, "schema")})`);
+        // pgvector in public, off the path with it: the vector row names the
+        // login role the same way, not the role it SETs (SMD-2238).
+        assert(!!printed && fix(acting.out, "vector extension").includes(`${printed}  (as pf_reader, or a superuser)`),
+               `…and the vector row prints the same statement (${fix(acting.out, "vector extension")})`);
+        let resolves = false;
+        let refused = "";
+        if (printed) {
+          const asLogin = new SQL({ url: readerUrl, max: 1 });
+          try {
+            await asLogin.unsafe(printed);
+          } catch (e) {
+            refused = (e as Error).message;
+          } finally {
+            await asLogin.close();
+          }
+          const next = new SQL({ url: readerUrl, max: 1 });
+          try {
+            resolves = ((await next`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+          } finally {
+            await next.close();
+          }
+        }
+        assert(resolves, `…and run as printed by the login role itself it takes (${refused ? `refused: ${refused}` : resolves})`);
+      } finally {
+        try {
+          await readerOnThisDatabase("RESET search_path");
+        } finally {
+          await claims.unsafe("ALTER ROLE pf_reader RESET role");
+          await claims.unsafe("DROP ROLE pf_acting");
+        }
+      }
+      // A role barred from pg_settings (a view in this database) cannot read
+      // where its path came from, and still gets the statement, not migrate.
+      const [{ settingsReadable }] = await claims`SELECT has_table_privilege('public', 'pg_catalog.pg_settings', 'SELECT') AS "settingsReadable"`;
+      await claims.unsafe("REVOKE SELECT ON pg_catalog.pg_settings FROM PUBLIC");
+      try {
+        const barred = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;  \(unless the connection string sets search_path, which outranks it\)/.test(barred.out),
+               `a role that cannot read pg_settings still gets the path's statement, with the connection string's caveat (${row(barred.out, "schema")})`);
+      } finally {
+        if (settingsReadable) await claims.unsafe("GRANT SELECT ON pg_catalog.pg_settings TO PUBLIC");
+      }
+      // Another relation's "does not exist" on the same count — an RLS policy
+      // for this role calling a function that reads a missing table — is the
+      // same undefined-table error (42P01) with thoughts resolving: public is
+      // on the path, and the row must not say otherwise.
+      const [{ rowSecurity }] = (await claims`SELECT relrowsecurity AS "rowSecurity" FROM pg_class WHERE oid = 'public.thoughts'::regclass`) as { rowSecurity: boolean }[];
+      try {
+        await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
+        await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts; DROP FUNCTION IF EXISTS public.pf_rls_missing()");
+        await claims.unsafe("CREATE FUNCTION public.pf_rls_missing() RETURNS boolean LANGUAGE plpgsql AS $f$ BEGIN PERFORM 1 FROM pf_no_such_table; RETURN true; END $f$");
+        await claims.unsafe("CREATE POLICY pf_rls ON public.thoughts FOR SELECT TO pf_reader USING (public.pf_rls_missing())");
+        // Named: the policies a SELECT by this role meets. Not named: one for
+        // INSERT, one for a role it is not (review pass 1).
+        await claims.unsafe("CREATE POLICY pf_rls_public ON public.thoughts AS RESTRICTIVE FOR SELECT TO PUBLIC USING (true)");
+        await claims.unsafe("CREATE POLICY pf_rls_insert ON public.thoughts FOR INSERT TO pf_reader WITH CHECK (public.pf_rls_missing())");
+        await claims.unsafe("CREATE POLICY pf_rls_other ON public.thoughts FOR SELECT TO pg_monitor USING (public.pf_rls_missing())");
+        await claims.unsafe("ALTER TABLE public.thoughts ENABLE ROW LEVEL SECURITY");
+        const rls = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/✗\s+schema\s+relation "pf_no_such_table" does not exist/.test(rls.out) && !/public is not on its search_path/.test(rls.out),
+               `another relation's "does not exist" is not read as thoughts off the path (${row(rls.out, "schema")})`);
+        // …nor as a brain to migrate: the row names the policy (SMD-2238).
+        assert(/relation "pf_no_such_table" does not exist — thoughts resolves \(public\.thoughts\), so the missing relation is read by what the count reaches: row-level security policies pf_rls, pf_rls_public on it\n\s+→ Fix the policies, or a function called there, so nothing reads a relation that does not exist\.  The table is there/.test(rls.out)
+                 && !/Apply the migrations/.test(fix(rls.out, "schema")),
+               `…and names the policy, not the migrate command (${row(rls.out, "schema")} ${fix(rls.out, "schema")})`);
+        // A policy calling a function this role may not run: 42501 with SELECT
+        // on thoughts held is the policy's refusal, not a missing grant on it.
+        await claims.unsafe("DROP POLICY pf_rls ON public.thoughts");
+        await claims.unsafe("CREATE FUNCTION public.pf_rls_denied() RETURNS boolean LANGUAGE sql AS $f$ SELECT true $f$");
+        await claims.unsafe("REVOKE EXECUTE ON FUNCTION public.pf_rls_denied() FROM PUBLIC");
+        await claims.unsafe("CREATE POLICY pf_rls ON public.thoughts FOR SELECT TO pf_reader USING (public.pf_rls_denied())");
+        const denied = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/✗\s+schema\s+permission denied for function pf_rls_denied — thoughts resolves \(public\.thoughts\) and this role may read it, so the refusal comes from what the count reaches: row-level security policies pf_rls, pf_rls_public on it\n\s+→ Grant this role what the error names, or change the policies to use only what the role may\.  The table is there/.test(denied.out)
+                 && !/GRANT SELECT ON public\.thoughts/.test(denied.out),
+               `…and a policy's refusal names the policy, not a GRANT on thoughts (${row(denied.out, "schema")} ${fix(denied.out, "schema")})`);
+        // row_security off: Postgres refuses a read a policy would filter, and
+        // neither a grant nor the policy fixes it (review pass 1). The printed
+        // BYPASSRLS, run, does.
+        await claims.unsafe("ALTER ROLE pf_reader SET row_security = off");
+        const rsOff = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/✗\s+schema\s+query would be affected by row-level security policy for table "thoughts" — row_security is off for this session and public\.thoughts has row-level security, so Postgres refuses the read rather than skip its policies\n\s+→ Turn row_security back on for this connection \(it is off in a role's or the database's settings, or the connection string\), or, for a role that should read every row, ALTER ROLE pf_reader BYPASSRLS;/.test(rsOff.out),
+               `…and row_security off names that, not the policy (${row(rsOff.out, "schema")} ${fix(rsOff.out, "schema")})`);
+        const bypass = /(ALTER ROLE pf_reader BYPASSRLS;)/.exec(rsOff.out)?.[1];
+        if (bypass) await claims.unsafe(bypass);
+        const bypassed = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(!!bypass && /✓\s+schema\s+thoughts table reachable/.test(bypassed.out),
+               `…and the printed BYPASSRLS, run, makes the count read (${row(bypassed.out, "schema")})`);
+      } finally {
+        try {
+          if (!rowSecurity) await claims.unsafe("ALTER TABLE public.thoughts DISABLE ROW LEVEL SECURITY");
+        } finally {
+          await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts; DROP POLICY IF EXISTS pf_rls_public ON public.thoughts; DROP POLICY IF EXISTS pf_rls_insert ON public.thoughts; DROP POLICY IF EXISTS pf_rls_other ON public.thoughts");
+          await claims.unsafe("ALTER ROLE pf_reader NOBYPASSRLS");
+          await claims.unsafe("ALTER ROLE pf_reader RESET row_security");
+          await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_missing()");
+          await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_denied()");
+          await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
+        }
+      }
 
       // With no USAGE on public — PUBLIC's taken too, which a fresh database
       // grants — to_regclass('public.…') itself raises. The rows whose reads
@@ -2014,15 +2720,20 @@ else {
       const [{ publicUsage }] = await claims`SELECT has_schema_privilege('public', 'public', 'USAGE') AS "publicUsage"`;
       await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader, PUBLIC");
       try {
-        const bare = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        const bare = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
         assert(/!\s+write privileges\s+could not verify: permission denied for schema public/.test(bare.out)
                  && /!\s+chunk context\s+could not verify: permission denied for schema public/.test(bare.out)
                  && !/not checked — the direct connection failed before it/.test(bare.out),
                `a role with no USAGE on public: the qualified reads' rows warn, each alone, and every later row runs (${row(bare.out, "write privileges")} | ${row(bare.out, "tier")})`);
-        // Without USAGE the path cannot be read, so the GRANT comes first
-        // and the path second, conditionally.
-        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  then, if public is not on the role's search_path, ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = <the schemas it has>, public;/.test(bare.out),
-               `…and the schema row names the missing USAGE, then the path (${row(bare.out, "schema")})`);
+        // The role's path is `nowhere`, so both causes hold, each with its
+        // statement (SMD-2242).
+        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public; public is not on its search_path, which is "nowhere"\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  then ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(bare.out),
+               `…and the schema row names the missing USAGE and the path, each with its statement (${row(bare.out, "schema")})`);
+        // An unquoted PUBLIC from the connection string is public: USAGE is
+        // the one cause.
+        const upper = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${readerUrl.includes("?") ? "&" : "?"}options=-csearch_path%3DPUBLIC` });
+        assert(/does not resolve for this role \(no USAGE on schema public\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  The table is there/.test(upper.out),
+               `an unquoted PUBLIC on the path is public: the row names the USAGE alone (${row(upper.out, "schema")})`);
       } finally {
         if (publicUsage) await claims.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC");
       }
@@ -2216,6 +2927,56 @@ console.log("\n[7] The supersession judge's model is reported, and probed under 
   const same = await run({ ...ENV, OB1_JUDGE_MODEL: "meta-7b" }, "--deep");
   assert(/✓\s+judge model\s+meta-7b \(OB1_JUDGE_MODEL\) — the same as the metadata model\s*$/m.test(same.out), "the same model in both knobs: the row says so");
   assert(chatModels.length === 1, `…and it is probed once (${chatModels.length})`);
+  stub.stop();
+}
+
+console.log("\n[7b] The extraction escalation model is probed under its own --deep row when it is a third distinct model the worker would dial (SMD-2000)");
+{
+  const chatModels: string[] = [];
+  let refuse = "";
+  const stub = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [] });
+      const body = (await req.json()) as { model: string };
+      if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] });
+      chatModels.push(body.model);
+      if (body.model === refuse) return new Response(`model "${body.model}" not found`, { status: 404 });
+      return Response.json({ choices: [{ message: { content: '{"ok":true}' } }] });
+    },
+  });
+  const ENV = { ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_METADATA_MODEL: "meta-7b" };
+
+  // Set to a third distinct model, reasoning off: its own row and its own probe,
+  // and the extraction window row names it as the unpenalised retry target.
+  const own = await run({ ...ENV, OB1_EXTRACT_ESCALATE_MODEL: "big-esc" }, "--deep");
+  assert(/✓\s+extraction escalation model\s+big-esc honours JSON mode at/.test(own.out), "OB1_EXTRACT_ESCALATE_MODEL set: the escalation model is probed under its own row");
+  assert(chatModels.length === 2 && chatModels.includes("meta-7b") && chatModels.includes("big-esc"), `…two probes, one per model, judge sharing the metadata model (${chatModels.join(", ")})`);
+  assert(/made once more on big-esc \(OB1_EXTRACT_ESCALATE_MODEL\), unpenalised/.test(own.out), "…and the extraction window row names it as the unpenalised retry target (describeExtractWindow)");
+
+  // Equal to the metadata model: windowingFor drops it — no row, no probe. A
+  // DISTINCT judge is set so the row's absence isolates the !=metadata gate: were
+  // it the judge-dedup instead, a gate-bypass mutant (escalate from the raw knob)
+  // would probe meta-7b a second time under an escalation row here.
+  chatModels.length = 0;
+  const same = await run({ ...ENV, OB1_JUDGE_MODEL: "big-judge", OB1_EXTRACT_ESCALATE_MODEL: "meta-7b" }, "--deep");
+  assert(!/extraction escalation model/.test(same.out) && chatModels.length === 2 && chatModels.filter((m) => m === "meta-7b").length === 1,
+         `escalate == metadata: no escalation row, meta-7b probed once (not again as escalation) beside the distinct judge (${chatModels.join(", ")})`);
+
+  // Reasoning on: no budget, so no runaway to escalate — windowingFor returns
+  // none, and the probe does not fire for a model the worker would never dial.
+  chatModels.length = 0;
+  const reasoning = await run({ ...ENV, OB1_EXTRACT_ESCALATE_MODEL: "big-esc", OB1_METADATA_REASONING: "on" }, "--deep");
+  assert(!/extraction escalation model/.test(reasoning.out) && !chatModels.includes("big-esc"),
+         `reasoning on: the escalation probe does not fire (${chatModels.join(", ")})`);
+
+  // Named in both the judge's and the escalation's knobs: one model, one probe —
+  // the escalation row dedups against the judge's (escalateModel !== judgeModel).
+  chatModels.length = 0;
+  const dedup = await run({ ...ENV, OB1_JUDGE_MODEL: "big-esc", OB1_EXTRACT_ESCALATE_MODEL: "big-esc" }, "--deep");
+  assert(/✓\s+judge model\s+big-esc honours JSON mode at/.test(dedup.out) && !/extraction escalation model\s+big-esc honours/.test(dedup.out),
+         "escalate == judge: big-esc is probed under the judge row, not a second escalation row");
+  assert(chatModels.filter((m) => m === "big-esc").length === 1, `…and big-esc is probed once, not twice (${chatModels.join(", ")})`);
   stub.stop();
 }
 

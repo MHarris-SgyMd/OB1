@@ -49,7 +49,7 @@
  *   M1  memory per container at the start of --verify and after the runs, the
  *       image and its digest, the version, and the store's size where the
  *       adapter reads it.
- * A candidate adds its own checks after these (n8n's K, P and E: n8n.ts).
+ * A candidate adds its own checks after these (n8n's K, P, A, I and E: n8n.ts).
  * Under a sealed variant, the ingestion is the probe workflow (ten fixed
  * captures, nothing fetched). The act tool must FAIL, since reaching Linear
  * would mean an escape, and --wait-schedule is refused, since the schedule
@@ -101,7 +101,7 @@ function selfCheck(): number {
   ];
   const out = (rest: string, iface = "eth0") => `${T}${iface}  Out IP 10.89.4.2.5555 > ${rest}`;
   // [what, lines, pass, detail must match, facts]
-  const cases: [string, string[], boolean, RegExp, (typeof facts & { problem?: string })?][] = [
+  const cases: [string, string[], boolean, RegExp, (typeof facts & { runner?: string[]; problem?: string })?][] = [
     ["the recorded shape passes", base, true, /the network's own names: server\.dns\.podman ×1/],
     ["a host search-domain expansion is reported apart, and passes", [...base, out("10.89.4.1.53: 7+ AAAA? server.cerberus-gondola.ts.net. (48)")], true, /search-domain expansions: server\.cerberus-gondola\.ts\.net ×1/],
     ["a TCP DNS connection to the resolver passes while its segments are empty", [...base, out("10.89.4.1.53: Flags [S], seq 9, length 0"), out("10.89.4.1.53: Flags [.], ack 1, win 63, length 0")], true, /DNS only to 10\.89\.4\.1/],
@@ -139,6 +139,11 @@ function selfCheck(): number {
     ["a capture that never opened fails", base.filter((l) => !l.startsWith("listening on")), false, /opened 0 times/],
     ["a capture that ended before it was read fails", [...base, "92 packets captured", "92 packets received by filter", "0 packets dropped by kernel"], false, /capture ended before it was read/],
     ["a question line without its length is unreadable", [...base, out("10.89.4.1.53: 4242+ A? server.dns.podman.")], false, /UNREADABLE PACKET LINES/],
+    // The import runner (SMD-2212): an import template's one internal peer besides the brain.
+    ["a connection to the import runner's :8090 passes", [...base, out("10.89.4.1.53: 11+ A? orchestration-runner.dns.podman. (49)"), out("10.89.4.5.8090: Flags [S], seq 12, length 0")], true, /to the import runner \(10\.89\.4\.5:8090\): 1/, { ...facts, runner: ["10.89.4.5"] }],
+    ["port 8090 on another host is not the runner", [...base, out("9.9.9.9.8090: Flags [S], seq 13, length 0")], false, /9\.9\.9\.9:8090/, { ...facts, runner: ["10.89.4.5"] }],
+    ["the runner on another port fails", [...base, out("10.89.4.5.22: Flags [S], seq 14, length 0")], false, /10\.89\.4\.5:22/, { ...facts, runner: ["10.89.4.5"] }],
+    ["with no runner running, :8090 is a dial like any other", [...base, out("10.89.4.5.8090: Flags [S], seq 15, length 0")], false, /10\.89\.4\.5:8090 \(tcp\)/],
   ];
   let failed = 0;
   for (const [what, lines, pass, re, f] of cases) {
@@ -155,6 +160,8 @@ function selfCheck(): number {
   expect("facts: resolvers, search domains and the brain's addresses parse; podman's 'invalid IP' is dropped", !good.problem && good.resolvers.join() === "10.89.4.1" && good.searchDomains.join() === "dns.podman,cerberus-gondola.ts.net" && good.brain.join() === "10.89.4.3,10.89.6.4");
   expect("facts: a stopped watcher is a problem", /not running/.test(factsFrom({ resolv, brain, watcher: watcher("false", "2026-09-26 06:12:25 -0500 CDT"), n8nStarted: n8nAt }).problem ?? ""));
   expect("facts: a watcher started after n8n is a problem", /after n8n/.test(factsFrom({ resolv, brain, watcher: watcher("true", "2026-09-26 06:12:30 -0500 CDT"), n8nStarted: n8nAt }).problem ?? ""));
+  const withRunner = factsFrom({ resolv, brain, runner: { out: "10.89.4.5 invalid IP ", code: 0 }, watcher: watcher("true", "2026-09-26 06:12:25.9 -0500 CDT"), n8nStarted: n8nAt });
+  expect("facts: the runner's addresses parse, and none when it is not running", withRunner.runner?.join() === "10.89.4.5" && (good.runner ?? []).length === 0 && !withRunner.problem);
   expect("facts: no brain address is a problem", /empty/.test(factsFrom({ resolv, brain: { out: "invalid IP", code: 0 }, watcher: watcher("true", "2026-09-26 06:12:25 -0500 CDT"), n8nStarted: n8nAt }).problem ?? ""));
   expect("engineTime reads podman's Go form and Docker's RFC 3339 alike", engineTime(n8nAt) === Date.parse("2026-09-26T11:12:26.451Z") && engineTime("2026-09-26T11:12:26.451Z") === Date.parse("2026-09-26T11:12:26.451Z"));
   // The watcher's filter keeps every clause E relies on (review pass 4: dropping the IPv6 clause survived).

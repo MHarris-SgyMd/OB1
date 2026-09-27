@@ -27,7 +27,7 @@
  *
  * A file on the shim WITHOUT the banner rewrite() writes was written for the shim
  * by hand — a script that spoke PostgREST through `fetch` and was ported
- * (recipes/brain-backup, recipes/lint-sweep; SMD-2144) — and has no supabase-js
+ * (recipes/brain-backup, recipes/lint-sweep; SMD-2144 — and recipes/thought-enrichment through its lib/brain.mjs, SMD-2139) — and has no supabase-js
  * import to go back to: `--revert`, with or without a path, names it and leaves
  * it alone (a revert restores the import the banner recorded, or
  * `@supabase/supabase-js` when the banner lacks that line), and the report

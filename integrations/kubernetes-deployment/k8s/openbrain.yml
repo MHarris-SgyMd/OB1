@@ -76,6 +76,8 @@ spec:
       labels:
         app: openbrain
     spec:
+      # The server drains for OB1_STOP_GRACE less 2 s (below); keep the two equal.
+      terminationGracePeriodSeconds: 30
       containers:
         # Container 1: PostgreSQL + pgvector
         - name: db
@@ -118,6 +120,8 @@ spec:
             - containerPort: 8000
               name: http
           env:
+            - name: OB1_STOP_GRACE
+              value: "30"
             - name: DB_HOST
               value: "127.0.0.1"
             - name: DB_PORT

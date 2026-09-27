@@ -30,7 +30,9 @@ import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEn
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
+import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
+import { drainBoundFrom } from "./shutdown.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -114,7 +116,7 @@ const CATALOG_HINT = "run once as the SQL store (OB1_STORE unset, DATABASE_URL s
 // that has not reported yet, rather than one name for whatever went wrong.
 const DIRECT_CHECKS = [
   "vector extension",
-  "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "agent identity",
+  "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log", "tier",
@@ -149,9 +151,18 @@ const APPLY_042 = "Apply db/migrations/042_thought_citations.sql.";
  * review pass; `migrate.ts --reapply` runs every file in order and is the
  * remedy that cannot get this wrong).
  */
-const THEN_055 = " Then apply db/migrations/055_capture_event_payload.sql — it last defines the audit trigger and the refusal trigger 046 also holds, so 046 alone puts their 046 bodies back (bun migrate.ts --reapply runs every file in order).";
+const THEN_055 = " Then apply db/migrations/055_capture_event_payload.sql and db/migrations/060_append_then_project.sql — 055 last defines the refusal trigger and 060 the audit trigger and the three write functions 046 also holds, so 046 alone puts their 046 bodies back (bun migrate.ts --reapply runs every file in order).";
+/**
+ * 055 also holds the audit trigger, which 060 last defines (SMD-2116): 055
+ * applied by hand alone puts its row-first body back — no check under
+ * ob1.projecting — so every remedy that names 055 names 060 after it.
+ */
+const THEN_060 = " Then apply db/migrations/060_append_then_project.sql — it last defines the audit trigger 055 also holds, so 055 alone puts its 055 body back (bun migrate.ts --reapply runs every file in order).";
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
+const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
+const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
+const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -603,6 +614,22 @@ if (chatEndpoint === embEndpoint) {
   egressRow("chat egress", chatEndpoint, localKnob({ embeddings: embEndpoint, chat: chatEndpoint }, "chat"), "chat", CHAT_REFUSED);
 }
 
+// ── Stop grace ───────────────────────────────────────────────────────────────
+
+// Only when set (SMD-2250, review pass 4). Compose appends `s` to it for the
+// server's stop_grace_period, so a value the server cannot read as whole
+// seconds makes the two disagree — `1m` a 1 ms kill while the server plans
+// 8 s of drain — and a container that refuses to start says so where a log
+// warning would not.
+if (env.OB1_STOP_GRACE) {
+  const grace = drainBoundFrom(env.OB1_STOP_GRACE);
+  if (grace.problem) {
+    add("stop grace", "fail", grace.problem, "Set OB1_STOP_GRACE to the platform's grace period in whole seconds, no unit (30, not 30s), or unset it for Docker's 10.");
+  } else {
+    add("stop grace", "ok", `${grace.graceS} s (OB1_STOP_GRACE) — a stop drains what is in flight for up to ${grace.drainBoundMs / 1000} s`);
+  }
+}
+
 // ── Access keys ──────────────────────────────────────────────────────────────
 
 // Parsed once; the `agent identity` row reads the same records (eighth review pass).
@@ -724,7 +751,7 @@ if (configFailed) {
   if (built) {
     /**
      * Every schema check below is gated on the SQL store, because they read
-     * pg_proc and information_schema over a direct connection that the PostgREST
+     * pg_proc and pg_attribute over a direct connection that the PostgREST
      * path does not have. That has been true since migration 004's check and is
      * a limitation of the deployment shape rather than of any one migration.
      *
@@ -753,45 +780,186 @@ if (configFailed) {
       // that holds it here (the alias included), and for PostgREST — which has
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
-      // public.thoughts present but not resolving for this role — no USAGE
-      // on public, or public off its search_path — is not a brain to
-      // migrate (SMD-2062). public alone, as every direct check judges it:
-      // a thoughts in some other schema is another tool's, and an
-      // un-migrated public still wants the migrations. With USAGE held the
-      // table can only be off the path; without it, whether the path holds
-      // public too cannot be read (current_schemas() leaves out a schema
-      // the role has no USAGE on), so the GRANT comes first and the path
-      // second. The exact path statement is SMD-2242's. pg_class answers
-      // for any role, whatever its path; over PostgREST there is no catalog
-      // to ask, and a failed probe asks nothing.
-      let offPath: { cause: string; fix: string } | null = null;
-      if (built.kind === "sql" && conn && /does not exist/i.test(msg)) {
+      /** GRANT CONNECT for the connection string's database and user, each as the server reads it (no case folding); placeholders where the URL names none. */
+      const connectGrant = (url: string) => {
+        let db = "<the database>", user = "<the role>";
+        try {
+          const u = new URL(url);
+          if (u.username) user = quoteIdent(decodeURIComponent(u.username));
+          if (u.pathname.length > 1) db = quoteIdent(decodeURIComponent(u.pathname.slice(1)));
+          else if (u.username) db = user;
+        } catch { /* placeholders stand */ }
+        return `GRANT CONNECT ON DATABASE ${db} TO ${user};`;
+      };
+      // The count's failure, by SQLSTATE — never the message or severity,
+      // which a server's lc_messages translates (review pass 3). On 42P01 or
+      // 42501 a probe on a second connection reads the catalog, and the
+      // remedy is the first of these that holds:
+      // - public.thoughts present and not resolving (SMD-2062): no USAGE on
+      //   public, public off the path, or both, each named with its statement
+      //   (SMD-2242). The path is parsed, never echoed, and not read from
+      //   current_schemas(), which hides a schema without USAGE
+      //   (search-path.ts); with USAGE held, thoughts not resolving means off
+      //   the path whatever the parse says. The GRANT names current_user,
+      //   whose privilege the count used; the ALTER ROLE names session_user,
+      //   whose settings load, IN DATABASE since a role's setting there
+      //   outranks its plain one and the database's. A path from the
+      //   connection (source `client`) or SET after login (`session`)
+      //   outranks it; an unread source gets that caveat. The connection's
+      //   path is replaced, never appended to: Bun joins two options with a
+      //   comma, libpq keeps the last, and Bun's search_path= outranks options.
+      // - thoughts resolving to another schema's table: another tool's, never
+      //   granted on; public goes ahead of it, and then, if the brain's table
+      //   is missing, the migrations.
+      // - 42501 without SELECT on public.thoughts: the grant.
+      // - 42501 with row_security off on a table with row-level security.
+      // - otherwise (42P01, or 42501 with SELECT held): a read the count
+      //   reaches, the row-level security policies a SELECT by this role meets.
+      // The probe's query needs no privilege, so a 42501 on it is a refusal
+      // at connection (no CONNECT, a connection-string setting the role may
+      // not make, a login trigger), which the count met too. Over PostgREST
+      // there is no catalog to ask; a probe that fails otherwise (no
+      // connection slot) leaves the SQLSTATE's own remedy below.
+      const errno = String((e as { errno?: unknown }).errno ?? "");
+      let probeErrno = "";
+      let found: { detail: string; remedy: string } | null = null;
+      if (built.kind === "sql" && conn && (errno === "42P01" || errno === "42501")) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
           try {
+            // The policies a SELECT by this role meets: FOR SELECT or ALL, TO
+            // PUBLIC or a role whose privileges it has.
             const [r] = (await probe`
+              WITH pol AS (
+                SELECT quote_ident(p.polname) AS name FROM pg_policy p
+                 WHERE p.polrelid = to_regclass('thoughts') AND p.polcmd IN ('r', '*')
+                   AND (0 = ANY (p.polroles) OR EXISTS (SELECT 1 FROM unnest(p.polroles) g WHERE g <> 0 AND pg_has_role(current_user, g, 'USAGE'))))
               SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
+                     to_regclass('thoughts') IS NULL AS unresolved,
                      has_schema_privilege('public', 'USAGE') AS usage,
+                     current_setting('search_path') AS path,
+                     current_setting('server_version_num')::int AS version,
                      quote_ident(current_user::text) AS role,
-                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; role: string; db: string }[];
-            if (r?.present) {
-              const putOnPath = `ALTER ROLE ${r.role} IN DATABASE ${r.db} SET search_path = <the schemas it has>, public; (a search_path in the connection string outranks it)`;
-              offPath = r.usage
-                ? { cause: "public is not on its search_path", fix: `Put public on the role's search_path: ${putOnPath}` }
-                : { cause: "no USAGE on schema public", fix: `GRANT USAGE ON SCHEMA public TO ${r.role};  then, if public is not on the role's search_path, ${putOnPath}` };
+                     quote_ident(session_user::text) AS login,
+                     quote_ident(current_database()::text) AS db,
+                     current_user::text AS "roleName",
+                     (SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE c.oid = to_regclass('thoughts')) AS resolved,
+                     (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE c.oid = to_regclass('thoughts')) AS "resolvedSchema",
+                     has_table_privilege(to_regclass('thoughts'), 'SELECT') AS "canSelect",
+                     (SELECT c.relrowsecurity FROM pg_class c WHERE c.oid = to_regclass('thoughts')) AS rls,
+                     current_setting('row_security') AS "rowSecurity",
+                     (SELECT string_agg(name, ', ' ORDER BY name) FROM pol) AS policies,
+                     (SELECT count(*)::int FROM pol) AS "policyCount",
+                     (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+                       WHERE e.extname = 'vector' AND to_regtype('vector') IS NULL) AS "vectorSchema"`) as {
+              present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
+              roleName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
+              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number; vectorSchema: string | null;
+            }[];
+            if (r?.present && r.unresolved) {
+              let source: string | null = null;
+              try {
+                source = ((await probe`SELECT source FROM pg_settings WHERE name = 'search_path'`) as { source: string }[])[0]?.source ?? null;
+              } catch { /* unread: the ALTER ROLE statement stands */ }
+              const schemas = searchPathSchemas(String(r.path ?? ""), Number(r.version));
+              const causes: string[] = [];
+              const fixes: string[] = [];
+              if (!r.usage) {
+                causes.push("no USAGE on schema public");
+                fixes.push(`GRANT USAGE ON SCHEMA public TO ${r.role};`);
+              }
+              if (r.usage || !schemas.includes("public")) {
+                causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
+                // pgvector's schema too, when the type does not resolve, so this
+                // row and `vector extension` print one path statement, which, run,
+                // puts both on the path (SMD-2238). A missing USAGE on pgvector's
+                // schema is the vector row's GRANT.
+                fixes.push(`${pathFix({ schemas, extension: r.vectorSchema, login: r.login, role: r.role, db: r.db, source })}  Then reconnect.`);
+              }
+              found = {
+                detail: `public.thoughts exists but does not resolve for this role (${causes.join("; ")})`,
+                remedy: `${fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`,
+              };
+            } else if (r?.resolved && r.resolvedSchema !== "public") {
+              // Another schema's thoughts, first on the path: another tool's
+              // table, never one to grant on or to call the brain's (review
+              // pass 1: the GRANT printed for it, run, passed this row against
+              // it). The brain's table missing is still a brain to migrate.
+              // The migrator's CREATE TABLE IF NOT EXISTS thoughts is
+              // unqualified too: run with that schema first on the path, it
+              // finds the other table and fails (review pass 2), so the path
+              // comes first either way. A schema named for the role is the
+              // default path's "$user".
+              const other = quoteIdent(String(r.resolvedSchema));
+              const named = r.resolvedSchema === r.roleName && searchPathSchemas(String(r.path ?? ""), Number(r.version)).includes("$user") ? ` (the path's "$user")` : "";
+              const putAhead = `put public ahead of ${other}${named} on this connection's search_path — the role's setting, or the connection string's where it sets one — or take ${other} off it`;
+              found = r.present
+                ? {
+                    detail: `thoughts resolves to ${r.resolved}, not the brain's public.thoughts`,
+                    remedy: `${r.usage ? "" : `GRANT USAGE ON SCHEMA public TO ${r.role};  then `}${putAhead}: the server reads the first thoughts on the path.  The brain's table is there, so migrating would not change it.`.replace(/^./, (c) => c.toUpperCase()),
+                  }
+                : {
+                    detail: `thoughts resolves to ${r.resolved}, another tool's table; the brain's public.thoughts does not exist`,
+                    remedy: `${putAhead.replace(/^./, (c) => c.toUpperCase())}, then apply the migrations: cd db && bun migrate.ts --url ${urlArg}  — the migrator's CREATE TABLE IF NOT EXISTS thoughts would otherwise find ${r.resolved}.`,
+                  };
+            } else if (r?.resolved && errno === "42501" && r.canSelect === false) {
+              // --grant takes the name raw, so it goes to the shell quoted.
+              const grantArg = /^[A-Za-z0-9_.-]+$/.test(r.roleName) ? r.roleName : `'${r.roleName.replaceAll("'", `'\\''`)}'`;
+              found = {
+                detail: `role ${r.role} has no SELECT on ${r.resolved}`,
+                remedy: `GRANT SELECT ON ${r.resolved} TO ${r.role};  — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant ${grantArg}  (db/README.md, Grants for a capturing role)`,
+              };
+            } else if (r?.resolved && errno === "42501" && r.rls && r.rowSecurity === "off") {
+              // row_security off: Postgres refuses a read a policy would
+              // filter rather than skip the policies — no grant or policy
+              // change fixes that.
+              found = {
+                detail: `row_security is off for this session and ${r.resolved} has row-level security, so Postgres refuses the read rather than skip its policies`,
+                remedy: `Turn row_security back on for this connection (it is off in a role's or the database's settings, or the connection string), or, for a role that should read every row, ALTER ROLE ${r.role} BYPASSRLS;  (as a superuser).  The table is there, so migrating would not change it.`,
+              };
+            } else if (r?.resolved) {
+              const whence = errno === "42501"
+                ? `thoughts resolves (${r.resolved}) and this role may read it, so the refusal comes from`
+                : `thoughts resolves (${r.resolved}), so the missing relation is read by`;
+              const plural = r.policyCount > 1;
+              const where = r.policies ? (plural ? "the policies" : "the policy") : "what the count reaches";
+              found = {
+                detail: r.policies
+                  ? `${whence} what the count reaches: row-level security ${plural ? "policies" : "policy"} ${r.policies} on it`
+                  : `${whence} something the count reaches, not the table itself`,
+                remedy: `${errno === "42501"
+                  ? `Grant this role what the error names, or change ${where} to use only what the role may.`
+                  : `Fix ${where}, or a function called there, so nothing reads a relation that does not exist.`}  The table is there, so migrating would not change it.`,
+              };
             }
           } finally {
             await probe.close();
           }
-        } catch { /* the remedy below stays the migrate command */ }
+        } catch (pe) { probeErrno = String((pe as { errno?: unknown }).errno ?? ""); }
       }
       add("schema", "fail",
-          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.cause})` : msg,
-          offPath
-            ? `${offPath.fix}  The table is there, so migrating would not make it resolve.`
-            : /does not exist|relation/i.test(msg)
+          found ? `${msg} — ${found.detail}` : msg,
+          found
+            ? found.remedy
+            // A connection refused before any query: the database it names is
+            // not there (3D000), or the role is refused (28000: it does not
+            // exist under trust auth — under a password, 28P01 hides that — it
+            // may not log in, or pg_hba.conf has no line for it).
+            : conn && errno === "3D000"
+            ? `Correct the database name in $${conn.from} — or, for a new brain, create it (CREATE DATABASE, as a role that may) and apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
+            : conn && errno === "28000"
+            ? `Check the role in $${conn.from}: the server refused it before any query — it must exist, be allowed to log in (LOGIN), and be admitted by pg_hba.conf from this host.`
+            : conn && errno === "42501" && probeErrno === "42501"
+            ? `The server refused this role at connection, before any query: grant it CONNECT on the database (${connectGrant(conn.url)}  as its owner), take out a setting $${conn.from} makes that the role may not (a parameter, or -c in options=), or, on PostgreSQL 17, see the login event triggers.`
+            // A query's refusal the probe could not explain (it failed, or
+            // opened no connection): the table's privilege, or a policy.
+            : conn && errno === "42501"
+            ? `Grant this role SELECT on public.thoughts — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant <the role> — or, if it holds that, fix the row-level security policy on thoughts that refuses it.`
+            : errno === "42P01" || /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
     }
@@ -1086,9 +1254,26 @@ if (configFailed) {
                  v.schema, quote_ident(v.schema) AS schema_ident,
                  CASE WHEN v.schema IS NOT NULL THEN has_schema_privilege(v.schema, 'USAGE') END AS usage,
                  current_user::text AS role, quote_ident(current_user) AS role_ident,
-                 current_database()::text AS db, quote_ident(current_database()) AS db_ident
+                 current_database()::text AS db, quote_ident(current_database()) AS db_ident,
+                 quote_ident(session_user) AS login_ident,
+                 current_setting('search_path') AS path, current_setting('server_version_num')::int AS version
             FROM (SELECT (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector') AS schema) v`;
-        const setPath = (verb: string, ident: string) => `${verb} ${ident} SET search_path = "$user", public, ${vec.schema_ident};`;
+        // The path's fix is the `schema` row's statement, pgvector's schema
+        // added (search-path.ts), so the two rows agree on one screen: the
+        // login role's setting IN DATABASE, which a plain ALTER ROLE or ALTER
+        // DATABASE is outranked by, the role's own path kept, public added
+        // once, and the connection string's path replaced where it sets one
+        // (SMD-2238). Only when the schema is not on the path already — with
+        // no USAGE it may be, and the GRANT alone is the fix.
+        const vecSchemas = searchPathSchemas(String(vec.path ?? ""), Number(vec.version));
+        const vecOnPath = !!vec.schema && vecSchemas.includes(vec.schema);
+        let vecSource: string | null = null;
+        if (!vec.resolves && vec.schema && !vecOnPath) {
+          try {
+            vecSource = ((await sql`SELECT source FROM pg_settings WHERE name = 'search_path'`) as { source: string }[])[0]?.source ?? null;
+          } catch { /* unread: the statement stands, with its caveat */ }
+        }
+        const vecPathFix = () => pathFix({ schemas: vecSchemas, extension: vec.schema, login: vec.login_ident, role: vec.role_ident, db: vec.db_ident, source: vecSource });
         // What the database says about itself, read ONCE through brain-info.ts —
         // the read brain_info and the keyed /health body make (SMD-2041) — so
         // this row, `migration ledger` and `schema version` below report what
@@ -1108,11 +1293,17 @@ if (configFailed) {
         } else if (vec.usage === false) {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", but role ${vec.role} has no USAGE on that schema, so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist' — SET search_path alone will not help here`,
-              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can), then put it on the path: ${setPath("ALTER ROLE", vec.role_ident)}`);
+              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can)${vecOnPath ? "" : vecSource === "client"
+                ? `  ${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `  then put it on the path: ${vecPathFix()}  Then reconnect.`}`);
         } else {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", which is not on this connection's search_path (role ${vec.role}, database ${vec.db}) — so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist'`,
-              `Put ${vec.schema} on the connection's search_path. Least-scoped (this role only): ${setPath("ALTER ROLE", vec.role_ident)}  — or database-wide: ${setPath("ALTER DATABASE", vec.db_ident)}  then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
+              // A connection string's path is replaced there, beside its other
+              // -c settings; a role's is a setting beside any hnsw.* bounds.
+              vecSource === "client"
+                ? `${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `Put ${quoteIdent(vec.schema)} on the connection's search_path: ${vecPathFix()}  Then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
         }
 
         // One schema-qualified read of every form, signature and body; no name
@@ -1183,7 +1374,7 @@ if (configFailed) {
           // over 055's (SMD-2115): every remedy that names 046 names 055 after
           // it — before the "or, if the ledger…" clause, which is the whole
           // re-apply and needs no second step (second review pass).
-          const applied = migration === "046" ? `${apply}${THEN_055}` : apply;
+          const applied = migration === "046" ? `${apply}${THEN_055}` : migration === "055" ? `${apply}${THEN_060}` : apply;
           return ledgerRead || !ledgerPresent
             ? applied
             : `${applied} — or, if the ledger already records ${migration} (${whyUnread}): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}${reapplied ? ` ${reapplied}` : ""}`;
@@ -1219,14 +1410,25 @@ if (configFailed) {
         // the getting-started guide pasted again, a vendored schema or recipe
         // (SMD-1250) — replaces a body with no error when the signature
         // matches; this is where the operator learns which body is there, and
-        // which migration owns it. 046 is the last definer of BOTH forms
-        // (035's bodies, each with the write event set beside the actor —
-        // SMD-1730; the recognisers below still tell 035's shape, which 046
+        // which migration owns it. 060 is the last definer of BOTH forms
+        // (046's bodies up to the write — 035's, each with the write event —
+        // appending the event first and projecting the row: SMD-2116; the
+        // recognisers below still tell every earlier shape, which 060
         // carries), so one file is the remedy for every stale state.
-        const LAST = "046_thought_audit_event_shape.sql";
+        const LAST = "061_derivations.sql";
         const LOCKED = /ob1:capture-takes-fingerprint-lock/;
         const NO_FILL = /ob1:re-capture-writes-no-provenance/;
-        const applyLast = (why: string) => ledgerRemedy("046", `Apply db/migrations/${LAST}${why}`);
+        // 060's own sentinel: the body appends the event and projects the row
+        // from it. Without it — 046 re-applied by hand, or 060 not yet applied
+        // — the row is written first and the trigger describes it (SMD-2116).
+        const PROJECTS = /ob1:capture-appends-then-projects/;
+        // 061's own sentinel: the body records the tags' lineage row with the
+        // write, and the windows' row goes with the windows. Without it — 060
+        // re-applied by hand, or 061 not yet applied — a capture's tags are a
+        // derived row without lineage, which the `lineage` check fails on
+        // (SMD-1731).
+        const RECORDS_LINEAGE = /ob1:derivation-recorded-with-its-artifact/;
+        const applyLast = (why: string) => ledgerRemedy("061", `Apply db/migrations/${LAST}${why}`);
         // The 2-argument body is judged on its own and said beside whichever
         // 3-argument state fires, so a brain with both replaced hears it once
         // rather than on the run after the first remedy (first review pass).
@@ -1240,6 +1442,7 @@ if (configFailed) {
         // dropped silently (sixth review pass).
         const EVENT_SET = /ob1:capture-sets-write-event/;
         const twoNoEvent = two !== undefined && !twoStale && !twoUnlocked && !EVENT_SET.test(two.src);
+        const twoNoProject = two !== undefined && !twoStale && !twoUnlocked && !twoNoEvent && !PROJECTS.test(two.src);
         const TWO_STALE_WHY = "it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again";
         // Why a body predates the migration that added what it lacks (`stage`:
         // 033 for the lock, 035 for the fill): the ordinary state on a brain
@@ -1254,8 +1457,8 @@ if (configFailed) {
           // — 046 alone when `stage` is 046 or the ledger has it (a brain at
           // 032 lacks 033, 035 and 046).
           const list = (fs: string[]) => fs.length === 1 ? `migration ${fs[0]} is` : `migrations ${fs.slice(0, -1).join(", ")} and ${fs[fs.length - 1]} are`;
-          const files = ["033", "035", "046"].filter((f) => f >= stage);
-          return ledger.has("046") ? `${earlier} re-applied by hand puts it back`
+          const files = ["033", "035", "046", "060", "061"].filter((f) => f >= stage);
+          return ledger.has("061") ? `${earlier} re-applied by hand puts it back`
             : ledgerRead && ledger.has(stage) ? `${earlier} re-applied by hand puts it back, and ${list(files.slice(1))} not yet applied`
             : ledgerRead ? `${list(files)} not yet applied`
               : `${list(files)} not yet applied, or ${earlier} was re-applied by hand`;
@@ -1264,10 +1467,11 @@ if (configFailed) {
         // 033's and 035's 2-argument bodies are byte-identical, so either
         // re-apply is named (run-it, seventh review pass).
         const TWO_NO_EVENT_WHY = `it is from before migration 046 (${pre("046", "033 or 035")}): it sets no write event beside the actor, so a stance, cites or a window a PostgREST caller declares in the payload reaches no audit row`;
-        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 046's either — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body is not 046's either — ${TWO_NO_EVENT_WHY}` : "";
+        const TWO_NO_PROJECT_WHY = `it is from before migration 060 (${pre("060", "046")}): it writes the row first and the trigger derives the event after it — the log describes the write, it does not decide it`;
+        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 060's either — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body is not 060's either — ${TWO_NO_EVENT_WHY}` : twoNoProject ? `; and the 2-argument body is not 060's either — ${TWO_NO_PROJECT_WHY}` : "";
         if (!three) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 046's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body present is not 046's — ${TWO_NO_EVENT_WHY}` : ""}${andOthers}`,
-              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033, 035 and 046 redefined it, and an earlier file's body alone would drop what every later one added)."));
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 060's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body present is not 060's — ${TWO_NO_EVENT_WHY}` : twoNoProject ? `; and the 2-argument body present is not 060's — ${TWO_NO_PROJECT_WHY}` : ""}${andOthers}`,
+              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033, 035, 046, 060 and 061 redefined it, and an earlier file's body alone would drop what every later one added)."));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
           // name and the two-step fallback do. A warning.
@@ -1275,7 +1479,7 @@ if (configFailed) {
               applyLast(" — the last definer of the 2-argument form as well."));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 046 after them): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 061 after them): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
               applyLast(" — the last definer; 022's or 025's file alone would leave what the later ones added out."));
         } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
           add("atomic capture", "warn",
@@ -1298,12 +1502,26 @@ if (configFailed) {
           add("atomic capture", "warn",
               `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock and writes provenance on a first capture only, but it is from before migration 046 (${pre("046", "035")}): the write event a capture declares — stance, cites, the valid window, trust — is dropped silently, so no audit row carries it and every read built on the event shape (SMD-1729) sees a capture that declared nothing${andTwo}${andOthers}`,
               applyLast("."));
-        } else if (twoStale || twoUnlocked || twoNoEvent) {
+        } else if (!PROJECTS.test(three.src)) {
+          // 046's body: locked, no fill, the event set — and the row written
+          // first, the trigger deriving the event after it. The 2-argument
+          // body is 046's too, said beside it through andTwo.
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present and the 3-argument body is 046's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `not 046's — ${TWO_UNLOCKED_WHY}` : `not 046's — ${TWO_NO_EVENT_WHY}`}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock, writes provenance on a first capture only and sets the write event beside the actor, but it is from before migration 060 (${pre("060", "046")}): the row is written first and the trigger derives the event after it — the log describes the write, it does not decide it, and no projected row is checked against its event (SMD-1997, step 2)${andTwo}${andOthers}`,
+              applyLast("."));
+        } else if (!RECORDS_LINEAGE.test(three.src)) {
+          // 060's body: appending then projecting — and recording no lineage
+          // for the tags the envelope declares, nor dropping the windows' row
+          // with the windows. The 2-argument body is 060's = 061's.
+          add("atomic capture", "warn",
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body appends the event first and projects the row (060), but it is from before migration 061 (${pre("061", "060")}): the tags' recipe a capture declares reaches no lineage row and a replaced window set keeps its old row — derived rows without lineage, which the lineage check fails on, and stale rows left behind (SMD-1731)${andTwo}${andOthers}`,
+              applyLast("."));
+        } else if (twoStale || twoUnlocked || twoNoEvent || twoNoProject) {
+          add("atomic capture", "warn",
+              `the 2- and 3-argument upsert_thought present and the 3-argument body is 061's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `not 060's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `not 060's — ${TWO_NO_EVENT_WHY}` : `not 060's — ${TWO_NO_PROJECT_WHY}`}${andOthers}`,
               applyLast(" — the last definer of the 2-argument form as well."));
         } else {
-          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both 046's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both set the write event beside the actor (046); the 2-argument body refuses a non-object payload (005) and takes the lock${andOthers}`);
+          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both shipped — the 3-argument body (061's) carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event (046) and append it first, projecting the row from it (060); the 3-argument body records the tags' lineage with the write (061); the 2-argument body (060's) refuses a non-object payload (005) and takes the lock${andOthers}`);
         }
 
         // The privileges the capture path's SECURITY INVOKER writers need to run
@@ -1378,7 +1596,15 @@ if (configFailed) {
             SELECT p.proname AS name, p.prosrc AS src FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE n.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'ob1_append_thought_event')`) as { name: string; src: string }[];
           const auditReadsAgents = keyRuleHolds(String(auditBodies.find((b) => b.name === "thoughts_write_audit")?.src ?? ""), String(auditBodies.find((b) => b.name === "ob1_append_thought_event")?.src ?? ""));
-          const required = [...CAPTURE_WRITES.filter((w) => w.table !== "ob1_agents" || auditReadsAgents), ...conditional];
+          // SELECT on thought_audit is asked of a brain with 055's append: its
+          // INSERT ... RETURNING reads the row it inserts (and since 060 the
+          // trigger's check and the projector read the event). Before 055 the
+          // trigger inserted with no RETURNING, so a brain without the function
+          // is not told to grant it — as ob1_agents is gated on 046's body.
+          const auditReturns = auditBodies.some((b) => b.name === "ob1_append_thought_event");
+          const required = [...CAPTURE_WRITES.filter((w) =>
+            (w.table !== "ob1_agents" || auditReadsAgents)
+            && (w.table !== "thought_audit" || w.privilege !== "SELECT" || auditReturns)), ...conditional];
           const reqTables = required.map((w) => w.table);
           const reqPrivs = required.map((w) => w.privilege);
           const privRows = (await sql`
@@ -1422,13 +1648,27 @@ if (configFailed) {
             // on every write that carries an actor — captures, edits AND deletes
             // — so that one is named with the trigger (SMD-1730).
             const agentsMiss = missingByTable.has("ob1_agents");
+            // 055's append reads the audit row it inserts (INSERT ... RETURNING)
+            // and since 060 the audit trigger's check and the projector read the
+            // event, as the caller on every function-borne write (SMD-2116); the
+            // snapshot trigger writes ob1_embedding_snapshot as the caller on
+            // every write of a vector.
+            const auditReadMiss = (missingByTable.get("thought_audit") ?? []).includes("SELECT");
+            const snapshotMiss = missingByTable.has("ob1_embedding_snapshot");
+            // 061's vector-lineage trigger and the write functions record
+            // derivations as the caller on every capture and edit — and delete
+            // a replaced set's or a cleared vector's row (SMD-1731).
+            const lineageMiss = missingByTable.has("derivations");
             const fails: string[] = [];
             if (captureMiss) fails.push((triggerMiss
               ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
               : "a windowed capture, an edit with content, or 008's audit trigger")
-              + (agentsMiss ? " (046's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor)" : ""));
+              + (agentsMiss ? " (046's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor)" : "")
+              + (auditReadMiss ? " (055's ob1_append_thought_event reads the audit row it inserts — INSERT … RETURNING — and since 060 the audit trigger's check and the projector read the event, as the caller on every capture, edit and delete through the functions)" : "")
+              + (snapshotMiss ? " (060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector)" : "")
+              + (lineageMiss ? " (061's vector lineage trigger and the write functions record derivations as the caller on every capture and edit, and drop a replaced set's row)" : ""));
             if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
-            // 060's triggers reconcile the node_state projection as the caller on
+            // 066's triggers reconcile the node_state projection as the caller on
             // a write of a ticket row or a pointer, and node_lifecycle() reads it:
             // a plain capture returns before touching it (SMD-2256).
             const projectionMiss = PROJECTION.flatMap((t) => missingByTable.get(t) ?? []);
@@ -1440,7 +1680,7 @@ if (configFailed) {
               // missing breaks the reads as well.
               fails.push((projectionMiss.includes("SELECT") ? "every lifecycle read (node_lifecycle, node_state, search_thoughts' prefer_current) and " : "")
                 + "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included"
-                + " (060's triggers keep the node_state projection as the caller)");
+                + " (066's triggers keep the node_state projection as the caller)");
             }
             const why = ` — so ${fails.join(", and ")} would fail`;
             if (missingByTable.size) {
@@ -1581,10 +1821,14 @@ if (configFailed) {
           const EVENT_COLUMNS = ["actor_kind", "trust", "origin", "stance", "cites", "valid_from", "valid_until", "backfilled_at"];
           // The eight names spelled into the query, not bound as an array: Bun's
           // SQL binds a JS array to ANY() as one text value (SMD-1803's trap).
+          // From pg_attribute, which shows every role the columns:
+          // information_schema shows a role none of a table it holds no
+          // privilege on, and told a reader to re-apply 046 (SMD-2238).
           const evCols = (await sql`
-            SELECT column_name AS c FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'thought_audit'
-              AND column_name IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at')`) as { c: string }[];
+            SELECT a.attname AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thought_audit' AND a.attnum > 0 AND NOT a.attisdropped
+              AND a.attname IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at')`) as { c: string }[];
           const missingCols = EVENT_COLUMNS.filter((c) => !evCols.some((r) => r.c === c));
           const bodies = (await sql`
             SELECT p.proname AS name, p.prosrc AS src
@@ -1640,6 +1884,16 @@ if (configFailed) {
             // has no ob1_capture_payload to derive with.
             const pre055 = !/ob1:capture-event-carries-content/.test(trigSrc);
             const PRE055 = "the audit trigger's body is from before 055 (migration 055 not yet applied, or 046 re-applied by hand): a capture records no content and an update no key move, so the log alone cannot rebuild those thoughts — backfill_thought_payloads fills the captures later, the key moves are lost";
+            // 060's sentinel (SMD-2116): the trigger that checks a projected
+            // row against its event under ob1.projecting. Without it — 060 not
+            // yet applied, or 055 re-applied by hand over it — the trigger
+            // derives the event after every write and checks nothing; the
+            // write functions of 060, if they stand, would append an event
+            // the trigger then appended AGAIN from the projected row (the
+            // atomic capture check names their body). Said beside the census
+            // as 055's rung is.
+            const pre060 = !pre055 && !/ob1:projection-checked-against-its-event/.test(trigSrc);
+            const PRE060 = "the audit trigger's body is from before 060 (migration 060 not yet applied, or 055 re-applied by hand): it derives the event after the write and checks no projected row against its event — with 060's write functions standing, every function-borne write would be recorded twice (SMD-1997, step 2)";
             // The census names what waits, not only how many: the names the
             // waiting rows carry that no classified key answers to (the
             // set_agent_kind the remedy asks for), and the rows whose key IS
@@ -1733,13 +1987,15 @@ if (configFailed) {
             const PAYLOAD_REMEDY_THEN = "Then, as the owner (the pass amends thought_audit), SELECT backfill_thought_payloads(); fills the capture events written before 055 from the first content-moving update, the tombstone or the live row, and reports any row nothing derives for (db/README.md).";
             const apply055 = ledgerRemedy("055", APPLY_055);
             const THEN_APPLY_055 = ` Then, ${apply055.charAt(0).toLowerCase()}${apply055.slice(1)}`;
+            const apply060 = ledgerRemedy("060", APPLY_060);
+            const THEN_APPLY_060 = ` Then, ${apply060.charAt(0).toLowerCase()}${apply060.slice(1)}`;
             if (unclassified > 0 || awaiting > 0) {
               const needsKinds = unclassified > 0 || Boolean(census.unnamed);
               // The payload census's finding — or the pre-055 body — rides the
               // same line, message AND remedy (cold read, first review pass: the
               // first draft appended the remedy and dropped the clause).
               add("audit events", "warn",
-                  `${unclassified} key(s) with no kind${unclassified ? ` (${census.labels})` : ""} and ${awaiting} audit row(s) naming a key with no kind${census.unnamed ? ` (names: ${census.unnamed})` : ""}${fillable ? `, ${fillable} of them naming a key classified since — waiting only on the backfill` : ""} — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say${pre055 ? `; and ${PRE055}` : payload > 0 ? `; and ${payloadClause}` : ""}`,
+                  `${unclassified} key(s) with no kind${unclassified ? ` (${census.labels})` : ""} and ${awaiting} audit row(s) naming a key with no kind${census.unnamed ? ` (names: ${census.unnamed})` : ""}${fillable ? `, ${fillable} of them naming a key classified since — waiting only on the backfill` : ""} — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say${pre055 ? `; and ${PRE055}` : pre060 ? `; and ${PRE060}${payload > 0 ? `; and ${payloadClause}` : ""}` : payload > 0 ? `; and ${payloadClause}` : ""}`,
                   // The backfill is the owner's call: its pass holds a share lock on
                   // ob1_agents, which needs UPDATE there (seventh review pass: the
                   // remedy read as a plain SELECT and a connector role following it
@@ -1749,9 +2005,12 @@ if (configFailed) {
                     ? "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then, as the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md)."
                     : "As the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills them — every key they name is classified (db/README.md).")
                   + (/(^|, )agent [0-9a-f-]{36}/.test(String(census.unnamed ?? "")) ? " A name shaped `agent <uuid>` is an id the registry has no row for: set_agent_kind cannot reach those rows, and they stay unknown." : "")
-                  + (pre055 ? THEN_APPLY_055 : payloadFinding ? ` ${PAYLOAD_REMEDY_THEN}` : ""));
+                  + (pre055 ? THEN_APPLY_055 : pre060 ? `${THEN_APPLY_060}${payloadFinding ? ` ${PAYLOAD_REMEDY_THEN}` : ""}` : payloadFinding ? ` ${PAYLOAD_REMEDY_THEN}` : ""));
             } else if (pre055) {
               add("audit events", "warn", `046's event shape present and every key classified, but ${PRE055}`, ledgerRemedy("055", APPLY_055));
+            } else if (pre060) {
+              add("audit events", "warn", `046's event shape present and every key classified, 055's payload in the capture event, but ${PRE060}${payloadFinding ? `; and ${payloadClause}` : ""}`,
+                  `${ledgerRemedy("060", APPLY_060)}${payloadFinding ? ` ${PAYLOAD_REMEDY_THEN}` : ""}`);
             } else if (payloadFinding) {
               // Every key classified, and captures the log cannot rebuild yet
               // (SMD-2115): the pass is the remedy, and it says what it filled.
@@ -1759,7 +2018,7 @@ if (configFailed) {
                   `046's event shape present and every key classified, but ${payloadClause}; the log alone cannot rebuild those thoughts until it runs`,
                   PAYLOAD_REMEDY);
             } else {
-              add("audit events", "ok", `046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified; 055's payload in every capture event${payload > 0 ? ` that has one — ${payload} with nothing to derive it from (the thought gone without a tombstone; the fold names them)` : ""}`);
+              add("audit events", "ok", `046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified; 055's payload in every capture event${payload > 0 ? ` that has one — ${payload} with nothing to derive it from (the thought gone without a tombstone; the fold names them)` : ""}; 060's check on every projected row`);
             }
           }
         } catch (e) {
@@ -1789,7 +2048,214 @@ if (configFailed) {
             add("audit events", "skip", `not checked — this role cannot read the census (${msg}); the shape is checked, the waiting keys are not`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${group}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
-            add("audit events", "warn", `could not verify: ${msg}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
+            add("audit events", "warn", `could not verify: ${msg}`, "The check reads pg_attribute, pg_proc, ob1_agents and thought_audit.");
+          }
+        }
+
+        /**
+         * Lineage (061, SMD-1731): every derived artifact has a row in
+         * `derivations` — the chunk sets, the extractions under each key, the
+         * proposals, the vectors. A derived row without one is the fault the
+         * epic names (SMD-1729: "an event and its lineage row commit
+         * together"), and this is where it is caught: a producer's body from
+         * before 061 (re-applied by hand), or a raw writer of the artifact
+         * tables. Every SOURCE read is bounded — the first 10,001 rows of each
+         * artifact table, whatever their order — and past the bound the ok
+         * headline says "read" and the line says the rest were not; a missing
+         * row past the bound is not seen (a designed limit, said). The probe
+         * side is the lineage table's unique index, or a hash of the kind's
+         * rows when the planner prefers it — 26 ms at 24,000 lineage rows,
+         * 136 ms at 500,000 (run-it, second review pass) — so a start's cost
+         * follows the lineage table, not the artifact tables. (Bounding the
+         * RESULT, the first shape, read every table whole on a healthy brain,
+         * where nothing matches — cold read, first review pass.) The tags are
+         * counted as coverage, not failed: nothing on a
+         * row from before 061 says the extractor tagged it, and the file
+         * backfilled none. Stale rows (the input's text moved since) are what
+         * rebuild_derived (063, SMD-1732) re-derives or hands to the workers;
+         * counted, not failed — as are the rows it has marked for a re-run. A
+         * lineage row whose ARTIFACT is gone while its thought stands (a raw
+         * delete of windows or mentions, a vector cleared under a replay) is
+         * the other direction, which 061 did not read and 063's rebuild
+         * deletes: a WARN naming `db/rebuild.ts --orphans` (SMD-1732).
+         */
+        try {
+          const [tab] = (await sql`SELECT to_regclass('public.derivations') IS NOT NULL AS present, to_regclass('public.page_sections') IS NOT NULL AS pages`) as { present: boolean; pages: boolean }[];
+          if (!tab.present) {
+            add("lineage", "fail",
+                "the derivations table is missing — every derived artifact (a chunk set, an extraction, a proposal, a vector, the extractor's tags) is written with no record of what it was computed from or how, so nothing can tell a stale one from a current one or re-derive it (SMD-1731)",
+                ledgerRemedy("061", APPLY_061));
+          } else {
+            const BOUND = 10001;
+            // Every producer's body: the 3- and 4-argument upsert_thought (the
+            // 2-argument form records nothing and is not asked), update_thought,
+            // the two record functions and the vector trigger's — six, each
+            // carrying 061's sentinel AND the call it vouches for — a body that
+            // kept the comment and lost its record line is not current (run-it,
+            // third review pass: a mutant's remedy blamed a raw writer); a
+            // seventh is an older arity re-applied by hand beside 061's (cold
+            // read, second review pass: the probe read two of the six and
+            // called the rest "every producer"). The vector trigger must also
+            // be ATTACHED and enabled — its function standing alone records
+            // nothing (cold read, third review pass).
+            // …and 063's three bodies, where 063 has landed (the mark's column
+            // stands): the writer clears the mark, the proposal writer replaces
+            // a stale row, the candidate filter yields a stale pair. 061 (or
+            // 029) re-applied by hand over 063 puts older bodies back that keep
+            // 061's sentinel, so the probe above stays green while every mark
+            // stands for ever and a stale pair is never replaced (cold read,
+            // 063's second review pass: this suite's own ladder proved it).
+            const [bodies] = (await sql`
+              SELECT bool_and(p.prosrc LIKE '%ob1:derivation-recorded-with-its-artifact%' AND p.prosrc LIKE '%ob1_record_derivation(%') AS records, count(*)::int AS n,
+                     EXISTS (SELECT 1 FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN pg_namespace tn ON tn.oid = c.relnamespace
+                              WHERE tn.nspname = 'public' AND c.relname = 'thoughts' AND tg.tgname = 'thoughts_record_vector_lineage' AND tg.tgenabled <> 'D') AS trigger_on,
+                     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'derivations' AND column_name = 'stale_since') AS has_063,
+                     (SELECT w.prosrc LIKE '%ob1:rerun-clears-the-mark%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)')) AS marks_clear,
+                     (SELECT w.prosrc LIKE '%supersession_proposals.status = ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)')) AS replaces_stale,
+                     (SELECT w.prosrc LIKE '%p.status <> ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS yields_stale
+                FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+               WHERE ns.nspname = 'public'
+                 AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null }[];
+            const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
+            const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number };
+            // 064's sections join the census where the store is applied; a brain at
+            // 062 has no page_sections, so the CTE is written only then (the text is
+            // built here — BOUND is a constant — and run as one statement).
+            const [c] = (await sql.unsafe(`
+              WITH ch_s AS (SELECT thought_id FROM public.thought_chunks LIMIT ${BOUND}),
+                   ch AS (SELECT DISTINCT c.thought_id AS id FROM ch_s c
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'chunks' AND d.artifact_id = c.thought_id)),
+                   vc_s AS (SELECT id FROM public.thoughts WHERE embedding IS NOT NULL LIMIT ${BOUND}),
+                   vc AS (SELECT s.id FROM vc_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'vector' AND d.artifact_id = s.id)),
+                   en_s AS (SELECT thought_id, extraction_key
+                              FROM (SELECT thought_id, extraction_key FROM public.thought_entities UNION ALL SELECT thought_id, extraction_key FROM public.ob1_entity_edges) u
+                             LIMIT ${BOUND}),
+                   en AS (SELECT DISTINCT x.thought_id AS id, x.extraction_key AS key FROM en_s x
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'entities' AND d.artifact_id = x.thought_id AND d.produced_by = x.extraction_key)),
+                   pr_s AS (SELECT id FROM public.supersession_proposals LIMIT ${BOUND}),
+                   pr AS (SELECT s.id FROM pr_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'proposal' AND d.artifact_id = s.id)),
+                   md_s AS (SELECT t.id FROM public.thoughts t
+                             WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
+                   md AS (SELECT s.id FROM md_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = s.id)),
+                   ${tab.pages
+                     ? `se_s AS (SELECT id FROM public.page_sections WHERE generation_source <> '{}'::jsonb LIMIT ${BOUND}),
+                   se AS (SELECT s.id FROM se_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'section' AND d.artifact_id = s.id)),
+                   pg_s AS (SELECT id FROM public.pages LIMIT ${BOUND}),
+                   pg AS (SELECT s.id FROM pg_s s JOIN public.thoughts t ON t.id = s.id
+                           WHERE t.content IS DISTINCT FROM public.render_page(s.id)),`
+                     : `se_s AS (SELECT NULL::uuid AS id WHERE false),
+                   se AS (SELECT NULL::uuid AS id WHERE false),
+                   pg_s AS (SELECT NULL::uuid AS id WHERE false),
+                   pg AS (SELECT NULL::uuid AS id WHERE false),`}
+                   al AS (SELECT d.id, d.artifact_kind, d.artifact_id, d.produced_by, d.input_ids, d.input_fingerprints, d.recipe,
+                                 (to_jsonb(d) ->> 'stale_since')::timestamptz AS stale_since
+                            FROM public.derivations d LIMIT ${BOUND}),
+                   st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
+                           WHERE d.artifact_kind <> 'proposal'
+                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
+                   orph AS (SELECT d.id, d.artifact_kind FROM al d
+                             WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
+                                OR (d.artifact_kind = 'entities' AND NOT EXISTS (SELECT 1 FROM public.thought_entities m WHERE m.thought_id = d.artifact_id AND m.extraction_key = d.produced_by)
+                                                                 AND NOT EXISTS (SELECT 1 FROM public.ob1_entity_edges g WHERE g.thought_id = d.artifact_id AND g.extraction_key = d.produced_by))
+                                OR (d.artifact_kind = 'vector'   AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = d.artifact_id AND t.embedding IS NOT NULL))
+                                OR (d.artifact_kind = 'metadata' AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = d.artifact_id AND (t.metadata ? 'type' OR t.metadata ? 'topics'))))
+              SELECT (SELECT count(*)::int FROM ch) AS chunks,    (SELECT array_agg(id::text) FROM (SELECT id FROM ch LIMIT 3) s) AS chunk_ids,
+                     (SELECT count(*)::int FROM vc) AS vectors,   (SELECT array_agg(id::text) FROM (SELECT id FROM vc LIMIT 3) s) AS vector_ids,
+                     (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
+                     (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
+                     (SELECT count(*)::int FROM se) AS sections,  (SELECT array_agg(id::text) FROM (SELECT id FROM se LIMIT 3) s) AS section_ids,
+                     (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
+                     (SELECT count(*)::int FROM md) AS untagged,
+                     (SELECT count(*)::int FROM st) AS stale,
+                     (SELECT count(*)::int FROM al WHERE stale_since IS NOT NULL) AS marked,
+                     (SELECT count(*)::int FROM orph) AS orphans, (SELECT array_agg(artifact_kind || ' ' || id::text) FROM (SELECT id, artifact_kind FROM orph LIMIT 3) s) AS orphan_ids,
+                     (SELECT count(*)::int FROM al) AS rows,
+                     (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
+                     (SELECT count(*)::int FROM al WHERE recipe->>'declared' = 'false') AS undeclared,
+                     (SELECT count(*)::int FROM ch_s) AS ch_read, (SELECT count(*)::int FROM vc_s) AS vc_read, (SELECT count(*)::int FROM en_s) AS en_read,
+                     (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
+                     (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read`)) as Census[];
+            const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
+            // Two bounds, two facts: an ARTIFACT source that reached the bound
+            // was sampled, so a missing row past it is not seen — the headline
+            // says "READ"; the LINEAGE table past the bound qualifies only the
+            // legacy/undeclared/stale counts, which are over the rows read. A
+            // brain with 4,000 thoughts passes the lineage bound long before
+            // any artifact table, and its verdict is exact (cold read, third
+            // review pass: one flag said "the rest not read" of tables read
+            // whole; run-it: the capped line said the disclosure twice).
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read].some((r) => Number(r) >= BOUND);
+            const missing: string[] = [];
+            if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
+            if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
+            if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
+            if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
+            if (Number(c.sections)) missing.push(`${n(c.sections)} page section(s) carrying a recipe (${(c.section_ids ?? []).join(", ")})`);
+            // 064's kind has its own writer and no backfill: the remedy for a
+            // section is that writer, said beside the general one (cold read,
+            // first review pass: the general remedy named 061's backfill, which
+            // knows no section).
+            const sectionRemedy = Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "";
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
+            if (missing.length) {
+              // The remedy by the cause the bodies show: every producer current,
+              // so a raw writer (or a write skipped) — the re-apply's backfill, or
+              // the writer's own lineage; a producer body from before 061 — the
+              // ledger's remedy for the file (run-it, first review pass: the
+              // ledger was blamed for a raw INSERT on a current schema).
+              add("lineage", "fail",
+                  `derived rows without a lineage row — ${missing.join("; ")} — written by a producer from before 061 (a write function, record_thought_entities or record_supersession_proposal re-applied by hand) or by a raw writer of the artifact tables; nothing can say what they were computed from (SMD-1731). ${coverage}`,
+                  producersCurrent
+                    ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.${sectionRemedy}`
+                    : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy.") + sectionRemedy);
+            } else if (Number(c.stale_pages)) {
+              // 064: a page thought that does not hold its render — a raw write
+              // of page_sections or of the thought (first review pass, both
+              // readers: nothing saw it). Reported when no row is missing — the
+              // fail above comes first. The store's own door repairs it.
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${n(c.stale_pages)} page(s) whose thought does not hold their render (${(c.stale_page_ids ?? []).join(", ")}) — a raw write of page_sections or of the page thought since the last live change; readers of the thought see a stale page — ${coverage}`,
+                  "For each page: SELECT ob1_render_page_thought('<page id>'); — re-renders the thought from its sections (an audited event). The store's own writers (write_page_section, delete_page_section, upsert_page) keep the two together.");
+            } else if (!producersCurrent) {
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : bodies.records !== true ? "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand), or lost its record line" : "the vector trigger thoughts_record_vector_lineage is dropped or disabled, so a vector written now leaves no row"}: its next write records no lineage (SMD-1731). ${coverage}`,
+                  ledgerRemedy("061", APPLY_061));
+            } else if (rebuildOlder && rebuildOlder.length) {
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${rebuildOlder.length === 3 ? "the three bodies 063 redefines are" : `${rebuildOlder.join(" and ")} ${rebuildOlder.length === 1 ? "is" : "are"}`} from before 063 (061 or 029 re-applied by hand over it): a rebuild's mark is never cleared by the producer's next write, and a stale proposal is never replaced by the next judgement (SMD-1732). ${coverage}`,
+                  ledgerRemedy("063", APPLY_063));
+            } else if (Number(c.orphans)) {
+              // The other direction (063): a row whose artifact is gone while
+              // its thought stands — nothing it describes exists, and the
+              // census above cannot see it (it starts from the artifacts).
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${n(c.orphans)} lineage row(s) name an artifact that is gone (${(c.orphan_ids ?? []).join(", ")}) — a raw delete of windows or mentions, or a vector cleared under a replay, left the row behind (SMD-1732). ${coverage}`,
+                  "Run bun db/rebuild.ts --url <url> --orphans: it deletes each such row through rebuild_derived, which touches no row whose artifact stands.");
+            } else {
+              // A capped read says so in the headline, before the count that
+              // a reader stops at (run-it, second review pass: a missing row
+              // past the bound printed "every derived row has its lineage row").
+              add("lineage", "ok", capped ? `every derived row READ has its lineage row — the first ${BOUND.toLocaleString("en-US")} rows of an artifact table that has more, the rest not read — ${coverage}` : `every derived row has its lineage row — ${coverage}`);
+            }
+          }
+        } catch (e) {
+          // A role that cannot read the table is the grant's fault, not the
+          // check's: a skip naming the grant, as the audit census does (run-it,
+          // second review pass) — `write privileges` above has already failed
+          // the start with the same GRANT.
+          const msg = (e as Error).message;
+          const denied = /permission denied for table (\w+)/.exec(msg)?.[1];
+          if (denied) {
+            add("lineage", "skip", `not checked — this role cannot read ${denied} (${msg})`,
+                `GRANT SELECT ON ${denied} TO <the connector's role>; — ${denied === "derivations" ? "the capture group's row since 061" : "a row of the grants table"}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
+          } else {
+            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections and pages (064) and pg_proc.");
           }
         }
 
@@ -2164,46 +2630,64 @@ if (configFailed) {
           // migration before the current one left.
           const ARITY = UPDATE_THOUGHT_SIGNATURE.split(",").length;
           const ut = (await sql`
-            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
+            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig, p.prosrc AS src
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'update_thought' AND n.nspname = 'public'
-            ORDER BY (p.pronargs = ${ARITY}) DESC, p.oid`) as { nargs: number; sig: string }[];
+            ORDER BY (p.pronargs = ${ARITY}) DESC, p.oid`) as { nargs: number; sig: string; src: string }[];
           // 046 (SMD-1730) gave update_thought a tenth argument, the write
           // event, by dropping the 9-argument form — 032's mechanism, one form
-          // later. A 9-argument form ALONE is a brain that predates 046: every
-          // edit still resolves (the servers send nine by name; a defaulted
-          // tenth is the same call), so it is a WARN naming what is lost — the
-          // event — where a 7- or 8-argument form alone is the FAIL it was.
+          // later; what a 9-argument form alone means under THIS server is
+          // said with the 10-argument case below.
           const current = ut.filter((r) => Number(r.nargs) === ARITY);
           const extra = ut.filter((r) => Number(r.nargs) !== ARITY).map((r) => r.sig);
-          const nineAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 1;
+          // 061 (SMD-1731) gave update_thought an eleventh argument, the
+          // lineage envelope, by dropping the 10-argument form — 046's
+          // mechanism, one form later. A 10-argument form ALONE is a brain at
+          // 060, a 9-argument form alone a brain at 044 — and under THIS
+          // server both are the pre-032 case, not 046's warning: the SQL store
+          // sends eleven positional arguments and the PostgREST store names
+          // p_lineage, which only 061's form takes, so every edit fails there
+          // ("function does not exist" / PGRST202), as it did for p_provenance
+          // before 032. A FAIL naming 061, whose DROP chain reaches both (cold
+          // read, third review pass of SMD-1731: the arms said "every edit
+          // resolves", true when the servers sent ten by name).
+          const tenAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 1;
+          const nineAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 2;
           if (!ut.length) {
             add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", ledgerRemedy("046", APPLY_046));
+          } else if (current.length && extra.length === 0 && !/ob1:capture-appends-then-projects/.test(current[0].src)) {
+            // 060's sentinel (SMD-2116): the body appends the edit as an event
+            // and projects the row from it. An 11-argument body without it is
+            // a hand edit of 061's body, since 061 carries 060's.
+            add("edit signature", "warn",
+                `${current[0].sig}: the form the servers and reembed.ts call since migration 061, alone, but its body is not 060's (edited by hand?): the row is written first and the trigger derives the event after it — the log describes the edit, it does not decide it (SMD-1997, step 2)`,
+                ledgerRemedy("061", APPLY_061));
           } else if (current.length && extra.length === 0) {
-            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 046 (${UPDATE_THOUGHT_SIGNATURE}), alone`);
+            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 061's body — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061)`);
           } else if (current.length) {
             add("edit signature", "fail",
-                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 046 — so every call that sends fewer than ten arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional eight, fails with "function is not unique"`,
-                `Drop the earlier form, as 046 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
-          } else if (nineAlone) {
-            add("edit signature", "warn",
-                `${ut[0].sig} is the form from before migration 046: every edit resolves, but no write event (p_event — stance, cites, the valid window, trust) reaches the audit row, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
-                ledgerRemedy("046", APPLY_046));
-          } else if (ut.some((r) => Number(r.nargs) === ARITY - 1)) {
-            // A 9-argument form among the leftovers and no 10: 032 re-applied
-            // would drop the 8 and 7 and leave its own 9 to be named on the next
-            // start; 046's chain reaches all three (second review pass).
+                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 061 — so every call that sends fewer than eleven arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional call, fails with "function is not unique"`,
+                `Drop the earlier form, as 046, 060 and 061 do: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+          } else if (tenAlone || nineAlone) {
             add("edit signature", "fail",
-                `${extra.join(" and ")} are forms from before migration 046 with none the servers call — every call with fewer than ten arguments is "function is not unique"`,
-                ledgerRemedy("046", `${APPLY_046} Its DROP chain reaches the 9-, 8- and 7-argument forms and leaves the one form.`, "Re-applied, 046's DROP chain reaches the 9-, 8- and 7-argument forms and leaves the one form."));
+                `${ut[0].sig} is the form from before migration ${tenAlone ? "061 (046's, which 060 kept)" : "046"}; the servers send p_lineage (the windows' and the tags' recipes), which only 061's form takes — so every edit would fail, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
+                ledgerRemedy("061", `${APPLY_061} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 061's DROP chain reaches every older form and leaves the one the servers call."));
+          } else if (ut.some((r) => Number(r.nargs) === ARITY - 1) || ut.some((r) => Number(r.nargs) === ARITY - 2)) {
+            // A 10- or 9-argument form among the leftovers and no 11: 046 or
+            // 032 re-applied would drop the older forms and leave its own to be
+            // named on the next start; 061's chain reaches all four (second
+            // review pass of SMD-1730, one form later).
+            add("edit signature", "fail",
+                `${extra.join(" and ")} are forms from before migration 061 with none the servers call — every call with fewer than eleven arguments is "function is not unique"`,
+                ledgerRemedy("061", `${APPLY_061} Its DROP chain reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form.`, "Re-applied, 061's DROP chain reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form."));
           } else {
-            // 046 is the remedy here too: its DROP chain reaches the 8- and
+            // 061 is the remedy here too: its DROP chain reaches the 8- and
             // 7-argument forms and leaves the one form the servers call, where
-            // 032's would leave its own 9-argument form to be named on the next
-            // start (run-it, third review pass).
+            // 032's or 046's would leave its own form to be named on the next
+            // start (run-it, third review pass of SMD-1730).
             add("edit signature", "fail",
                 `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db/reembed.ts refuses to run`,
-                ledgerRemedy("046", `${APPLY_046} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 046's DROP chain reaches every older form and leaves the one the servers call."));
+                ledgerRemedy("061", `${APPLY_061} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 061's DROP chain reaches every older form and leaves the one the servers call."));
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
@@ -2223,24 +2707,31 @@ if (configFailed) {
          */
         try {
           const dt = (await sql`
-            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
+            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig, p.prosrc AS src
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'delete_thought' AND n.nspname = 'public'
-            ORDER BY (p.pronargs = 3) DESC, p.oid`) as { nargs: number; sig: string }[];
+            ORDER BY (p.pronargs = 3) DESC, p.oid`) as { nargs: number; sig: string; src: string }[];
           const current = dt.filter((r) => Number(r.nargs) === 3);
           const extra = dt.filter((r) => Number(r.nargs) !== 3).map((r) => r.sig);
+          // 042's file alone puts 042's body back over 060's (SMD-2116): the
+          // remedies that name it name 060 after it.
+          const THEN_060_DELETE = " Then apply db/migrations/060_append_then_project.sql — it last defines delete_thought (the tombstone appended first, the row projected away).";
           if (!dt.length) {
-            add("delete signature", "fail", "delete_thought is missing — the delete_thought tool calls it", ledgerRemedy("042", APPLY_042));
+            add("delete signature", "fail", "delete_thought is missing — the delete_thought tool calls it", ledgerRemedy("042", `${APPLY_042}${THEN_060_DELETE}`));
+          } else if (current.length && extra.length === 0 && !/ob1:capture-appends-then-projects/.test(current[0].src)) {
+            add("delete signature", "warn",
+                `${current[0].sig}: the form the servers call since migration 042, alone, but its body is from before migration 060 (migration 060 not yet applied, or 042 re-applied by hand): the row is deleted first and the trigger derives the tombstone after it — the log describes the delete, it does not decide it (SMD-1997, step 2)`,
+                ledgerRemedy("060", APPLY_060));
           } else if (current.length && extra.length === 0) {
-            add("delete signature", "ok", `${current[0].sig}: the form the servers call since migration 042, alone`);
+            add("delete signature", "ok", `${current[0].sig}: the form the servers call since migration 042, alone, with 060's body — the tombstone appended first, the row projected away`);
           } else if (current.length) {
             add("delete signature", "fail",
                 `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — 009 or 036 re-applied by hand over 042 — so every call that sends two arguments to delete_thought, which is every PostgREST caller by name from before this change and every hand-written SELECT, fails with "function is not unique"`,
-                `Drop the earlier form, as 042 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+                `Drop the earlier form, as 042 and 060 do: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
           } else {
             add("delete signature", "fail",
                 `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 042; the server sends p_detach, which only 042's form takes — so every delete would fail`,
-                ledgerRemedy("042", APPLY_042));
+                ledgerRemedy("042", `${APPLY_042}${THEN_060_DELETE}`));
           }
         } catch (e) {
           add("delete signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
@@ -2254,11 +2745,11 @@ if (configFailed) {
          * default is REPEATABLE READ or SERIALIZABLE (a role or database
          * setting, a pooler) reads its transaction's snapshot instead, and
          * 042's guard then cannot see a citation committed after that
-         * snapshot — its source goes from under it. Before 060 a warning, not a
+         * snapshot — its source goes from under it. Before 066 a warning, not a
          * refusal: the server still worked, the guarantees named did not (third
          * review pass, SMD-1712).
          */
-        // Since 060 REPEATABLE READ is more than a lost guarantee: the node_state
+        // Since 066 REPEATABLE READ is more than a lost guarantee: the node_state
         // projection's triggers refuse, under it, every write that moves a
         // ticket's key, status or watermark or a supersedes pointer — captures
         // naming supersedes, and deletes of ticket rows or of any superseded
@@ -2283,11 +2774,11 @@ if (configFailed) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
           } else if (projection && /^repeatable read$/i.test(level)) {
             add("transaction isolation", "fail",
-                `default_transaction_isolation is ${level}: migration 060's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included) — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                `default_transaction_isolation is ${level}: migration 066's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included) — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
                 fixIsolation);
           } else {
             add("transaction isolation", "warn",
-                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? "; and 060's node_state projection stays exact only if every writer of ticket rows is serializable" : ""}`,
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? "; and 066's node_state projection stays exact only if every writer of ticket rows is serializable" : ""}`,
                 fixIsolation);
           }
         } catch (e) {
@@ -2613,9 +3104,12 @@ if (configFailed) {
         // boundary of its own took every later check with it.
         try {
           const { CHUNK_CONTEXT: wantContext } = await import("../db/config.mjs");
+          // pg_attribute, not information_schema, which hides the column from a
+          // role with no privilege on the table and said "apply 013" (SMD-2238).
           const ctxCol = await sql`
-            SELECT count(*)::int AS c FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'thought_chunks' AND column_name = 'context'`;
+            SELECT count(*)::int AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thought_chunks' AND a.attname = 'context' AND a.attnum > 0 AND NOT a.attisdropped`;
           const haveCtxCol = Number(ctxCol[0].c) >= 1;
           if (wantContext && !haveCtxCol) {
             add("chunk context", "fail",
@@ -2656,7 +3150,7 @@ if (configFailed) {
             }
           }
         } catch (e) {
-          add("chunk context", "warn", `could not verify: ${(e as Error).message}`, "The check reads information_schema.columns and thought_chunks.");
+          add("chunk context", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_attribute and thought_chunks.");
         }
 
         /**
@@ -2763,9 +3257,12 @@ if (configFailed) {
          */
         let haveLabel = false;
         try {
+          // pg_attribute: information_schema hides the column from a role with
+          // no privilege on thoughts, and said --reapply 021 (SMD-2238).
           const labelCol = await sql`
-            SELECT count(*)::int AS c FROM information_schema.columns
-            WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+            SELECT count(*)::int AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thoughts' AND a.attname = 'embedding_model' AND a.attnum > 0 AND NOT a.attisdropped`;
           haveLabel = Number(labelCol[0].c) >= 1;
           if (!haveLabel) {
             add("vector models", "fail",
@@ -3046,8 +3543,15 @@ if (configFailed) {
                      (SELECT count(*)::int FROM consolidation_pool(NULL)) AS thoughts
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; thoughts: number }[];
-            const [{ pending: queued }] = await sql`SELECT count(*)::int AS pending FROM supersession_proposals WHERE status = 'pending'`;
-            const queue = Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "";
+            // 063 (SMD-1732): a stale row is a pending verdict whose texts
+            // moved; the next pass replaces one it finds in conflict again,
+            // and one it does not is the reviewer's — said here, since no
+            // other row counts them (third review pass, cold read).
+            const [{ pending: queued, stale: staleQueued }] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'stale')::int AS stale FROM supersession_proposals`;
+            const queue = [
+              Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "",
+              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again, a reviewer settles one it does not) — cd db && bun consolidate.ts --url $DATABASE_URL --list stale` : "",
+            ].filter(Boolean).join("; ");
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {
               const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };
@@ -3323,10 +3827,22 @@ if (deep) {
   // and a judge model the endpoint does not serve fails the `judge model` row
   // rather than the first pass of db/consolidate.ts (SMD-1901). One model,
   // one probe: the two rows would otherwise report one call twice.
+  // The escalation target the worker would ACTUALLY dial (SMD-2000): windowingFor
+  // applies the rule — active only with reasoning off (a runaway exists only
+  // under a budget) and when it is not the metadata model — so the probe never
+  // fires for a model the worker would never reach.
+  const { windowingFor } = await import("./entities.ts");
+  const escalateModel = windowingFor(resolvedEmbed).escalateModel ?? "";
   const probes: [row: string, model: string, consequence: string][] = [
     ["metadata model", metaModel, "Capture would still succeed, but every thought would be tagged uncategorized."],
     ...(judgeModel !== metaModel
       ? [["judge model", judgeModel, "Capture is unaffected; db/consolidate.ts would fail every pair it judges."] as [string, string, string]]
+      : []),
+    // The escalation target (SMD-2000), when it is a third distinct model: a
+    // runaway is remade on it, so it must honour JSON mode too, or the answer
+    // it was meant to rescue is malformed and the thought fails.
+    ...(escalateModel && escalateModel !== judgeModel
+      ? [["extraction escalation model", escalateModel, "Capture and the judge are unaffected; a runaway extraction escalated to it would fail rather than be rescued."] as [string, string, string]]
       : []),
   ];
   for (const [row, model, consequence] of probes) {
