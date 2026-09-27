@@ -16,8 +16,8 @@ import { createClient } from "../../../compat/supabase-sql/index.ts";
  * The `KEY=value` lines of an env file; a missing file is no lines. A leading
  * `export ` is dropped, a quoted value is unquoted, and an unquoted value ends
  * at a ` #` comment — the three spellings a shell-style file carries that the
- * original loader read as part of the value (review pass 1, run-it: a trailing
- * comment reached Postgres inside the database name).
+ * original loader read as part of the value (a trailing comment reached
+ * Postgres inside the database name).
  */
 export function loadEnvFile(envPath) {
   if (!fs.existsSync(envPath)) return {};
@@ -48,7 +48,7 @@ export function readEnv(recipeDir) {
  * stack. A value that is not a postgres:// string is refused HERE, naming its
  * scheme and never the value: the shim's own refusal quotes the first forty
  * characters of what it was given, which since this port carry the role's
- * password (review pass 1, run-it — a mistyped scheme printed it). Nothing
+ * password (a mistyped scheme printed it). Nothing
  * connects until the first query, which answers `{ error }` (a refused
  * connection, a wrong database) — the callers turn that into a failure() and
  * end the run.
@@ -64,7 +64,7 @@ export function connect(env) {
   if (!/^postgres(ql)?:\/\//.test(url)) {
     // A scheme is named only when `://` follows it: the first colon-delimited
     // token of a value pasted without its scheme is the user name, or the
-    // password (review pass 2, run-it).
+    // password.
     const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(url)?.[1];
     throw new Error(
       `SUPABASE_URL must be a postgres:// connection string; the value's scheme is ${scheme ? `"${scheme}:"` : "missing"} ` +
@@ -85,7 +85,7 @@ export function failure(what, error) {
   // `brain: true` marks the error as the database's: a caller that ends a run
   // on a structural refusal tests the mark, not the code — Bun's fetch errors
   // carry codes too (ConnectionRefused, ENOTFOUND), and a model outage is a
-  // per-row failure, not a refusal (review pass 2, both readers).
+  // per-row failure, not a refusal.
   return Object.assign(new Error(`${what} → ${code}${error?.message || error}`), { code: error?.code, brain: true });
 }
 
@@ -95,15 +95,14 @@ export function failure(what, error) {
  * (40001, 40P01), a server shutting down (57P01), a server-sent connection
  * exception (class 08) and the driver's own name for a socket that closed
  * under a query (ERR_POSTGRES_CONNECTION_CLOSED — Bun reports a dropped
- * connection that way, with no SQLSTATE; review pass 1, cold read). A refused
- * connection is not among them — an operator with the wrong port reads one
- * line now, not after the ladder's half minute — and a 42xxx (an undefined
- * column, a denied table) is structural and never is. A pool reconnecting to
- * a server that is still starting answers ERR_POSTGRES_CONNECTION_FAILED
- * ("closed before the connection was established"), which follows a 57P01 on
- * the next query, so it rides with it (review pass 2, cold read). Neither
- * closed-socket case is driven by the live suite: it would take killing a
- * backend mid-run.
+ * connection that way, with no SQLSTATE, and it is what the query after a
+ * 57P01 answers; probed). A refused connection is not among them — an
+ * operator with the wrong port reads one line now, not after the ladder's
+ * half minute — and a 42xxx (an undefined column, a denied table) is
+ * structural and never is. A pool reconnecting to a server that is still
+ * starting answers ERR_POSTGRES_CONNECTION_FAILED ("closed before the
+ * connection was established"), so it rides along. The live suite drives
+ * neither closed-socket case: it would take killing a backend mid-run.
  */
 export function isTransientDbError(error) {
   const code = String(error?.code ?? "");
@@ -113,7 +112,7 @@ export function isTransientDbError(error) {
 /**
  * An integer flag's value: digits alone, at least `min`; anything else is
  * refused naming the flag (`parseInt` read `1.5` as 1 and `foo` as NaN, and
- * `--concurrency 0` spun forever — review pass 1, run-it).
+ * `--concurrency 0` spun forever).
  */
 export function intFlag(raw, flag, min = 0) {
   if (raw === undefined || !/^\d+$/.test(String(raw)) || !Number.isSafeInteger(Number(raw)) || Number(raw) < min) {
@@ -124,12 +123,11 @@ export function intFlag(raw, flag, min = 0) {
 
 /**
  * A flag no script knows is refused, not ignored: `--dryrun` for `--dry-run`
- * would have written every row (review pass 1, run-it). `known` names the
+ * would have written every row. `known` names the
  * flags; `withValue` the ones whose next token is their value — which must be
  * there and not another flag, and is never given as `--flag=value`: both
  * forms passed this check and were then ignored by the scripts' parsers, so
- * `--limit=2` and a trailing `--limit` ran unbounded (review pass 2, both
- * readers).
+ * `--limit=2` and a trailing `--limit` ran unbounded.
  */
 export function refuseUnknownFlags(argv, known, withValue = []) {
   for (let i = 0; i < argv.length; i++) {

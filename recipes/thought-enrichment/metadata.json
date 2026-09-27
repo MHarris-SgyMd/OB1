@@ -9,7 +9,7 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter API or Anthropic API (enrich-thoughts.mjs only; any OpenAI-compatible endpoint, a local one included)"],
+    "services": ["OpenRouter API (enrich-thoughts.mjs only; or any OpenAI-compatible endpoint, a local one included)", "Anthropic API (enrich-thoughts.mjs, --provider anthropic)"],
     "tools": ["Bun 1.4+"],
     "env": {
       "required": ["SUPABASE_URL"],

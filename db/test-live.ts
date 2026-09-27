@@ -5667,14 +5667,18 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
         assert(oneLine(deniedType, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/Done\./.test(deniedType.out) && oneLine(deniedTier, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== Results ===/.test(deniedTier.out) && afterDenied.every((r) => r.type === "reference") && (await tiers())["personal"] === 1,
           `…a role with SELECT alone: both backfills read their page and end on the first write with 42501, exit 1, no summary, no row changed (${deniedType.code}: ${errorLine(deniedType.out)}; ${deniedTier.code}: ${errorLine(deniedTier.out)})`);
         // The enrichment too: past the blank row (--skip 1, the .range() path), one row is classified — one paid call
-        // — and its write is refused, which ends the run: exit 1, one ERROR line, no summary, no checkpoint, no row
-        // enriched. Under Promise.allSettled it was a FAIL line per row while every later row still paid its call and
-        // the run exited 0 (review pass 1, both readers).
+        // — and its write is refused, which ends the run: exit 1, one ERROR line, no summary, no row enriched, and a
+        // checkpoint that records nothing (written before the refusal ends the run, so the rows a chunk handled before
+        // it are not lost). Under Promise.allSettled it was a FAIL line per row while every later row still paid its
+        // call and the run exited 0 (review pass 1, both readers). Its own state directory, so the dry run below still
+        // meets none.
         const mark = stubCalls;
-        const deniedEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...model }, "--apply", "--skip", "1", "--limit", "2", "--concurrency", "1", ...ENRICH_FLAGS);
+        const deniedEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...model, ENRICH_STATE_DIR: join(scratch, "state-denied") }, "--apply", "--skip", "1", "--limit", "2", "--concurrency", "1", ...ENRICH_FLAGS);
         const [{ enrichedDenied }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedDenied" FROM thoughts`) as { enrichedDenied: number }[];
-        assert(oneLine(deniedEnrich, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== ENRICHMENT|FAIL #/.test(deniedEnrich.out) && stubCalls - mark === 1 && enrichedDenied === 0 && !existsSync(statePath),
-          `…and the enrichment ends on its first refused write after one model call: exit 1, one ERROR line, no FAIL lines, no summary, no checkpoint, no row enriched (${deniedEnrich.code}: ${errorLine(deniedEnrich.out)}; ${stubCalls - mark} call(s), ${enrichedDenied} enriched)`);
+        const deniedStatePath = join(scratch, "state-denied", "enrichment-state.json");
+        const deniedState = existsSync(deniedStatePath) ? JSON.parse(readFileSync(deniedStatePath, "utf8")) as { totalProcessed: number; failedIds: string[]; lastProcessedId: string | null } : null;
+        assert(oneLine(deniedEnrich, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== ENRICHMENT|FAIL #/.test(deniedEnrich.out) && stubCalls - mark === 1 && enrichedDenied === 0 && deniedState?.totalProcessed === 0 && deniedState.failedIds.length === 0 && deniedState.lastProcessedId === null,
+          `…and the enrichment ends on its first refused write after one model call: exit 1, one ERROR line, no FAIL lines, no summary, no row enriched, a checkpoint recording nothing (${deniedEnrich.code}: ${errorLine(deniedEnrich.out)}; ${stubCalls - mark} call(s), ${enrichedDenied} enriched, state ${JSON.stringify(deniedState)})`);
       } finally {
         await dropProbe();
       }

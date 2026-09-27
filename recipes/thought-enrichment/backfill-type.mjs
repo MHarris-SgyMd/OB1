@@ -119,8 +119,8 @@ async function main() {
 
   while (true) {
     // The limit met, no page is read: the scan had gone on to the next row it
-    // would have written, every page between read for nothing (review pass 2,
-    // run-it — `--limit 1` on a smoke test scanned the whole set).
+    // would have written, every page between read for nothing (`--limit 1` on
+    // a smoke test scanned the whole set).
     if (LIMIT && totalUpdated >= LIMIT) {
       limitReached = true;
       break;
@@ -181,8 +181,8 @@ async function main() {
     }
 
     // The rows examined — every row of the page, unless the limit stopped the
-    // scan inside it (review pass 1, cold read: the rest of the page was counted
-    // as processed and classified nowhere).
+    // scan inside it (the rest of the page was counted as processed and
+    // classified nowhere).
     processedRows += examined;
     // Advance cursor past the highest id seen (rows are ordered by id ASC).
     afterId = rows[rows.length - 1].id;

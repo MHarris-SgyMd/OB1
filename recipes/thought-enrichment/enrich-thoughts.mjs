@@ -216,8 +216,7 @@ async function withRetry(fn, maxRetries = 3) {
       const is5xx = /\b5\d{2}\b/.test(msg);
       const isAbort = name === "AbortError" || msg.includes("Timeout after") || msg.includes("aborted");
       // A socket the provider reset or that timed out is worth another try; a
-      // refused connection or an unknown host is not — the row fails at once
-      // (review pass 2, run-it).
+      // refused connection or an unknown host is not — the row fails at once.
       const isSocket = ["ECONNRESET", "ETIMEDOUT", "EPIPE", "UND_ERR_SOCKET"].includes(String(err.code ?? ""));
       const retriable = is429 || is5xx || isAbort || isSocket;
       if (attempt === maxRetries || !retriable) throw err;
@@ -252,8 +251,8 @@ async function main() {
   if (args.apply) {
     // The checkpoint's directory, made and proven writable before a row is
     // written or a model paid: a directory that is a file failed after the
-    // first chunk (review pass 2, run-it). A relative ENRICH_STATE_DIR
-    // resolves against the current directory.
+    // first chunk. A relative ENRICH_STATE_DIR resolves against the current
+    // directory.
     try {
       fs.mkdirSync(STATE_DIR, { recursive: true });
       fs.writeFileSync(path.join(STATE_DIR, ".probe"), "");
@@ -339,7 +338,7 @@ async function main() {
         for (let k = 0; k < results.length; k++) {
           processed++;
           const t = chunk[k];
-          if (results[k].status === "rejected") refusedWrite(results[k].reason);
+          if (results[k].status === "rejected") refusedWrite(results[k].reason, state, config);
           if (results[k].status === "fulfilled") {
             enriched++;
             if (!config.dryRun) {
@@ -401,7 +400,7 @@ async function main() {
     if (config.limit && processed >= config.limit) break;
     if (config.maxCalls > 0 && budget.calls >= config.maxCalls) {
       // ABORTED only when a row was left: a budget met as the table completed
-      // read as an abort (review pass 2, run-it).
+      // read as an abort.
       budgetExceeded = (await fetchUnenriched(fetchCursor, 1)).length > 0;
       break;
     }
@@ -431,7 +430,7 @@ async function main() {
       for (let j = 0; j < results.length; j++) {
         processed++;
         const t = chunk[j];
-        if (results[j].status === "rejected") refusedWrite(results[j].reason);
+        if (results[j].status === "rejected") refusedWrite(results[j].reason, state, config);
         if (results[j].status === "fulfilled") {
           enriched++;
           if (!config.dryRun) {
@@ -474,8 +473,8 @@ async function main() {
   console.log(`Enriched:       ${enriched}`);
   console.log(`Failed:         ${failed}`);
   console.log(`LLM calls made: ${budget.calls}${config.maxCalls > 0 ? " / " + config.maxCalls : ""}`);
-  // A run that left rows failed exits 1, so a scheduler can tell (review pass 1,
-  // run-it: five failed rows exited 0).
+  // A run that left rows failed exits 1, so a scheduler can tell (five failed
+  // rows exited 0).
   if (failed > 0) process.exitCode = 1;
 }
 
@@ -493,14 +492,17 @@ function chunkWidth(config, budget) {
  * undefined column: a failure() (marked `brain`) whose SQLSTATE is not
  * transient — ends the run here, on the row it happened on, as the two
  * backfills do. Under Promise.allSettled it was one FAIL line per row while
- * every later row still paid its model call and the run exited 0 (review pass
- * 1, both readers). A model's error — a 5xx, bad JSON, a timeout, a closed
- * port (Bun's fetch gives that one a code, ConnectionRefused, which a test on
- * the code alone read as a refusal — review pass 2, both readers) — stays a
- * per-row FAIL, recorded for --retry-failed.
+ * every later row still paid its model call and the run exited 0. A model's
+ * error — a 5xx, bad JSON, a timeout, a closed port (Bun's fetch gives that
+ * one a code, ConnectionRefused, which a test on the code alone read as a
+ * refusal) — stays a per-row FAIL, recorded for --retry-failed. The chunk's
+ * checkpoint is written first, so the rows before the refused one — written,
+ * or failed on the model — are not lost to the next run's --retry-failed.
  */
-function refusedWrite(reason) {
-  if (reason?.brain && !isTransientDbError(reason)) throw reason;
+function refusedWrite(reason, state, config) {
+  if (!(reason?.brain && !isTransientDbError(reason))) return;
+  if (!config.dryRun) checkpointState(state);
+  throw reason;
 }
 
 // --- Classification ---
@@ -521,7 +523,7 @@ async function classifyAndUpdate(thought, config, budget) {
   // block is untrusted data.
   // A row's metadata is an object on every path the functions write; a raw
   // writer may have left a scalar or an array, which a spread would turn into
-  // digit keys and lose (review pass 1, run-it). It is kept under one key.
+  // digit keys and lose. It is kept under one key.
   const existingMetadata = isPlainObject(thought.metadata) ? thought.metadata : thought.metadata == null ? {} : { prior_metadata: thought.metadata };
   const existingSource = thought.source_type || existingMetadata.source || "";
   const safeContent = escapeThoughtTags(content.substring(0, 4000));
@@ -734,7 +736,7 @@ function loadState() {
   if (!fs.existsSync(STATE_PATH)) return fresh;
   try {
     // A checkpoint missing a key — an older shape, a hand edit — takes the
-    // default for it rather than a TypeError (review pass 1, run-it).
+    // default for it rather than a TypeError.
     const saved = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
     const state = { ...fresh, ...(isPlainObject(saved) ? saved : {}) };
     if (!Array.isArray(state.failedIds)) state.failedIds = [];
