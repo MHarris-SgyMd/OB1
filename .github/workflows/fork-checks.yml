@@ -747,11 +747,44 @@ jobs:
         with:
           persist-credentials: false
 
-      # For the three dashboards at the end of this job (SMD-1801): Bun installs
-      # and builds them, and drives the SvelteKit one against the stack.
+      # For the three dashboards (SMD-1801): Bun installs and builds them, and
+      # drives the SvelteKit one against the stack at the end of this job.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
+
+      # SMD-2251. The three dashboards need nothing from the stack, and built in
+      # series after it they added 35 s to this job. So they build here, in the
+      # background, one after another while the stack comes up (mostly waiting
+      # on health checks, not CPU), and "The three dashboards build" below
+      # waits for them and reports each. The two Next dashboards read their env
+      # at build time — the gateway URL and a session secret, any values. Each
+      # dashboard writes its log and exit code under $RUNNER_TEMP beside the
+      # one limit, which the wait step reads for its labels and cap; a hang
+      # ends as 124 and the next dashboard still builds. The subshell's output
+      # goes to files: otherwise this step would wait for the whole build.
+      - name: The three dashboards start building, in the background
+        id: dashboards
+        env:
+          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
+          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
+        run: |
+          out="$RUNNER_TEMP/dashboards"
+          mkdir -p "$out"
+          limit_s=240
+          echo "$limit_s" > "$out/limit"
+          (
+            for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
+              check=""
+              if [ "$d" = open-brain-dashboard ]; then check=" && bun run check"; fi
+              start=$SECONDS
+              rc=0
+              (cd "dashboards/$d" && exec timeout --kill-after=10s "${limit_s}s" sh -c "bun install --frozen-lockfile && bun run build$check") > "$out/$d.log" 2>&1 || rc=$?
+              echo "$rc $((SECONDS - start))" > "$out/$d.rc"
+            done
+            touch "$out/done"
+          ) > "$out/runner.log" 2>&1 < /dev/null &
+          echo "$!" > "$out/pid"
 
       # The other container this repository ships (SMD-1800): kubernetes-deployment's
       # image, Bun's base with its pinned install, built from integrations/ so the
@@ -772,19 +805,22 @@ jobs:
       # never dialled. The stop has to wait for it and count it — an idle stop
       # passed a handler that exits at once, or that never got the server
       # (review pass 1). The stub runs from the image just built, which has
-      # Bun, so nothing is pulled.
+      # Bun, so nothing is pulled. The stop lands once the stub logs the
+      # server's request, so the call is in flight however loaded the runner
+      # is (the dashboards build beside this step, SMD-2251).
       - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
         run: |
           KEY=$(openssl rand -hex 32)
           HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
           docker network create ob1-k8s-stop > /dev/null
-          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
+          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { console.log("embedding request"); await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
           docker run -d --name ob1-k8s-stop --network ob1-k8s-stop -p 127.0.0.1:8099:8000 -e DB_PASSWORD=unused -e EMBEDDING_API_BASE=http://ob1-k8s-embed:8080 -e "MCP_ACCESS_KEYS=ci:read:$HASH" ob1-k8s-mcp:ci > /dev/null
           up=""
           for _ in $(seq 1 40); do curl -s -m 2 -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
           curl -s -N --max-time 10 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts","arguments":{"query":"stop probe"}}}' http://127.0.0.1:8099/ > /tmp/k8s-call.out &
-          sleep 0.5
+          seen=""
+          for _ in $(seq 1 40); do grep -q 'embedding request' <<< "$(docker logs ob1-k8s-embed 2>&1)" && { seen=1; break; }; sleep 0.1; done
           t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
           wait
           code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
@@ -794,6 +830,7 @@ jobs:
           echo "$log"
           echo "docker stop: ${ms} ms, exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
           [ -n "$up" ] || { echo "the Kubernetes image never answered" >&2; exit 1; }
+          [ -n "$seen" ] || { echo "the server never called the embedding stub, so no call was in flight when the stop landed" >&2; exit 1; }
           if ! { [ "$code" = 0 ] && [ "$ms" -ge 1000 ] && [ "$ms" -lt 5000 ]; }; then echo "expected exit 0 once the call in flight answered, in 1–5 s (137 near 10 s is the grace period's kill; under 1 s it did not wait)" >&2; exit 1; fi
           grep -q '^SIGTERM: no longer accepting; 1 in flight' <<< "$log" || { echo "the handler did not count the call in flight" >&2; exit 1; }
           grep -q '"id":1' /tmp/k8s-call.out || { echo "the call in flight got no answer" >&2; exit 1; }
@@ -1195,23 +1232,65 @@ jobs:
 
       # SMD-1801. The three dashboards build from their pinned installs, with no
       # Supabase package among them (check 22 holds the imports; this holds the
-      # builds). The two Next dashboards read their env at build time — the
-      # gateway URL and a session secret, any values — and are built, not run:
-      # they speak to the open-brain-rest gateway, which this stack does not
-      # serve (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP
-      # to the server this stack serves, so it is driven too, below.
+      # builds). The two Next dashboards are built, not run: they speak to the
+      # open-brain-rest gateway, which this stack does not serve
+      # (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP to
+      # the server this stack serves, so it is driven too, below.
+      # They build in the background from the job's start (SMD-2251); this step
+      # waits for that and reports it — each dashboard's log folded when it
+      # passed and open under an error when it failed, and a line per dashboard
+      # of exit code and seconds. It runs when a stack step failed too, so a
+      # broken build is never hidden behind one. The wait ends when the
+      # background shell writes its done mark or dies without it, or at a cap
+      # a minute past the three limits and their kill-after grace. A dead shell
+      # nothing has reaped yet is a zombie, which `kill -0` counts as alive, so
+      # its state is read instead (review pass 1). timeout TERMs a build's
+      # process group, and its child, the `sh -c` running the chain, dies on
+      # it (dash does not exec the last command of an && list), so a hang is
+      # 124 and a process that ignores TERM outlives the limit; a 137 is a KILL
+      # from outside.
       - name: The three dashboards build
-        env:
-          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
-          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
+        if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
         run: |
+          out="$RUNNER_TEMP/dashboards"
+          pid=$(cat "$out/pid")
+          limit_s=$(cat "$out/limit")
+          cap=$((3 * (limit_s + 10) + 60))
+          running() {
+            local state
+            state=$(cut -d' ' -f3 "/proc/$1/stat" 2> /dev/null) && [ -n "$state" ] && [ "$state" != Z ]
+          }
+          start=$SECONDS
+          while [ ! -e "$out/done" ] && running "$pid" && [ $((SECONDS - start)) -lt "$cap" ]; do sleep 1; done
+          echo "waited $((SECONDS - start)) s for the background build"
+          if [ ! -e "$out/done" ]; then
+            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past $cap s) — its logs follow"
+            for rc in "$out"/*.rc; do [ -e "$rc" ] && echo "finished: $(basename "$rc" .rc), exit and seconds $(cat "$rc")"; done
+            for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
+            exit 1
+          fi
+          failed=0
+          summaries=""
           for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-            echo "::group::$d"
-            # The group closed on failure too, or the rest of the log nests under it.
-            if ! ( cd "dashboards/$d" && bun install --frozen-lockfile && bun run build ); then echo "::endgroup::"; exit 1; fi
-            echo "::endgroup::"
+            read -r rc secs < "$out/$d.rc"
+            why=$rc
+            case $rc in
+              124) why="124, over the $limit_s s limit" ;;
+              137) why="137, killed from outside, most likely out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::$d — built"
+              cat "$out/$d.log"
+              echo "::endgroup::"
+            else
+              echo "::error title=The three dashboards build::$d failed (exit $why) — its log follows"
+              cat "$out/$d.log"
+              failed=1
+            fi
+            summaries+="  $d: exit $rc in $secs s"$'\n'
           done
-          ( cd dashboards/open-brain-dashboard && bun run check )
+          printf '\n%s' "$summaries"
+          [ "$failed" = 0 ]
 
       # The SvelteKit dashboard as a browser uses it, against the stack that is
       # up: a wrong key refused at /signin, the write key signed in and the JSON
