@@ -1957,7 +1957,7 @@ if (configFailed) {
                       OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number };
-            // 063's sections join the census where the store is applied; a brain at
+            // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
             const [c] = (await sql.unsafe(`
@@ -2024,11 +2024,11 @@ if (configFailed) {
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
             if (Number(c.sections)) missing.push(`${n(c.sections)} page section(s) carrying a recipe (${(c.section_ids ?? []).join(", ")})`);
-            // 063's kind has its own writer and no backfill: the remedy for a
+            // 064's kind has its own writer and no backfill: the remedy for a
             // section is that writer, said beside the general one (cold read,
             // first review pass: the general remedy named 061's backfill, which
             // knows no section).
-            const sectionRemedy = Number(c.sections) ? " A page section's row is written by 063's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "";
+            const sectionRemedy = Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "";
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
@@ -2042,7 +2042,7 @@ if (configFailed) {
                     ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.${sectionRemedy}`
                     : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy.") + sectionRemedy);
             } else if (Number(c.stale_pages)) {
-              // 063: a page thought that does not hold its render — a raw write
+              // 064: a page thought that does not hold its render — a raw write
               // of page_sections or of the thought (first review pass, both
               // readers: nothing saw it). Reported when no row is missing — the
               // fail above comes first. The store's own door repairs it.
@@ -2071,7 +2071,7 @@ if (configFailed) {
             add("lineage", "skip", `not checked — this role cannot read ${denied} (${msg})`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${denied === "derivations" ? "the capture group's row since 061" : "a row of the grants table"}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
-            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections and pages (063) and pg_proc.");
+            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections and pages (064) and pg_proc.");
           }
         }
 

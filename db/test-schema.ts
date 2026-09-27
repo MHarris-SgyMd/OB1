@@ -4660,7 +4660,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   // nothing does now.
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
-  assert(schemaFiles.length >= 13 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three, 13 after SMD-1812 moved wiki-pages into core as 063; the set otherwise grows), the four with prerequisites among them`);
+  assert(schemaFiles.length >= 13 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three, 13 after SMD-1812 moved wiki-pages into core as 064; the set otherwise grows), the four with prerequisites among them`);
 
   // The rule check-fork-consistency holds these files to, from inside the
   // suite: none runs a Supabase-ism, comments excepted. And the strip's teeth,
@@ -4734,7 +4734,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   assert(serialSeqs.length === 6 && serialSeqs.every((s) => listedSeqs.has(s)) && listedSeqs.size === serialSeqs.length,
     `the community group names exactly the bigserial sequences the files created (${serialSeqs.length}: ${serialSeqs.sort().join(", ")})`);
   assert(identitySeqs.length === 1 && identitySeqs.join() === "thought_audit_seq_seq" && identitySeqs.every((s) => !listedSeqs.has(s)),
-    `…and not the one identity column's — 050's thought_audit.seq, the table schemas/thought-audit shares (wiki-pages' was the other until SMD-1812 moved it into core, where [58] measures 063's) (${identitySeqs.join(", ")})`);
+    `…and not the one identity column's — 050's thought_audit.seq, the table schemas/thought-audit shares (wiki-pages' was the other until SMD-1812 moved it into core, where [59] measures 064's) (${identitySeqs.join(", ")})`);
 
   // The role: created here with nothing, granted USAGE on the schema, then
   // probed as the connecting role. An INSERT of DEFAULT VALUES asks for every
@@ -7565,7 +7565,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 4 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("063") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 4 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("064") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -9114,7 +9114,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   assert((await functionsNamed("upsert_thought")) === 3, "three upsert_thought overloads still");
   for (const fn of ["upsert_thought", "update_thought", "record_thought_entities", "record_supersession_proposal", "ob1_record_vector_lineage"])
     assert(lastDefinerOf(fn).startsWith("061"), `061 is the last definer of ${fn} (${lastDefinerOf(fn)})`);
-  assert(lastDefinerOf("ob1_record_derivation").startsWith("063"), `063 is the last definer of ob1_record_derivation — 061's body plus the section kind ([58] reads it) (${lastDefinerOf("ob1_record_derivation")})`);
+  assert(lastDefinerOf("ob1_record_derivation").startsWith("064"), `064 is the last definer of ob1_record_derivation — 061's body plus the section kind ([59] reads it) (${lastDefinerOf("ob1_record_derivation")})`);
   assert(lastDefinerOf("delete_thought").startsWith("060") && lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("ob1_project_thought_event").startsWith("060") && lastDefinerOf("ob1_refresh_thought_vector").startsWith("060"),
     "060 stays the last definer of delete_thought, the audit trigger, the projector and the refresh — 061 touches none");
   const RECORDS = /ob1:derivation-recorded-with-its-artifact/;
@@ -9346,7 +9346,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   await db.exec(`DELETE FROM derivations`);
 }
 
-console.log("\n[58] Migration 063: the page store — a page is a thought whose text is its render, written through update_thought; a machine's regeneration leaves a human-owned section byte-identical and parks its draft; the revisions reconstruct any prior state byte for byte; a generated section records its lineage and a human's drops it; the pages grant group (SMD-1812)");
+console.log("\n[59] Migration 064: the page store — a page is a thought whose text is its render, written through update_thought; a machine's regeneration leaves a human-owned section byte-identical and parks its draft; the revisions reconstruct any prior state byte for byte; a generated section records its lineage and a human's drops it; the pages grant group (SMD-1812)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -9407,9 +9407,9 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   const kindCheck = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check'`)).d;
   assert(/'section'/.test(kindCheck) && /'chunks'/.test(kindCheck) && /'metadata'/.test(kindCheck), `061's kind CHECK admits the sixth kind, section, beside the five (${kindCheck})`);
   const RD = "ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)";
-  assert(lastDefinerOf("ob1_record_derivation").startsWith("063") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
-    "063 is the last definer of ob1_record_derivation — 061's body, one form, the section kind admitted, the upsert kept");
-  for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "reject_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_actor", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe", "page_section_revisions_refuse_mutation", "ob1_drop_section_derivations"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063's`);
+  assert(lastDefinerOf("ob1_record_derivation").startsWith("064") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
+    "064 is the last definer of ob1_record_derivation — 061's body, one form, the section kind admitted, the upsert kept");
+  for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "reject_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_actor", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe", "page_section_revisions_refuse_mutation", "ob1_drop_section_derivations"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("064"), `one ${fn}, 064's`);
   const immutableDef = (await one<{ d: string }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'page_section_revisions_immutable'`))?.d ?? "";
   assert(/BEFORE (UPDATE OR DELETE|DELETE OR UPDATE) ON (public\.)?page_section_revisions FOR EACH ROW/.test(immutableDef), `the revisions' row trigger refuses UPDATE and DELETE (${immutableDef})`);
   assert(/NOT EXISTS \(SELECT 1 FROM page_sections WHERE id = OLD\.section_id\)/.test(await src("page_section_revisions_refuse_mutation()")) && /FOR NO KEY UPDATE/.test(await src("ob1_page_lock(uuid, text)")) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src("upsert_page(text, text, text, jsonb, text, uuid)")) && [await src("write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)"), await src("accept_page_section(uuid, text)"), await src("reject_page_section(uuid, text)"), await src("release_page_section(uuid, text)"), await src("lock_page_section(uuid, boolean, text)"), await src("delete_page_section(uuid, text)")].every((b) => /ob1_page_lock\(/.test(b)) && /FROM thoughts WHERE id = v_id FOR NO KEY UPDATE/.test(await src("upsert_page(text, text, text, jsonb, text, uuid)")),
@@ -9579,7 +9579,7 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   const refusals: [string, string][] = [
     [await writeRefused(P, "steps", "x", "machine"), "origin must be manual or generated, got 'machine'"],
     [await writeRefused(P, "  ", "x", "generated", { evidence: [e1.id] }), "section_key is required"],
-    [await writeRefused("00000000-0000-4000-8000-000000000063", "k", "x", "generated", { evidence: [e1.id] }), "no page 00000000-0000-4000-8000-000000000063"],
+    [await writeRefused("00000000-0000-4000-8000-000000000064", "k", "x", "generated", { evidence: [e1.id] }), "no page 00000000-0000-4000-8000-000000000064"],
     [await writeRefused(P, "steps", "x", "generated"), "a generated section names the thoughts it was derived from"],
     [await writeRefused(P, "steps", "x", "generated", { evidence: [] }), "a generated section names the thoughts it was derived from"],
     [await writeRefused(P, "steps", "x", "generated", { evidence: [e1.id, "00000000-0000-4000-8000-000000000009"] }), "evidence thought 00000000-0000-4000-8000-000000000009 does not exist"],
@@ -9691,9 +9691,9 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   // review pass: a LIKE on the column name took two such; the tooth from the third).
   const pagesBefore = await count(`SELECT count(*)::int AS c FROM pages`), revsAll = await count(`SELECT count(*)::int AS c FROM page_section_revisions`);
   await db.exec(`ALTER TABLE derivations ADD CONSTRAINT ob1_test_foreign_kind CHECK (artifact_kind <> 'never')`);
-  await reapply("063");
+  await reapply("064");
   const kindChecks = (await q<{ n: string }>(`SELECT conname AS n FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%' ORDER BY 1`)).map((x) => x.n).join();
-  assert((await count(`SELECT count(*)::int AS c FROM pages`)) === pagesBefore && (await count(`SELECT count(*)::int AS c FROM page_section_revisions`)) === revsAll && (await functionsNamed("write_page_section")) === 1 && kindChecks === "derivations_artifact_kind_check,ob1_test_foreign_kind", `re-applying 063 moves no row and no function, and drops only its own kind CHECK — a foreign CHECK on the column stands (${kindChecks})`);
+  assert((await count(`SELECT count(*)::int AS c FROM pages`)) === pagesBefore && (await count(`SELECT count(*)::int AS c FROM page_section_revisions`)) === revsAll && (await functionsNamed("write_page_section")) === 1 && kindChecks === "derivations_artifact_kind_check,ob1_test_foreign_kind", `re-applying 064 moves no row and no function, and drops only its own kind CHECK — a foreign CHECK on the column stands (${kindChecks})`);
   await db.exec(`ALTER TABLE derivations DROP CONSTRAINT ob1_test_foreign_kind`);
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts`);

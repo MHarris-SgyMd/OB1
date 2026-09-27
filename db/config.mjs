@@ -1792,7 +1792,7 @@ export const ROLE_GRANTS = Object.freeze({
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
   ]),
-  // The page store (063, SMD-1812): a page is a thought (its id, its render as
+  // The page store (064, SMD-1812): a page is a thought (its id, its render as
   // the content — written through the capture group's functions, so a role
   // that writes pages holds `capture` too), and the sections, their pending
   // drafts and their revisions are these three tables, written only through
@@ -1804,12 +1804,12 @@ export const ROLE_GRANTS = Object.freeze({
   // tables' owner); DELETE on page_sections, since delete_page_section deletes
   // the row as the caller. The revisions take INSERT alone, and a trigger
   // refuses UPDATE, a DELETE while the section stands, and TRUNCATE, for the
-  // owner too. The identity column needs no sequence grant (test-schema [58]
+  // owner too. The identity column needs no sequence grant (test-schema [59]
   // measures it).
   pages: Object.freeze([
-    Object.freeze({ table: "pages",                  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "063" }),
-    Object.freeze({ table: "page_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "063" }),
-    Object.freeze({ table: "page_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),           since: "063" }),
+    Object.freeze({ table: "pages",                  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "064" }),
+    Object.freeze({ table: "page_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "064" }),
+    Object.freeze({ table: "page_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),           since: "064" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`

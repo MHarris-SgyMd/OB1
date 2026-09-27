@@ -4438,7 +4438,7 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
       // and the one call a community RPC makes for real: lookup_agent_memory_key,
       // as the role — SECURITY DEFINER, REVOKEd FROM PUBLIC, reading and touching
       // agent_memory_keys (the wiki RPCs were this probe until SMD-1812 moved
-      // the page store into core: test-live [31])
+      // the page store into core: test-live [32])
       const lookup = (await asRole.unsafe(`SELECT count(*)::int AS n FROM lookup_agent_memory_key('${"a".repeat(64)}')`)) as { n: number }[];
       assert(lookup[0]?.n === 0, `…and calls lookup_agent_memory_key through its grant, an unknown hash answering no row (${JSON.stringify(lookup[0])})`);
 
@@ -6428,7 +6428,7 @@ console.log("\n[30] Migration 061 on a real server: the windowed capture's linea
   await sql.close();
 }
 
-console.log("\n[31] Migration 063 on a real server: the page store under concurrency — two sessions' first write of one section serialise on the page (one created, one updated), two sessions on two sections of one page leave the render the thought's content, a human's edit and a machine's regeneration racing leave the human's text live whichever commits first, a section write racing delete_thought of the page waits and finds no page (no deadlock), two creates of one slug — one title or two — leave one page and one refusal by name (SMD-1812)");
+console.log("\n[32] Migration 064 on a real server: the page store under concurrency — two sessions' first write of one section serialise on the page (one created, one updated), two sessions on two sections of one page leave the render the thought's content, a human's edit and a machine's regeneration racing leave the human's text live whichever commits first, a section write racing delete_thought of the page waits and finds no page (no deadlock), two creates of one slug — one title or two — leave one page and one refusal by name (SMD-1812)");
 {
   const sql = new SQL({ url: URL_, max: 1 });
   await sql`DELETE FROM thoughts`;
@@ -6439,7 +6439,7 @@ console.log("\n[31] Migration 063 on a real server: the page store under concurr
   try {
     type R = { action?: string; section_id?: string; page_id?: string; created?: boolean };
     type Sec = { origin: string; body_md: string; pending: string | null };
-    const e = (await sql`SELECT upsert_thought('063 live: the evidence', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }}::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string };
+    const e = (await sql`SELECT upsert_thought('064 live: the evidence', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }}::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string };
     const P = ((await sql`SELECT upsert_page('live-runbook', 'Live runbook', 'topic', '{}'::jsonb, 'alice') AS r`)[0].r as { page_id: string }).page_id;
     const write = async (c: SQL, key: string, body: string, origin: string, actor: string): Promise<R> =>
       ((await c`SELECT write_page_section(${P}::uuid, ${key}, ${body}, ${origin}, NULL, '{}'::jsonb, ${origin === "generated" ? sql.array([e.id], "TEXT") : null}::uuid[], NULL, ${actor}) AS r`) as { r: R }[])[0].r;

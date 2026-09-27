@@ -45,7 +45,7 @@ const TABLES = [
   "ob1_entity_edges",
   "thought_entities",
   "ob1_entities",
-  // 063's page store (SMD-1812): the revisions reference the sections, the
+  // 064's page store (SMD-1812): the revisions reference the sections, the
   // sections the pages, the pages `thoughts` — so all three before it.
   "page_section_revisions",
   "page_sections",
@@ -221,7 +221,7 @@ const FUNCTIONS = [
   "ob1_record_vector_lineage()",
   "ob1_drop_thought_derivations()",
   "ob1_drop_proposal_derivation()",
-  // 063 (SMD-1812): the page store's nine functions, its four helpers, the
+  // 064 (SMD-1812): the page store's nine functions, its four helpers, the
   // page-thought writer, the revisions' refusal trigger and the section drop
   // trigger; ob1_record_derivation, redefined on 061's body, is named above.
   "upsert_page(text, text, text, jsonb, text, uuid)",

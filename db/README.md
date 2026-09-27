@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1812).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 064 SMD-1812).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -531,7 +531,7 @@ SMD-2117's.
 Migration 061 gives every derived artifact its lineage (SMD-1731, Phase 1b of
 SMD-1729; the projections table in `../docs/event-log-as-truth.md`). One
 table, `derivations`: a row per artifact per producing pass — `artifact_kind`
-in chunks / entities / proposal / vector / metadata (and section since 063), `artifact_id` (the
+in chunks / entities / proposal / vector / metadata (and section since 064), `artifact_id` (the
 thought's id, or the proposal's), `input_ids` and `input_fingerprints`
 (parallel, no NULL element), `produced_by` (the pass), `recipe` (a JSON object
 with a boolean `deterministic`, what SMD-1732's rebuild will read, and the
@@ -570,7 +570,7 @@ arities move under their own DROP; a re-apply re-seeds nothing. test-schema
 [57], test-live [30], test-upgrade [20n]; the rebuild that walks the table is
 SMD-1732's, the forget SMD-1723's.
 
-Migration 063 is the page store (SMD-1812, the store half of SMD-949): a
+Migration 064 is the page store (SMD-1812, the store half of SMD-949): a
 durable, named document a human and a machine both edit, without the next run
 of its generator shredding what the human wrote. **A page is a thought.**
 `pages.id` is the page thought's id (a foreign key, cascade), and the thought's
@@ -638,7 +638,7 @@ directory retires with this file: a brain that applied it by hand keeps its
 tables untouched. The new `pages` grant group is what a role needs beside
 `capture` (the grants table). Additive; no arity moves; no seed row; a
 re-apply is idempotent (it re-validates the kind CHECK and moves no row).
-test-schema [58], test-live [31], test-upgrade [20o];
+test-schema [59], test-live [32], test-upgrade [20p];
 `server-portable/test-preflight.ts` drives the census, the remedy and the
 repair arms.
 
@@ -712,9 +712,9 @@ issues every group at once.
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
-| **pages** — the page store (063, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (063) | `SELECT, INSERT, UPDATE` |
-| | `page_sections` (063) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
-| | `page_section_revisions` (063; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [58]) | `SELECT, INSERT` |
+| **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
+| | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
+| | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -758,9 +758,9 @@ key — but three community schemas use `BIGSERIAL` ids, and an `INSERT` into su
 a table needs `USAGE` on the sequence (`permission denied for sequence …` with
 the table fully granted),
 so the **community** group names those six sequences; an identity column
-(063's `page_section_revisions.seq`) needs none. Both are measured, not recalled:
+(064's `page_section_revisions.seq`) needs none. Both are measured, not recalled:
 test-schema [40] grants the tables alone and watches which inserts are still
-refused, and [58] inserts a revision under the `pages` group with no sequence
+refused, and [59] inserts a revision under the `pages` group with no sequence
 granted. Functions are executable by `PUBLIC` by default, so only the community
 functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones — are
 listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,
@@ -788,7 +788,7 @@ them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, and **pages**
-for a role that writes pages (063). The
+for a role that writes pages (064). The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
