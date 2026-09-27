@@ -1439,7 +1439,7 @@ if (configFailed) {
               // triggers read the tables too (second review pass) — and SELECT
               // missing breaks the reads as well.
               fails.push((projectionMiss.includes("SELECT") ? "every lifecycle read (node_lifecycle, node_state, search_thoughts' prefer_current) and " : "")
-                + "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes and a delete of such a row included"
+                + "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included"
                 + " (060's triggers keep the node_state projection as the caller)");
             }
             const why = ` — so ${fails.join(", and ")} would fail`;

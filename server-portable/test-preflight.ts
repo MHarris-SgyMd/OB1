@@ -1694,7 +1694,7 @@ else {
       await claims.unsafe("REVOKE INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
       const projectionWrites = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(projectionWrites.code === 1 &&
-             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes and a delete of such a row included \(060's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionWrites.out)) &&
+             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included \(060's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionWrites.out)) &&
              !/windowed capture|every delete|lifecycle read/.test(writeLine(projectionWrites.out)) &&
              /GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;\s+GRANT INSERT, UPDATE, DELETE ON ob1_superseded_by TO ob1_pf_capture;/.test(projectionWrites.out),
              `without 060's projection writes the check names the writes that move a key or a pointer — not lifecycle reads, not a plain capture, not every delete — each table with its GRANT (exit ${projectionWrites.code})`);

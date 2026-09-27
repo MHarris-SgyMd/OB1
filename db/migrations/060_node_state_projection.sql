@@ -43,15 +43,18 @@
 --     rules, once each, NULL for every key: the seed, the rebuild and the
 --     triggers all compute through them. Each is a one-time-filtered branch
 --     for NULL UNION ALL a branch whose keys are an index condition (`=
---     ANY(...)`), so a small key set is index probes whatever the statistics
---     say (a runtime `p IS NULL OR x = ANY(p)` is never folded, and the OR
---     takes the index away — SMD-2256's prototype; a join to unnest() fell to
---     a full scan once an ANALYZE inside a long transaction saw no rows —
---     third review pass). "Nothing supersedes it" is a probe of
+--     ANY(...)`), so a small key set stays index probes even when the
+--     statistics say the table is empty (a runtime `p IS NULL OR x = ANY(p)` is
+--     never folded, and the OR takes the index away — SMD-2256's prototype; a
+--     join to unnest() fell to a full scan once an ANALYZE from another
+--     session, autovacuum's say, ran during a long transaction of ticket
+--     writes and saw none of its rows — third review pass). "Nothing supersedes it" is a probe of
 --     ob1_superseded_by per candidate, so superseders are always reconciled
 --     before heads.
 --   * ob1_node_projection_reconcile(text[], uuid[]) — superseders, then
 --     heads: a keyed delete of what vanished and an upsert of what changed.
+--     Internal: it takes no lock (its callers do), so a direct call races the
+--     triggers — call the rebuild instead.
 --   * ob1_rebuild_node_projection() — every key, under the exclusive lock;
 --     returns what it wrote and deleted, zeros when exact. The seed below,
 --     and the repair after a write made with triggers disabled. It refuses
@@ -90,28 +93,38 @@
 --   upsert would keep a stale head. So before it recomputes, the trigger takes
 --   transaction advisory locks — a shared global (22560, 0), then buckets of
 --   the keys' hashes, 256 per class, in bucket order: 22562 for the
---   superseded thoughts, for every deleted row and for the rows whose head
---   fields moved (a concurrent pointer write to such a row reads its issue),
---   22561 for the issues (bucketed on md5(issue), the head row's key), the pointer targets' issues read once the pointer buckets are held
---   (a write moving a target's issue holds that target's bucket too); each
+--   superseded thoughts, for the rows whose head fields moved (a concurrent
+--   pointer write to such a row reads its issue) and for the deleted rows a
+--   cascade can need, 22561 for the issues (bucketed on md5(issue), the head
+--   row's key), the pointer targets' issues read once the pointer buckets are
+--   held (a write moving a target's issue holds that target's bucket too); each
 --   recompute is a statement after the grant, so it sees every write committed
 --   before it. So statements moving one ticket's key, status, watermark or
 --   pointers serialise until commit (a content-only edit takes no lock), and a
 --   transaction holds at most 513 of these locks however many keys it writes.
---   A deleted row takes its own pointer bucket, so the ON DELETE SET NULL
+--   A DELETE that locks at all takes the buckets of its deleted issue rows and
+--   of every deleted row something supersedes, so the ON DELETE SET NULL
 --   cascade — which fires this trigger again after the DELETE's own firing —
---   needs no bucket it does not hold. Two new costs of that:
+--   needs no bucket it does not hold; one with no key and no pointer locks
+--   nothing, and its cascade then takes one round alone. Two new costs of that:
 --   a transaction whose ticket writes take more than one round of locks — two
 --   or more statements, or one statement that fires the trigger twice (a MERGE
 --   with several actions, a multi-row INSERT ... ON CONFLICT that both inserts
 --   and updates, a writable CTE with more than one kind of write) — can
 --   deadlock (40P01) with another, where before it waited: retry it (the
 --   repo's writers are single-row, one statement per transaction); and
---   ob1_rebuild_node_projection() takes 22560 exclusively. REPEATABLE READ is
+--   ob1_rebuild_node_projection() takes 22560 exclusively (after thoughts, as
+--   writers do — a transaction that writes a ticket row and then truncates or
+--   alters thoughts can still deadlock with it, detected and retryable).
+--   REPEATABLE READ is
 --   refused for such a statement: its snapshot predates the lock, so a
 --   concurrent commit could be lost without a conflict. SERIALIZABLE is left
 --   to SSI, which keeps the tables exact only when every writer of ticket rows
 --   is serializable; after a mix, run the rebuild under READ COMMITTED.
+--
+-- UPGRADE
+--   Run `db/migrate.ts --grant <role>` again for every role granted before
+--   this file (the capture group gains writes on both new tables).
 --
 -- SAFETY
 --   Additive: two tables, one index, seven functions, four triggers; two
@@ -127,17 +140,24 @@
 --   role granted before this file fails preflight's write-privileges check
 --   with the exact GRANT until `migrate.ts --grant` runs again — until then a
 --   write that moves an issue key, a ticket's status or watermark, or a
---   pointer, and every lifecycle read, is refused on the new tables. A reader
+--   pointer (a delete of any thought something supersedes included, through
+--   its cascade), and every lifecycle read, is refused on the new tables; a
+--   worker or integration under a --grant role, which runs no preflight, meets
+--   a bare "permission denied" there. A reader
 --   of node_lifecycle() — graph-centrality's default modes — needs SELECT on
 --   ob1_ticket_head now, beside thoughts. Idempotent: IF NOT EXISTS, DROP
 --   TRIGGER IF EXISTS, CREATE OR REPLACE, and the seed is a reconcile, not a
---   wipe. The seed runs
---   after the triggers exist; CREATE TRIGGER holds writers off until commit.
+--   wipe. The seed runs after the triggers exist; CREATE TRIGGER holds writers
+--   off until commit.
 --   A write made with thoughts' user triggers disabled — ALTER TABLE ...
 --   DISABLE TRIGGER, session_replication_role = replica (logical replication's
 --   apply, pg_restore --disable-triggers) — bypasses the projection: run
 --   SELECT * FROM ob1_rebuild_node_projection() after it (drift() says
---   whether one is needed). MINOR under the version rules.
+--   whether one is needed). So does, on a PostgreSQL release that drops them,
+--   the rows a MERGE updates when its own DELETE's cascade updates them too:
+--   PGlite's 17.5 leaves them out of the transition table (16.15 and 17.8 keep
+--   them; fourth review pass), and the move they make is not seen — rebuild
+--   after such a MERGE there. MINOR under the version rules.
 --
 -- Expected outcome
 --   SELECT count(*) FROM ob1_node_projection_drift() is 0, node_state() lists
@@ -301,7 +321,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_node_projection_reconcile(text[], uuid[]) IS
-  'Brings ob1_superseded_by, then ob1_ticket_head, to what the two rules compute for the keys given (every key when NULL; an empty array touches neither table): deletes what vanished, upserts what changed, and returns the counts. Takes no lock itself — the triggers and ob1_rebuild_node_projection() do. Migration 060 / SMD-2256.';
+  'Brings ob1_superseded_by, then ob1_ticket_head, to what the two rules compute for the keys given (every key when NULL; an empty array touches neither table): deletes what vanished, upserts what changed, and returns the counts. Takes no lock itself — the triggers and ob1_rebuild_node_projection() do — so it is internal: a direct call races the triggers (call the rebuild instead). Migration 060 / SMD-2256.';
 
 CREATE OR REPLACE FUNCTION ob1_rebuild_node_projection()
 RETURNS TABLE (heads_written int, heads_deleted int, superseders_written int, superseders_deleted int)
@@ -375,7 +395,7 @@ DECLARE
   v_targets uuid[];   -- thoughts whose superseded-ness may have moved (their issue's head with it)
   v_rows    uuid[];   -- rows whose head fields moved (a concurrent pointer write to one of them
                       -- reads its issue, so it takes the same pointer bucket — first review
-                      -- pass) and every deleted row (its cascade's firing — second, third)
+                      -- pass), and the deleted rows a cascade can need (second to fourth)
   b         int;
 BEGIN
   IF TG_OP = 'INSERT' THEN
@@ -387,21 +407,22 @@ BEGIN
     v_targets := v_ids;
   ELSIF TG_OP = 'DELETE' THEN
     SELECT array_agg(DISTINCT o.metadata->>'issue') FILTER (WHERE o.metadata->>'issue' IS NOT NULL),
-           array_agg(DISTINCT o.supersedes) FILTER (WHERE o.supersedes IS NOT NULL),
-           -- every deleted row, plain ones included: ON DELETE SET NULL then
-           -- fires this trigger again for the rows that pointed at them, and
-           -- that firing needs their buckets — held already, so no bucket is
-           -- taken out of order (second review pass: a single-row delete;
-           -- third: a multi-row one mixing a keyed row with a plain row that
-           -- something supersedes). A statement with no key and no pointer
-           -- still returns below, and its cascade then takes one round alone.
-           array_agg(o.id)
-      INTO v_issues, v_ids, v_rows
+           array_agg(DISTINCT o.supersedes) FILTER (WHERE o.supersedes IS NOT NULL)
+      INTO v_issues, v_ids
       FROM old_rows o;
     v_targets := v_ids;
   ELSE
-    -- A row seen on one side only (its id changed, or it gained or lost both
-    -- the key and the pointer) moved everything it names.
+    IF NOT EXISTS (SELECT 1 FROM old_rows r WHERE r.metadata ? 'issue' OR r.supersedes IS NOT NULL)
+       AND NOT EXISTS (SELECT 1 FROM new_rows r WHERE r.metadata ? 'issue' OR r.supersedes IS NOT NULL) THEN
+      RETURN NULL;
+    END IF;
+    -- Every pair of images, the filter on the pair, not on each side: one
+    -- statement can list an id twice on a side — a writable CTE or a MERGE
+    -- whose DELETE's cascade nulls the pointer of a row the statement also
+    -- updates — and only the first old image beside the last new one shows the
+    -- pointer move (fourth review pass: filtering each side dropped that pair
+    -- and left a stale superseder). A row seen on one side only (its id
+    -- changed) moved everything it names; extra pairs only add keys.
     SELECT array_agg(DISTINCT m.issue) FILTER (WHERE m.issue IS NOT NULL),
            array_agg(DISTINCT m.sb) FILTER (WHERE m.sb IS NOT NULL),
            array_agg(DISTINCT m.target) FILTER (WHERE m.target IS NOT NULL),
@@ -409,10 +430,10 @@ BEGIN
       INTO v_issues, v_ids, v_targets, v_rows
       FROM (SELECT o.id AS oid, n.id AS nid, o.metadata AS om, n.metadata AS nm,
                    o.supersedes AS os, n.supersedes AS ns, o.created_at AS oc, n.created_at AS nc
-              FROM (SELECT r.id, r.metadata, r.supersedes, r.created_at FROM old_rows r
-                     WHERE r.metadata ? 'issue' OR r.supersedes IS NOT NULL) o
-              FULL JOIN (SELECT r.id, r.metadata, r.supersedes, r.created_at FROM new_rows r
-                          WHERE r.metadata ? 'issue' OR r.supersedes IS NOT NULL) n ON n.id = o.id) r
+              FROM (SELECT r.id, r.metadata, r.supersedes, r.created_at FROM old_rows r) o
+              FULL JOIN (SELECT r.id, r.metadata, r.supersedes, r.created_at FROM new_rows r) n ON n.id = o.id
+             WHERE coalesce(o.metadata ? 'issue', false) OR o.supersedes IS NOT NULL
+                OR coalesce(n.metadata ? 'issue', false) OR n.supersedes IS NOT NULL) r
       CROSS JOIN LATERAL (
         SELECT r.oid IS NULL OR r.nid IS NULL
                  OR (r.om->>'issue', r.om->>'status', r.om->>'status_type', r.om->>'linear_updated_at')
@@ -437,6 +458,20 @@ BEGIN
       MESSAGE = 'this write moves an issue key, a ticket''s status or watermark, a supersedes pointer or a successor''s created_at, and node_state''s projection (migration 060) cannot be kept under REPEATABLE READ',
       HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of ticket rows is serializable.',
       ERRCODE = 'feature_not_supported';
+  END IF;
+  -- A DELETE locks the pointer buckets of the deleted rows its ON DELETE SET
+  -- NULL cascade can need — those some row still supersedes — and of its issue
+  -- rows: the cascade fires this trigger again, after this firing, and finds
+  -- them held, so it takes no bucket out of order (second and third review
+  -- passes: a single-row delete, then a multi-row one mixing a keyed row with
+  -- a plain superseded one). Not every deleted row (fourth review pass: a
+  -- prune of thousands with one ticket row among them held all 256 buckets and
+  -- stalled every ticket writer until it committed). A pointer to a row being
+  -- deleted cannot appear meanwhile: its foreign-key check waits on the row.
+  IF TG_OP = 'DELETE' THEN
+    SELECT array_agg(o.id) FILTER (WHERE o.metadata->>'issue' IS NOT NULL
+                                      OR EXISTS (SELECT 1 FROM ob1_superseded_by x WHERE x.old_id = o.id))
+      INTO v_rows FROM old_rows o;
   END IF;
   -- Never NULL past here: NULL means every key to the rules.
   v_issues := coalesce(v_issues, '{}');
@@ -473,7 +508,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_node_projection_sync() IS
-  'The thoughts_node_projection_* row-change triggers'' body: from a statement''s transition tables, the issue keys whose head may have moved (both sides of a key''s move, the issues of every pointer target) and the thoughts whose newest successor may have moved; returns at once when the statement touched no row carrying an issue key or a supersedes pointer; refuses under REPEATABLE READ; otherwise takes the advisory locks — 22560 shared, then buckets of 256 per class: 22562 for the superseded thoughts, every deleted row and the rows whose head fields moved, then 22561 for the issues (bucketed on md5(issue)), the pointer targets'' issues read after the pointer buckets are held — and reconciles. Never writes thoughts. Migration 060 / SMD-2256.';
+  'The thoughts_node_projection_* row-change triggers'' body: from a statement''s transition tables, the issue keys whose head may have moved (both sides of a key''s move, the issues of every pointer target) and the thoughts whose newest successor may have moved; returns at once when the statement touched no row carrying an issue key or a supersedes pointer; refuses under REPEATABLE READ; otherwise takes the advisory locks — 22560 shared, then buckets of 256 per class: 22562 for the superseded thoughts, the rows whose head fields moved and the deleted rows a cascade can need, then 22561 for the issues (bucketed on md5(issue)), the pointer targets'' issues read after the pointer buckets are held — and reconciles. Never writes thoughts. Migration 060 / SMD-2256.';
 
 CREATE OR REPLACE FUNCTION ob1_node_projection_truncate()
 RETURNS trigger

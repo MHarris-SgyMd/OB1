@@ -5835,6 +5835,30 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
       `a DELETE of a keyed row and a plain superseded one, paused between its firing and its cascade's, holds the plain row's pointer bucket already: a status write of a row sharing that bucket waits on it (class 22562) and both commit, no deadlock, no drift (${errors || "clean"})`);
   }
 
+  // One statement that deletes a thought and updates its successor — a
+  // writable CTE, and a MERGE — lists the successor twice on the UPDATE's
+  // side, once from the statement (moving it to G-5, where it must become the
+  // head) and once from the cascade that nulls its pointer (fourth review
+  // pass: a filter on each side dropped the pair that shows the move). The
+  // MERGE is here, on real PostgreSQL, because PGlite's 17.5 leaves the
+  // MERGE's own UPDATE rows out of the transition table when a cascade updates
+  // them too (16.15 and 17.8 do not).
+  const moved: string[] = [];
+  for (const shape of ["cte", "merge"]) {
+    const t = await row(`[28] ${shape} T, deleted`, { kind: "race2256", issue: `G-7-${shape}` });
+    const sRow = await row(`[28] ${shape} S, T's successor`, { kind: "race2256", issue: `G-2-${shape}` });
+    await db`UPDATE thoughts SET supersedes = ${t}::uuid WHERE id = ${sRow}::uuid`;
+    await row(`[28] ${shape} B, G-5's older row`, { kind: "race2256", issue: `G-5-${shape}`, status_type: "started", linear_updated_at: "2026-09-01" });
+    const patch = { issue: `G-5-${shape}`, status_type: "canceled", linear_updated_at: "2026-09-02" };
+    if (shape === "cte") await db`WITH d AS (DELETE FROM thoughts WHERE id = ${t}::uuid RETURNING id) UPDATE thoughts SET metadata = metadata || ${patch}::jsonb WHERE id = ${sRow}::uuid`;
+    else await db`MERGE INTO thoughts x USING (VALUES (${t}::uuid, 'delete'), (${sRow}::uuid, 'update')) v(id, op) ON x.id = v.id
+                  WHEN MATCHED AND v.op = 'delete' THEN DELETE WHEN MATCHED THEN UPDATE SET metadata = x.metadata || ${patch}::jsonb`;
+    const h = await head(`G-5-${shape}`);
+    moved.push(`${shape}: head ${h?.id === sRow ? "S" : h?.id}, drift ${await drift()}`);
+  }
+  assert(moved.every((m) => /head S, drift 0$/.test(m)),
+    `a writable CTE and a MERGE that delete a thought and update its successor into another ticket leave that ticket's head the successor and no drift (${moved.join("; ")})`);
+
   // A ticket write on a brain of twenty thousand thoughts, five thousand of
   // them superseding another, reads a handful of rows: its keys are index
   // probes. A NULL passed for "no keys" would reconcile every key — correct,
@@ -5867,7 +5891,7 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
     `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers, scan neither thoughts nor the five thousand superseders and read a handful of rows (thoughts ${th.rows}, superseders ${sb.rows}, heads ${hd.rows}; scans ${th.scans}/${sb.scans}/${hd.scans}), and no drift`);
 
   await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2256'`;
-  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'D-1', 'M-1', 'M-2')) AS heads`;
+  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'D-1', 'M-1', 'M-2') OR issue LIKE 'G-%') AS heads`;
   assert(suiteDrift === 0 && left.drift === 0 && left.heads === 0,
     `every section before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
   await db.close();

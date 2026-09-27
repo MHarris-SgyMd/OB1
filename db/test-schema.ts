@@ -8566,7 +8566,7 @@ console.log("\n[56] Migration 060: node_state reads a stored projection kept cur
     const some = async (n: number) => { const all = await ids(); return Array.from({ length: n }, () => pick(all)).filter(Boolean); };
     const content = () => `[56] thought ${seed}-${++serial}`;
     for (let k = 0; k < 20; k++) await db.query(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb)`, [content(), JSON.stringify(meta())]);
-    for (let step = 0; step < 150 && !failure; step++) {
+    for (let step = 0; step < 220 && !failure; step++) {
       const r = rnd();
       let kind = "";
       // A kind counts only when its statement wrote a row (first review pass:
@@ -8629,7 +8629,19 @@ console.log("\n[56] Migration 060: node_state reads a stored projection kept cur
           kind = "id change";
           const [id] = (await q<{ id: string }>(`SELECT t.id::text AS id FROM thoughts t WHERE NOT EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = t.id) ORDER BY t.id`)).map((x) => x.id);
           if (id) await run(`WITH w AS (DELETE FROM thought_work_claims WHERE thought_id = $1) UPDATE thoughts SET id = gen_random_uuid() WHERE id = $1`, [id]);
-        } else if (r < 0.97) {
+        } else if (r < 0.975) {
+          // One statement that deletes a thought and updates its successor
+          // lists the successor twice on the UPDATE's side, once from the
+          // statement and once from the cascade (fourth review pass: a filter
+          // on each side dropped the pair that shows the pointer move). A
+          // writable CTE here; the MERGE form is test-live [28]'s, on real
+          // PostgreSQL — PGlite's 17.5 leaves the MERGE's own UPDATE rows out
+          // of the transition table when a cascade updates them too.
+          kind = "delete and update, one CTE";
+          const pairs = (await q<{ t: string; s: string }>(`SELECT supersedes::text AS t, id::text AS s FROM thoughts WHERE supersedes IS NOT NULL AND supersedes <> id ORDER BY id`));
+          const [a, b] = pairs.length ? (({ t, s }) => [t, s])(pick(pairs)) : await some(2);
+          await run(`WITH d AS (DELETE FROM thoughts WHERE id = $1 RETURNING id) UPDATE thoughts SET metadata = metadata || $3::jsonb WHERE id = $2`, [a, b, JSON.stringify(meta())]);
+        } else if (r < 0.99) {
           kind = "rolled back";
           const [id] = await some(1);
           await db.transaction(async (tx) => {
@@ -8656,8 +8668,8 @@ console.log("\n[56] Migration 060: node_state reads a stored projection kept cur
     }
   }
   const [shape] = await q<{ heads: number; sup: number }>(`SELECT (SELECT count(*)::int FROM ob1_ticket_head) AS heads, (SELECT count(*)::int FROM ob1_superseded_by) AS sup`);
-  assert(failure === "" && kinds.size === 13 && shape.heads > 0 && shape.sup > 0,
-    `after every statement of two seeded sequences of raw writes — each of thirteen kinds writing at least once: ${[...kinds].map(([k, n]) => `${k} ×${n}`).join(", ")} — drift() is empty and node_lifecycle() and superseded_by are 058's formulas' rows, both ways (${failure || `${shape.heads} heads, ${shape.sup} superseders at the end`})`);
+  assert(failure === "" && kinds.size === 14 && shape.heads > 0 && shape.sup > 0,
+    `after every statement of two seeded sequences of raw writes — each of fourteen kinds writing at least once: ${[...kinds].map(([k, n]) => `${k} ×${n}`).join(", ")} — drift() is empty and node_lifecycle() and superseded_by are 058's formulas' rows, both ways (${failure || `${shape.heads} heads, ${shape.sup} superseders at the end`})`);
 
   // The plan a caller gets: node_state pulled up, the dependency joins gone,
   // and primary-key probes from the caller's ids available.
@@ -8772,27 +8784,24 @@ console.log("\n[56] Migration 060: node_state reads a stored projection kept cur
   });
   assert(held > 300 && held <= 513, `six hundred ticket writes with six hundred issue keys in one transaction hold ${held} of the projection's locks — more than one class's buckets, never more than 513`);
 
-  // A deleted row takes its own pointer bucket, so the ON DELETE SET NULL
-  // cascade that follows needs none it lacks (second review pass: a deleted
-  // row with no issue key left its bucket to the cascade's firing, out of
-  // order — a deadlock between two single-row writers). T supersedes P and
-  // nothing supersedes T, so only the DELETE's own firing can take T's bucket;
-  // P's bucket is picked to differ.
-  let tRow = "", pRow = "";
-  for (let k = 0; ; k++) {
-    const [pp] = await q<{ id: string; b: number }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}') RETURNING id::text AS id, hashtext(id::text) & 255 AS b`, [`[56] cascade P ${k}`]);
-    const [tt] = await q<{ id: string; b: number }>(`INSERT INTO thoughts (content, metadata, supersedes) VALUES ($1, '{}', $2::uuid) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`, [`[56] cascade T ${k}`, pp.id]);
-    if (tt.b !== pp.b) { tRow = tt.id; pRow = pp.id; break; }
-  }
-  let ownBucket = false;
+  // A DELETE locks the pointer buckets its cascade can need — its issue rows
+  // and the rows something supersedes — and not every deleted row (fourth
+  // review pass: a prune of thousands with one ticket row held all 256 and
+  // stalled every ticket writer). A thousand plain rows, one ticket row and
+  // one plain row another supersedes: two buckets, at most. The cascade's
+  // correctness is test-live [28]'s paused DELETE.
+  const prune = (await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) SELECT '[56] prune ' || g, '{}' FROM generate_series(1, 1000) g RETURNING id::text AS id`)).map((r) => r.id);
+  const [ticket] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[56] prune ticket', '{"issue": "PR-1"}') RETURNING id::text AS id`);
+  const [kept] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[56] prune kept', '{}') RETURNING id::text AS id`);
+  await db.query(`UPDATE thoughts SET supersedes = $1 WHERE id = $2`, [prune[0], kept.id]);
+  let pruneBuckets = -1;
   await db.transaction(async (tx) => {
-    await tx.query(`DELETE FROM thoughts WHERE id = $1`, [tRow]);
-    ownBucket = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND classid = 22562
-                                                  AND objid = (SELECT hashtext($1) & 255)`, [tRow])).rows[0].n > 0;
+    await tx.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[...prune, ticket.id]]);
+    pruneBuckets = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND classid = 22562`)).rows[0].n;
     await tx.rollback();
   });
-  await db.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[tRow, pRow]]);
-  assert(ownBucket, "a delete of a row that supersedes another holds the deleted row's own pointer bucket (class 22562), so a cascade nulling pointers to it takes nothing out of order");
+  await db.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[...prune, ticket.id, kept.id]]);
+  assert(pruneBuckets >= 1 && pruneBuckets <= 2, `a DELETE of a thousand plain rows, one ticket row and one superseded plain row holds ${pruneBuckets} pointer buckets — the ticket row's and the superseded row's, not one per deleted row`);
 
   // A TRUNCATE leaves no head and no superseder: the fourth trigger empties
   // both tables (first review pass: TRUNCATE ... CASCADE left them stale).

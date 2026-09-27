@@ -498,8 +498,10 @@ locks are transaction advisory locks on buckets of the keys' hashes (classes
 statements moving one ticket's key, status, watermark or pointers serialise
 until commit (a content-only edit takes none), a row whose head fields move
 holds its own pointer bucket so a concurrent pointer to it waits and reads its
-issue after, a deleted row holds its own so the cascade that nulls pointers to
-it needs none it lacks, and a transaction whose ticket writes take more than
+issue after, a DELETE holds the buckets of its deleted issue rows and of the
+deleted rows something supersedes so the cascade that nulls pointers to them
+needs none it lacks (not of every deleted row: a prune of plain rows stalls no
+ticket writer), and a transaction whose ticket writes take more than
 one round of locks — two or more statements, or one that fires the trigger
 twice (a MERGE with several actions, a multi-row upsert that both inserts and
 updates, a writable CTE with several kinds of write) — can now deadlock (40P01)
@@ -508,7 +510,11 @@ transaction). Such a statement is refused under REPEATABLE READ (its snapshot
 predates the lock); SERIALIZABLE keeps the tables exact only when every ticket
 writer is serializable. The trigger and the reconcile plan every statement
 that takes the keys afresh: a plan cached while the tables were small went on
-scanning them. It is fed by the row
+scanning them. The reconcile is internal (it takes no lock; call the rebuild).
+On a PostgreSQL release that drops them from the transition table (PGlite's
+17.5 does; 16.15 and 17.8 do not), the rows a MERGE updates when its own
+DELETE's cascade updates them too are not seen: rebuild after such a MERGE
+there. It is fed by the row
 store, not the log: every writer reaches `thoughts`, raw ones included, and the
 log carries no `created_at` move; SMD-1997's fold can later feed the heads'
 status. `node_lifecycle()` and `node_state()` keep their signatures and rows and
@@ -2486,7 +2492,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1863 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 773 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or [26]'s four sweep cases are, on a machine with a recipes/lint-sweep/.env or .env.local)
+./with-postgres.sh bun test-live.ts         # 774 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or [26]'s four sweep cases are, on a machine with a recipes/lint-sweep/.env or .env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
