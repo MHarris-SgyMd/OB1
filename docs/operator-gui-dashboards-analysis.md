@@ -1,6 +1,6 @@
 # The three dashboards, read against one operator surface
 
-**Status:** analysis, 2026-09-27, read from `main` at `0d659e5b` (SMD-2280, under SMD-2133). No decision is recorded here. This is the input to one.
+**Status:** analysis, 2026-09-27, read from `main` at `0d659e5b` (SMD-2280, under SMD-2133). No decision is recorded here. This is the input to one. **Decided 2026-09-27 in `docs/operator-surface-tiers.md` (SMD-2282):** a REST core with a SvelteKit GUI and an SDK-v2 MCP server as its clients, behind the proxy with an authorization server. That ADR answers §8.
 **Question:** the tree ships three dashboards, and `FORK.md` says "nothing says which is canonical. Pick one before depending on any." What does each one do, where do they overlap, what is unique to each, and what would a single GUI for human operators need that none of them has?
 
 Every claim cites `file:line`. Paths are relative to the dashboard's own folder unless they start with a top-level directory. **S** is `dashboards/open-brain-dashboard/` (SvelteKit), **N** is `dashboards/open-brain-dashboard-next/`, **P** is `dashboards/open-brain-dashboard-pro/`. **OBR** is `integrations/open-brain-rest/index.ts` and **RA** is `integrations/rest-api/index.ts`.
