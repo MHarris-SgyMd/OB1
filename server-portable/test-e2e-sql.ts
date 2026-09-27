@@ -958,7 +958,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
 {
   // The raw envelope, not call(): this section reads errors as answers. One
   // helper per key (fifth review pass: three hand-rolled copies).
-  type Envelope = { error?: { message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[]; structuredContent?: { code?: string; retryable?: boolean; positions?: number[] } } };
+  type Envelope = { error?: { code?: number; message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[]; structuredContent?: { code?: string; retryable?: boolean; positions?: number[] } } };
   const sc = (e: Envelope) => e.result?.structuredContent;
   const rpcAs = (key: string) => async (method: string, params: Record<string, unknown>): Promise<Envelope> => {
     const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }) });
@@ -997,11 +997,14 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   const [key] = await sql`SELECT scope FROM ob1_agent_keys WHERE key_hash = ${hashKey(CAPTURE_KEY)}`;
   assert(key?.scope === "capture", `the registry recorded the scope as presented (${key?.scope})`);
 
-  // Absent, not refused: a read through the capture key is an unknown tool.
+  // Absent, not refused: a read through the capture key is an unknown tool. v2's
+  // McpServer surfaces a call to a tool that was never registered for this principal
+  // as a JSON-RPC error (-32602), where v1 wrapped "tool not found" as an isError
+  // result (SMD-2278). The fork's own refusals-as-values path (SMD-1978) is
+  // unaffected — this is the SDK's built-in not-found, not a fork refusal.
   const read = await rpc("tools/call", { name: "search_thoughts", arguments: { query: "eta", limit: 5, threshold: 0.1 } });
-  // The shape the hook reads: a RESULT with isError whose text opens "MCP error -32602" (thirteenth review pass — the hook's fake had it as a JSON-RPC error).
-  assert(read.error === undefined && read.result?.isError === true && /^MCP error -32602: Tool search_thoughts not found/.test(textOf(read)), `search_thoughts is not a tool the capture key can call — an isError result, not a JSON-RPC error (${textOf(read).slice(0, 60)})`);
-  assert(/not found|unknown tool/i.test(String(read.error?.message ?? textOf(read))), "…told as a missing tool, not a permission error");
+  assert(read.result === undefined && read.error?.code === -32602 && /Tool search_thoughts not found/.test(String(read.error?.message)), `search_thoughts is not a tool the capture key can call — a JSON-RPC -32602 error, not a result (${JSON.stringify(read.error ?? read.result)?.slice(0, 80)})`);
+  assert(/not found|unknown tool/i.test(String(read.error?.message ?? "")), "…told as a missing tool, not a permission error");
   const del = await rpc("tools/call", { name: "delete_thought", arguments: { id } });
   assert(del.error !== undefined || del.result?.isError === true, "delete_thought is not either — the key cannot remove what it added");
 

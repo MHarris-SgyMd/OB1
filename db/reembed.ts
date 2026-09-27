@@ -414,54 +414,38 @@ import { describeEgress, localKnob, mayLeaveBox, refusesEverything, ROW_UNITS } 
 import { maskUrl, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
+import { commandLine } from "./cli.ts";
 
-const args = process.argv.slice(2);
-const flag = (name: string): string | undefined => {
-  const i = args.indexOf(`--${name}`);
-  return i >= 0 ? args[i + 1] : undefined;
-};
-const has = (name: string) => args.includes(`--${name}`);
-/** What each flag takes — one value, any number, none — for the scanner below; flag(), has() and values() read by it. */
-const TAKES_ONE = new Set(["url", "workers", "batch", "ttl", "heartbeat", "job", "retire"]);
-const TAKES_MANY = new Set(["accept-failed"]);
-const TAKES_NONE = new Set(["status", "dry-run", "switch-model", "retry-failed", "retry-fallbacks", "all"]);
-const numberFlag = (name: string, fallback: number, min: number): number => {
-  const raw = flag(name);
-  if (raw === undefined) return fallback;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < min) {
-    console.error(`--${name} must be an integer >= ${min}, got "${raw}"`);
-    process.exit(2);
-  }
-  return n;
-};
+// Every argument accounted for (db/cli.ts): an id after another flag, a flag
+// this tool does not have, a flag given twice or one that takes a value
+// followed by another flag is refused rather than dropped — `--accept-failed a
+// --dry-run b` would accept one row and exit 0 (second review pass), and `--job
+// --switch-model` read "--switch-model" as the key and backfilled the corpus
+// under it (third). Ids go right after --accept-failed.
+const cli = commandLine("reembed.ts", {
+  url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", job: "one", retire: "one",
+  "accept-failed": "many",
+  status: "none", "dry-run": "none", "switch-model": "none", "retry-failed": "none", "retry-fallbacks": "none", all: "none",
+}, { hints: { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", retire: "<reembed:model@dim[:suffix] — preflight prints it>", "accept-failed": "<thought-id …> (right after it, before any other flag)", all: "(with --accept-failed)" } });
 
-const url = flag("url") ?? process.env.DATABASE_URL;
+const url = cli.value("url") ?? process.env.DATABASE_URL;
 if (!url) {
   console.error("No database URL. Pass --url or set DATABASE_URL.");
   process.exit(2);
 }
 
-const WORKERS = numberFlag("workers", 2, 1);
-const BATCH = numberFlag("batch", 8, 1);
-const STATUS_ONLY = has("status");
-const DRY_RUN = has("dry-run");
-const SWITCH_MODEL = has("switch-model");
-const RETRY_FAILED = has("retry-failed");
-const RETRY_FALLBACKS = has("retry-fallbacks");
-/** The values after a flag, up to the next flag: `--accept-failed <id> <id>`. */
-const values = (name: string): string[] => {
-  const i = args.indexOf(`--${name}`);
-  if (i < 0) return [];
-  const out: string[] = [];
-  for (let k = i + 1; k < args.length && !args[k].startsWith("--"); k++) out.push(args[k]);
-  return out;
-};
-const ACCEPT_FAILED = has("accept-failed");
-const ACCEPT_IDS = values("accept-failed");
-const ACCEPT_ALL = has("all");
-const RETIRE = has("retire");
-const RETIRE_KEY = flag("retire");
+const WORKERS = cli.int("workers", { absent: 2, min: 1 });
+const BATCH = cli.int("batch", { absent: 8, min: 1 });
+const STATUS_ONLY = cli.has("status");
+const DRY_RUN = cli.has("dry-run");
+const SWITCH_MODEL = cli.has("switch-model");
+const RETRY_FAILED = cli.has("retry-failed");
+const RETRY_FALLBACKS = cli.has("retry-fallbacks");
+const ACCEPT_FAILED = cli.has("accept-failed");
+const ACCEPT_IDS = cli.values("accept-failed");
+const ACCEPT_ALL = cli.has("all");
+const RETIRE = cli.has("retire");
+const RETIRE_KEY = cli.value("retire");
 // One thing at a time — see "Saying I know": the two maintenance modes write
 // claim rows, not vectors, and combine with nothing but --dry-run.
 {
@@ -471,50 +455,13 @@ const RETIRE_KEY = flag("retire");
     console.error(`  ${[...modes, ...runFlags].join(" and ")} do not combine — one thing at a time (--dry-run combines with any one of them).`);
     process.exit(2);
   }
-  if (RETIRE && (RETIRE_KEY === undefined || RETIRE_KEY.startsWith("--"))) {
-    console.error("  --retire needs the key to retire: --retire reembed:<model>@<dim>[:suffix] — preflight prints it.");
-    process.exit(2);
-  }
   if (ACCEPT_ALL && !ACCEPT_FAILED) {
     console.error("  --all belongs to --accept-failed.");
     process.exit(2);
   }
 }
-// Every argument accounted for: an id after another flag, or a flag this tool
-// does not have, is refused rather than dropped — `--accept-failed a --dry-run
-// b` would otherwise accept one row and exit 0 (second review pass).
-{
-  const stray: string[] = [];
-  const seen = new Set<string>();
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (!a.startsWith("--")) { stray.push(a); continue; }
-    const name = a.slice(2);
-    // Once: flag() and values() read the first occurrence, and a second
-    // would otherwise be consumed here and done nothing (third review pass).
-    if (seen.has(name)) {
-      console.error(`  --${name} is given twice — once, with everything it takes after it.`);
-      process.exit(2);
-    }
-    seen.add(name);
-    if (TAKES_ONE.has(name)) {
-      // The value must be one: `--job --switch-model` read "--switch-model" as
-      // the key and backfilled the corpus under it (third review pass).
-      if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
-        console.error(`  --${name} needs a value; what follows it is ${args[i + 1] ?? "nothing"}.`);
-        process.exit(2);
-      }
-      i += 1;
-    } else if (TAKES_MANY.has(name)) while (i + 1 < args.length && !args[i + 1].startsWith("--")) i++;
-    else if (!TAKES_NONE.has(name)) stray.push(a);
-  }
-  if (stray.length) {
-    console.error(`  not understood: ${stray.join(" ")} — ids go right after --accept-failed, and the flags are listed in the header of db/reembed.ts.`);
-    process.exit(2);
-  }
-}
 /** The pass and its target. See migration 015's header on why the target is in the key. */
-const JOB = flag("job") ?? reembedKey(EMBEDDING_MODEL, EMBEDDING_DIM);
+const JOB = cli.value("job") ?? reembedKey(EMBEDDING_MODEL, EMBEDDING_DIM);
 /** Whether preflight will attribute this key to the tool — see "What preflight sees". */
 const PREFLIGHT_SEES = JOB.startsWith(REEMBED_KEY_PREFIX);
 if (!PREFLIGHT_SEES) {
@@ -553,12 +500,12 @@ const embedder = createEmbedder(() => embedConfig, { rememberRefusal: false });
 // header — so it has to outlast a missed beat, not the batch; db/lease.ts
 // holds the rule the three consumers share. Whole seconds: claim_thoughts and
 // renew_claims take ints.
-const TTL = numberFlag("ttl", DEFAULT_TTL_S, 1);
-const HEARTBEAT = flag("heartbeat") === undefined ? heartbeatFor(TTL) : numberFlag("heartbeat", DEFAULT_HEARTBEAT_S, 1);
+const TTL = cli.int("ttl", { absent: DEFAULT_TTL_S, min: 1 });
+const HEARTBEAT = cli.has("heartbeat") ? cli.int("heartbeat", { absent: DEFAULT_HEARTBEAT_S, min: 1 }) : heartbeatFor(TTL);
 // Read-only modes never claim, so they answer whatever the lease; --dry-run
 // reports the refusal a run would make, alongside the 018 check below.
 const refusalTtl: string | null = (() => {
-  const r = leaseRefusal(TTL, HEARTBEAT, flag("heartbeat") === undefined);
+  const r = leaseRefusal(TTL, HEARTBEAT, !cli.has("heartbeat"));
   return r === null ? null : ` ${r}`;
 })();
 
@@ -1202,7 +1149,8 @@ if (ACCEPT_FAILED) {
   }
   // The stores' rule (store.ts), so the CLI refuses exactly the ids they answer null for.
   const bad = ACCEPT_IDS.filter((id) => !UUID_RE.test(id));
-  if (bad.length) await refuse(`not a thought id: ${bad.join(", ")}.`);
+  // Counted, not repeated: a value --accept-failed takes may be a URL given without --url (cli.ts's rule).
+  if (bad.length) await refuse(`${bad.length} of the ${ACCEPT_IDS.length} value(s) after --accept-failed ${bad.length === 1 ? "is" : "are"} not a thought id (a UUID).`);
   const failedIds = new Set(failedRows.map((r) => r.id));
   const asked = [...new Set(ACCEPT_IDS.map((id) => id.toLowerCase()))];
   const notFailed = asked.filter((id) => !failedIds.has(id));

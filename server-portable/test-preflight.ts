@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
-import { searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
+import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -322,8 +322,24 @@ console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242
     const got = searchPathSchemas(setting, version);
     assert(JSON.stringify(got) === JSON.stringify(want), `search_path ${shown(setting)} on ${version / 10000} reads as ${shown(want)} (got ${shown(got)})`);
   }
-  assert(withPublic([]) === "public" && withPublic(["$user", "public"]) === '"$user", public' && withPublic(['a"b', "x;y"]) === '"a""b", "x;y", public',
-         "…and the path with public put on it keeps the rest in order, each quoted, public once and last");
+  assert(withPublic([]) === "public" && withPublic(["$user", "public"]) === '"$user", public' && withPublic(['a"b', "x;y"]) === '"a""b", "x;y", public'
+           && withPublic(["public", "a"]) === 'public, "a"',
+         "…and the path with public put on it keeps the rest in order, each quoted, public once — where it stands, or last");
+  // pgvector's schema after them (SMD-2238): once, never public twice, and not
+  // at all when the path has it — the two rows' one statement.
+  assert(withPublic(["$user", "public"], "ext") === '"$user", public, "ext"' && withPublic(["nowhere"], "public") === '"nowhere", public'
+           && withPublic(["ext", "x"], "ext") === '"ext", "x", public' && withPublic(["nowhere"], "Ext x") === '"nowhere", public, "Ext x"'
+           && withPublicInOptions(["$user", "public"], "extensions") === "-csearch_path%3D%22%24user%22%2Cpublic%2C%22extensions%22",
+         "…and with pgvector's schema, it follows public, once, and not when the path has it");
+  {
+    const base = { schemas: ["$user", "public"], extension: "ext", login: "r", role: "r", db: '"d"' };
+    assert(pathFix({ ...base, source: "database" }) === 'ALTER ROLE r IN DATABASE "d" SET search_path = "$user", public, "ext";'
+             && pathFix({ ...base, role: "t", source: "user" }) === 'SET ROLE NONE; ALTER ROLE r IN DATABASE "d" SET search_path = "$user", public, "ext";  (as r, or a superuser)'
+             && pathFix({ ...base, source: null }).endsWith("(unless the connection string sets search_path, which outranks it)")
+             && pathFix({ ...base, source: "session" }).includes("this session's path was SET after login")
+             && pathFix({ ...base, source: "client" }).endsWith("(separated by %20): -csearch_path%3D%22%24user%22%2Cpublic%2C%22ext%22"),
+           "…and the fix is the login role's setting IN DATABASE, SET ROLE NONE first under SET ROLE, the options= value where the connection sets the path, and a caveat where the source is a session's or unread");
+  }
   assert(withPublicInOptions(["nowhere"]) === "-csearch_path%3D%22nowhere%22%2Cpublic" && decodeURIComponent(withPublicInOptions(["a b,c", "x\\y"])) === '-csearch_path="a\\ b,c","x\\\\y",public'
            && withPublicInOptions(["it's!(x)"]) === "-csearch_path%3D%22it%27s%21%28x%29%22%2Cpublic",
          "…and as a connection string's options it has no space between names, escapes a space or backslash inside one, and is percent-encoded, a shell's characters included");
@@ -1022,6 +1038,54 @@ else {
          `a chunk set without its lineage row does not start, the kind and the thought named, the raw writer blamed (every producer is current) and the re-apply's backfill the remedy (exit ${noLineage.code}: ${noLineage.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
   await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`);
   assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and with the row back the check is ok again, counting the one row");
+  // 064's kind (SMD-1812): a generated page section without its lineage row
+  // is refused the same way, the section named. The page is a thought, so
+  // its removal is one delete_thought, which takes the section, its revisions
+  // and the gap with it.
+  const pg064 = (await ctx.unsafe(`SELECT upsert_page('preflight-064', 'Preflight page') AS r`))[0].r as { page_id: string };
+  const sec064 = (await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`))[0].r as { section_id: string };
+  assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "a generated page section with its lineage row is ok, counted beside the chunk set's (two rows)");
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'section' AND artifact_id = '${sec064.section_id}'::uuid`);
+  const noSection = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noSection.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 page section\\(s\\) carrying a recipe \\(${sec064.section_id}\\) — written by a producer from before 061`).test(noSection.out) && /Every producer is 061's, so these rows came from a raw writer/.test(noSection.out) && /A page section's row is written by 064's write_page_section \(or accept_page_section\): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'\./.test(noSection.out),
+         `a section carrying a recipe without its lineage row does not start, the section named, the raw writer blamed, and the remedy names the store's own writer beside 061's (exit ${noSection.code}: ${noSection.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  // The remedy as written: regenerating the section — the same body, evidence
+  // and recipe — records the missing row (walkthrough, second review pass: an
+  // identical regeneration recorded nothing, and the remedy was false).
+  await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\)/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and following the remedy — regenerating the section unchanged — records the row: ok again on two rows");
+  // The second fail branch — a producer body from before 061 beside a section
+  // missing its row — names the section's remedy too (run-it, third review
+  // pass: pass 1 put it in the first branch alone). The vector trigger
+  // disabled is the cheapest "not current" producer; its row deleted raw.
+  await ctx.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_record_vector_lineage`);
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'section' AND artifact_id = '${sec064.section_id}'::uuid`);
+  const olderProducer = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(olderProducer.code === 1 && /✗  lineage\s+derived rows without a lineage row — 1 page section\(s\) carrying a recipe/.test(olderProducer.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(olderProducer.out) && /A page section's row is written by 064's write_page_section/.test(olderProducer.out),
+         `with a producer from before 061 beside it, a section missing its row still gets the store's remedy beside the ledger's (exit ${olderProducer.code}: ${olderProducer.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_record_vector_lineage`);
+  await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`);
+  // A human's section is not a derivation: a manual write that moved the body
+  // emptied the recipe, so releasing it back to the machine leaves nothing
+  // for the census to count (cold read, first review pass: the origin-keyed
+  // census read a released section as a generated one without lineage, and
+  // named 061's backfill — which knows no section — as the remedy).
+  await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'By hand now.', 'manual')`);
+  await ctx.unsafe(`SELECT release_page_section('${sec064.section_id}'::uuid)`);
+  const released = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(released.code === 0 && /✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\)/.test(released.out), `a section a human wrote and then released back to the machine is not a derivation without lineage: the check is ok (exit ${released.code})`);
+  // A raw write of page_sections leaves the page thought without its render:
+  // a warning naming the page and the repair door, not a refusal.
+  await ctx.unsafe(`UPDATE page_sections SET body_md = 'Edited around the store.' WHERE id = '${sec064.section_id}'::uuid`);
+  const stale = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(stale.code === 0 && new RegExp(`!  lineage\\s+every derived row has its lineage row, but 1 page\\(s\\) whose thought does not hold their render \\(${pg064.page_id}\\) — a raw write of page_sections or of the page thought`).test(stale.out) && /SELECT ob1_render_page_thought\('<page id>'\);/.test(stale.out),
+         `a page thought that does not hold its render is a warning naming the page and ob1_render_page_thought as the repair (exit ${stale.code}: ${stale.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  await ctx.unsafe(`SELECT ob1_render_page_thought('${pg064.page_id}'::uuid)`);
+  assert(/✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and re-rendered through the door, the check is ok again");
+  // No actor on the delete: a name nobody classified would be a key with no
+  // kind, which the audit-events legs below count (run-it, the build).
+  await ctx.unsafe(`SELECT delete_thought('${pg064.page_id}'::uuid, NULL::jsonb)`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and the page gone through delete_thought — section, revisions and the gap with it — the check is ok again on the one row");
   // 063 (SMD-1732): the rows rebuild_derived marked for a re-run are counted
   // in the coverage; a lineage row whose ARTIFACT is gone while its thought
   // stands — the direction 061 did not read — is a WARN naming
@@ -2394,6 +2458,16 @@ else {
       assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(wide.out)
                && !/Apply the migrations: cd db/.test(wide.out),
              `…and the schema row names the path, not the migrate command (${row(wide.out, "schema")})`);
+      // pgvector in public, off the path too: the vector row prints the schema
+      // row's statement, public once — before, `"$user", public, public` on the
+      // role's plain setting, which its setting in the database outranks (SMD-2238).
+      const schemaStmt = /→ (ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = [^;]*;)/.exec(fix(wide.out, "schema"))?.[1];
+      const vectorStmt = /(ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = [^;]*;)/.exec(fix(wide.out, "vector extension"))?.[1];
+      assert(!!schemaStmt && schemaStmt === vectorStmt && !/public, public/.test(wide.out),
+             `…and the vector row prints the same statement, public once (${fix(wide.out, "vector extension")})`);
+      // Both say to reconnect: the running server's pooled connections keep the old path (review pass 2).
+      assert(fix(wide.out, "schema").endsWith(`${schemaStmt}  Then reconnect.  The table is there, so migrating would not make it resolve.`),
+             `…and the schema row, like the vector row, says to reconnect after it (${fix(wide.out, "schema")})`);
 
       // The path's statement is rebuilt from the parsed setting, never
       // echoed (SMD-2242). An empty path reads back as "" — a zero-length
@@ -2509,6 +2583,10 @@ else {
         const acting = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
         const printed = /→ (SET ROLE NONE; ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;)  \(as pf_reader, or a superuser\)/.exec(acting.out)?.[1];
         assert(printed !== undefined, `a login role that SETs ROLE is the one the ALTER ROLE names, after SET ROLE NONE (${row(acting.out, "schema")})`);
+        // pgvector in public, off the path with it: the vector row names the
+        // login role the same way, not the role it SETs (SMD-2238).
+        assert(!!printed && fix(acting.out, "vector extension").includes(`${printed}  (as pf_reader, or a superuser)`),
+               `…and the vector row prints the same statement (${fix(acting.out, "vector extension")})`);
         let resolves = false;
         let refused = "";
         if (printed) {

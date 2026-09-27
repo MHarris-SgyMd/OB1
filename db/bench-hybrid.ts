@@ -56,7 +56,9 @@
 
 import { SQL } from "bun";
 import { requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { commandLine } from "./cli.ts";
 
+commandLine("bench-hybrid.ts", {}, { note: "its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-hybrid.ts");
 const DIM = 64;
 const SCALES = (process.env.OB1_BENCH_SCALES ?? "10000").split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);

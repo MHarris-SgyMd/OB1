@@ -30,7 +30,7 @@ import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEn
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
-import { quoteIdent, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
+import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
@@ -854,10 +854,12 @@ if (configFailed) {
                      (SELECT c.relrowsecurity FROM pg_class c WHERE c.oid = to_regclass('thoughts')) AS rls,
                      current_setting('row_security') AS "rowSecurity",
                      (SELECT string_agg(name, ', ' ORDER BY name) FROM pol) AS policies,
-                     (SELECT count(*)::int FROM pol) AS "policyCount"`) as {
+                     (SELECT count(*)::int FROM pol) AS "policyCount",
+                     (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+                       WHERE e.extname = 'vector' AND to_regtype('vector') IS NULL) AS "vectorSchema"`) as {
               present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
               roleName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
-              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number;
+              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number; vectorSchema: string | null;
             }[];
             if (r?.present && r.unresolved) {
               let source: string | null = null;
@@ -873,20 +875,11 @@ if (configFailed) {
               }
               if (r.usage || !schemas.includes("public")) {
                 causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
-                // A superuser, a CREATEROLE role (from PostgreSQL 16, one with ADMIN
-                // on it), or the login role itself may alter it; under a SET ROLE the
-                // login role must drop it first (RESET ROLE returns to the role its
-                // settings SET).
-                const alter = r.login !== r.role
-                  ? `SET ROLE NONE; ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};  (as ${r.login}, or a superuser)`
-                  : `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`;
-                fixes.push(source === "client"
-                  ? `the connection string sets search_path (a search_path= parameter, or -c search_path= in options=), which outranks any ALTER ROLE: remove that and put this in options=, beside any other -c setting there (separated by %20): ${withPublicInOptions(schemas)}`
-                  : source === "session"
-                  ? `${alter}  (this session's path was SET after login — by a pooler replaying the connection string's, or a login trigger — which outranks it; change it there)`
-                  : source === null
-                  ? `${alter}  (unless the connection string sets search_path, which outranks it)`
-                  : alter);
+                // pgvector's schema too, when the type does not resolve, so this
+                // row and `vector extension` print one path statement, which, run,
+                // puts both on the path (SMD-2238). A missing USAGE on pgvector's
+                // schema is the vector row's GRANT.
+                fixes.push(`${pathFix({ schemas, extension: r.vectorSchema, login: r.login, role: r.role, db: r.db, source })}  Then reconnect.`);
               }
               found = {
                 detail: `public.thoughts exists but does not resolve for this role (${causes.join("; ")})`,
@@ -1262,9 +1255,26 @@ if (configFailed) {
                  v.schema, quote_ident(v.schema) AS schema_ident,
                  CASE WHEN v.schema IS NOT NULL THEN has_schema_privilege(v.schema, 'USAGE') END AS usage,
                  current_user::text AS role, quote_ident(current_user) AS role_ident,
-                 current_database()::text AS db, quote_ident(current_database()) AS db_ident
+                 current_database()::text AS db, quote_ident(current_database()) AS db_ident,
+                 quote_ident(session_user) AS login_ident,
+                 current_setting('search_path') AS path, current_setting('server_version_num')::int AS version
             FROM (SELECT (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector') AS schema) v`;
-        const setPath = (verb: string, ident: string) => `${verb} ${ident} SET search_path = "$user", public, ${vec.schema_ident};`;
+        // The path's fix is the `schema` row's statement, pgvector's schema
+        // added (search-path.ts), so the two rows agree on one screen: the
+        // login role's setting IN DATABASE, which a plain ALTER ROLE or ALTER
+        // DATABASE is outranked by, the role's own path kept, public added
+        // once, and the connection string's path replaced where it sets one
+        // (SMD-2238). Only when the schema is not on the path already — with
+        // no USAGE it may be, and the GRANT alone is the fix.
+        const vecSchemas = searchPathSchemas(String(vec.path ?? ""), Number(vec.version));
+        const vecOnPath = !!vec.schema && vecSchemas.includes(vec.schema);
+        let vecSource: string | null = null;
+        if (!vec.resolves && vec.schema && !vecOnPath) {
+          try {
+            vecSource = ((await sql`SELECT source FROM pg_settings WHERE name = 'search_path'`) as { source: string }[])[0]?.source ?? null;
+          } catch { /* unread: the statement stands, with its caveat */ }
+        }
+        const vecPathFix = () => pathFix({ schemas: vecSchemas, extension: vec.schema, login: vec.login_ident, role: vec.role_ident, db: vec.db_ident, source: vecSource });
         // What the database says about itself, read ONCE through brain-info.ts —
         // the read brain_info and the keyed /health body make (SMD-2041) — so
         // this row, `migration ledger` and `schema version` below report what
@@ -1284,11 +1294,17 @@ if (configFailed) {
         } else if (vec.usage === false) {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", but role ${vec.role} has no USAGE on that schema, so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist' — SET search_path alone will not help here`,
-              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can), then put it on the path: ${setPath("ALTER ROLE", vec.role_ident)}`);
+              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can)${vecOnPath ? "" : vecSource === "client"
+                ? `  ${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `  then put it on the path: ${vecPathFix()}  Then reconnect.`}`);
         } else {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", which is not on this connection's search_path (role ${vec.role}, database ${vec.db}) — so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist'`,
-              `Put ${vec.schema} on the connection's search_path. Least-scoped (this role only): ${setPath("ALTER ROLE", vec.role_ident)}  — or database-wide: ${setPath("ALTER DATABASE", vec.db_ident)}  then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
+              // A connection string's path is replaced there, beside its other
+              // -c settings; a role's is a setting beside any hnsw.* bounds.
+              vecSource === "client"
+                ? `${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `Put ${quoteIdent(vec.schema)} on the connection's search_path: ${vecPathFix()}  Then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
         }
 
         // One schema-qualified read of every form, signature and body; no name
@@ -2050,7 +2066,7 @@ if (configFailed) {
          * deletes: a WARN naming `db/rebuild.ts --orphans` (SMD-1732).
          */
         try {
-          const [tab] = (await sql`SELECT to_regclass('public.derivations') IS NOT NULL AS present`) as { present: boolean }[];
+          const [tab] = (await sql`SELECT to_regclass('public.derivations') IS NOT NULL AS present, to_regclass('public.page_sections') IS NOT NULL AS pages`) as { present: boolean; pages: boolean }[];
           if (!tab.present) {
             add("lineage", "fail",
                 "the derivations table is missing — every derived artifact (a chunk set, an extraction, a proposal, a vector, the extractor's tags) is written with no record of what it was computed from or how, so nothing can tell a stale one from a current one or re-derive it (SMD-1731)",
@@ -2094,8 +2110,11 @@ if (configFailed) {
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_065 && bodies.reopens_settled !== true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
-            const [c] = (await sql`
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number };
+            // 064's sections join the census where the store is applied; a brain at
+            // 062 has no page_sections, so the CTE is written only then (the text is
+            // built here — BOUND is a constant — and run as one statement).
+            const [c] = (await sql.unsafe(`
               WITH ch_s AS (SELECT thought_id FROM public.thought_chunks LIMIT ${BOUND}),
                    ch AS (SELECT DISTINCT c.thought_id AS id FROM ch_s c
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'chunks' AND d.artifact_id = c.thought_id)),
@@ -2114,6 +2133,17 @@ if (configFailed) {
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = s.id)),
+                   ${tab.pages
+                     ? `se_s AS (SELECT id FROM public.page_sections WHERE generation_source <> '{}'::jsonb LIMIT ${BOUND}),
+                   se AS (SELECT s.id FROM se_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'section' AND d.artifact_id = s.id)),
+                   pg_s AS (SELECT id FROM public.pages LIMIT ${BOUND}),
+                   pg AS (SELECT s.id FROM pg_s s JOIN public.thoughts t ON t.id = s.id
+                           WHERE t.content IS DISTINCT FROM public.render_page(s.id)),`
+                     : `se_s AS (SELECT NULL::uuid AS id WHERE false),
+                   se AS (SELECT NULL::uuid AS id WHERE false),
+                   pg_s AS (SELECT NULL::uuid AS id WHERE false),
+                   pg AS (SELECT NULL::uuid AS id WHERE false),`}
                    al AS (SELECT d.id, d.artifact_kind, d.artifact_id, d.produced_by, d.input_ids, d.input_fingerprints, d.recipe,
                                  (to_jsonb(d) ->> 'stale_since')::timestamptz AS stale_since
                             FROM public.derivations d LIMIT ${BOUND}),
@@ -2130,6 +2160,8 @@ if (configFailed) {
                      (SELECT count(*)::int FROM vc) AS vectors,   (SELECT array_agg(id::text) FROM (SELECT id FROM vc LIMIT 3) s) AS vector_ids,
                      (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
                      (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
+                     (SELECT count(*)::int FROM se) AS sections,  (SELECT array_agg(id::text) FROM (SELECT id FROM se LIMIT 3) s) AS section_ids,
+                     (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
                      (SELECT count(*)::int FROM st) AS stale,
                      (SELECT count(*)::int FROM al WHERE stale_since IS NOT NULL) AS marked,
@@ -2138,7 +2170,8 @@ if (configFailed) {
                      (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
                      (SELECT count(*)::int FROM al WHERE recipe->>'declared' = 'false') AS undeclared,
                      (SELECT count(*)::int FROM ch_s) AS ch_read, (SELECT count(*)::int FROM vc_s) AS vc_read, (SELECT count(*)::int FROM en_s) AS en_read,
-                     (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read`) as Census[];
+                     (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
+                     (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read`)) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
             // was sampled, so a missing row past it is not seen — the headline
@@ -2148,12 +2181,18 @@ if (configFailed) {
             // any artifact table, and its verdict is exact (cold read, third
             // review pass: one flag said "the rest not read" of tables read
             // whole; run-it: the capped line said the disclosure twice).
-            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read].some((r) => Number(r) >= BOUND);
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read].some((r) => Number(r) >= BOUND);
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
+            if (Number(c.sections)) missing.push(`${n(c.sections)} page section(s) carrying a recipe (${(c.section_ids ?? []).join(", ")})`);
+            // 064's kind has its own writer and no backfill: the remedy for a
+            // section is that writer, said beside the general one (cold read,
+            // first review pass: the general remedy named 061's backfill, which
+            // knows no section).
+            const sectionRemedy = Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "";
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
@@ -2164,8 +2203,16 @@ if (configFailed) {
               add("lineage", "fail",
                   `derived rows without a lineage row — ${missing.join("; ")} — written by a producer from before 061 (a write function, record_thought_entities or record_supersession_proposal re-applied by hand) or by a raw writer of the artifact tables; nothing can say what they were computed from (SMD-1731). ${coverage}`,
                   producersCurrent
-                    ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.`
-                    : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy."));
+                    ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.${sectionRemedy}`
+                    : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy.") + sectionRemedy);
+            } else if (Number(c.stale_pages)) {
+              // 064: a page thought that does not hold its render — a raw write
+              // of page_sections or of the thought (first review pass, both
+              // readers: nothing saw it). Reported when no row is missing — the
+              // fail above comes first. The store's own door repairs it.
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${n(c.stale_pages)} page(s) whose thought does not hold their render (${(c.stale_page_ids ?? []).join(", ")}) — a raw write of page_sections or of the page thought since the last live change; readers of the thought see a stale page — ${coverage}`,
+                  "For each page: SELECT ob1_render_page_thought('<page id>'); — re-renders the thought from its sections (an audited event). The store's own writers (write_page_section, delete_page_section, upsert_page) keep the two together.");
             } else if (!producersCurrent) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : bodies.records !== true ? "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand), or lost its record line" : "the vector trigger thoughts_record_vector_lineage is dropped or disabled, so a vector written now leaves no row"}: its next write records no lineage (SMD-1731). ${coverage}`,
@@ -2203,7 +2250,7 @@ if (configFailed) {
             add("lineage", "skip", `not checked — this role cannot read ${denied} (${msg})`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${denied === "derivations" ? "the capture group's row since 061" : "a row of the grants table"}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
-            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals and pg_proc.");
+            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections and pages (064) and pg_proc.");
           }
         }
 
