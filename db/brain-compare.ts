@@ -42,7 +42,8 @@
  *     brain embeds the query server-side, so search_thoughts (hybrid) replays it.
  *     The query set is supplied (--query/--queries-file) or drawn from a brain's own
  *     log (--from-log, via list_logged_searches, SMD-2245) — each logged search on
- *     the arm that ran it.
+ *     the arm that ran it, `current` as search_thoughts with prefer_current (059,
+ *     SMD-2255).
  *
  * Both of SMD-2109's once-deferred limits are now closed over the read surface: the
  * EXACT id-set difference rides list_thought_ids (SMD-2244), and a replay sourced
@@ -286,10 +287,17 @@ export async function newestCapture(ep: BrainEndpoint): Promise<string | null> {
   }
 }
 
+/**
+ * The arms a replay knows: keyword and hybrid, and current — search_thoughts
+ * with prefer_current (migration 059, SMD-2255), the hybrid with settled and
+ * superseded thoughts ranked below current ones.
+ */
+export type ReplayArm = "keyword" | "hybrid" | "current";
+
 /** The ids a brain returns for one query on one arm, in rank order (parsed from the `ID:` lines). */
-export async function searchIds(ep: BrainEndpoint, arm: "keyword" | "hybrid", query: string): Promise<string[]> {
+export async function searchIds(ep: BrainEndpoint, arm: ReplayArm, query: string): Promise<string[]> {
   const tool = arm === "keyword" ? "search_thoughts_keyword" : "search_thoughts";
-  const text = await callTool(ep, tool, { query });
+  const text = await callTool(ep, tool, arm === "current" ? { query, prefer_current: true } : { query });
   return parseResultIds(text);
 }
 
@@ -438,7 +446,7 @@ export async function corpusIdDiff(a: BrainEndpoint, b: BrainEndpoint): Promise<
 
 /** A brain's logged searches, as list_logged_searches returns them. */
 interface LoggedSearchPage {
-  searches: { query: string; arm: "keyword" | "hybrid" | null }[];
+  searches: { query: string; arm: ReplayArm | null }[];
   truncated: boolean;
 }
 
@@ -466,7 +474,7 @@ export function replayPlanFromLog(searches: { query: string; arm: string | null 
   const seen = new Set<string>();
   const plan: ReplayEntry[] = [];
   for (const s of searches) {
-    if (s.arm !== "keyword" && s.arm !== "hybrid") continue;
+    if (s.arm !== "keyword" && s.arm !== "hybrid" && s.arm !== "current") continue;
     if (typeof s.query !== "string" || s.query.length === 0) continue;
     const key = `${s.arm}\u0000${s.query}`;
     if (seen.has(key)) continue;
@@ -488,7 +496,7 @@ export interface FieldDelta {
 
 export interface RetrievalRow {
   query: string;
-  arm: "keyword" | "hybrid";
+  arm: ReplayArm;
   a: string[];
   b: string[];
   /** ids b returned that a did not. */
@@ -544,7 +552,7 @@ function identityFields(r: BrainReading): Record<string, string> {
 /** One entry of a retrieval plan: a query and the arm to replay it on. */
 export interface ReplayEntry {
   query: string;
-  arm: "keyword" | "hybrid";
+  arm: ReplayArm;
 }
 
 export async function compareBrains(
@@ -615,7 +623,7 @@ export async function compareBrains(
 }
 
 /** One retrieval row: what b returned against what a returned for the same query and arm. */
-export function diffRow(query: string, arm: "keyword" | "hybrid", a: string[], b: string[]): RetrievalRow {
+export function diffRow(query: string, arm: ReplayArm, a: string[], b: string[]): RetrievalRow {
   const aSet = new Set(a);
   const bSet = new Set(b);
   const onlyB = b.filter((id) => !aSet.has(id));

@@ -772,6 +772,305 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   }
 }
 
+console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, exit 0, within OB1_STOP_GRACE less 2 s, and says what it cut; SIGINT the same (SMD-2250)");
+{
+  // Child servers first, run the way the image runs them — index.ts the entry,
+  // which is when the handlers go in. The first request in flight is a keyed
+  // /health against a database that never replies (13c's), answered at its
+  // deadline; the others stall before any response. As a child the process
+  // is not PID 1, so without the handlers SIGTERM's default action kills it
+  // at once: the request is cut off and there is no exit code, which is what
+  // these rows fail on. Then the bounds against a stand-in server, the call
+  // count, the grace period's parse and where compose and preflight read it.
+  const { HEALTH_DEADLINE_MS } = await import("./index.ts");
+  const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
+  const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  // stdout and stderr both read: the per-request lines are warnings.
+  const start = (env: Record<string, string> = {}) => {
+    const port = freePort();
+    const proc = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+      cwd: import.meta.dir,
+      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const err = new Response(proc.stderr).text();
+    return { port, proc, out: new Response(proc.stdout).text().then(async (o) => o + (await err)) };
+  };
+  const up = async (port: number) => {
+    for (let i = 0; i < 200; i++) {
+      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
+      await Bun.sleep(50);
+    }
+    return false;
+  };
+  // Bounded, and a child still running is killed, so its stdout ends and the row reads it rather than hanging.
+  const exited = async (proc: ReturnType<typeof Bun.spawn>, ms: number) => {
+    const code = await Promise.race([proc.exited.then(() => proc.exitCode), Bun.sleep(ms).then(() => "still running" as const)]);
+    if (code === "still running") proc.kill("SIGKILL");
+    return code;
+  };
+
+  const busy = start();
+  // A malformed grace period: said, and read as the default (8 s of drain).
+  const idle = start({ OB1_STOP_GRACE: "soon" });
+  // On the PostgREST store, which holds no pool: its stop must not say it closed one (review pass 2).
+  const ctrlC = start({ OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  const cutter = start();
+  // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
+  const graced = start({ OB1_STOP_GRACE: "3" });
+  try {
+    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port), "five child servers answer a keyless probe (the first request, which hands the handlers the server)");
+
+    const t0 = performance.now();
+    const inFlight = fetch(`http://127.0.0.1:${busy.port}/health`, { headers: { "x-brain-key": KEY } })
+      .then(async (r) => ({ status: r.status, body: await r.text(), at: performance.now() - t0 }), (e: Error) => ({ status: 0, body: e.message, at: performance.now() - t0 }));
+    await Bun.sleep(300);
+    busy.proc.kill("SIGTERM");
+    // Polled, not slept on: a loaded runner may take a while to deliver the
+    // signal, and until then the child rightly answers (review pass 1).
+    let late = "";
+    let refusedAt = Infinity;
+    for (let i = 0; i < 40 && late !== "refused"; i++) {
+      late = await fetch(`http://127.0.0.1:${busy.port}/health`).then((r) => `answered ${r.status}`, () => "refused");
+      if (late === "refused") refusedAt = performance.now() - t0;
+      else await Bun.sleep(50);
+    }
+    const answered = await inFlight;
+    const code = await exited(busy.proc, HEALTH_DEADLINE_MS + 5_000);
+    const took = performance.now() - t0;
+    const log = await busy.out;
+    assert(answered.status === 200 && answered.body === "ok" && answered.at >= HEALTH_DEADLINE_MS - 100,
+      `the keyed /health in flight when SIGTERM landed is answered, 200 \`ok\` at its deadline (${Math.round(answered.at)} ms; got ${answered.status} ${answered.body.slice(0, 60)})`);
+    assert(late === "refused" && refusedAt < answered.at, `…a new connection after the signal is refused while it is in flight (${late} at ${Math.round(refusedAt)} ms, the request answered at ${Math.round(answered.at)} ms)`);
+    assert(code === 0 && took < HEALTH_DEADLINE_MS + 2_500, `…and the server exits 0 once it is, not at the drain bound (${code} at ${Math.round(took)} ms)`);
+    assert(/SIGTERM: no longer accepting; 1 request in flight/.test(log) && /SIGTERM: stopped in [\d.]+ s; database pool not closed within 1000 ms; exit 0/.test(log),
+      `…saying so on stdout, the request counted (${log.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
+
+    const t1 = performance.now();
+    idle.proc.kill("SIGTERM");
+    const idleCode = await exited(idle.proc, 3_000);
+    const idleLog = await idle.out;
+    assert(idleCode === 0 && performance.now() - t1 < 1_000 && /0 requests in flight/.test(idleLog) && /no database pool was opened; exit 0/.test(idleLog),
+      `an idle server stops at once, exit 0, and says it opened no pool (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
+    assert(/OB1_STOP_GRACE="soon" is not a whole number of seconds from 1 to 3600, with no unit .*; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
+      "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
+
+    await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }); // builds its store
+    ctrlC.proc.kill("SIGINT");
+    const intCode = await exited(ctrlC.proc, 3_000);
+    const intLog = await ctrlC.out;
+    assert(intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
+      `SIGINT stops it the same way, and a PostgREST store is not said to have a pool closed (${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
+
+    // A keyed call that stalls before its response — the registry lookup, on
+    // the database that never replies — and two SIGTERMs: the second cuts the
+    // drain short, the same path as the bound (onCut, then stop(true) not
+    // waited on), in a fraction of the 8 s. Holds index.ts's flag, which picks
+    // the cut line, on real Bun (review pass 2).
+    const tc = performance.now();
+    const stalled = fetch(`http://127.0.0.1:${cutter.port}/`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then((r) => `answered ${r.status}`, () => "cut off");
+    await Bun.sleep(300);
+    cutter.proc.kill("SIGTERM");
+    await Bun.sleep(200);
+    cutter.proc.kill("SIGTERM");
+    const cutCode = await exited(cutter.proc, 3_000);
+    const cutLog = await cutter.out;
+    const cutLines = cutLog.split("\n").filter((l) => /^request (cut off|abandoned)/.test(l));
+    assert(cutCode === 1 && await stalled === "cut off" && performance.now() - tc < 2_500
+      && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; database pool not closed: a second signal; exit 1|database pool not closed within 250 ms; exit 1/.test(cutLog),
+      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, the close given 250 ms (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
+    // One SIGTERM, and the bound OB1_STOP_GRACE sets does the cutting.
+    const tg = performance.now();
+    const graceStalled = fetch(`http://127.0.0.1:${graced.port}/`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then((r) => `answered ${r.status}`, () => "cut off");
+    await Bun.sleep(300);
+    graced.proc.kill("SIGTERM");
+    const graceCode = await exited(graced.proc, 4_000);
+    const graceLog = await graced.out;
+    const graceTook = performance.now() - tg;
+    assert(graceCode === 1 && await graceStalled === "cut off" && graceTook > 1_200 && graceTook < 3_000
+      && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog),
+      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
+  } finally {
+    for (const { proc } of [busy, idle, ctrlC, cutter, graced]) proc.kill("SIGKILL");
+    silent.stop(true);
+  }
+
+  // The bounds, against a stand-in server: a request that never finishes is
+  // cut off at the drain bound (exit 1, named), a second signal cuts the wait
+  // short, a pool that will not close is left at its bound, and with no server
+  // yet there is nothing to wait on. The stand-in's stop(true) never resolves
+  // either, as Bun's does not while a handler has yet to return (review pass 1).
+  const { drainOnSignal, isStoppable, createCallCount, drainBoundFrom } = await import("./shutdown.ts");
+  const { cutByStopLine, abandonedRequestLine, toolCallsRunning } = await import("./index.ts");
+  const stuck = () => {
+    const calls: string[] = [];
+    return { calls, server: { pendingRequests: 1, stop: (force?: boolean) => { calls.push(force ? "stop(true)" : "stop()"); return new Promise<void>(() => {}); } } };
+  };
+  const harness = (opts: Partial<Parameters<typeof drainOnSignal>[0]> & { server: () => any }) => {
+    const handlers = new Map<string, () => void>();
+    const lines: string[] = [];
+    const exits: number[] = [];
+    const { stopped } = drainOnSignal({ close: async () => true, drainBoundMs: 200, closeBoundMs: 100, log: (l) => lines.push(l), exit: (c) => exits.push(c), on: (s, h) => handlers.set(s, h), ...opts });
+    return { handlers, lines, exits, stopped };
+  };
+  /** The stop's exit code, or -1 when it has not run to its exit within 3 s: a hang fails its row rather than the suite. */
+  const settled = (p: Promise<number>) => Promise.race([p, Bun.sleep(3_000).then(() => -1)]);
+
+  let s = stuck();
+  let h = harness({ server: () => s.server, onCut: () => s.calls.push("onCut") });
+  const b0 = performance.now();
+  h.handlers.get("SIGTERM")!();
+  let c = await settled(h.stopped);
+  assert(c === 1 && h.exits.join() === "1" && performance.now() - b0 >= 190 && s.calls.join() === "stop(),onCut,stop(true)" && h.lines.some((l) => /1 request still in flight after 0\.\d s, closed unfinished/.test(l)),
+    `a request that never finishes is cut off at the drain bound: stop(), the cut told, stop(true) not waited on, exit 1, the line naming it (${s.calls.join()}; ${h.lines.join(" | ")})`);
+
+  s = stuck();
+  h = harness({ server: () => s.server, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, closeAfterCutMs: 50 });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 1 && /database pool not closed within 50 ms; exit 1$/.test(h.lines.at(-1) ?? ""),
+    `after a cut the pool is given the shorter bound, not the full one (${h.lines.at(-1)})`);
+
+  s = stuck();
+  h = harness({ server: () => s.server, drainBoundMs: 60_000 });
+  const b1 = performance.now();
+  h.handlers.get("SIGTERM")!();
+  h.handlers.get("SIGINT")!();
+  c = await settled(h.stopped);
+  assert(c === 1 && performance.now() - b1 < 1_000 && h.lines.some((l) => l === "SIGINT again: not waiting for the rest") && s.calls.join() === "stop(),stop(true)",
+    `a second signal cuts a 60 s wait short (${Math.round(performance.now() - b1)} ms, exit ${c})`);
+
+  h = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}) });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && h.lines.some((l) => /0 requests in flight/.test(l)) && h.lines.some((l) => /database pool not closed within 100 ms; exit 0/.test(l)),
+    `no server yet: nothing to wait on, exit 0; a pool that will not close is left at its bound and said (${h.lines.at(-1)})`);
+
+  h = harness({ server: () => undefined, close: () => Promise.reject(new Error("boom")) });
+  h.handlers.get("SIGTERM")!();
+  assert(await settled(h.stopped) === 0 && /database pool not closed: boom; exit 0/.test(h.lines.at(-1) ?? ""), "a pool whose close throws is said, and the stop still exits 0");
+
+  h = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000 });
+  const b2 = performance.now();
+  h.handlers.get("SIGTERM")!();
+  await Bun.sleep(20);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && performance.now() - b2 < 1_000 && /database pool not closed: a second signal; exit 0/.test(h.lines.at(-1) ?? ""),
+    `…and a second signal during the pool's close ends that wait too (${Math.round(performance.now() - b2)} ms: ${h.lines.at(-1)})`);
+
+  h = harness({ server: () => undefined, close: async () => false });
+  h.handlers.get("SIGTERM")!();
+  assert(await settled(h.stopped) === 0 && /; no database pool was opened; exit 0$/.test(h.lines.at(-1) ?? ""), "no pool opened is said as such, not as a pool closed");
+
+  const cut = cutByStopLine("tools/call capture_thought", 8_400);
+  assert(cut.startsWith("request cut off by the server's stop after 8.4 s: tools/call capture_thought — still running when the stop closed it") && !/runs to its end/.test(cut) && cut !== abandonedRequestLine("tools/call capture_thought", 8_400),
+    "a request the stop cuts off is said to be the stop's, not the client leaving (SMD-1864's line says the call runs to its end, which it will not)");
+
+  const g = (raw: string | undefined) => { const r = drainBoundFrom(raw); return `${r.graceS}/${r.drainBoundMs}/${r.problem ? "said" : "-"}`; };
+  const graceCases = [g(undefined), g(""), g("30"), g(" 20 "), g("2"), g("1"), g("3600"), g("0"), g("-5"), g("ten"), g("1.5"), g("30s"), g("1m"), g("3601"), g("1e3")];
+  assert(graceCases.join(" ") === "10/8000/- 10/8000/- 30/28000/- 20/18000/- 2/500/- 1/500/- 3600/3598000/- 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said",
+    `drainBoundFrom: whole seconds from 1 to 3600, less 2 s, at least 0.5 s; unset and "" the default; a fraction, a unit, 0, a negative or past an hour the default, said (${graceCases.join(" ")})`);
+
+  // Compose appends `s` to OB1_STOP_GRACE for every server's stop_grace_period,
+  // with its own fallback: held equal to the code's default, since check 14
+  // reads environment forwards only (review pass 4 — FORK.md's value defined twice).
+  const { DEFAULT_STOP_GRACE_S } = await import("./shutdown.ts");
+  const graceFallbacks: string[] = [];
+  for (const file of ["compose.yaml", "compose.tiers.yaml"]) {
+    const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; stop_grace_period?: string }> };
+    for (const [name, svc] of Object.entries(doc.services)) {
+      if (svc.build?.dockerfile !== "server-portable/Dockerfile") continue;
+      graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
+    }
+  }
+  assert(graceFallbacks.length === 4 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+    `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
+
+  // Preflight refuses a value compose would render wrong, and reports one it reads.
+  const preflightWith = async (grace: string) => {
+    const p = Bun.spawn(["bun", "--no-env-file", "preflight.ts"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_STOP_GRACE: grace }, stdout: "pipe", stderr: "pipe" });
+    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
+    await p.exited;
+    return out;
+  };
+  const badGrace = await preflightWith("1m");
+  const goodGrace = await preflightWith("30");
+  assert(/✗\s+stop grace\s+OB1_STOP_GRACE="1m" is not a whole number of seconds/.test(badGrace) && /30, not 30s/.test(badGrace) && /✓\s+stop grace\s+30 s \(OB1_STOP_GRACE\) — a stop drains what is in flight for up to 28 s/.test(goodGrace),
+    "preflight fails a stop grace compose would render wrong (1m → a 1 ms kill), with the fix, and reports one it reads");
+
+  // A tool call runs on after its client has gone, which Bun's request count
+  // does not see (review pass 3: a stop whose only call's client had just left
+  // exited under it, and the capture was lost). The count, then the drain
+  // waiting on it, then the wrap in index.ts counting a real call past its
+  // client, served in-process with the provider slowed.
+  const count = createCallCount();
+  let release: () => void = () => {};
+  const held = count.track(() => new Promise<string>((resolve) => { release = () => resolve("done"); }));
+  const failing = count.track(async () => { throw new Error("boom"); }).catch((e: Error) => e.message);
+  const idleEarly = await Promise.race([count.idle().then(() => "idle"), Bun.sleep(30).then(() => "waiting")]);
+  const during = count.running;
+  release();
+  const results = [await held, await failing];
+  const idleAfter = await Promise.race([count.idle().then(() => "idle"), Bun.sleep(30).then(() => "waiting")]);
+  assert(during === 1 && idleEarly === "waiting" && idleAfter === "idle" && count.running === 0 && results.join() === "done,boom",
+    `the call count: a running call holds idle(), a failed one is still let go, each result passed through (${during} running, ${idleEarly} → ${idleAfter})`);
+
+  let callsLeft = 1;
+  let callsIdle: () => void = () => {};
+  const bc = performance.now();
+  h = harness({ server: () => ({ pendingRequests: 0, stop: () => Promise.resolve() }), calls: { get running() { return callsLeft; }, idle: () => new Promise<void>((resolve) => { callsIdle = resolve; }) }, drainBoundMs: 5_000 });
+  h.handlers.get("SIGTERM")!();
+  setTimeout(() => { callsLeft = 0; callsIdle(); }, 150);
+  c = await settled(h.stopped);
+  assert(c === 0 && performance.now() - bc >= 140 && h.lines[0].includes("0 requests in flight, 1 tool call running"),
+    `the drain waits for a tool call its request no longer counts, and says so (${Math.round(performance.now() - bc)} ms: ${h.lines[0].slice(0, 70)})`);
+
+  h = harness({ server: () => ({ pendingRequests: 0, stop: () => new Promise<void>(() => {}) }), calls: { running: 0, idle: () => Promise.resolve() } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && !h.lines.some((l) => /closed unfinished/.test(l)),
+    `a bound that finds nothing left in flight is a drain, not "0 still in flight, closed unfinished" and exit 1 (${h.lines.at(-1)})`);
+
+  h = harness({ server: () => ({ pendingRequests: 1, stop: () => Bun.sleep(170) }), close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, closeAfterCutMs: 30 });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const lateClose = Number(/database pool not closed within (\d+) ms; exit 0$/.exec(h.lines.at(-1) ?? "")?.[1] ?? NaN);
+  assert(c === 0 && lateClose >= 30 && lateClose <= 70,
+    `a drain that ends late gives the close what is left of the bound, not its full second (${lateClose} ms of a 200 ms bound ended at about 170)`);
+
+  const aborter = new AbortController();
+  embedDelayMs = 700;
+  const gone = fetch(BASE, { method: "POST", headers: AUTH, signal: aborter.signal, body: JSON.stringify({ jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "search_thoughts", arguments: { query: "a call whose client leaves" } } }) }).then(async (r) => { await r.text(); return "read"; }, () => "left");
+  const quiet = console.warn;
+  console.warn = () => {};
+  try {
+    await Bun.sleep(150);
+    aborter.abort();
+    await gone;
+    await Bun.sleep(150);
+    const whileRunning = toolCallsRunning();
+    await Bun.sleep(900);
+    assert(whileRunning === 1 && toolCallsRunning() === 0,
+      `index.ts counts a tool call past its client leaving, and lets it go when the handler ends (${whileRunning} after the client left, ${toolCallsRunning()} after)`);
+  } finally {
+    console.warn = quiet;
+    embedDelayMs = 0;
+  }
+
+  assert(isStoppable({ stop: () => Promise.resolve(), pendingRequests: 0 }) && !isStoppable({ OB1_STORE: "postgrest" }) && !isStoppable(undefined) && !isStoppable(null),
+    "isStoppable: Bun's server shape, not a Workers env, not nothing");
+}
+
 console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selectable and is said to be retired here (SMD-1797)");
 {
   const { createStore, databaseUrl, DEFAULT_STORE, isPostgresUrl, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind } = await import("./store.ts");
@@ -940,6 +1239,48 @@ console.log("\n[16b] said_by and actor fold into the filter, and the By: line re
   const twenty = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, i]));
   assert(/too many keys/.test(refusal(twenty, "operator", undefined)) && /too large/.test(refusal({ blob: "x".repeat(4090) }, undefined, "op-key")),
     "the filter's caps hold over the folded object: twenty keys plus said_by is over the key cap, a filter at the size cap plus actor over the size cap (first review pass)");
+}
+
+console.log("\n[16c] prefer_current's row line, header note and error hint render from the row alone (SMD-2255)");
+{
+  // Pure, exported for this: the weight is read off the row (score over
+  // fused), so the server holds no copy of 059's 0.25.
+  const { demotedLine, currentNote, currentSearchHint } = await import("./index.ts") as {
+    demotedLine: (t: { demoted: string[]; score: number; fused: number }) => string | null;
+    currentNote: (rows: { window?: { rows: number; known: number; demoted: number; syncedAt: string | null; exact: boolean }; demoted?: string[] }[]) => string | null;
+    currentSearchHint: (msg: string) => string;
+  };
+  assert(demotedLine({ demoted: [], score: 0.016, fused: 0.016 }) === null, "a row nothing demoted has no line — every row without the flag");
+  assert(demotedLine({ demoted: ["completed"], score: 0.004, fused: 0.016 }) === "↓ Ranked ×0.25 — completed", `the weight comes off the row: score over fused (${demotedLine({ demoted: ["completed"], score: 0.004, fused: 0.016 })})`);
+  assert(demotedLine({ demoted: ["completed", "superseded"], score: 0.0041, fused: 0.0164 }) === "↓ Ranked ×0.25 — completed, superseded", "both reasons, in the order the function gives them");
+  assert(demotedLine({ demoted: ["superseded"], score: 0, fused: 0 }) === "↓ Ranked below current thoughts — superseded", "a zero fused score says 'below' rather than dividing by it");
+  const win = { rows: 40, known: 12, demoted: 7, syncedAt: "2026-09-25T00:00:00.000Z", exact: true };
+  assert(currentNote([{}]) === null && currentNote([]) === null, "no window on the rows (no flag, or no rows): no note");
+  assert(currentNote([{ window: win }]) === "Current first (prefer_current): 7 of the top 40 matches are settled or superseded and ranked below the current ones; 12 carry a lifecycle (latest sync 2026-09-25T00:00:00.000Z).",
+    `the note gives the window's demoted count, its lifecycle coverage and freshness (${currentNote([{ window: win }])})`);
+  // The exception counts what happened: a returned demoted row above a
+  // current one (a literal hit keeps a quarter of its bonus) — said when there
+  // is one, never as a rule (third and fourth review passes).
+  const cur = { window: win, demoted: [] as string[] };
+  const dem = { window: win, demoted: ["completed"] };
+  const aboveOne = currentNote([cur, dem, cur]) ?? "";
+  const aboveTwo = currentNote([dem, dem, cur]) ?? "";
+  const belowAll = currentNote([cur, cur, dem, dem]) ?? "";
+  assert(aboveOne.includes("ranked below the current ones — 1 of the demoted, holding the query's literal, still ranks above a current one here;")
+      && aboveTwo.includes("— 2 of the demoted, holding the query's literal, still rank above a current one here;")
+      && !belowAll.includes("still rank") && belowAll.includes("ranked below the current ones;"),
+    "the note names how many returned demoted rows sit above a current one, and says nothing when none does");
+  const thin = currentNote([{ window: { rows: 40, known: 40, demoted: 36, syncedAt: null, exact: false } }]) ?? "";
+  assert(thin.includes("36 of the top 40 matches are settled or superseded") && thin.includes("40 carry a lifecycle.") && thin.endsWith("Only 4 current matches were in the top 40, so the rows after them are demoted ones, and a current match past the window may have been missed — raise limit to read further."),
+    `a window with fewer current rows than the limit says what that means and what to do (${thin})`);
+  const capped = currentNote([{ window: { rows: 100, known: 90, demoted: 30, syncedAt: null, exact: false } }]) ?? "";
+  const none = currentNote([{ window: { rows: 40, known: 40, demoted: 40, syncedAt: null, exact: false } }]) ?? "";
+  assert(capped.endsWith("may have been missed — the window is capped at 100.") && !capped.includes("raise limit") && none.includes("No current match was in the top 40, so every row here is a demoted one"),
+    `a window of 100 is already capped, so the note says so rather than to raise the limit (the window's size decides, not the limit as sent: second review pass); a window with no current row says so (first review pass) (${capped})`);
+  assert(/migration 059 .* is not applied, or PostgREST has not reloaded/.test(currentSearchHint('function search_thoughts_current(vector, unknown) does not exist'))
+      && /migration 059 .* is not applied/.test(currentSearchHint("Could not find the function public.search_thoughts_current(filter, half_life_days, match_count, match_threshold, query_embedding, query_text, recency_weight) in the schema cache"))
+      && /needs SELECT on thought_sources .* the server group/.test(currentSearchHint("permission denied for table thought_sources")) && currentSearchHint("connection refused") === "",
+    "an error on prefer_current's path names 059 (missing, or the schema cache) or the server group's grant; any other error gets no hint");
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");

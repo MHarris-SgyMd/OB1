@@ -9,10 +9,10 @@
     "ob1-lint-sweep": "./lint-sweep.js"
   },
   "engines": {
-    "node": ">=18"
+    "bun": ">=1.4"
   },
   "scripts": {
-    "lint-sweep": "node lint-sweep.js"
+    "lint-sweep": "bun lint-sweep.js"
   },
   "license": "FSL-1.1-MIT"
 }

@@ -2526,6 +2526,99 @@ percent of the table, and the migration's contract is a re-ranking of the
 nearest candidates, not an exact blended ranking. What an opted-in caller pays
 is in `db/bench-plan.ts`'s recency arm.
 
+## Settled and superseded, ranked below on request (SMD-2255)
+
+`eval-supersession.ts`'s second section, run as `bun run supersession` (SMD-2255,
+SMD-2074's second consumer, migration 059). Needs only a throwaway Postgres: a
+seeded corpus through the real write path, no model.
+
+025 kept supersession labelled, not demoted, and named this file the instrument
+any demotion must pass. `search_thoughts`' opt-in `prefer_current` demotes over
+the hybrid's top W = min(100, 4N): a thought `node_state` (058) calls settled
+(its ticket completed or canceled — a note filed under a Done ticket included)
+or superseded weighs 0.25 of its fused score, once; the window is re-sorted, ties
+in the hybrid's order, and cut to N. The rule and the decision were written
+before any number was read, and the demotion was PRICED with a TypeScript oracle
+before 059 existed; 059's function is now held to that oracle on every query.
+
+Every row sits at a controlled cosine to its topic's axis, its remainder in axes
+no topic uses. Three policies — off (the hybrid at N), demote, exclude — at
+N = 10, threshold 0 and −1, over four classes: TWIN (a current row, the row it
+supersedes, three live distractors; TOPICAL / CURRENT / PREVIOUS relevance),
+LIFECYCLE (a live ticket, a settled one, a note filed under the settled one, two
+distractors; LIVE / ANY / SETTLED / NOTE), and LITERAL (a settled ticket's key,
+sparse and dense). Every class is filtered, so match_thoughts answers exactly
+(041's exact branch) and the policies differ by the rule alone.
+
+- **The controls.** Nothing demotable: demote is the hybrid's order. Every row
+  settled: a uniform multiplier, the off order. The SQL is the oracle on 288 of
+  288 queries, window flag included. The window never held fewer than N current
+  rows here (0 of 288 — test-schema [55] builds that case); of the 168 queries
+  whose whole admitted list fits in 100 rows, the window's top N was that list
+  re-weighted on all 168 (the first review pass found the check had counted
+  every query, the other 120 unverifiable).
+- **Three runs, each on the maintainer's call.** 12 topics per class: CURRENT
+  +0.039, under the +0.05 bar. Replicated once at 48 per class, the same bar:
+  the bars cleared, but the controls failed — the approximate index walk
+  returned different candidates at counts 10, 40 and 100 once the corpus reached
+  1,200 rows. Rerun with every class filtered, so the walk is not taken: the
+  controls hold, and the effect numbers are identical to the second run's.
+
+| threshold 0, 48 per class | off MRR | demote | exclude | Δ demote |
+| --- | ---: | ---: | ---: | ---: |
+| TWIN / CURRENT | 0.495 | 0.547 | 0.547 | +0.052 |
+| LIFECYCLE / LIVE | 0.444 | 0.639 | 0.639 | +0.194 |
+| TWIN / PREVIOUS | 0.449 | 0.200 | 0.000 | −0.249 |
+| TWIN / TOPICAL | 0.674 | 0.547 | 0.547 | −0.127 |
+| LIFECYCLE / NOTE | 0.524 | 0.231 | 0.000 | −0.292 |
+| LIFECYCLE / SETTLED | 0.380 | 0.219 | 0.000 | −0.161 |
+| LITERAL, sparse / dense | 1.000 / 0.500 | 0.250 / 0.000 | 0.000 / 0.000 | −0.750 / −0.500 |
+
+At threshold 0 each topic admits four or five rows (the relative floor keeps
+only its own; 21 for the dense literal), so the window is small and a demoted
+row drops a rank or two.
+At threshold −1 the window fills, as it does on a real brain, and **demote
+equals exclude for the top N in every cell**: PREVIOUS −0.449, NOTE −0.524,
+SETTLED −0.380, a settled key −1.000 (CURRENT and LIVE are the same gains).
+Once the window holds N current rows, a demoted thought is out of the top N —
+a key hit included, which keeps only a quarter of its bonus (the first review
+pass: the threshold-0 costs alone understated this). A demoted exact hit keeps
+a quarter of its literal bonus, 1/61 per literal it holds: on a query of
+literals only it stays above every row without one; holding one literal, only
+above current rows past the vector arm's 62nd rank; holding two, past about the
+21st; holding three or more, above nearly every current row without one (the
+eval's key queries hold one, hence −0.750 and −1.000).
+
+**Decision, by the pre-registered rule:** the controls hold, CURRENT and LIVE
+each gain at least 0.05, and demote beats exclude on PREVIOUS — build, opt-in,
+default off. The costs are disclosed, not vetoes: the caller opts in. Under the
+hybrid's fusion 0.25 is in practice a partition — every current match in the
+window first — and it bites only against an exact-literal hit, so a settled
+ticket looked up by its key drops; the tool says to leave the flag off for that.
+
+**On the dogfood brain** (a read-only dump, 945 thoughts, 315 demotable: 197
+settled ticket rows, 56 notes filed under a settled ticket, 60 superseded, 2
+both; 59 logged hybrid searches replayed with the provider): the top result
+changed in 20 of 59, and in 20 the default's top result was settled or
+superseded (the two counted apart); a demoted row sat in 54 of the 59 windows;
+the window was exact on 59 of 59.
+
+**Latency, and a missed budget.** `db/bench-hybrid.ts`'s prefer_current arm:
++10.7 ms over the hybrid's 1.1 at 10,000 thoughts, +129 ms at 100,000, and
++2.8 ms over 2.4 on the dogfood brain — `node_state` computes the whole brain's
+lifecycle on every call. The budget pre-registered (added cost at most the
+hybrid's own median at 10,000) was missed; the flag shipped opt-in on the
+maintainer's call, the cost stated in the flag's description, and SMD-2256
+narrows `node_state` for a list of ids. The numbers are one machine's: a review
+pass measured +18.8 ms over 1.6 at 10,000 — over budget either way.
+
+**A tie-break, after the first review pass.** On a query that is only literals
+every row without one scores 0, and 0 × 0.25 is 0, so the demoted zeros stayed
+among the current ones while each was marked as ranked below them. Ties now go
+to the current row, then to the hybrid's order, in 059 and in the oracle alike;
+the numbers above are unchanged (no eval query is literal-only), and
+test-schema [55] holds the case.
+
 ## LongMemEval: the fork on a public benchmark, and the floor it exposed
 
 `eval-longmemeval.ts`, run as `bun run longmemeval` (SMD-1039, the second
@@ -4894,7 +4987,9 @@ fingerprint on the graph rows, content in the capture event. The record is
 
 ## Does the extension contract survive the move? `thoughts` as a writable projection, prototyped (SMD-1999)
 
-`eval-writable-projection.ts`. Spike 2 of the event-sourcing ADR (SMD-1997):
+`eval-writable-projection.ts` — RETIRED with migration 060 (SMD-2116), which
+shipped the bodies it prototyped; the record stays here, see the note above
+the results. Spike 2 of the event-sourcing ADR (SMD-1997):
 under CQRS-lite the write-side truth is the event log and the `thoughts` row
 is a projection of it — and the entire community surface (recipes, schemas,
 integrations) writes to that row, through `upsert_thought` /
@@ -4967,42 +5062,43 @@ their step's letter; the events' stance, cites, valid window and context (its
 `claimed`) are in the comparison. The cost line is the
 median of 200 captures and 200 edits, baseline against option 2.
 
-**The prototype** is SQL in `evals/writable-projection/`, applied on top of
-053 and thrown away with the database — where check 7 does not look,
-deliberately: the write functions are redefined for the measurement, not
-shipped. `common.sql` lifts 046's diff rule out of the audit trigger into
+**The prototype** was SQL in `evals/writable-projection/` (retired with 060;
+the bodies are `db/migrations/060_append_then_project.sql` now), applied on
+top of 053 and thrown away with the database — where check 7 did not look,
+deliberately: the write functions were redefined for the measurement, not
+shipped. `common.sql` lifted 046's diff rule out of the audit trigger into
 `ob1_thought_diff` (one addition: an update records the fingerprint's
 before/after, since 018 sets it NULL for a text another row holds — a decision
-a replay cannot re-derive), makes the append a function
+a replay cannot re-derive), made the append a function
 (`ob1_append_thought_event`, 046's trigger tail: the kind from the registry,
-the trust ceiling, the door, the claim), adds the projector
+the trust ceiling, the door, the claim), added the projector
 (`ob1_project_thought_event`: capture → INSERT, update → UPDATE by the diff's
 afters, delete → DELETE; a live write passes its vector, a replay takes it
 from `ob1_embedding_snapshot` by `(content_fingerprint, embedding_model)` —
 SMD-1998's key made a table, fed by a trigger on the row store — or leaves it
 NULL for the re-embed pool, so the row is readable while its vector is still
-materialising; a capture event without content is refused), turns the audit
+materialising; a capture event without content is refused), turned the audit
 trigger into the CHECK under `ob1.projecting = <event id>` (the row's diff
 recomputed and held to the event's afters, SQLSTATE `OB002` on a divergence,
 the vector aside; a raw write without the setting is appended as 046 does),
-makes 050's stamp callable so the event carries the stamped metadata and the
-projector writes the row under 050's own pass-through, and lets 001's
+made 050's stamp callable so the event carries the stamped metadata and the
+projector writes the row under 050's own pass-through, and let 001's
 `updated_at` trigger yield to the projector's stamp for the event's own row.
-`option2-functions.sql` redefines the three write functions: everything
-before the row write stays in the same order (005's guard, 025's provenance
+`option2-functions.sql` redefined the three write functions: everything
+before the row write stayed in the same order (005's guard, 025's provenance
 validation, 046's event validation, the actor setting, 003's key, 033's
 advisory lock, 035's row read FOR NO KEY UPDATE, SMD-1323's lock, 018's
 unchanged-content rule, the cycle walk, `STALE_READ`), and the `INSERT … ON
-CONFLICT` / `UPDATE` / `DELETE` becomes: compute the after-image, the diff,
+CONFLICT` / `UPDATE` / `DELETE` became: compute the after-image, the diff,
 append, project with the caller's vector — a vector arriving on a row that
 already has one is a projection refresh with no event, verified as such. The
-contract sentinels preflight and test-schema read stay where the behaviours
-stay. `option1-view.sql` renames the table to `thought_rows`, creates the
+contract sentinels preflight and test-schema read stayed where the behaviours
+did. `option1-view.sql` renamed the table to `thought_rows`, created the
 view `thoughts` and its INSTEAD OF INSERT/UPDATE/DELETE triggers (the same
-append and projector); `option1-undo.sql` reverses it so test-support's
-reset can run again. `writable-projection.ts` holds every rule pure and
-`--self-check` (62 probes) runs in the portable-server job; `--check` runs
-the prototype in the data-layer job and holds it to the matrix recorded
+append and projector); `option1-undo.sql` reversed it so test-support's
+reset could run again. `writable-projection.ts` held every rule pure and
+`--self-check` (62 probes) ran in the portable-server job; `--check` ran
+the prototype in the data-layer job and held it to the matrix recorded
 below (`EXPECTED`, an outcome and a probe count per measured cell), so a
 Postgres or prototype change that moves a cell — or a step that stops
 running — is named.
@@ -5010,11 +5106,18 @@ running — is named.
 ### Results, 2026-09-24 (PostgreSQL 16.15, pgvector 0.8.6, width 8; the program's output, verbatim)
 
 (The run below is the run at 053, as it was. Since migration 055 — SMD-2115,
-step 1 of the decision — the shipped capture event carries the content, the
-baseline passes C1 and the recorded matrix in `evals/writable-projection.ts`
-says so; the prototype SQL calls the shipped diff rule, append and stamp arms
-rather than defining them, and CI's `--check` holds the live run to the
-matrix as recorded now, not to this block.)
+step 1 of the decision — the shipped capture event carries the content and
+the baseline passed C1. Since migration 060 — SMD-2116, step 2 — the shipped
+functions ARE option 2, so the runner's baseline would compare the schema with
+itself and its teardown would drop shipped objects: the runner, its rules
+module and the prototype SQL are retired, and its criteria live on the
+shipped bodies — C1–C6 and C10–C12 in `db/test-schema.ts` [56] (the scripted
+writes, the trigger counts, the forged-row checks, the drop-the-projector
+control, the replay of the log through the projector, the planted community
+triggers), C7–C9 in `db/test-live.ts` (two sessions, read through pg_locks;
+C7 [6f] and 060's section's racing captures, C8 [6d], C9 [6g] and [6h]), C13
+measured in 060's header. This block is
+the spike's report as it was published, not a description of the tree.)
 
 ```
 Writable projection — SMD-1999 (Spike 2 of SMD-1997), PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)
@@ -5223,7 +5326,8 @@ and test-schema's sentinel reads pin the current bodies and move with them.
 Not built here: the production projector, a migration, `thought_changes`
 reading the event, the raw in-tree writers (`review_supersession_proposal`,
 the backfills, the guard's bump — trigger-audited as today), the chunk rows.
-The record is `changes/smd-1999.md`.
+The record is `changes/smd-1999.md`. Steps 1 and 2 have since landed as
+migrations 055 (SMD-2115) and 060 (SMD-2116, `changes/smd-2116.md`).
 
 ## The typed-decision tier beside Ollama, and the entity gate run against it (SMD-2050)
 

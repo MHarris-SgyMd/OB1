@@ -68,7 +68,10 @@ await requireQueryLog(sql, "export-queries");
 // handed over empty.
 const searchRows = await sql<SearchDbRow[]>`
   SELECT id, agent_id, logged_at, (extract(epoch FROM logged_at)::numeric * 1000000)::bigint AS at_us,
-         tool, query, match_count, threshold, recency_weight, result_ids,
+         tool, query, match_count, threshold, recency_weight,
+         -- arm is 045's column: read through the row's jsonb, a log from
+         -- before 045 reads NULL instead of failing (SMD-2255, first review pass).
+         to_jsonb(query_log) ->> 'arm' AS arm, result_ids,
          NULL::bigint AS chars, 0::int AS surviving
     FROM query_log WHERE kind = 'search'`;
 const actionRows = await sql<ActionDbRow[]>`
@@ -86,10 +89,15 @@ for (const [searchId, uses] of bySearch) {
 
 // The baseline ranking per query: the ids the MOST RECENT search of that text
 // returned, in rank order. Distinct on the query keeps one baseline per query.
+// Only the default search's rankings — hybrid, or NULL from before 045:
+// eval-replay replays that search, so a prefer_current ranking (arm current,
+// 059) would count the demotion as drift and a keyword one the other arm
+// (SMD-2255, second and third review passes). arm read through the row's
+// jsonb, as above.
 const baselines = await sql<{ query: string; result_ids: unknown }[]>`
   SELECT DISTINCT ON (query) query, result_ids
     FROM query_log
-   WHERE kind = 'search' AND query IS NOT NULL
+   WHERE kind = 'search' AND query IS NOT NULL AND coalesce(to_jsonb(query_log) ->> 'arm', 'hybrid') = 'hybrid'
    ORDER BY query, logged_at DESC`;
 const baselineOf = new Map(baselines.map((b) => [b.query, parsePgUuidArray(b.result_ids)]));
 

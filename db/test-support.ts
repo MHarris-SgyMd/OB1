@@ -55,6 +55,10 @@ const TABLES = [
   // schema "without 034" and found the previous section's table standing —
   // the reset had carried it across every boundary since 034 landed.
   "query_log",
+  // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
+  // embedding_model), no foreign key either way — a row outlives the
+  // thought it came from on purpose — so its place in the order is free.
+  "ob1_embedding_snapshot",
   // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
@@ -142,6 +146,9 @@ const FUNCTIONS = [
   "node_lifecycle()",
   "node_settled_types()",
   "node_lifecycle_types()",
+  // 059 (SMD-2255)
+  "search_thoughts_current(vector, text, float, int, jsonb, float, float)",
+  "search_demote_weight()",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
@@ -182,6 +189,13 @@ const FUNCTIONS = [
   "ob1_actor_stamp_kept(jsonb, jsonb)",
   "ob1_capture_payload(uuid, timestamptz, bigint)",
   "backfill_thought_payloads(integer)",
+  // 060 (SMD-2116): the projector, the refresh, the snapshot's feeding
+  // trigger function and the log's order; the three write functions and the
+  // audit trigger it redefines are named above.
+  "ob1_project_thought_event(uuid, vector, text, boolean)",
+  "ob1_refresh_thought_vector(uuid, vector, text)",
+  "ob1_snapshot_embedding()",
+  "ob1_thought_events_in_order(uuid[])",
 ];
 
 /**

@@ -115,8 +115,10 @@ export class PostgrestStore implements ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
+    preferCurrent?: boolean;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]> {
-    const { data, error } = await this.client.rpc("search_thoughts_hybrid", {
+    // prefer_current is 059's function, same arguments (SMD-2255).
+    const { data, error } = await this.client.rpc(opts.preferCurrent === true ? "search_thoughts_current" : "search_thoughts_hybrid", {
       query_embedding: opts.embedding,
       query_text: opts.query,
       match_threshold: opts.threshold,

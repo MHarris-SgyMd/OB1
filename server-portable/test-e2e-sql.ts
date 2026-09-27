@@ -239,6 +239,29 @@ console.log("\n[3] search_thoughts ranks over real pgvector");
   const firstUnweighted = unweighted.split("--- Result ")[1] ?? "";
   assert(/^1 \(100\.0% match\) ---/.test(firstUnweighted) && /alpha thought about migrations/.test(firstUnweighted), "without a weight the exact match is first again — the default is the ranking by meaning alone");
   await sql`UPDATE thoughts SET created_at = now() WHERE content LIKE 'alpha%'`;
+
+  // Migration 059 over MCP (SMD-2255): prefer_current reaches
+  // search_thoughts_current. The alpha thought, stamped a completed ticket, is
+  // demoted — its block says by what and why, the header states the window —
+  // and without the flag it is first and unmarked, as before.
+  await sql`UPDATE thoughts SET metadata = metadata || ${{ source: "linear", issue: "SMD-9902", status: "Done", status_type: "completed", linear_updated_at: "2026-09-25T00:00:00.000Z" }}::jsonb WHERE content LIKE 'alpha%'`;
+  const preferred = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1, prefer_current: true });
+  const preferredFirst = preferred.split("--- Result ")[1] ?? "";
+  const demotedBlock = preferred.split("--- Result ").find((b) => /alpha thought about migrations/.test(b)) ?? "";
+  const plainAgain = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1 });
+  assert(!/alpha thought about migrations/.test(preferredFirst) && /\n↓ Ranked ×0\.25 — completed\n/.test(demotedBlock) && /^\d+ \(100\.0% match\) ---/.test(demotedBlock)
+      && /Current first \(prefer_current\): 1 of the top \d+ matches is settled or superseded and ranked below the current ones; 1 carries a lifecycle \(latest sync 2026-09-25T00:00:00\.000Z\)\./.test(preferred)
+      && /^1 \(100\.0% match\) ---/.test(plainAgain.split("--- Result ")[1] ?? "") && !/↓ Ranked|Current first/.test(plainAgain),
+    `prefer_current demotes the completed alpha ticket below the current rows, says ×0.25 — completed on its block (its similarity still the cosine) and the window in the header; without it the ticket is first and unmarked (${demotedBlock.split("\n").slice(0, 3).join(" / ")})`);
+  // The tool's description states the weight 059 applies, and they agree.
+  const listed = await fetch(BASE, { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }) });
+  const listedText = await listed.text();
+  const listedBody = JSON.parse(listedText.startsWith("{") ? listedText : (listedText.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+  const preferDesc = String(listedBody.result?.tools?.find((t: { name: string }) => t.name === "search_thoughts")?.inputSchema?.properties?.prefer_current?.description ?? "");
+  const [{ w }] = await sql`SELECT search_demote_weight() AS w`;
+  assert(Number(/multiplied by ([0-9.]+)/.exec(preferDesc)?.[1]) === Number(w) && /off \(default\)/i.test(preferDesc),
+    `prefer_current's description names the weight search_demote_weight() applies (${/multiplied by ([0-9.]+)/.exec(preferDesc)?.[1]} = ${w}) and says it is off by default`);
+  await sql`UPDATE thoughts SET metadata = metadata - 'source' - 'issue' - 'status' - 'status_type' - 'linear_updated_at' WHERE content LIKE 'alpha%'`;
   await sql.close();
 }
 
@@ -702,6 +725,11 @@ console.log("\n[10b] query log: the filter a search ran, the arm that served it 
     `keyword search is logged now (034 logged none), arm=keyword, unfiltered {} (${JSON.stringify(kwPlain)})`);
   assert(kwFiltered.arm === "keyword" && JSON.stringify(kwFiltered.filter) === JSON.stringify({ type: "idea" }),
     `a filtered keyword search records its filter (${JSON.stringify(kwFiltered)})`);
+  // 059 (SMD-2255): a search with prefer_current is the arm `current`, so a
+  // replay takes search_thoughts_current too.
+  await call("search_thoughts", { query: "zeta", limit: 5, threshold: -1, prefer_current: true });
+  const [preferRow] = await qlog<{ tool: string; arm: string | null }[]>`SELECT tool, arm FROM query_log WHERE kind = 'search' ORDER BY logged_at DESC LIMIT 1`;
+  assert(preferRow?.tool === "search_thoughts" && preferRow.arm === "current", `search_thoughts with prefer_current is logged as arm=current (${JSON.stringify(preferRow)})`);
 
   // The boundary refuses a shape jsonb should not run: a nested object. call()
   // throws on the tool error (or the schema rejection) — either way the bad

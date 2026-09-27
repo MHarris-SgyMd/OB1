@@ -158,22 +158,41 @@ export class SqlStore implements ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
+    preferCurrent?: boolean;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]> {
     // The function extracts the needles and does the fusion, so neither store
     // has a copy of either rule to get out of step — the same reason the two
-    // methods above call their functions rather than inlining them.
-    const rows = await this.sql`
-      SELECT id, content, metadata, created_at, similarity,
-             matched_needles, needles, needle_counts, common_needles, literal_only, score
-      FROM search_thoughts_hybrid(
-        ${toVector(opts.embedding)}::vector,
-        ${opts.query}::text,
-        ${opts.threshold}::float,
-        ${opts.limit}::int,
-        ${opts.filter}::jsonb,
-        ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
-        ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
-      )`;
+    // methods above call their functions rather than inlining them. Under
+    // prefer_current the demotion is 059's function's too (SMD-2255); a tagged
+    // template cannot bind a function name, so the two calls are two literals.
+    const weight = opts.recencyWeight ?? RECENCY_DEFAULTS.weight;
+    const halfLife = opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays;
+    const rows = opts.preferCurrent === true
+      ? await this.sql`
+          SELECT id, content, metadata, created_at, similarity,
+                 matched_needles, needles, needle_counts, common_needles, literal_only, score,
+                 fused, demoted, window_rows, window_known, window_demoted, window_synced_at, window_exact
+          FROM search_thoughts_current(
+            ${toVector(opts.embedding)}::vector,
+            ${opts.query}::text,
+            ${opts.threshold}::float,
+            ${opts.limit}::int,
+            ${opts.filter}::jsonb,
+            ${weight}::float,
+            ${halfLife}::float
+          )`
+      : await this.sql`
+          SELECT id, content, metadata, created_at, similarity,
+                 matched_needles, needles, needle_counts, common_needles, literal_only, score
+          FROM search_thoughts_hybrid(
+            ${toVector(opts.embedding)}::vector,
+            ${opts.query}::text,
+            ${opts.threshold}::float,
+            ${opts.limit}::int,
+            ${opts.filter}::jsonb,
+            ${weight}::float,
+            ${halfLife}::float
+          )`;
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
