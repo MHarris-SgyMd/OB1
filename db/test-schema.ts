@@ -4203,14 +4203,19 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   assert((await twoRowLoops()) === 0, "…no two-row loop in the table (the header's query)");
 
   // No supersession lock: inside one transaction a capture naming supersedes
-  // holds ONE advisory lock — the fingerprint's. At 033 it held two.
-  let heldNaming = -1;
+  // holds ONE advisory lock of the write path's — the fingerprint's. At 033 it
+  // held two. 060's projection locks (the two-key form, classes 22560–22562:
+  // the shared global and the pointer target's) are counted apart.
+  let heldNaming = -1, heldProjection = -1;
   await db.transaction(async (tx) => {
     await tx.query(`SELECT upsert_thought($1, $2::jsonb, $3::vector)`, ["035 a capture naming a pointer, held", JSON.stringify({ metadata: {}, supersedes: c.id }), unit(5)]);
-    heldNaming = (await tx.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)).rows[0].c;
+    const held = (await tx.query<{ projection: boolean; c: number }>(
+      `SELECT (objsubid = 2 AND classid BETWEEN 22560 AND 22562) AS projection, count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' GROUP BY 1`)).rows;
+    heldNaming = held.find((h) => !h.projection)?.c ?? 0;
+    heldProjection = held.find((h) => h.projection)?.c ?? 0;
     await tx.rollback();
   });
-  assert(heldNaming === 1, `a capture naming supersedes holds one advisory lock while its transaction is open — the fingerprint's, not the supersession lock (${heldNaming})`);
+  assert(heldNaming === 1 && heldProjection === 2, `a capture naming supersedes holds one advisory lock of the write path's while its transaction is open — the fingerprint's, not the supersession lock — and 060's two for the projection (${heldNaming}, ${heldProjection})`);
   assert(Number((await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)).rows[0].c) === 0, "…and none once it ends");
 
   // The COMMENTs say so: the 3-argument form's states the rule and the
@@ -8244,6 +8249,9 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
       && (skewKnown ?? "").includes("this brain's migration 058 knows triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled). Update whichever is behind.")
       && (skewSettled ?? "").includes("knows triage,backlog,unstarted,started,completed,canceled (settled: completed)") && reordered === null,
     `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); a known or settled set that is not the script's is refused naming both, and the same members in another order are not (${skewKnown})`);
+  // The replays above left 058's bodies; 060 redefines two of them over its
+  // projection, and the sections after read the shipped ones.
+  await restoreShipped("node_state");
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`SELECT prune_orphan_entities()`);
@@ -8456,8 +8464,13 @@ console.log("\n[55] Migration 059: search_thoughts_current — the hybrid with s
   };
   const withServer = await asGroups(["capture", "server"]);
   const captureOnly = await asGroups(["capture"]);
-  assert(withServer === "5 rows" && /permission denied for table thought_sources/.test(captureOnly) && ROLE_GRANTS.server.some((r) => (r as { table?: string }).table === "thought_sources"),
-    `a role with the capture and server groups runs it; the capture group alone is refused on thought_sources (${withServer}; ${captureOnly})`);
+  // Since 060 the columns the wrapper reads come from its projection, and the
+  // dependency subqueries that name thought_sources are removed before they
+  // are planned — so their tables are not checked, and the capture group alone
+  // runs it (at 059 it was refused on thought_sources; the dependency read
+  // still is, [54]).
+  assert(withServer === "5 rows" && captureOnly === "5 rows" && ROLE_GRANTS.server.some((r) => (r as { table?: string }).table === "thought_sources"),
+    `a role with the capture and server groups runs it, and since 060 the capture group alone does too (${withServer}; ${captureOnly})`);
 
   // A later migration reshapes the wrapper by DROP and CREATE; --reapply
   // replays 059 over it, which drops it first.
@@ -8468,6 +8481,270 @@ console.log("\n[55] Migration 059: search_thoughts_current — the hybrid with s
   try { await reapply("059"); } catch (e) { replayError = (e as Error).message; }
   const [reshaped] = await q<{ r: string }>(`SELECT pg_get_function_result(to_regprocedure($1)) AS r`, [SEARCH_THOUGHTS_CURRENT_SIGNATURE]);
   assert(replayError === "" && reshaped.r === fn?.result, `059 replays over a reshaped wrapper — it drops it first — and leaves its own columns (${replayError || "replayed"})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+}
+
+// ── 56. Migration 060: the node_state projection (SMD-2256) ──
+//
+// node_lifecycle() and node_state() read two tables the thoughts triggers keep
+// current — every ticket's head, every thought's newest superseder — instead of
+// computing both per call. Held here: the catalog; after every statement of
+// two seeded sequences of raw writes (inserts, key moves, status and
+// watermark moves, pointers set, cleared and retargeted, created_at ties,
+// multi-row and whole-table statements, deletes of targets and of
+// superseders, upserts, an id change, the bulk path, rollbacks), drift() is
+// empty and node_lifecycle() and superseded_by are 058's own formulas' rows;
+// the plan a caller gets (no whole-brain read, primary-key probes available);
+// the grant; the replays; the rebuild after a write with triggers disabled;
+// the rewrite outside READ COMMITTED. The races are test-live's.
+console.log("\n[56] Migration 060: node_state reads a stored projection kept current on write — the catalog, 058's rows after every kind of write, the plan, the grant, the replays and the rebuild (SMD-2256)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+
+  // The contract.
+  const cols = async (t: string) => (await q<{ c: string }>(
+    `SELECT string_agg(column_name || ' ' || data_type, ', ' ORDER BY ordinal_position) AS c FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`, [t]))[0].c;
+  const [cat] = await q<{ fks: number; idx: string | null; trig: string; defs: number; comments: boolean; lifeBody: string; stateBody: string; rows: number }>(`
+    SELECT (SELECT count(*)::int FROM pg_constraint WHERE contype = 'f' AND (conrelid IN ('ob1_ticket_head'::regclass, 'ob1_superseded_by'::regclass)
+                                                                         OR confrelid IN ('ob1_ticket_head'::regclass, 'ob1_superseded_by'::regclass))) AS fks,
+           pg_get_indexdef(to_regclass('thoughts_issue_key_idx')) AS idx,
+           (SELECT string_agg(tgname || ':' || (tgtype & 1)::text || ':' || coalesce(tgoldtable::text, '-') || ':' || coalesce(tgnewtable::text, '-'), ' ' ORDER BY tgname)
+              FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname LIKE 'thoughts_node_projection_%') AS trig,
+           (SELECT count(*)::int FROM pg_proc WHERE proname LIKE 'ob1\\_%node\\_projection%' OR proname IN ('ob1_superseders_of', 'ob1_ticket_heads_of') AND prosecdef) AS defs,
+           (SELECT bool_and(obj_description(oid, 'pg_proc') LIKE '%Migration 058 / SMD-2074%' AND obj_description(oid, 'pg_proc') LIKE '%060 / SMD-2256%')
+              FROM pg_proc WHERE oid IN ('node_lifecycle()'::regprocedure, 'node_state(uuid[])'::regprocedure)) AS comments,
+           (SELECT prosrc FROM pg_proc WHERE oid = 'node_lifecycle()'::regprocedure) AS "lifeBody",
+           (SELECT prosrc FROM pg_proc WHERE oid = 'node_state(uuid[])'::regprocedure) AS "stateBody",
+           (SELECT prorows::int FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure) AS rows`);
+  const secdef = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname LIKE 'ob1\\_%' AND prosecdef`))[0].n;
+  assert(await cols("ob1_ticket_head") === "issue_key uuid, issue text, head_id uuid, status text, status_type text, synced_at text"
+      && await cols("ob1_superseded_by") === "old_id uuid, new_id uuid" && cat.fks === 0
+      && /md5\(\(metadata ->> 'issue'::text\)\)\)::uuid\)+ WHERE \(metadata \? 'issue'::text\)/.test(cat.idx ?? "")
+      && cat.trig === "thoughts_node_projection_delete:0:old_rows:- thoughts_node_projection_insert:0:-:new_rows thoughts_node_projection_update:0:old_rows:new_rows"
+      && secdef === 0 && cat.comments === true && !/^\s*WITH\b/i.test(cat.stateBody) && !/row_number/.test(cat.lifeBody + cat.stateBody)
+      && /ob1_ticket_head/.test(cat.lifeBody) && /ob1_superseded_by/.test(cat.stateBody) && cat.rows === 100,
+    `the two tables, their columns and no foreign key either way; the md5 index on the issue key; three statement triggers (tgtype bit 0 clear) with transition tables; no ob1_* function SECURITY DEFINER; node_lifecycle and node_state name 058 and 060 in their COMMENTs, read the tables, hold no window and node_state no top-level WITH; the hybrid estimates 100 rows (${cat.trig}; rows ${cat.rows})`);
+
+  // 058's two formulas, verbatim from its file: what the projection must equal.
+  const src058 = readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith("058_"))!), "utf8");
+  const lifeAt = src058.indexOf("CREATE OR REPLACE FUNCTION node_lifecycle()");
+  const life058 = src058.slice(src058.indexOf("AS $$", lifeAt) + 5, src058.indexOf("\n$$;", lifeAt));
+  const sup058 = /superseders AS \(\s*([\s\S]*?ORDER BY s\.supersedes, s\.created_at DESC, s\.id DESC)\)/.exec(src058)?.[1] ?? "";
+  assert(/row_number\(\) OVER/.test(life058) && /DISTINCT ON \(s\.supersedes\)/.test(sup058), "the oracle is 058's own text: its ticket-head window and its superseder DISTINCT ON");
+  const diverged = async () => (await q<{ drift: number; life: number; sup: number }>(`
+    SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift,
+           (SELECT count(*)::int FROM (((SELECT * FROM node_lifecycle()) EXCEPT ALL (SELECT * FROM (${life058}) o))
+                                  UNION ALL ((SELECT * FROM (${life058}) o) EXCEPT ALL (SELECT * FROM node_lifecycle()))) x) AS life,
+           (SELECT count(*)::int FROM (((SELECT thought_id, superseded_by FROM node_state() WHERE superseded_by IS NOT NULL) EXCEPT ALL (SELECT old_id, new_id FROM (${sup058}) o))
+                                  UNION ALL ((SELECT old_id, new_id FROM (${sup058}) o) EXCEPT ALL (SELECT thought_id, superseded_by FROM node_state() WHERE superseded_by IS NOT NULL))) x) AS sup`))[0];
+
+  // Two seeded sequences of raw writes, checked after every statement.
+  const ISSUES = ["N-1", "N-2", "N-3", "N-4", "N-5", "N-6", "N-7", "N-8"];
+  const STATUS: [string, string][] = [["Done", "completed"], ["In Progress", "started"], ["Todo", "unstarted"], ["Canceled", "canceled"], ["Odd", "weird"]];
+  let serial = 0;
+  const kinds = new Map<string, number>();
+  let failure = "";
+  for (const seed of [2256, 6522]) {
+    const { rnd } = seededRandom(seed);
+    const pick = <T,>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)];
+    const meta = () => {
+      const m: Record<string, unknown> = {};
+      const r = rnd();
+      if (r < 0.5) m.issue = pick(ISSUES); else if (r < 0.7) m.ticket = pick(ISSUES); else if (r < 0.75) m.issue = null;
+      if (rnd() < 0.75) { const [s, t] = pick(STATUS); m.status = s; m.status_type = t; }
+      if (rnd() < 0.6) m.linear_updated_at = `2026-09-0${1 + Math.floor(rnd() * 4)}`;
+      return m;
+    };
+    const ids = async () => (await q<{ id: string }>(`SELECT id::text AS id FROM thoughts ORDER BY id`)).map((r) => r.id);
+    const some = async (n: number) => { const all = await ids(); return Array.from({ length: n }, () => pick(all)).filter(Boolean); };
+    const content = () => `[56] thought ${seed}-${++serial}`;
+    for (let k = 0; k < 20; k++) await db.query(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb)`, [content(), JSON.stringify(meta())]);
+    for (let step = 0; step < 150 && !failure; step++) {
+      await db.exec(rnd() < 0.3 ? `SET ob1.node_projection_bulk_keys = '2'` : `RESET ob1.node_projection_bulk_keys`);
+      const r = rnd();
+      let kind = "";
+      try {
+        if (r < 0.10) {
+          kind = "insert";
+          const [target] = await some(1);
+          await db.query(`INSERT INTO thoughts (content, metadata, supersedes) VALUES ($1, $2::jsonb, $3::uuid)`, [content(), JSON.stringify(meta()), rnd() < 0.3 ? target ?? null : null]);
+        } else if (r < 0.16) {
+          kind = "insert several";
+          const [a, b] = await some(2);
+          const rows = [0, 1, 2].map((i) => ({ content: content(), metadata: meta(), supersedes: i === 0 ? a ?? null : i === 1 ? b ?? null : null }));
+          await db.query(`INSERT INTO thoughts (content, metadata, supersedes) SELECT x.content, x.metadata, x.supersedes FROM jsonb_to_recordset($1::jsonb) AS x(content text, metadata jsonb, supersedes uuid)`, [JSON.stringify(rows)]);
+        } else if (r < 0.30) {
+          kind = "replace metadata";
+          const [id] = await some(1);
+          await db.query(`UPDATE thoughts SET metadata = $2::jsonb WHERE id = $1`, [id, JSON.stringify(meta())]);
+        } else if (r < 0.42) {
+          kind = "merge metadata, several";
+          const picked = await some(1 + Math.floor(rnd() * 4));
+          await db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = ANY($1::uuid[])`, [picked, JSON.stringify(meta())]);
+        } else if (r < 0.45) {
+          kind = "whole table";
+          await db.query(`UPDATE thoughts SET metadata = metadata || jsonb_build_object('linear_updated_at', $1::text)`, [`2026-09-0${1 + Math.floor(rnd() * 4)}`]);
+        } else if (r < 0.60) {
+          kind = "set pointer";
+          const [id, target] = await some(2);
+          // A third of the time at a thought something already supersedes, so
+          // successors compete (and created_at edits matter).
+          const taken = (await q<{ id: string }>(`SELECT DISTINCT supersedes::text AS id FROM thoughts WHERE supersedes IS NOT NULL ORDER BY 1`)).map((x) => x.id);
+          await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [id, rnd() < 0.1 ? id : taken.length && rnd() < 0.33 ? pick(taken) : target]);
+        } else if (r < 0.66) {
+          kind = "clear pointer";
+          const [id] = (await q<{ id: string }>(`SELECT id::text AS id FROM thoughts WHERE supersedes IS NOT NULL ORDER BY id`)).map((x) => x.id);
+          if (id) await db.query(`UPDATE thoughts SET supersedes = NULL WHERE id = $1`, [id]);
+        } else if (r < 0.74) {
+          kind = "created_at";
+          // Half the time a successor of a thought superseded more than once —
+          // where created_at decides which is the newest (mutation testing: a
+          // random row almost never is one).
+          const contested = (await q<{ id: string }>(`SELECT s.id::text AS id FROM thoughts s WHERE s.supersedes IN
+                               (SELECT supersedes FROM thoughts WHERE supersedes IS NOT NULL GROUP BY 1 HAVING count(*) > 1) ORDER BY s.id`)).map((x) => x.id);
+          const [picked, other] = await some(2);
+          const id = contested.length && rnd() < 0.5 ? pick(contested) : picked;
+          if (rnd() < 0.5) await db.query(`UPDATE thoughts SET created_at = (SELECT created_at FROM thoughts WHERE id = $2) WHERE id = $1`, [id, other]);
+          else await db.query(`UPDATE thoughts SET created_at = now() - make_interval(mins => $2) WHERE id = $1`, [id, Math.floor(rnd() * 1000)]);
+        } else if (r < 0.84) {
+          kind = "delete";
+          const picked = await some(1 + Math.floor(rnd() * 2));
+          await db.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [picked]);
+        } else if (r < 0.90) {
+          kind = "upsert";
+          const [id] = await some(1);
+          await db.query(`INSERT INTO thoughts (id, content, metadata) VALUES (coalesce($1::uuid, gen_random_uuid()), $2, $3::jsonb)
+                          ON CONFLICT (id) DO UPDATE SET metadata = EXCLUDED.metadata`, [rnd() < 0.7 ? id ?? null : null, content(), JSON.stringify(meta())]);
+        } else if (r < 0.93) {
+          kind = "id change";
+          const [id] = (await q<{ id: string }>(`SELECT t.id::text AS id FROM thoughts t WHERE NOT EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = t.id) ORDER BY t.id`)).map((x) => x.id);
+          if (id) await db.query(`WITH w AS (DELETE FROM thought_work_claims WHERE thought_id = $1) UPDATE thoughts SET id = gen_random_uuid() WHERE id = $1`, [id]);
+        } else if (r < 0.97) {
+          kind = "rolled back";
+          const [id] = await some(1);
+          await db.transaction(async (tx) => {
+            await tx.query(`UPDATE thoughts SET metadata = $2::jsonb, supersedes = NULL WHERE id = $1`, [id, JSON.stringify(meta())]);
+            await tx.rollback();
+          });
+        } else {
+          kind = "savepoint";
+          const [a, b] = await some(2);
+          await db.transaction(async (tx) => {
+            await tx.exec(`SAVEPOINT s56`);
+            await tx.query(`UPDATE thoughts SET metadata = $2::jsonb WHERE id = $1`, [a, JSON.stringify(meta())]);
+            await tx.exec(`ROLLBACK TO SAVEPOINT s56`);
+            await tx.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [b, JSON.stringify(meta())]);
+          });
+        }
+      } catch (e) {
+        failure = `seed ${seed} step ${step} (${kind}) threw: ${(e as Error).message.split("\n")[0]}`;
+        break;
+      }
+      kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+      const d = await diverged();
+      if (d.drift || d.life || d.sup) failure = `seed ${seed} step ${step} (${kind}): drift ${d.drift}, lifecycle ${d.life}, superseded_by ${d.sup}`;
+    }
+    await db.exec(`RESET ob1.node_projection_bulk_keys`);
+  }
+  const [shape] = await q<{ heads: number; sup: number }>(`SELECT (SELECT count(*)::int FROM ob1_ticket_head) AS heads, (SELECT count(*)::int FROM ob1_superseded_by) AS sup`);
+  assert(failure === "" && kinds.size === 13 && shape.heads > 0 && shape.sup > 0,
+    `after every statement of two seeded sequences of raw writes — ${[...kinds].map(([k, n]) => `${k} ×${n}`).join(", ")} — drift() is empty and node_lifecycle() and superseded_by are 058's formulas' rows, both ways (${failure || `${shape.heads} heads, ${shape.sup} superseders at the end`})`);
+
+  // The plan a caller gets: node_state pulled up, the dependency joins gone,
+  // and primary-key probes from the caller's ids available.
+  const plan = async (sql: string) => (await q<{ "QUERY PLAN": string }>(`EXPLAIN (COSTS OFF) ${sql}`)).map((r) => r["QUERY PLAN"]).join("\n");
+  const joinSql = `SELECT w.id, s.open, s.superseded_by, s.status_type, s.synced_at FROM (SELECT id FROM thoughts LIMIT 5) w LEFT JOIN node_state(NULL) s ON s.thought_id = w.id`;
+  const free = await plan(joinSql);
+  await db.exec(`SET enable_hashjoin = off; SET enable_mergejoin = off`);
+  const probed = await plan(joinSql);
+  await db.exec(`RESET enable_hashjoin; RESET enable_mergejoin`);
+  assert(!/CTE Scan|WindowAgg|Subquery Scan on (s|l|d|nm)\b|Function Scan on node_|thought_facets|thought_sources/.test(free)
+      && /Index Scan (using|on) thoughts_pkey/.test(probed) && /ob1_ticket_head_pkey/.test(probed) && /ob1_superseded_by_pkey/.test(probed),
+    `joined for its lifecycle and superseded_by columns, node_state is pulled into the caller: no CTE, no window, no dependency scan; with hash and merge joins off it is primary-key probes into thoughts and both tables (${probed.split("\n").map((l) => l.trim()).filter((l) => /Index Scan/.test(l)).join(" | ")})`);
+
+  // The grant: the capture group writes and reads the projection; without it a
+  // ticket write is refused on the projection, and a plain capture is not. Capture
+  // and server, as a server's role holds them (a raw write's audit row reads
+  // thought_audit, the server group's).
+  const asRole = async (name: string, revoke: boolean, body: () => Promise<unknown>) => {
+    await db.exec(`CREATE ROLE ${name} NOLOGIN`);
+    const present = new Set((await q<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects()))).filter((r) => r.present).map((r) => r.name));
+    for (const s of [`GRANT USAGE ON SCHEMA public TO "${name}";`, ...grantStatements(name, { groups: ["capture", "server"] as never, present })]) await db.exec(s);
+    if (revoke) await db.exec(`REVOKE ALL ON ob1_ticket_head, ob1_superseded_by FROM ${name}`);
+    await db.exec(`SET ROLE ${name}`);
+    let out = "ok";
+    try { await body(); } catch (e) { out = (e as Error).message.split("\n")[0]; } finally { await db.exec(`RESET ROLE`); }
+    await db.exec(`DROP OWNED BY ${name}; DROP ROLE ${name}`);
+    return out;
+  };
+  const writes = async () => {
+    const [a] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[56] a granted ticket', '{"issue": "G-1", "status_type": "started"}') RETURNING id::text AS id`);
+    const [b] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[56] its successor', '{"issue": "G-1", "status_type": "completed"}') RETURNING id::text AS id`);
+    await db.query(`UPDATE thoughts SET supersedes = $1 WHERE id = $2`, [a.id, b.id]);
+    await q(`SELECT count(*) FROM node_lifecycle()`);
+    await db.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[a.id, b.id]]);
+  };
+  const granted = await asRole("ob1_projection_capture", false, writes);
+  const plainCapture = await asRole("ob1_projection_bare", true, () => q(`INSERT INTO thoughts (content, metadata) VALUES ('[56] a plain capture', '{}')`));
+  const ticketWrite = await asRole("ob1_projection_bare", true, () => q(`INSERT INTO thoughts (content, metadata) VALUES ('[56] a bare ticket', '{"issue": "G-2"}')`));
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[56] a %'`);
+  assert(granted === "ok" && plainCapture === "ok" && /permission denied for table ob1_(ticket_head|superseded_by)\b/.test(ticketWrite)
+      && ["ob1_ticket_head", "ob1_superseded_by"].every((t) => ROLE_GRANTS.capture.some((r) => (r as { table?: string }).table === t)),
+    `the capture and server groups write a ticket row, a pointer and a delete and read lifecycles; without the two tables a plain capture still succeeds and a ticket write is refused on the projection (the head rule reads ob1_superseded_by first; ${granted}; ${plainCapture}; ${ticketWrite})`);
+
+  // Replays: 060 over itself writes nothing; 058 then 060 is the shipped
+  // state; 058 alone leaves its bodies, which read what the tables say, and
+  // the triggers still keep the tables current.
+  const snapshot = async () => (await q<{ s: string }>(`SELECT (SELECT string_agg(row(h.*)::text, '|' ORDER BY issue_key) FROM ob1_ticket_head h) || '#' || (SELECT string_agg(row(s.*)::text, '|' ORDER BY old_id) FROM ob1_superseded_by s) AS s`))[0].s;
+  const before = await snapshot();
+  await reapply("060");
+  await reapply("060");
+  const twice = await snapshot();
+  const [rebuiltClean] = await q<{ w: number }>(`SELECT heads_written + heads_deleted + superseders_written + superseders_deleted AS w FROM ob1_rebuild_node_projection()`);
+  await reapply("058");
+  const oldBody = (await q<{ b: string }>(`SELECT prosrc AS b FROM pg_proc WHERE oid = 'node_lifecycle()'::regprocedure`))[0].b;
+  const underOld = await diverged();
+  const [x] = await q<{ id: string }>(`SELECT id::text AS id FROM thoughts WHERE metadata ? 'issue' ORDER BY id LIMIT 1`);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled", "linear_updated_at": "2026-09-09"}' WHERE id = $1`, [x.id]);
+  const keptUnderOld = await diverged();
+  await reapply("060");
+  const restored = (await q<{ b: string }>(`SELECT prosrc AS b FROM pg_proc WHERE oid = 'node_lifecycle()'::regprocedure`))[0].b;
+  const triggers = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname LIKE 'thoughts_node_projection_%'`))[0].n;
+  assert(before === twice && rebuiltClean.w === 0 && /row_number/.test(oldBody) && !underOld.drift && !underOld.life && !keptUnderOld.drift && !keptUnderOld.life
+      && /ob1_ticket_head/.test(restored) && triggers === 3,
+    `060 replayed twice writes nothing and a rebuild after it finds nothing to fix; 058 replayed alone puts its window back, which reads the tables' rows, and a write under it still keeps the tables exact; 060 after it restores the reads, three triggers (${JSON.stringify(underOld)}, ${JSON.stringify(keptUnderOld)})`);
+
+  // A write with thoughts' user triggers disabled bypasses the projection:
+  // drift() sees it, the rebuild repairs it and says what it did.
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed", "linear_updated_at": "2026-09-30"}' WHERE id = $1`, [x.id]);
+  await db.query(`UPDATE thoughts SET supersedes = NULL WHERE supersedes IS NOT NULL`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
+  const stale = await diverged();
+  const [fixed] = await q<{ hw: number; sd: number }>(`SELECT heads_written AS hw, superseders_deleted AS sd FROM ob1_rebuild_node_projection()`);
+  const after = await diverged();
+  assert(stale.drift > 0 && fixed.hw > 0 && fixed.sd > 0 && !after.drift && !after.life && !after.sup,
+    `a write with the triggers disabled leaves drift() naming it (${stale.drift} rows); ob1_rebuild_node_projection() rewrites the head and deletes the superseders (${fixed.hw}, ${fixed.sd}) and leaves none`);
+
+  // Outside READ COMMITTED every key is rewritten, so a concurrent writer of
+  // the same key conflicts rather than skews.
+  const rewrites = async (iso: string) => {
+    let n = -1;
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET TRANSACTION ISOLATION LEVEL ${iso}`);
+      n = (await tx.query<{ w: number }>(`SELECT heads_written AS w FROM ob1_node_projection_reconcile($1::text[], '{}')`, [ISSUES])).rows[0].w;
+      await tx.rollback();
+    });
+    return n;
+  };
+  const rc = await rewrites("READ COMMITTED");
+  const rr = await rewrites("REPEATABLE READ");
+  const liveHeads = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_ticket_head WHERE issue = ANY($1::text[])`, [ISSUES]))[0].n;
+  assert(rc === 0 && rr === liveHeads && rr > 0, `an exact projection reconciled under READ COMMITTED writes nothing, and under REPEATABLE READ rewrites every head it names (${rc}, ${rr} of ${liveHeads})`);
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`SELECT prune_orphan_entities()`);

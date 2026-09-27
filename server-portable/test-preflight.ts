@@ -1635,6 +1635,9 @@ else {
       await claims.unsafe("GRANT USAGE ON SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
+      // 060's projection writes, held from the start so the steps below name
+      // only what they revoke; its own step follows the base set (SMD-2256).
+      await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
 
       // thoughts satisfied, but no INSERT/DELETE on thought_chunks, no INSERT
       // on thought_audit and no UPDATE on thought_facets (042's delete guard
@@ -1672,6 +1675,18 @@ else {
       const baseOk = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);
+
+      // 060's triggers reconcile the node_state projection as the caller on a
+      // write of a ticket row or a pointer: without its writes the check names
+      // those writes and lifecycle reads — not a capture, not a delete.
+      await claims.unsafe("REVOKE INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
+      const projectionMiss = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(projectionMiss.code === 1 &&
+             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write of a row carrying an issue key or a supersedes pointer, and every lifecycle read \(060's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionMiss.out)) &&
+             !/windowed capture|every delete/.test(writeLine(projectionMiss.out)) &&
+             /GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;\s+GRANT INSERT, UPDATE, DELETE ON ob1_superseded_by TO ob1_pf_capture;/.test(projectionMiss.out),
+             `without 060's projection writes the check names ticket and pointer writes and lifecycle reads, not captures or deletes, each table with its GRANT (exit ${projectionMiss.code})`);
+      await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
 
       // 016's trigger reads ob1_config as the caller on EVERY capture (before it
       // checks the key), so with the trigger present — the schema is fully

@@ -1681,6 +1681,13 @@ export const ROLE_GRANTS = Object.freeze({
     // trigger — so SELECT is hard here, while the writes resolve_agent makes
     // stay soft, in `server` below (SMD-1730, first review pass).
     Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT"]),                               since: "046" }),
+    // 060's triggers run as the caller on every write of a row carrying an
+    // issue key or a supersedes pointer, and reconcile the node_state
+    // projection; node_lifecycle() and node_state() read it. A role without
+    // these cannot write a ticket row or a pointer, nor read a lifecycle
+    // (SMD-2256).
+    Object.freeze({ table: "ob1_ticket_head",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "060" }),
+    Object.freeze({ table: "ob1_superseded_by", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "060" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)

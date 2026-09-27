@@ -55,6 +55,10 @@ const TABLES = [
   // schema "without 034" and found the previous section's table standing —
   // the reset had carried it across every boundary since 034 landed.
   "query_log",
+  // 060's node_state projection (SMD-2256): no foreign key either way, so its
+  // place is free too.
+  "ob1_ticket_head",
+  "ob1_superseded_by",
   // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
@@ -145,6 +149,13 @@ const FUNCTIONS = [
   // 059 (SMD-2255)
   "search_thoughts_current(vector, text, float, int, jsonb, float, float)",
   "search_demote_weight()",
+  // 060 (SMD-2256): the triggers go with thoughts; their function is named here.
+  "ob1_node_projection_sync()",
+  "ob1_node_projection_drift()",
+  "ob1_rebuild_node_projection()",
+  "ob1_node_projection_reconcile(text[], uuid[])",
+  "ob1_ticket_heads_of(text[])",
+  "ob1_superseders_of(uuid[])",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)

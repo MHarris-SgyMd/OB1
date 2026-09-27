@@ -1416,7 +1416,8 @@ if (configFailed) {
             // thought_facets as the caller on every delete — every delete of a
             // thought for that one, said separately so an operator whose
             // capture succeeds is not told the check was wrong (seventh pass).
-            const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets");
+            const PROJECTION = ["ob1_ticket_head", "ob1_superseded_by"];
+            const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets" && !PROJECTION.includes(t));
             // 046's audit trigger reads the key's kind from ob1_agents as the caller
             // on every write that carries an actor — captures, edits AND deletes
             // — so that one is named with the trigger (SMD-1730).
@@ -1427,6 +1428,10 @@ if (configFailed) {
               : "a windowed capture, an edit with content, or 008's audit trigger")
               + (agentsMiss ? " (046's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor)" : ""));
             if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
+            // 060's triggers reconcile the node_state projection as the caller on
+            // a write of a ticket row or a pointer, and node_lifecycle() reads it:
+            // a plain capture returns before touching it (SMD-2256).
+            if (PROJECTION.some((t) => missingByTable.has(t))) fails.push("a write of a row carrying an issue key or a supersedes pointer, and every lifecycle read (060's triggers keep the node_state projection as the caller)");
             const why = ` — so ${fails.join(", and ")} would fail`;
             if (missingByTable.size) {
               const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");

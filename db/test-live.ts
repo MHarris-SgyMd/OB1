@@ -5629,6 +5629,158 @@ console.log("\n[27] search_thoughts_current against a hand oracle on real Postgr
   await sql.close();
 }
 
+console.log("\n[28] Migration 060's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a pointer write re-reads its target's issue after a concurrent move; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
+{
+  // test-schema [56] holds the rules on one connection; what it cannot hold is
+  // a second writer's uncommitted row. Each race below goes stale without the
+  // lock (or the re-read) it names, and drift() — 058's formulas against the
+  // tables — is the check.
+  const db = new SQL({ url: URL_!, max: 1 });
+  const drift = async () => Number((await db`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`)[0].n);
+  const suiteDrift = await drift();
+  const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+  const waitingOn = async (pid: number, cls: number) =>
+    Number((await db`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${pid} AND classid = ${cls} AND objsubid = 2`)[0].n);
+  const gate = () => { let open: () => void = () => {}; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+  const row = async (content: string, meta: Record<string, unknown>) =>
+    String((await db`INSERT INTO thoughts (content, metadata) VALUES (${content}, ${meta}::jsonb) RETURNING id`)[0].id);
+  const head = async (issue: string) => (await db`SELECT head_id::text AS id, status_type FROM ob1_ticket_head WHERE issue = ${issue}`)[0] as { id: string; status_type: string } | undefined;
+
+  // Same ticket, two writers. X1 is R-1's head (the newer watermark); A moves
+  // its status and holds its transaction open; B moves X2's. B's recompute
+  // waits on R-1's key until A commits and then sees X1's new status — without
+  // the lock it would read X1's old one and its upsert, queued behind A's,
+  // would overwrite A's head with it.
+  const x1 = await row("[28] R-1's head", { kind: "race2256", issue: "R-1", status_type: "started", linear_updated_at: "2026-09-02" });
+  const x2 = await row("[28] R-1's older row", { kind: "race2256", issue: "R-1", status_type: "started", linear_updated_at: "2026-09-01" });
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, aError = "", bPid = -1, bError = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}' WHERE id = ${x1}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { aError = e.message; });
+    await waitFor(() => aHolding || aError !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status": "Todo"}' WHERE id = ${x2}::uuid`;
+    }).catch((e: Error) => { bError = e.message; });
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22561)) === 1);
+    const bWaited = bPid > 0 && (await waitingOn(bPid, 22561)) === 1;
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const h = await head("R-1");
+    assert(aHolding && bWaited && aError === "" && bError === "" && h?.id === x1 && h.status_type === "completed" && (await drift()) === 0,
+      `a second writer of R-1 waits on its key (class 22561) until the first commits, then recomputes from it: the head is X1 with the first writer's status, and no drift (${JSON.stringify(h)}; ${aError || bError || "clean"})`);
+  }
+
+  // A pointer write whose target's issue is moving. C holds M-1's key; A moves
+  // P from M-1 to M-2 and queues on it; B points Y at P, reads P's issue as
+  // M-1 (A has not committed) and queues behind A. C lets go: A recomputes
+  // M-2 with P live (B's pointer is not committed) and commits; B takes M-1,
+  // re-reads P's issue — now M-2 — locks it and recomputes it with P
+  // superseded, so M-2's head is Q. Without the re-read M-2 kept P.
+  const p = await row("[28] P, moving to M-2", { kind: "race2256", issue: "M-1", status_type: "started", linear_updated_at: "2026-09-05" });
+  const qRow = await row("[28] Q, M-2's older row", { kind: "race2256", issue: "M-2", status_type: "completed", linear_updated_at: "2026-09-01" });
+  const y = await row("[28] Y, P's successor", { kind: "race2256" });
+  {
+    const connC = racer(), connA = racer(), connB = racer();
+    const { p: releaseP, open: release } = gate();
+    let cHolding = false, aPid = -1, bPid = -1, errors = "";
+    const cDone = connC.begin(async (tx: SQL) => {
+      await tx`SELECT pg_advisory_xact_lock(22561, hashtext('M-1'))`;
+      cHolding = true;
+      await releaseP;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(() => cHolding);
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"issue": "M-2"}' WHERE id = ${p}::uuid`;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(async () => aPid > 0 && (await waitingOn(aPid, 22561)) === 1);
+    const aQueued = aPid > 0 && (await waitingOn(aPid, 22561)) === 1;
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET supersedes = ${p}::uuid WHERE id = ${y}::uuid`;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22561)) === 1);
+    const bQueued = bPid > 0 && (await waitingOn(bPid, 22561)) === 1;
+    release();
+    await cDone; await aDone; await bDone;
+    await connC.close(); await connA.close(); await connB.close();
+    const h = await head("M-2");
+    assert(aQueued && bQueued && errors === "" && h?.id === qRow && (await head("M-1")) === undefined && (await drift()) === 0,
+      `a pointer write that read its target's issue before a concurrent move re-reads it after the grant: M-2's head is Q, M-1 has none, and no drift (${JSON.stringify(h)}; ${errors || "clean"})`);
+  }
+
+  // Two successors of one thought written at once: both take its superseder
+  // key (class 22562), so the later sees the earlier and the newest wins.
+  const target = await row("[28] a thought superseded twice at once", { kind: "race2256" });
+  const [s1, s2] = [await row("[28] successor one", { kind: "race2256" }), await row("[28] successor two", { kind: "race2256" })];
+  await db`UPDATE thoughts SET created_at = now() - interval '1 hour' WHERE id = ${s1}::uuid`;
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET supersedes = ${target}::uuid WHERE id = ${s2}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(() => aHolding);
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET supersedes = ${target}::uuid WHERE id = ${s1}::uuid`;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22562)) === 1);
+    const bWaited = bPid > 0 && (await waitingOn(bPid, 22562)) === 1;
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [sb] = await db`SELECT new_id::text AS id FROM ob1_superseded_by WHERE old_id = ${target}::uuid`;
+    assert(bWaited && errors === "" && sb?.id === s2 && (await drift()) === 0,
+      `two successors written at once serialise on the target's key (class 22562): the newer one is its superseder, and no drift (${sb?.id === s2 ? "s2" : sb?.id}; ${errors || "clean"})`);
+  }
+
+  // A ticket write on a brain of twenty thousand thoughts, five thousand of
+  // them superseding another, reads a handful of rows: its keys are index
+  // probes. A NULL passed for "no keys" would reconcile every key — correct,
+  // and every pointer read through 025's index per write, which counts no
+  // sequential scan (mutation testing: a scan count alone let it pass), so the
+  // rows read are counted too.
+  await db`INSERT INTO thoughts (content, metadata) SELECT '[28] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
+  await db`UPDATE thoughts t SET supersedes = s.id FROM thoughts s
+            WHERE t.metadata->>'kind' = 'race2256' AND s.metadata->>'kind' = 'race2256'
+              AND (t.metadata->>'n')::int <= 5000 AND (s.metadata->>'n')::int = (t.metadata->>'n')::int + 10000`;
+  await db`ANALYZE thoughts`;
+  const reads = async () => {
+    await db`SELECT pg_stat_force_next_flush()`;
+    await db`SELECT pg_stat_clear_snapshot()`;
+    const [r] = await db`SELECT seq_scan::int AS scans, (coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0))::int AS rows FROM pg_stat_user_tables WHERE relname = 'thoughts'`;
+    return r as { scans: number; rows: number };
+  };
+  const before = await reads();
+  await db`UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled", "linear_updated_at": "2026-09-09"}' WHERE id = ${x2}::uuid`;
+  await db`UPDATE thoughts SET supersedes = ${x1}::uuid WHERE id = ${x2}::uuid`;
+  const after = await reads();
+  const scanned = after.scans - before.scans, rowsRead = after.rows - before.rows;
+  assert(scanned === 0 && rowsRead < 100 && (await drift()) === 0,
+    `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers, scan thoughts no times and read ${rowsRead} of its rows (under 100), and no drift`);
+
+  await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2256'`;
+  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'M-1', 'M-2')) AS heads`;
+  assert(suiteDrift === 0 && left.drift === 0 && left.heads === 0,
+    `every section before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
+  await db.close();
+}
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");

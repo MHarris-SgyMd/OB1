@@ -242,13 +242,16 @@ current matches than asked for, that one past it may have been missed (raise
 `limit` below 25; above, the window is already capped at 100). A blocked or
 unknown status does not demote a thought (superseded still does), and ties go
 to the current one. An exact identifier hit on a settled thought is demoted
-too: to look a finished ticket up by its key, leave the flag off. The
-server's role needs SELECT on `thought_sources` (the server group,
-`db/README.md`); without it, or without 059, that search is refused naming the
-fix and every other search runs. The query log records such a search as arm
-`current`. It costs `node_state`'s whole-brain read per call — a few
-milliseconds on a brain of a thousand thoughts, about 130 ms at 100,000
-(`db/bench-hybrid.ts`; SMD-2256 narrows it). The ChatGPT `search` tool cannot take the parameter and never
+too: to look a finished ticket up by its key, leave the flag off. Since
+migration 060 each candidate's lifecycle is a lookup in a table the thoughts
+triggers keep current, so the server's role needs the capture group's grants on
+`ob1_ticket_head` and `ob1_superseded_by` (a brain before 060 needed SELECT on
+`thought_sources`, the server group — `db/README.md`); without them, or
+without 059, that search is refused naming the fix and every other search runs.
+The query log records such a search as arm `current`. It costs about a
+millisecond over an ordinary search at 10,000 thoughts and two or three at
+100,000, most of that the wider window it reads (`db/bench-hybrid.ts`; at 059
+it read the whole brain per call, about 130 ms at 100,000). The ChatGPT `search` tool cannot take the parameter and never
 demotes; `evals/eval-supersession.ts` records what the demotion finds higher
 (the current version, the live ticket) and lower (the topical answer, a note
 under a finished ticket, a finished ticket looked up by its key).
