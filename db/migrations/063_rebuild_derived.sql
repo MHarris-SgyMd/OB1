@@ -226,9 +226,10 @@
 --   --grant` issues every group). MINOR under FORK.md's version rules.
 --   Measured on a read-only copy of the dogfood brain (1,025 thoughts, 2,472
 --   lineage rows, 15,520 mentions, 12,057 edges; PostgreSQL 16): the walk
---   from the most-fed thought 3.3 ms, a rebuild on it 3-4 ms whatever the
---   arm, every thought in turn 523 ms for 1,025 calls, the orphan census
---   36 ms (changes/smd-1732.md has the table).
+--   from the most-fed thought up to 3.3 ms, a rebuild on it up to 3-4 ms
+--   whatever the arm, every thought in turn up to 523 ms for 1,025 calls, a
+--   force over every thought up to 544 ms (1,025 records renewed), the
+--   orphan census up to 37 ms (changes/smd-1732.md has the ranges).
 --
 -- Prerequisites
 --   016 (requeue_thought_work, the entity tables), 029 (supersession_proposals,
@@ -391,7 +392,7 @@ ALTER TABLE supersession_proposals
     CHECK ((status IN ('pending', 'stale')) = (reviewed_at IS NULL));
 
 COMMENT ON COLUMN supersession_proposals.status IS
-  'pending: the judge''s verdict awaits a reviewer. accepted / rejected: the reviewer''s decision (review_supersession_proposal). stale (063, SMD-1732): rebuild_derived found one of the pair''s texts moved since the judge saw them — the verdict is about texts that no longer stand; the pair is judged again by the next consolidation pass, whose record_supersession_proposal replaces this row in place (back to pending), and a reviewer may still accept it with p_force or reject it. Migrations 029, 063.';
+  'pending: the judge''s verdict awaits a reviewer. accepted / rejected: the reviewer''s decision (review_supersession_proposal). stale (063, SMD-1732): rebuild_derived found one of the pair''s texts moved since the judge saw them — the verdict is about texts that no longer stand; the pair is judged again by the next consolidation pass, whose record_supersession_proposal replaces this row in place (back to pending) when it finds the conflict again; a pair the pass no longer finds in conflict leaves the row stale for a reviewer, who may accept it with p_force or reject it (consolidate.ts --list stale). Migrations 029, 063.';
 
 -- 029's body, verbatim, plus one condition: a pair whose proposal is stale is
 -- a candidate again — the judge's next pass re-proposes it, and the writer
@@ -860,7 +861,12 @@ BEGIN
       WHEN 'vector' THEN
         v_cur   := COALESCE(v_a.content_fingerprint, content_fingerprint_of(v_a.content));
         v_model := COALESCE(v_row.recipe->>'model', v_a.embedding_model, v_cfg_model);
-        IF NOT v_fp_stale AND (v_cfg_model IS NULL OR v_model IS NOT DISTINCT FROM v_cfg_model) THEN
+        -- (The row's OWN model — its recipe's or its label — against the
+        -- configured one, not v_model's fallback to the config: an unlabelled
+        -- vector would otherwise be re-recorded under a model nothing named,
+        -- where the pool's write moves the label and records — fourth
+        -- review pass.)
+        IF NOT v_fp_stale AND (v_cfg_model IS NULL OR COALESCE(v_row.recipe->>'model', v_a.embedding_model) IS NOT DISTINCT FROM v_cfg_model) THEN
           -- --force on a vector whose text did not move, AT THE CONFIGURED
           -- MODEL: the vector IS the current text's (a deterministic model,
           -- the fingerprint the row carries), so what force renews is the

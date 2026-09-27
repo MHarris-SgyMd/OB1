@@ -252,19 +252,20 @@ try {
     process.exit(0);
   }
   if (DRY) console.log("  dry run: each call runs and rolls back");
-  let deleted = 0, touched = 0;
+  let deleted = 0, touched = 0, refused = 0;
   for (const o of orphans) {
     // Orphans only: a stale row on the same thought keeps its own reason
     // for its own rebuild (cold read, first review pass).
     const r = await callRebuild(o.id, REASON, false, null, false, true);
-    if (!r.ok) { console.error(`  ${o.id}: refused ${r.error}`); continue; }
+    if (!r.ok) { console.error(`  ${o.id}: refused ${r.error}`); refused += 1; continue; }
     touched += 1;
     deleted += r.deleted;
   }
   console.log(`  orphans:     ${orphans.length} thought(s) carried a lineage row whose artifact is gone${orphans.length >= LIMIT ? ` (the first ${LIMIT}; run again for the rest)` : ""}`);
   console.log(`  deleted:     ${deleted} lineage row(s) over ${touched} thought(s)${DRY ? " (rolled back)" : ""} — nothing else on those thoughts was touched`);
   await sql.close();
-  process.exit(0);
+  // A refusal as a value is exit 1 here as under --input (fourth review pass).
+  process.exit(refused ? 1 : 0);
 } catch (e) {
   console.error(`  failed: ${(e as Error).message}`);
   await sql.close();

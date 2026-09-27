@@ -591,7 +591,7 @@ export type CaptureResult = {
  */
 export type SupersessionProposal = {
   id: string;
-  /** `stale` since migration 063: rebuild_derived found a text moved under a pending verdict; the next consolidation pass re-judges the pair in place (SMD-1732). */
+  /** `stale` since migration 063: rebuild_derived found a text moved under a pending verdict; the next consolidation pass replaces the row when it finds the conflict again, a reviewer settles one it does not (SMD-1732). */
   status: "pending" | "accepted" | "rejected" | "stale";
   verdict: "newer_supersedes_older" | "older_supersedes_newer" | "conflict_undirected";
   confidence: number;

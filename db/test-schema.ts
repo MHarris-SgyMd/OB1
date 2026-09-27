@@ -9419,7 +9419,12 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   // run the 4-argument insert), the extractor's tags on A, a pending proposal
   // on the pair, a child C derived from A.
   const META = { deterministic: false, model: "stub-meta", prompt_version: 1, prompt_hash: "sha256:0063" };
-  const B = await cap("063: the older note about Alice", 1, { metadata: { source: "mcp", type: "note" }, lineage: { metadata: META } });
+  // B's capture names its agent (010's id, which ob1_actor_agent_id reads
+  // from the actor's agent_id), so its vector row carries one — the tooth
+  // on the forced re-record keeping the writer's agent would otherwise
+  // compare NULL with NULL (fourth review pass, cold read and mutant).
+  const AGENT = (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = 'op-key'`)).id;
+  const B = await cap("063: the older note about Alice", 1, { metadata: { source: "mcp", type: "note" }, actor: { ...ACTOR, agent_id: AGENT }, lineage: { metadata: META } });
   await db.query(`UPDATE thoughts SET created_at = now() - interval '3 days' WHERE id = $1::uuid`, [B.id]);
   const A = await cap("063: the newer note about Alice and Bob", 2, { metadata: { source: "mcp", type: "note", topics: ["people"] }, lineage: { metadata: META } });
   const C = await cap("063: a synthesis of the newer note", 3, { derived_from: [A.id] });
@@ -9545,7 +9550,7 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   const bVec = (await rowOf(B.id, "vector"))!;
   assert(r.current === 0 && r.rebuilt === 1 && r.enqueued === 2 && r.marked === 2 && r.stale_proposals === 1 && r.unqueued === 1 && (await claimsOf(B.id)) === `${OLD_KEY}:pending` && (await claimsOf(A.id)).includes("consolidate:stub@p2:pending") && (await proposal(pid)).status === "stale",
     `--force re-runs every row: the vector, current by fingerprint, re-RECORDED rather than sent to a pool that could not clear its mark, the extraction to the row's own key (the configured one is empty, so unset), the tags marked, the proposal stale and its newer side requeued under the judge's key (${counts(r)})`);
-  assert(bVec.recipe.legacy === undefined && bVec.since === null && bVec.at > bVecBefore.at && bVec.fps.join() === B.fingerprint && bVec.recipe.model === MODEL && bVec.recipe.dims === EMBEDDING_DIM && bVec.agent === bVecBefore.agent,
+  assert(bVec.recipe.legacy === undefined && bVec.since === null && bVec.at > bVecBefore.at && bVec.fps.join() === B.fingerprint && bVec.recipe.model === MODEL && bVec.recipe.dims === EMBEDDING_DIM && bVecBefore.agent === AGENT && bVec.agent === AGENT,
     `…the re-recorded vector row: no longer legacy, unmarked, produced_at moved, the same fingerprint, the recipe as the trigger writes it, the writer's agent kept when the session sets no actor (${JSON.stringify(bVec.recipe)}; agent ${bVecBefore.agent} → ${bVec.agent})`);
   // A vector at ANOTHER model than the configured one — a corpus mid-switch
   // — is not re-recorded under force: the pool re-embeds it under the
@@ -9558,8 +9563,26 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   r = await rebuild(B.id, "force mid-switch", false, null, true);
   assert(r.rebuilt === 0 && (await claimsOf(B.id)).includes(`${REEMBED}:pending`) && (await rowOf(B.id, "vector"))!.why === "force mid-switch",
     `under force a vector at another model than the configured one goes to the reembed pool, marked, not re-recorded at the old model (${counts(r)})`);
+  // …and an UNLABELLED vector (a raw write took the label): the row's own
+  // model is none, not the configured one, so the pool moves the label and
+  // the trigger records; a re-record would have named a model nothing did
+  // (fourth review pass).
+  await db.query(`UPDATE thoughts SET embedding_model = NULL WHERE id = $1::uuid`, [B.id]);
+  await db.query(`DELETE FROM thought_work_claims WHERE thought_id = $1::uuid AND work_type = $2`, [B.id, REEMBED]);
+  assert((await rowOf(B.id, "vector"))!.recipe.model === undefined, "the label cleared raw re-recorded the vector row without a model (061's trigger)");
+  r = await rebuild(B.id, "force unlabelled", false, null, true);
+  assert(r.rebuilt === 0 && (await claimsOf(B.id)).includes(`${REEMBED}:pending`) && (await rowOf(B.id, "vector"))!.recipe.model === undefined,
+    `under force an unlabelled vector goes to the reembed pool and is not re-recorded under the configured model (${counts(r)})`);
   await db.query(`UPDATE thoughts SET embedding_model = $2 WHERE id = $1::uuid`, [B.id, MODEL]);
   await db.query(`DELETE FROM thought_work_claims WHERE thought_id = $1::uuid AND work_type = $2`, [B.id, REEMBED]);
+  // The session's word wins when it sets one: a rebuild under an actor
+  // re-records the row as that agent.
+  const other = await db.transaction(async (tx) => {
+    await tx.exec(`SELECT set_config('ob1.actor', '{"name": "other", "agent_id": "00000000-0000-4000-8000-00000000063a"}', true)`);
+    await tx.query(`SELECT rebuild_derived($1::uuid, 'force as other', false, NULL, true, false)`, [B.id]);
+    return (await tx.query<{ a: string | null }>(`SELECT canonical_agent_id::text AS a FROM derivations WHERE artifact_kind = 'vector' AND artifact_id = $1::uuid`, [B.id])).rows[0].a;
+  });
+  assert(other === "00000000-0000-4000-8000-00000000063a", `…and under a session that names an agent the re-record takes it (${other})`);
   r = await rebuild(B.id, "force again", false, null, true);
   assert(r.rebuilt === 1 && r.stale_proposals === 0 && (await proposal(pid)).status === "stale" && (await rowOf(B.id, "entities"))!.why === "force", `a second force re-records the vector again, requeues the already-stale proposal without counting it again, and leaves the first reason on the marked rows (${counts(r)})`);
   await db.exec(`UPDATE ob1_config SET value = '${CUR_KEY}' WHERE key = 'entity_extraction_key'`);
