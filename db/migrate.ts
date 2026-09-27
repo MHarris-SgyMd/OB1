@@ -95,8 +95,8 @@ const has = (name: string) => args.includes(`--${name}`);
 // the same way, with more shapes; the two are not yet one function.
 {
   const TAKES_ONE = new Set(["url", "grant"]);
-  const TAKES_NONE = new Set(["dry-run", "baseline", "reapply"]);
-  const USAGE = "  flags: --url <postgres://…>, --dry-run, --baseline, --reapply, --grant <role>";
+  const TAKES_NONE = new Set(["dry-run", "baseline", "reapply", "force"]);
+  const USAGE = "  flags: --url <postgres://…>, --dry-run, --baseline, --force (with --baseline), --reapply, --grant <role>";
   const seen = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -129,6 +129,7 @@ const url = flag("url") ?? process.env.DATABASE_URL;
 const dryRun = has("dry-run");
 const baseline = has("baseline");
 const reapply = has("reapply");
+const force = has("force");
 
 if (!url) {
   console.error("No database URL. Pass --url or set DATABASE_URL.");
@@ -136,6 +137,13 @@ if (!url) {
 }
 if (reapply && baseline) {
   console.error("--reapply re-runs what the ledger records; --baseline records without running. One or the other.");
+  process.exit(2);
+}
+// --force has one job: override --baseline's empty-database guard below. On its
+// own it would change nothing, so it is refused rather than dropped — a plain
+// run "forced" is still a plain run, and an operator who typed it meant --baseline.
+if (force && !baseline) {
+  console.error("--force overrides --baseline's empty-database guard; it does nothing on its own. Pass it with --baseline, or drop it.");
   process.exit(2);
 }
 
@@ -328,6 +336,31 @@ const begin = <T>(fn: (tx: SQL) => Promise<T>): Promise<T> =>
     await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_S}s'`);
     return fn(tx);
   }) as Promise<T>;
+
+// --baseline records every migration as applied WITHOUT running one: adoption of
+// a schema already built by hand. On a database with no fork schema that is never
+// adoption — it leaves a ledger over nothing, and every later plain run then skips
+// every file (SMD-2237). Judge by public.thoughts (migration 001's table, by
+// pg_class so a role's search_path does not hide it, as preflight's ledger row
+// does), before the ledger table is created, so a refused --baseline touches
+// nothing; --force is the escape hatch for an operator who means to record the
+// ledger over a schema built some other way.
+if (baseline && !force) {
+  const [{ present }] = (await sql`
+    SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[];
+  if (!present) {
+    console.error(
+      "--baseline refused: public.thoughts does not exist, so there is no schema to adopt.\n" +
+        "  --baseline records every migration as applied WITHOUT running it; on an empty database that\n" +
+        "  leaves a ledger over no schema, and every later plain run then skips every file.\n" +
+        "  Apply the migrations instead: cd db && bun migrate.ts --url <the same connection string>.\n" +
+        "  To record the ledger over a schema built some other way on purpose, pass --force."
+    );
+    await sql.close();
+    process.exit(2);
+  }
+}
 
 await sql`
   CREATE TABLE IF NOT EXISTS schema_migrations (

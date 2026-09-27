@@ -10,8 +10,13 @@
   "requires": {
     "open_brain": true,
     "services": ["OpenRouter (Tier 3 only)"],
-    "tools": ["Node.js 18+"],
-    "env": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
+    "tools": ["Bun 1.4+"],
+    "env": {
+      "required": ["SUPABASE_URL"],
+      "optional": ["OPENROUTER_API_KEY"],
+      "legacy_aliases": { "OPEN_BRAIN_URL": "SUPABASE_URL" },
+      "ignored": ["SUPABASE_SERVICE_ROLE_KEY", "OPEN_BRAIN_SERVICE_KEY"]
+    }
   },
   "tags": ["quality", "audit", "maintenance", "contradictions", "orphans", "staleness"],
   "difficulty": "intermediate",

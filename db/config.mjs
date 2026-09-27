@@ -1442,6 +1442,7 @@ export const ROUTE_ESTIMATE_MIN_PAGES = 8192;
  */
 export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, jsonb, float, float)";
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
+export const SEARCH_THOUGHTS_CURRENT_SIGNATURE = "search_thoughts_current(vector, text, float, int, jsonb, float, float)";
 /**
  * update_thought's signature since migration 046 (SMD-1730): a tenth,
  * defaulted parameter, `p_event`, the write event {stance, cites, valid_from,
@@ -1715,6 +1716,11 @@ export const ROLE_GRANTS = Object.freeze({
     // this grant named, and captures on (second review pass: the capture group
     // holds INSERT alone, and the read failed under the documented role).
     Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["SELECT"]),                    since: "008" }),
+    // search_thoughts' opt-in prefer_current calls 059's search_thoughts_current,
+    // which reads 058's node_state(), which reads the source rows (SMD-2255).
+    // Soft as the rest of this group — without it that search is refused with
+    // this grant named, and every other search runs.
+    Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT"]),                   since: "053" }),
   ]),
   // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
   // releases work, upserts its job key into `ob1_config` (reembed's
@@ -1750,8 +1756,9 @@ export const ROLE_GRANTS = Object.freeze({
   // record_thought_entities, so it needs `extraction` as well (SMD-2216).
   // graph-centrality.ts's dependency read (--startable, --decay-blocked) is
   // 058's node_state(), which reads `thought_sources` too, so a reader running
-  // it needs this group's SELECT; its default modes read node_lifecycle(),
-  // `thoughts` alone (SMD-2074).
+  // it needs SELECT on it — this group's, or the server group's since 059
+  // (SMD-2255); its default modes read node_lifecycle(), `thoughts` alone
+  // (SMD-2074).
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),

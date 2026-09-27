@@ -111,8 +111,19 @@ export type ThoughtHybridMatch = {
   commonNeedles: string[];
   /** Every row: the query had nothing to embed, so exact hits were ranked ahead of the vector arm. */
   literalOnly: boolean;
-  /** The fused score; monotone in the rank the function returned. Not for display. */
+  /** The fused score — times 0.25 for a demoted row under prefer_current (059) — monotone in the rank the function returned. Not for display. */
   score: number;
+  /** The hybrid's fused score before any weight; equal to `score` when nothing demoted the row. */
+  fused: number;
+  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled) and/or "superseded". Empty when it did not (and always without the flag). */
+  demoted: string[];
+  /**
+   * Under prefer_current only (059, SMD-2255): the window the function re-ranked
+   * — its size, how many rows in it carry a lifecycle, how many were demoted,
+   * the latest source watermark among them, and whether its top N is the
+   * whole list re-weighted. The same on every row; absent without the flag.
+   */
+  window?: { rows: number; known: number; demoted: number; syncedAt: string | null; exact: boolean };
 };
 
 /**
@@ -236,6 +247,19 @@ export function normaliseHybridRow(r: Record<string, unknown>): ThoughtHybridMat
     commonNeedles: strings(r.common_needles),
     literalOnly: r.literal_only === true,
     score: Number(r.score),
+    // search_thoughts_hybrid has no fused, demoted or window columns; only 059's
+    // search_thoughts_current does, so a row without them is an undemoted one.
+    fused: r.fused == null ? Number(r.score) : Number(r.fused),
+    demoted: strings(r.demoted),
+    ...(r.window_rows == null ? {} : {
+      window: {
+        rows: Number(r.window_rows),
+        known: Number(r.window_known),
+        demoted: Number(r.window_demoted),
+        syncedAt: r.window_synced_at == null ? null : String(r.window_synced_at),
+        exact: r.window_exact === true,
+      },
+    }),
   };
 }
 
@@ -376,6 +400,33 @@ export type ThoughtIdPage = {
   digest: string | null;
   cursor: string | null;
 };
+
+/**
+ * One logged search from `query_log` (SMD-2245), for a log-sourced cross-brain
+ * replay. Telemetry, not thought content: the query text, which arm ran it, the
+ * tier that logged it, when, and the search's own arguments. `result_ids` (the
+ * historical answer) is left off — the compare replays each query FRESH against
+ * both brains and diffs those, so the recorded ids are not needed, and a uuid
+ * array would diverge across the two stores' drivers for no gain.
+ */
+export type LoggedSearchRow = {
+  query: string;
+  arm: "hybrid" | "keyword" | null;
+  tier: string | null;
+  loggedAt: string | null;
+  matchCount: number | null;
+  threshold: number | null;
+  recencyWeight: number | null;
+  filter: Record<string, unknown>;
+};
+
+/**
+ * A window of a brain's logged searches, most recent first, bounded by `limit`.
+ * `truncated` is whether more searches matched the window than were returned —
+ * a log-sourced replay is bounded (two search calls per row), so the whole log
+ * is never streamed; a window is the unit.
+ */
+export type LoggedSearchPage = { searches: LoggedSearchRow[]; truncated: boolean };
 
 export type ListFilters = {
   limit: number;
@@ -868,7 +919,7 @@ export type QuerySearchLog = {
   filter: Record<string, unknown>;
   resultIds: string[];
   resultScores: (number | null)[];
-  /** Which retrieval arm served the row: 'hybrid' or 'keyword' (SMD-1490). */
+  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490) or 'current' — search_thoughts with prefer_current (059, SMD-2255). */
   arm?: string;
   /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
   tier?: string;
@@ -924,6 +975,13 @@ export interface ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
+    /**
+     * search_thoughts' opt-in prefer_current (SMD-2255): call 059's
+     * search_thoughts_current, which ranks settled and superseded thoughts
+     * below current ones, instead of search_thoughts_hybrid. Off (absent or
+     * false) is today's function, and today's order.
+     */
+    preferCurrent?: boolean;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]>;
 
   getThought(id: string): Promise<ThoughtRecord | null>;
@@ -941,6 +999,14 @@ export interface ThoughtStore {
    * enumeration when two brains' digests match. Ids only: no content, no vectors.
    */
   listThoughtIds(opts: { limit: number; after: string | null }): Promise<ThoughtIdPage>;
+
+  /**
+   * A window of the brain's logged searches (`query_log`), most recent first, for a
+   * log-sourced cross-brain replay (SMD-2245). `since` bounds the window; `limit`
+   * caps it (one extra row is read to set `truncated`). Empty when the log is off
+   * or the window holds none. Telemetry only — no thought content, no keys.
+   */
+  listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage>;
 
   /**
    * Everything thought_stats needs, aggregated by the store. The two backends
@@ -1114,7 +1180,8 @@ export interface ThoughtStore {
    * thought that supersedes each. One query over the `supersedes` column (025).
    * The read tools use it to LABEL a search hit a newer thought has replaced —
    * the guaranteed-shipping half of the retrieval decision (SMD-1253); the
-   * ranking change is gated on eval-supersession.ts. Empty when nothing given or
+   * ranking half is search_thoughts' opt-in prefer_current (059, SMD-2255),
+   * priced by eval-supersession.ts. Empty when nothing given or
    * nothing superseded; best-effort, so a pre-025 database returns an empty map
    * rather than breaking search — preflight's `provenance` check names the fix.
    */

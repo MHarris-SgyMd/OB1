@@ -310,7 +310,7 @@ the check would refuse it; that is the point of the check.
 | supersession proposals | `supersession_proposals` | `older_fingerprint`, `newer_fingerprint`, `judge_key` — recorded | re-judge on a key change | none; the shape to copy |
 | the facets | `thought_facets` | derived from `thought_sources.canonical` (053), whose `canonical_hash` is beside it | re-derive from the canonical | none; the shape to copy |
 | the change feed | `thought_changes` (052) | a read over the log | none — it is the log | reads a capture's head from the event (SMD-2117) |
-| `node_state` | 058's functions (SMD-2074): a read over the projection tables, not stored | none — `metadata.status_type`, the lossy scalar, is read as it stands | none needed while it is a read; the fold of status transitions from the log and the link facets replaces the scalar's two reads, `node_lifecycle()`'s body and `node_dependencies()`' gate | the first read-model fold to build on this log; its signatures are what the fold keeps |
+| `node_state` | 058's functions (SMD-2074): a read over the projection tables, not stored — graph-centrality and search's opt-in `prefer_current` (059) read it | none — `metadata.status_type`, the lossy scalar, is read as it stands | none needed while it is a read; the fold of status transitions from the log and the link facets replaces the scalar's two reads, `node_lifecycle()`'s body and `node_dependencies()`' gate | the first read-model fold to build on this log; its signatures are what the fold keeps |
 
 The rule the table applies: a projection's key names everything its value is
 a function of — the input's fingerprint and the recipe — or the rebuild

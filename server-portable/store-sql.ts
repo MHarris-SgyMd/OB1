@@ -41,6 +41,7 @@ import type {
   SupersessionProposal,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
+  LoggedSearchPage,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -156,22 +157,41 @@ export class SqlStore implements ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
+    preferCurrent?: boolean;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]> {
     // The function extracts the needles and does the fusion, so neither store
     // has a copy of either rule to get out of step — the same reason the two
-    // methods above call their functions rather than inlining them.
-    const rows = await this.sql`
-      SELECT id, content, metadata, created_at, similarity,
-             matched_needles, needles, needle_counts, common_needles, literal_only, score
-      FROM search_thoughts_hybrid(
-        ${toVector(opts.embedding)}::vector,
-        ${opts.query}::text,
-        ${opts.threshold}::float,
-        ${opts.limit}::int,
-        ${opts.filter}::jsonb,
-        ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
-        ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
-      )`;
+    // methods above call their functions rather than inlining them. Under
+    // prefer_current the demotion is 059's function's too (SMD-2255); a tagged
+    // template cannot bind a function name, so the two calls are two literals.
+    const weight = opts.recencyWeight ?? RECENCY_DEFAULTS.weight;
+    const halfLife = opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays;
+    const rows = opts.preferCurrent === true
+      ? await this.sql`
+          SELECT id, content, metadata, created_at, similarity,
+                 matched_needles, needles, needle_counts, common_needles, literal_only, score,
+                 fused, demoted, window_rows, window_known, window_demoted, window_synced_at, window_exact
+          FROM search_thoughts_current(
+            ${toVector(opts.embedding)}::vector,
+            ${opts.query}::text,
+            ${opts.threshold}::float,
+            ${opts.limit}::int,
+            ${opts.filter}::jsonb,
+            ${weight}::float,
+            ${halfLife}::float
+          )`
+      : await this.sql`
+          SELECT id, content, metadata, created_at, similarity,
+                 matched_needles, needles, needle_counts, common_needles, literal_only, score
+          FROM search_thoughts_hybrid(
+            ${toVector(opts.embedding)}::vector,
+            ${opts.query}::text,
+            ${opts.threshold}::float,
+            ${opts.limit}::int,
+            ${opts.filter}::jsonb,
+            ${weight}::float,
+            ${halfLife}::float
+          )`;
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
@@ -243,6 +263,36 @@ export class SqlStore implements ThoughtStore {
       digest = (agg.digest as string | null) ?? null;
     }
     return { ids, total, digest, cursor };
+  }
+
+  async listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage> {
+    // The search rows of query_log (migration 034), most recent first, windowed by
+    // `since`. One extra row over the limit tells the caller more matched without a
+    // count query. query_log is opt-in (OB1_QUERY_LOG); when it was never on this
+    // is simply empty.
+    // "" is not a time: normalise it to null (no window) rather than cast it and
+    // fail, so a direct caller matches the PostgREST store, which treats it as falsy.
+    const since = opts.since || null;
+    const rows = await this.sql`
+      SELECT query, arm, tier, logged_at, match_count, threshold, recency_weight, filter
+      FROM query_log
+      WHERE kind = 'search'
+        AND query IS NOT NULL
+        AND (${since}::timestamptz IS NULL OR logged_at > ${since}::timestamptz)
+      ORDER BY logged_at DESC, id DESC
+      LIMIT ${opts.limit + 1}::int`;
+    const truncated = rows.length > opts.limit;
+    const searches = rows.slice(0, opts.limit).map((r: Record<string, unknown>) => ({
+      query: r.query as string,
+      arm: (r.arm as LoggedSearchPage["searches"][number]["arm"]) ?? null,
+      tier: (r.tier as string | null) ?? null,
+      loggedAt: isoTimestampOrNull(r.logged_at as string | null),
+      matchCount: (r.match_count as number | null) ?? null,
+      threshold: (r.threshold as number | null) ?? null,
+      recencyWeight: (r.recency_weight as number | null) ?? null,
+      filter: (r.filter as Record<string, unknown> | null) ?? {},
+    }));
+    return { searches, truncated };
   }
 
   async databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts> {

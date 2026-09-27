@@ -33,7 +33,7 @@
  *
  *   # compare two live brains over HTTP — version/migration/freshness/retrieval —
  *   # in one report (SMD-2109, db/brain-compare.ts). No Postgres, no writes.
- *   bun db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> …] [--json]
+ *   bun db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> … | --from-log <brain> [--since <iso>]] [--json]
  *
  * --refresh uses pg_dump | pg_restore for a faithful whole-database snapshot
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
@@ -57,7 +57,9 @@
  *     end-to-end (test-live [20]) exercises;
  *   • the hybrid arm (search_thoughts_hybrid) needs a provider to embed the query
  *     text, so it is replayed only when a model is configured (OB1_EVAL_EMBED, as
- *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise.
+ *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise;
+ *   • the current arm (search_thoughts with prefer_current, 059) is the hybrid's
+ *     through search_thoughts_current, with the same provider rule.
  * A row logged before migration 045 carries a NULL arm (no way to know which arm
  * produced its ids), so it is skipped rather than guessed. Both verbs print how
  * many rows the window held, replayed and skipped. A window that replayed none
@@ -88,7 +90,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export type LoggedSearch = {
   id: string;
   query: string;
-  arm: "hybrid" | "keyword" | null;
+  /** 'current' is search_thoughts with prefer_current (059, SMD-2255): replayed through search_thoughts_current. */
+  arm: "hybrid" | "keyword" | "current" | null;
   matchCount: number | null;
   threshold: number | null;
   recencyWeight: number | null;
@@ -176,15 +179,22 @@ export async function replayOne(
     const rows = await sql`SELECT id FROM search_thoughts_keyword(${row.query}, ${limit}, 0, ${filter}::jsonb)`;
     return { ids: rows.map((r: { id: string }) => r.id), ran: true };
   }
-  if (row.arm === "hybrid") {
-    if (!embedFn) return { ids: [], ran: false, reason: "hybrid needs a provider (set OB1_EVAL_EMBED)" };
+  if (row.arm === "hybrid" || row.arm === "current") {
+    if (!embedFn) return { ids: [], ran: false, reason: `${row.arm} needs a provider (set OB1_EVAL_EMBED)` };
     const qv = await embedFn(row.query);
     const threshold = row.threshold ?? -1;
     const count = row.matchCount ?? 10;
     const recency = row.recencyWeight ?? 0;
-    const rows = await sql`
-      SELECT id FROM search_thoughts_hybrid(
-        ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`;
+    // `current` is the same arm through 059's function, the one the server
+    // called (SMD-2255); a function name cannot be a bound parameter, so two
+    // literal statements.
+    const rows = row.arm === "current"
+      ? await sql`
+          SELECT id FROM search_thoughts_current(
+            ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`
+      : await sql`
+          SELECT id FROM search_thoughts_hybrid(
+            ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`;
     return { ids: rows.map((r: { id: string }) => r.id), ran: true };
   }
   return { ids: [], ran: false, reason: "arm is NULL (logged before migration 045) — which arm produced its ids is unknown" };
@@ -710,13 +720,14 @@ function printSummary(s: ReplaySummary, gate: boolean, window: { words: string; 
  */
 export function parseCompareArgs(args: string[]): CompareArgs {
   const USAGE =
-    "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--json]\n" +
+    "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--from-log <brain> [--since <iso>]] [--json]\n" +
     "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, OB1_COMPARE_KEY, or ?key=) or a connector name (open-brain, open-brain-canary)";
-  const TAKES_ONE = new Set(["a-key", "b-key", "queries-file"]);
+  const TAKES_ONE = new Set(["a-key", "b-key", "queries-file", "from-log", "since"]);
   const TAKES_MANY = new Set(["query"]);
   const TAKES_NONE = new Set(["compare", "replay", "hybrid", "json"]);
   const out: CompareArgs = { a: "", b: "", replay: false, hybrid: false, queries: [], json: false };
   const refs: string[] = [];
+  const seenOne = new Set<string>(); // single-value flags refuse a repeat, as the SQL-verb parser does
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const name = a.startsWith("--") ? a.slice(2) : null;
@@ -733,9 +744,12 @@ export function parseCompareArgs(args: string[]): CompareArgs {
     if (name !== null && (TAKES_ONE.has(name) || TAKES_MANY.has(name))) {
       const v = args[i + 1];
       if (v === undefined || v.startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
+      if (TAKES_ONE.has(name)) { if (seenOne.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); } seenOne.add(name); }
       if (name === "a-key") out.aKey = v;
       else if (name === "b-key") out.bKey = v;
       else if (name === "queries-file") out.queries.push(...readQueriesFile(v));
+      else if (name === "from-log") { if (v.trim().length === 0) { console.error(`--from-log is empty.\n${USAGE}`); process.exit(2); } out.fromLog = v; }
+      else if (name === "since") { if (Number.isNaN(Date.parse(v))) { console.error(`--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).\n${USAGE}`); process.exit(2); } out.since = v; }
       else if (name === "query") { if (v.trim().length === 0) { console.error(`--query is empty.\n${USAGE}`); process.exit(2); } out.queries.push(v); }
       i++;
       continue;
@@ -750,8 +764,12 @@ export function parseCompareArgs(args: string[]): CompareArgs {
   if (refs.length !== 2) { console.error(`--compare needs two brains.\n${USAGE}`); process.exit(2); }
   [out.a, out.b] = refs;
   if (out.hybrid && !out.replay) { console.error(`--hybrid only applies with --replay.\n${USAGE}`); process.exit(2); }
+  if (out.fromLog && out.queries.length > 0) { console.error(`--from-log and --query/--queries-file are two query sources; pass one.\n${USAGE}`); process.exit(2); }
+  if (out.fromLog && out.hybrid) { console.error(`--hybrid does not apply to --from-log: each logged search replays on the arm that ran it.\n${USAGE}`); process.exit(2); }
+  if (out.fromLog && !out.replay) { console.error(`--from-log only applies with --replay.\n${USAGE}`); process.exit(2); }
+  if (out.since && !out.fromLog) { console.error(`--since only applies with --from-log (it windows the logged searches).\n${USAGE}`); process.exit(2); }
   if (out.queries.length > 0 && !out.replay) { console.error(`--query/--queries-file only apply with --replay (without it, no retrieval runs).\n${USAGE}`); process.exit(2); }
-  if (out.replay && out.queries.length === 0) { console.error(`--replay needs a query set: --query <q> (repeatable) or --queries-file <path>. query_log is not reachable over HTTP, so the queries are supplied.\n${USAGE}`); process.exit(2); }
+  if (out.replay && out.queries.length === 0 && !out.fromLog) { console.error(`--replay needs a query source: --query <q> (repeatable), --queries-file <path>, or --from-log <brain>.\n${USAGE}`); process.exit(2); }
   return out;
 }
 
@@ -866,7 +884,7 @@ async function main(): Promise<void> {
       : "in all of stable's log (the canary records no refresh)";
     const embedModel = process.env.OB1_EVAL_EMBED;
     const embedFn: EmbedFn | undefined = embedModel ? (q) => embed(embedModel, q, true) : undefined;
-    if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid-arm searches will be skipped (keyword arm replays without a model).`);
+    if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid- and current-arm searches will be skipped (keyword arm replays without a model).`);
     const summary = await replayAndDiff(stable, canary, { since: window, embedFn });
     const verdict = printSummary(summary, verb === "diff", { words, bounded: window !== null });
     // The gate: 1 when a ranking moved, 3 when nothing was compared — not a

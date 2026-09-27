@@ -238,6 +238,24 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
   const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: unit(0), threshold: -1, limit: 10, filter: { kind: "a" } });
   assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter reaches the keyword arm");
 
+  // prefer_current (059, SMD-2255): the store calls search_thoughts_current and
+  // maps its three extra fields; without the flag the rows carry fused =
+  // score, nothing demoted and no window. The row nearest the query, stamped a
+  // completed ticket, is demoted: no longer first, weighted exactly 0.25.
+  assert(plain.every((r) => r.fused === r.score && r.demoted.length === 0 && r.window === undefined), "without prefer_current every row carries fused = score, nothing demoted and no window");
+  const stampSql = new SQL({ url: URL_, max: 1 });
+  await stampSql`UPDATE thoughts SET metadata = metadata || ${{ source: "linear", issue: "SMD-9901", status: "Done", status_type: "completed", linear_updated_at: "2026-09-25T00:00:00.000Z" }}::jsonb WHERE id = ${plain[0].id}::uuid`;
+  const offAgain = await store.hybridThoughts({ query: "the exact thing", embedding: unit(0), threshold: -1, limit: 10, filter: {} });
+  const onCurrent = await store.hybridThoughts({ query: "the exact thing", embedding: unit(0), threshold: -1, limit: 10, filter: {}, preferCurrent: true });
+  const demotedRow = onCurrent.find((r) => r.id === plain[0].id);
+  assert(offAgain[0].id === plain[0].id && onCurrent[0].id !== plain[0].id && demotedRow !== undefined && demotedRow.demoted.join() === "completed" && demotedRow.score === demotedRow.fused * 0.25
+      && onCurrent.filter((r) => r.id !== plain[0].id).every((r) => r.demoted.length === 0 && r.score === r.fused)
+      && onCurrent.every((r) => r.window !== undefined && r.window.demoted === 1 && r.window.known === 1 && r.window.syncedAt === "2026-09-25T00:00:00.000Z" && r.window.exact === true)
+      && [...onCurrent.map((r) => r.id)].sort().join() === [...offAgain.map((r) => r.id)].sort().join(),
+    `with preferCurrent the completed row nearest the query is demoted — no longer first, marked completed, 0.25 of its fused score — the rest untouched, the window mapped on every row (${onCurrent.map((r) => r.demoted.join("+") || "-").join(" ")})`);
+  await stampSql`UPDATE thoughts SET metadata = metadata - 'source' - 'issue' - 'status' - 'status_type' - 'linear_updated_at' WHERE id = ${plain[0].id}::uuid`;
+  await stampSql.close();
+
   for (const c of ["ticket SMD-507 came up in the distant note", "ticket SMD-507 with no vector yet"]) {
     await store.deleteThought({ id: (await store.keywordThoughts({ query: c, limit: 1, offset: 0, filter: {} }))[0].id });
   }
@@ -347,6 +365,34 @@ console.log("\n[5c] listThoughtIds — the id set, its digest and keyset paging 
   // limit 0: an empty page whose cursor is null, not undefined (review pass 3).
   const zero = await store.listThoughtIds({ limit: 0, after: null });
   assert(zero.ids.length === 0 && zero.cursor === null, "limit 0 yields no ids and a null cursor (not undefined)");
+}
+
+console.log("\n[5d] listLoggedSearches — the search rows of query_log, windowed and bounded (SMD-2245)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    await raw`DELETE FROM query_log`; // isolate this section
+    await raw`INSERT INTO query_log (kind, tool, query, arm, match_count, threshold, recency_weight, filter, tier, logged_at) VALUES
+      ('search','search_thoughts_keyword','older query','keyword',25,NULL,NULL,'{}'::jsonb,'stable', now() - interval '2 hours'),
+      ('search','search_thoughts','newer query','hybrid',10,0.5,0.25,'{"type":"note"}'::jsonb,NULL, now() - interval '1 hour')`;
+    await raw`INSERT INTO query_log (kind, tool, target_id) VALUES ('action','fetch', gen_random_uuid())`; // an action row — excluded by kind='search'
+    const all = await store.listLoggedSearches({ since: null, limit: 100 });
+    assert(all.searches.length === 2 && !all.truncated, `two search rows — the action row is excluded (${all.searches.length})`);
+    assert(all.searches[0].query === "newer query" && all.searches[0].arm === "hybrid", "most recent first");
+    assert(all.searches[0].matchCount === 10 && all.searches[0].threshold === 0.5 && all.searches[0].recencyWeight === 0.25, "the search's arguments come back");
+    assert(JSON.stringify(all.searches[0].filter) === JSON.stringify({ type: "note" }), "the filter is an object, not a string");
+    assert(all.searches[1].query === "older query" && all.searches[1].tier === "stable", "the older row, with its tier");
+    assert(all.searches.every((s) => s.loggedAt !== null && ISO_RE.test(s.loggedAt)), "loggedAt is ISO on each");
+    const one = await store.listLoggedSearches({ since: null, limit: 1 });
+    assert(one.searches.length === 1 && one.truncated === true && one.searches[0].query === "newer query", "limit 1 returns the newest and flags truncated");
+    const recent = await store.listLoggedSearches({ since: new Date(Date.now() - 90 * 60 * 1000).toISOString(), limit: 100 });
+    assert(recent.searches.length === 1 && recent.searches[0].query === "newer query", "since excludes the two-hour-old row");
+    const emptySince = await store.listLoggedSearches({ since: "", limit: 100 });
+    assert(emptySince.searches.length === 2, "an empty since is no window, not a ''::timestamptz cast error (review pass 2)");
+    await raw`DELETE FROM query_log`;
+  } finally {
+    await raw.close();
+  }
 }
 
 console.log("\n[6] Dedup and merge behave as the tools expect");
