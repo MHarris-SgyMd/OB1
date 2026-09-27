@@ -424,8 +424,9 @@ INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 schema knows, and the two that settle a node); `node_lifecycle()` (per thought:
 status, status_type, the source watermark `synced_at` and `created_at` — a row
 carrying `ticket` or `issue` reads its ticket's head; it read `thoughts`
-alone until 060 stored the heads); `node_dependencies()` (one row per `blocks` / `blocked_by` link facet,
-active or closed, with whether its system gates — SMD-2218's rule); and
+alone until 060 stored the heads); `node_dependencies()` (one row per
+`blocks` / `blocked_by` link facet, active or closed, with whether its system
+gates — SMD-2218's rule); and
 `node_state(ids)` (every thought, or those named: the lifecycle beside `open`,
 `blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
 `superseded_by`). Coverage and freshness are columns — a node carries a
@@ -477,8 +478,9 @@ MRR +0.052, live-ticket MRR +0.194; costs disclosed — topical −0.127, a note
 under a Done ticket −0.292, a settled key −0.750); the query log records such a
 search as arm `current` (the CHECK widened), and `db/tier.ts` replays it. The
 server group gains SELECT on `thought_sources`, which `node_state` reads for
-its dependency columns (since 060 the search's columns do not); the wrapper is dropped before it is created, as 058's three are. At 059
-it cost what `node_state` cost — the whole brain's lifecycle per call: +10.7 ms
+its dependency columns (since 060 the search's columns do not); the wrapper
+is dropped before it is created, as 058's three are. At 059 it cost what
+`node_state` cost — the whole brain's lifecycle per call: +10.7 ms
 at 10,000 thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the
 budget pre-registered for it; shipped opt-in on the maintainer's call, and 060
 made it a lookup.
@@ -488,9 +490,9 @@ Migration 060 stores what `node_state` read per call (SMD-2256):
 the head's status, status_type and watermark, and `ob1_superseded_by`, every
 superseded thought with its newest successor. Three statement triggers on
 `thoughts` (AFTER INSERT, UPDATE and DELETE, with transition tables) keep them
-current, and a fourth empties both on TRUNCATE: a statement touching no row
-with an issue key or a `supersedes` pointer returns at once; otherwise the keys
-it moved — both sides of a key's move, a pointer's targets and their issues, a
+current, and a fourth empties both on TRUNCATE: a statement touching no row with
+an issue key or a `supersedes` pointer returns at once; otherwise the keys it
+moved — both sides of a key's move, a pointer's targets and their issues, a
 successor's `created_at` — are locked and reconciled through
 `ob1_ticket_heads_of()` and `ob1_superseders_of()`, each rule written once. The
 locks are transaction advisory locks on buckets of the keys' hashes (classes
@@ -501,51 +503,50 @@ holds its own pointer bucket so a concurrent pointer to it waits and reads its
 issue after, a DELETE holds the buckets of its deleted issue rows and of the
 deleted rows something supersedes so the cascade that nulls pointers to them
 needs none it lacks (not of every deleted row: a prune of plain rows stalls no
-ticket writer), and a transaction whose ticket writes take more than
-one round of locks — two or more statements, or one that fires the trigger
-twice (a MERGE with several actions, a multi-row upsert that both inserts and
-updates, a writable CTE with several kinds of write) — can now deadlock (40P01)
-where it waited: retry it (the repo's writers are single-row, one statement per
+ticket writer), and a transaction whose ticket writes take more than one round
+of locks — two or more statements, or one that fires the trigger twice (a MERGE
+with several actions, a multi-row upsert that both inserts and updates, a
+writable CTE with several kinds of write) — can now deadlock (40P01) where it
+waited: retry it (the repo's writers are single-row, one statement per
 transaction). Such a statement is refused under REPEATABLE READ (its snapshot
 predates the lock); SERIALIZABLE keeps the tables exact only when every ticket
-writer is serializable. The trigger and the reconcile plan every statement
-that takes the keys afresh: a plan cached while the tables were small went on
+writer is serializable. The trigger and the reconcile plan every statement that
+takes the keys afresh: a plan cached while the tables were small went on
 scanning them. The reconcile is internal (it takes no lock; call the rebuild).
-On a PostgreSQL release that drops them from the transition table (PGlite's
-17.5 does; 16.15 and 17.8 do not), the rows a MERGE updates when its own
-DELETE's cascade updates them too are not seen: rebuild after such a MERGE
-there. It is fed by the row
-store, not the log: every writer reaches `thoughts`, raw ones included, and the
-log carries no `created_at` move; SMD-1997's fold can later feed the heads'
-status. `node_lifecycle()` and `node_state()` keep their signatures and rows and
-read the tables; `node_state` lost its top-level WITH, so a caller's planner
-pulls it up, drops the dependency joins it does not read (still whole-brain
-reads — `blockers`, `unknown_blockers`, `in_dependencies`, and
-`node_dependencies()`' gate on the status scalar — SMD-2267) and looks the rest
-up by primary key. `search_thoughts_hybrid` is estimated at 100 rows, its
+On a PostgreSQL release that drops them from the transition table (PGlite's 17.5
+does; 16.15 and 17.8 do not), the rows a MERGE updates when its own DELETE's
+cascade updates them too are not seen: rebuild after such a MERGE there. It is
+fed by the row store, not the log: every writer reaches `thoughts`, raw ones
+included, and the log carries no `created_at` move; SMD-1997's fold can later
+feed the heads' status. `node_lifecycle()` and `node_state()` keep their
+signatures and rows and read the tables; `node_state` lost its top-level WITH,
+so a caller's planner pulls it up, drops the dependency joins it does not read
+(still whole-brain reads — `blockers`, `unknown_blockers`, `in_dependencies`,
+and `node_dependencies()`' gate on the status scalar — SMD-2267) and looks the
+rest up by primary key. `search_thoughts_hybrid` is estimated at 100 rows, its
 window's bound, so a ten-thousand-thought brain does not hash-join the whole
-table to it. Measured on `bench-hybrid.ts`'s arm:
-`prefer_current` adds, in the bench's run of this code, +0.50 ms at 10,000
-thoughts with no needle and +0.66 with one (the difference of medians,
-alternating order; the budget 059 missed is the hybrid's own median, 0.88 and
-1.14 — as sql, re-planned per call, the wrapper was once +1.11 against 1.10),
-and +1.11 and +1.34 at 100,000. The hybrid asked for its window of 40 costs
-+0.44 and +0.99 on its own, about all of that: the two differences of medians
-do not subtract. A narrow read is what got cheaper: a whole-brain read of every
-thought's lifecycle still reads every row (6.3 ms at 10,000, 78 at 100,000). A
-writer's cost is measured against the triggers dropped — disabling them still fills their transition tables — and
-is in `changes/smd-2256.md`.
-`ob1_node_projection_drift()` compares the tables with 058's formulas (zero
-rows when exact) and `ob1_rebuild_node_projection()` repairs them after a write
-made with the triggers disabled (`DISABLE TRIGGER`, `session_replication_role
-= replica`); it refuses to run outside READ COMMITTED, and `migrate.ts` now
-runs every file under READ COMMITTED, so 060's seed is right on a brain whose
-default is not. Preflight fails a connection whose default is REPEATABLE
-READ. The triggers run as the writer, so the **capture** group gains the
-writes on both tables: a role granted before 060 fails preflight until
-`migrate.ts --grant` runs again, and a reader of `node_lifecycle()` needs
-SELECT on `ob1_ticket_head`. On PostgreSQL 16 and 17 the search's lifecycle
-columns no longer read `thought_sources` (a removed join's tables are not
+table to it. Measured on `bench-hybrid.ts`'s arm: `prefer_current` adds, in the
+bench's run of this code, +0.50 ms at 10,000 thoughts with no needle and +0.66
+with one (the difference of medians, alternating order; the budget 059 missed is
+the hybrid's own median, 0.88 and 1.14 — as sql, re-planned per call, the
+wrapper was once +1.11 against 1.10), and +1.11 and +1.34 at 100,000. With no
+needle, the hybrid asked for its window of 40 costs +0.44 at 10,000 and +0.99 at
+100,000 on its own, about all of the no-needle addition: the two differences of
+medians do not subtract. A narrow read is what got cheaper: a whole-brain read
+of every thought's lifecycle still reads every row (6.3 ms at 10,000, 78 at
+100,000). A writer's cost is measured against the triggers dropped — disabling
+them still fills their transition tables — and is in `changes/smd-2256.md`.
+`ob1_node_projection_drift()` compares the tables with 058's formulas (zero rows
+when exact) and `ob1_rebuild_node_projection()` repairs them after a write made
+with the triggers disabled (`DISABLE TRIGGER`, `session_replication_role =
+replica`); it refuses to run outside READ COMMITTED, and `migrate.ts` now runs
+every file under READ COMMITTED, so 060's seed is right on a brain whose default
+is not. Preflight fails a connection whose default is REPEATABLE READ. The
+triggers run as the writer, so the **capture** group gains the writes on both
+tables: a role granted before 060 fails preflight until `migrate.ts --grant`
+runs again, and a reader of `node_lifecycle()` needs SELECT on
+`ob1_ticket_head`. On PostgreSQL 16 and 17 the search's lifecycle columns no
+longer read `thought_sources` (a removed join's tables are not
 permission-checked — observed, not documented), so the server group keeps that
 grant.
 

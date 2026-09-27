@@ -41,14 +41,14 @@
 --     the newest successor by (created_at, id) descending — 058's rule.
 --   * ob1_superseders_of(uuid[]) and ob1_ticket_heads_of(text[]) — the two
 --     rules, once each, NULL for every key: the seed, the rebuild and the
---     triggers all compute through them. Each is a one-time-filtered branch
---     for NULL UNION ALL a branch whose keys are an index condition (`=
---     ANY(...)`), so a small key set stays index probes even when the
---     statistics say the table is empty (a runtime `p IS NULL OR x = ANY(p)` is
---     never folded, and the OR takes the index away — SMD-2256's prototype; a
---     join to unnest() fell to a full scan once an ANALYZE from another
---     session, autovacuum's say, ran during a long transaction of ticket
---     writes and saw none of its rows — third review pass). "Nothing supersedes it" is a probe of
+--     triggers all compute through them. Each is a one-time-filtered branch for
+--     NULL UNION ALL a branch whose keys are an index condition (`= ANY(...)`),
+--     so a small key set stays index probes even when the statistics say the
+--     table is empty (a runtime `p IS NULL OR x = ANY(p)` is never folded, and
+--     the OR takes the index away — SMD-2256's prototype; a join to unnest()
+--     fell to a full scan once an ANALYZE from another session, autovacuum's
+--     say, ran during a long transaction of ticket writes and saw none of its
+--     rows — third review pass). "Nothing supersedes it" is a probe of
 --     ob1_superseded_by per candidate, so superseders are always reconciled
 --     before heads.
 --   * ob1_node_projection_reconcile(text[], uuid[]) — superseders, then
@@ -101,7 +101,10 @@
 --   recompute is a statement after the grant, so it sees every write committed
 --   before it. So statements moving one ticket's key, status, watermark or
 --   pointers serialise until commit (a content-only edit takes no lock), and a
---   transaction holds at most 513 of these locks however many keys it writes.
+--   transaction holds at most 513 of these locks however many keys it writes
+--   (the shared lock table sizes at max_locks_per_transaction, 64, per
+--   backend — some 7,800 slots on a default server — so fifteen such wide
+--   transactions at once would fill it for every session).
 --   A DELETE that locks at all takes the buckets of its deleted issue rows and
 --   of every deleted row something supersedes, so the ON DELETE SET NULL
 --   cascade — which fires this trigger again after the DELETE's own firing —
@@ -174,7 +177,8 @@ BEGIN
                   WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'supersedes') THEN
     RAISE EXCEPTION USING
       MESSAGE = 'migration 060 needs 025 (thoughts.supersedes); this schema lacks it',
-      -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
+      -- ASCII only: Bun's client hands a HINT holding a non-ASCII character
+      -- back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -392,7 +396,8 @@ AS $$
 DECLARE
   v_issues  text[];   -- issue keys whose head may have moved
   v_ids     uuid[];   -- superseded thoughts whose newest successor may have moved
-  v_targets uuid[];   -- thoughts whose superseded-ness may have moved (their issue's head with it)
+  v_targets uuid[];   -- thoughts whose superseded-ness may have moved (their
+                      -- issue's head with it)
   v_rows    uuid[];   -- rows whose head fields moved (a concurrent pointer write to one of them
                       -- reads its issue, so it takes the same pointer bucket — first review
                       -- pass), and the deleted rows a cascade can need (second to fourth)
@@ -619,12 +624,13 @@ COMMENT ON FUNCTION node_state(uuid[]) IS
 -- ---------------------------------------------------------------------------
 -- search_thoughts_current in plpgsql: 059's body, columns and settings,
 -- unchanged, in a language whose plan is cached. As LANGUAGE sql with a SET
--- clause it was planned afresh on every call (first review pass: as sql, in
--- one run, +1.11 ms at 10,000 thoughts against a budget of 1.10; as plpgsql,
--- in that pass's runs, +0.84 to +1.06 against 1.09 to 1.19 — a margin inside
--- the hybrid median's own spread from run to run). CREATE OR REPLACE keeps its signature, columns, COMMENT and ACL;
--- --reapply replays 059's sql body and then this one. The body is still a
--- string, so it records no dependency on node_state.
+-- clause it was planned afresh on every call (first review pass: as sql, in one
+-- run, +1.11 ms at 10,000 thoughts against a budget of 1.10; as plpgsql, in
+-- that pass's runs, +0.84 to +1.06 against 1.09 to 1.19 — a margin inside the
+-- hybrid median's own spread from run to run). CREATE OR REPLACE keeps its
+-- signature, columns, COMMENT and ACL; --reapply replays 059's sql body and
+-- then this one. The body is still a string, so it records no dependency on
+-- node_state.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION search_thoughts_current(
   query_embedding  vector({{EMBEDDING_DIM}}),
