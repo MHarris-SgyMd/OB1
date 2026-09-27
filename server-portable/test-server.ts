@@ -82,7 +82,7 @@ const BASE = `http://localhost:${PORT}`;
 /** Every response the server sends, success or refusal, carries the permissive CORS header. */
 const corsOk = (r: Response) => r.headers.get("access-control-allow-origin") === "*";
 
-/** StreamableHTTPTransport answers with raw JSON or an SSE frame. */
+/** WebStandardStreamableHTTPServerTransport answers with raw JSON or an SSE frame. */
 async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
   const text = await r.text();
   if (text.startsWith("{") || text.startsWith("[")) return JSON.parse(text);
