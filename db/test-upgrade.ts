@@ -2332,6 +2332,13 @@ console.log("\n[20n] Migration 061 onto a populated brain at the file before it 
   const shapeBefore = await shape(sql);
   const [arities] = await sql`SELECT (SELECT pronargs FROM pg_proc WHERE proname = 'update_thought') AS u, (SELECT pronargs FROM pg_proc WHERE proname = 'record_thought_entities') AS e, (SELECT pronargs FROM pg_proc WHERE proname = 'record_supersession_proposal') AS p`;
   assert(Number(arities.u) === 10 && Number(arities.e) === 6 && Number(arities.p) === 10, "at 060 the three producers stand at ten, six and ten arguments");
+  // db/reembed.ts on this brain refuses naming 061 and the plain run through
+  // it — not 046, which this brain has (cold read, first review pass: the
+  // refusal named 061 and told the operator to apply through 046).
+  const status060 = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: MIGRATOR_ENV, cwd: HERE });
+  const out060 = status060.out.replace(/\x1b\[[0-9;]*m/g, "");
+  assert(status060.code === 0 && /a run would refuse: update_thought predates migration 061/.test(out060) && /eleven-argument update_thought/.test(out060) && /every file through 061, in order/.test(out060) && !/through 046/.test(out060),
+         `reembed.ts --status on a brain at 060 names 061 as the missing file and the plain run through it as the remedy (exit ${status060.code}: ${out060.split("\n").find((l) => /would refuse/.test(l))?.trim().slice(0, 200)})`);
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("061") });
 

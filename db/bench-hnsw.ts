@@ -864,6 +864,17 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
     SELECT t.id, g.i, 'chunk ' || g.i, t.embedding
     FROM thoughts t, generate_series(0, ${CHUNKS_PER - 1}) AS g(i)
     WHERE (t.metadata->>'doc')::int % ${Math.round(1 / CHUNKED_SHARE)} = 0`);
+  // …and their lineage rows, where 061's table exists (SMD-1731): a bench
+  // corpus a preflight reads must not fail its lineage check on rows this
+  // file wrote raw.
+  await sql.unsafe(`DO $$ BEGIN
+    IF to_regclass('derivations') IS NOT NULL THEN
+      INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+      SELECT DISTINCT 'chunks', c.thought_id, ARRAY[c.thought_id], ARRAY[COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))], 'capture',
+             '{"deterministic": true, "bench": "bench-hnsw.ts"}'::jsonb
+        FROM thought_chunks c JOIN thoughts t ON t.id = c.thought_id
+      ON CONFLICT (artifact_kind, artifact_id, produced_by) DO NOTHING;
+    END IF; END $$`);
   const chunkS = (performance.now() - t1) / 1000;
   const [{ chunkRows }] = await sql.unsafe(`SELECT count(*)::int AS "chunkRows" FROM thought_chunks`);
 

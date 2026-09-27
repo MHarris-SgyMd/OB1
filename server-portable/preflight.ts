@@ -1387,7 +1387,7 @@ if (configFailed) {
           // for the tags the envelope declares, nor dropping the windows' row
           // with the windows. The 2-argument body is 060's = 061's.
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, and the 3-argument body appends the event first and projects the row (060), but it is from before migration 061 (${pre("061", "060")}): the tags' recipe a capture declares reaches no lineage row and a replaced window set keeps its old row — derived rows without lineage, or lineage without its artifact, which the lineage check fails on (SMD-1731)${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body appends the event first and projects the row (060), but it is from before migration 061 (${pre("061", "060")}): the tags' recipe a capture declares reaches no lineage row and a replaced window set keeps its old row — derived rows without lineage, which the lineage check fails on, and stale rows left behind (SMD-1731)${andTwo}${andOthers}`,
               applyLast("."));
         } else if (twoStale || twoUnlocked || twoNoEvent || twoNoProject) {
           add("atomic capture", "warn",
@@ -1913,10 +1913,13 @@ if (configFailed) {
          * epic names (SMD-1729: "an event and its lineage row commit
          * together"), and this is where it is caught: a producer's body from
          * before 061 (re-applied by hand), or a raw writer of the artifact
-         * tables. Every read is bounded (LIMIT 10,001, as the fingerprint
-         * census is) — a start costs the same on a brain with a million rows
-         * as on one with ten — and past the bound the line says "more than
-         * 10,000". The tags are counted as coverage, not failed: nothing on a
+         * tables. Every read is bounded at its SOURCE — the first 10,001 rows
+         * of each artifact table, whatever their order — so a start costs the
+         * same on a brain with a million mentions as on one with ten, and
+         * past the bound the line says the rest were not read. (Bounding the
+         * RESULT, the first shape, read every table whole on a healthy brain,
+         * where nothing matches — cold read, first review pass.) The tags are
+         * counted as coverage, not failed: nothing on a
          * row from before 061 says the extractor tagged it, and the file
          * backfilled none. Stale rows (the input's text moved since) are what
          * SMD-1732's rebuild will re-derive; counted, not failed.
@@ -1933,24 +1936,30 @@ if (configFailed) {
               SELECT bool_and(p.prosrc LIKE '%ob1:derivation-recorded-with-its-artifact%') AS records, count(*)::int AS n
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public' AND p.proname IN ('record_thought_entities', 'record_supersession_proposal')`) as { records: boolean | null; n: number }[];
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number };
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
             const [c] = (await sql`
-              WITH ch AS (SELECT DISTINCT c.thought_id AS id FROM public.thought_chunks c
-                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'chunks' AND d.artifact_id = c.thought_id) LIMIT ${BOUND}),
-                   vc AS (SELECT t.id FROM public.thoughts t WHERE t.embedding IS NOT NULL
-                           AND NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'vector' AND d.artifact_id = t.id) LIMIT ${BOUND}),
-                   en AS (SELECT DISTINCT x.thought_id AS id, x.extraction_key AS key
-                            FROM (SELECT thought_id, extraction_key FROM public.thought_entities UNION ALL SELECT thought_id, extraction_key FROM public.ob1_entity_edges) x
-                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'entities' AND d.artifact_id = x.thought_id AND d.produced_by = x.extraction_key) LIMIT ${BOUND}),
-                   pr AS (SELECT sp.id FROM public.supersession_proposals sp
-                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'proposal' AND d.artifact_id = sp.id) LIMIT ${BOUND}),
-                   md AS (SELECT t.id FROM public.thoughts t
-                           WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND NOT (t.metadata ? 'metadata_extraction_failed')
-                             AND NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = t.id) LIMIT ${BOUND}),
-                   st AS (SELECT d.id FROM public.derivations d JOIN public.thoughts t ON t.id = d.input_ids[1]
+              WITH ch_s AS (SELECT thought_id FROM public.thought_chunks LIMIT ${BOUND}),
+                   ch AS (SELECT DISTINCT c.thought_id AS id FROM ch_s c
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'chunks' AND d.artifact_id = c.thought_id)),
+                   vc_s AS (SELECT id FROM public.thoughts WHERE embedding IS NOT NULL LIMIT ${BOUND}),
+                   vc AS (SELECT s.id FROM vc_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'vector' AND d.artifact_id = s.id)),
+                   en_s AS (SELECT thought_id, extraction_key
+                              FROM (SELECT thought_id, extraction_key FROM public.thought_entities UNION ALL SELECT thought_id, extraction_key FROM public.ob1_entity_edges) u
+                             LIMIT ${BOUND}),
+                   en AS (SELECT DISTINCT x.thought_id AS id, x.extraction_key AS key FROM en_s x
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'entities' AND d.artifact_id = x.thought_id AND d.produced_by = x.extraction_key)),
+                   pr_s AS (SELECT id FROM public.supersession_proposals LIMIT ${BOUND}),
+                   pr AS (SELECT s.id FROM pr_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'proposal' AND d.artifact_id = s.id)),
+                   md_s AS (SELECT t.id FROM public.thoughts t
+                             WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND NOT (t.metadata ? 'metadata_extraction_failed') LIMIT ${BOUND}),
+                   md AS (SELECT s.id FROM md_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = s.id)),
+                   al AS (SELECT id, artifact_kind, input_ids, input_fingerprints, recipe FROM public.derivations LIMIT ${BOUND}),
+                   st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
                            WHERE d.artifact_kind <> 'proposal'
-                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content)) LIMIT ${BOUND}),
-                   al AS (SELECT recipe FROM public.derivations LIMIT ${BOUND})
+                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content)))
               SELECT (SELECT count(*)::int FROM ch) AS chunks,    (SELECT array_agg(id::text) FROM (SELECT id FROM ch LIMIT 3) s) AS chunk_ids,
                      (SELECT count(*)::int FROM vc) AS vectors,   (SELECT array_agg(id::text) FROM (SELECT id FROM vc LIMIT 3) s) AS vector_ids,
                      (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
@@ -1959,18 +1968,31 @@ if (configFailed) {
                      (SELECT count(*)::int FROM st) AS stale,
                      (SELECT count(*)::int FROM al) AS rows,
                      (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
-                     (SELECT count(*)::int FROM al WHERE recipe->>'declared' = 'false') AS undeclared`) as Census[];
+                     (SELECT count(*)::int FROM al WHERE recipe->>'declared' = 'false') AS undeclared,
+                     (SELECT count(*)::int FROM ch_s) AS ch_read, (SELECT count(*)::int FROM vc_s) AS vc_read, (SELECT count(*)::int FROM en_s) AS en_read,
+                     (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read`) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
+            // A source that reached the bound was sampled, not read whole: the
+            // counts over it are of what was read, and the line says so.
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.rows].some((r) => Number(r) >= BOUND);
+            const sample = capped ? ` — over the first ${BOUND.toLocaleString("en-US")} rows of each table read; the rest were not` : "";
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
-            const coverage = `${n(c.rows)} lineage row(s): ${n(c.legacy)} backfilled by 061 at the thought's current text (legacy), ${n(c.undeclared)} with no declared recipe (a caller from before the envelope), ${n(c.stale)} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) tagged before 061 carry no tag lineage (nothing on a row says which model tagged them — coverage, not a failure)`;
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) tagged before 061 carry no tag lineage (nothing on a row says which model tagged them — coverage, not a failure)${sample}`;
             if (missing.length) {
+              // The remedy by the cause the bodies show: every producer current,
+              // so a raw writer (or a write skipped) — the re-apply's backfill, or
+              // the writer's own lineage; a producer body from before 061 — the
+              // ledger's remedy for the file (run-it, first review pass: the
+              // ledger was blamed for a raw INSERT on a current schema).
               add("lineage", "fail",
                   `derived rows without a lineage row — ${missing.join("; ")} — written by a producer from before 061 (a write function, record_thought_entities or record_supersession_proposal re-applied by hand) or by a raw writer of the artifact tables; nothing can say what they were computed from (SMD-1731). ${coverage}`,
-                  ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy."));
+                  bodies.records === true && Number(bodies.n) === 2
+                    ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.`
+                    : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy."));
             } else if (bodies.records === false || Number(bodies.n) !== 2) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${Number(bodies.n) !== 2 ? "record_thought_entities or record_supersession_proposal is missing or doubled" : "record_thought_entities' or record_supersession_proposal's body is from before 061 (056 or 029 re-applied by hand)"}: the next extraction or consolidation pass writes rows without lineage (SMD-1731). ${coverage}`,

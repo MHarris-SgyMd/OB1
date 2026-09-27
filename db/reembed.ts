@@ -707,11 +707,11 @@ const HAS_LABEL: boolean = Boolean(fn.labelled);
 const refusalSchema: string | null = fn.present && fn.labelled
   ? null
   : ` ${fn.labelled ? "update_thought" : "the schema"} predates migration ${missingMigration}: this pass writes the model beside every vector it stores and builds\n` +
-    "  its pool from the rows not at that model, which needs thoughts.embedding_model (021) and the ten-argument update_thought\n" +
-    "  (046, carrying 032's envelope and 018's rule, without which a pair from before the fingerprint fails on every run). " +
+    "  its pool from the rows not at that model, which needs thoughts.embedding_model (021) and the eleven-argument update_thought\n" +
+    "  (061, carrying 046's event, 032's envelope and 018's rule — without which a pair from before the fingerprint fails on every run — and taking the lineage envelope this pass sends). " +
     (fn.ledgered
       ? `schema_migrations records ${missingMigration} as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction, and runs 021's backfill with the operator's acceptances out of its sight, so it labels\n  from real passes alone (a paste of 021's body alone labels from the acceptances too).\n  Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
-      : `Apply the pending migrations first (every file through ${fn.labelled ? "046" : "021"}, in order — a plain run does exactly that; ${missingMigration} alone would not):\n    cd db && bun migrate.ts --url …`);
+      : `Apply the pending migrations first (every file through ${fn.labelled ? "061" : "021"}, in order — a plain run does exactly that; ${missingMigration} alone would not):\n    cd db && bun migrate.ts --url …`);
 /**
  * What a run would refuse on, in the order a run judges them — the job, the
  * lease, the schema — spelled once for --status, --dry-run and the run.

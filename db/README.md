@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2032 assertions: 2032 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2034 assertions: 2034 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-one (61) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -751,6 +751,15 @@ granted only the `INSERT`: **after upgrading a brain past 055, run
 fail on the audit table's `SELECT`.** The role `migrate.ts` and the reference
 deploy connect as is the objects' owner, which holds it already — only a
 separately `--grant`-provisioned scoped role is affected.
+
+**And 061's lineage writes.** Migration 061 (SMD-1731) adds `derivations`, which
+the vector-lineage trigger and the write functions upsert **as the caller on
+every capture and edit** — and `ob1_record_derivation`'s `INSERT … RETURNING`
+needs the `SELECT`, 055's trap again. A role provisioned by `--grant` before 061
+holds no privilege on it, so **every capture that carries a vector fails inside
+the trigger: after upgrading a brain past 061, run `bun migrate.ts --grant
+<role>` again for every role that captures or runs a worker.** Preflight's
+`write privileges` row names the table until it is granted.
 
 ## Chunk context, and why it is off
 
@@ -2570,7 +2579,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2032 assertions, PGlite, no container
+bun test-schema.ts                          # 2034 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 812 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

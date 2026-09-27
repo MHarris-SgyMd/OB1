@@ -994,6 +994,17 @@ else {
   assert(/1 of 2 chunks carry a situating context and 1 do not/.test(mixed.out),
          "…and it is counted from the rows rather than trusted from ob1_config");
 
+  // 061's lineage check, the fail arm — the ticket's mutant, a producer's
+  // write skipped: the chunk set above without its row is refused, naming the
+  // kind and the thought, with the file's re-apply (its backfill) as the
+  // remedy; the row back, ok again (cold read, first review pass: no suite
+  // ran the arm).
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'chunks' AND artifact_id = '${tid}'::uuid`);
+  const noLineage = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noLineage.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 chunk set\\(s\\) \\(thought ${tid}\\) — written by a producer from before 061`).test(noLineage.out) && /Every producer is 061's, so these rows came from a raw writer of the artifact tables .* re-apply the recorded migrations — .*--reapply.* — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation\./.test(noLineage.out),
+         `a chunk set without its lineage row does not start, the kind and the thought named, the raw writer blamed (every producer is current) and the re-apply's backfill the remedy (exit ${noLineage.code}: ${noLineage.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
+  await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and with the row back the check is ok again, counting the one row");
   await ctx.unsafe(`UPDATE thought_chunks SET context = 'Situating blurb.' WHERE context IS NULL`);
   const allCtxOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/all 2 chunks carry a context but OB1_CHUNK_CONTEXT is off/.test(allCtxOff.out),
@@ -1479,7 +1490,7 @@ else {
   // after it is the shipped pair again.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") });
   const pre061 = await run(SQL_ENV);
-  assert(pre061.code === 1 && /!  atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body appends the event first and projects the row \(060\), but it is from before migration 061 \(migration 061 is not yet applied, or 060 was re-applied by hand\): the tags' recipe a capture declares reaches no lineage row and a replaced window set keeps its old row — derived rows without lineage, or lineage without its artifact, which the lineage check fails on \(SMD-1731\)/.test(pre061.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(pre061.out),
+  assert(pre061.code === 1 && /!  atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body appends the event first and projects the row \(060\), but it is from before migration 061 \(migration 061 is not yet applied, or 060 was re-applied by hand\): the tags' recipe a capture declares reaches no lineage row and a replaced window set keeps its old row — derived rows without lineage, which the lineage check fails on, and stale rows left behind \(SMD-1731\)/.test(pre061.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(pre061.out),
          "060 re-applied over 061 is a warning on the capture pair naming 061 — the body appends and projects, and records no lineage — with 061 as the remedy (SMD-1731)");
   assert(/✗  edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\) — an earlier migration re-applied by hand over 061/.test(pre061.out) && /DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\);/.test(pre061.out),
          "…and 060's 10-argument update_thought stands beside 061's eleven: the start is refused naming it with its DROP");

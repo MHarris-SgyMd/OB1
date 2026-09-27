@@ -103,13 +103,19 @@ export function captureLineage(cfg: EmbedConfig, embedded: Pick<EmbeddedCapture,
 /**
  * The extraction's recipe: the model, the prompt's version and hash, how many
  * windows were sent and — for a bounded thought — what was cut (SMD-2240),
- * whether a runaway was retried or aborted. The per-window answers stay in
+ * whether a runaway was retried, aborted or escalated to a larger model
+ * (SMD-2000). The per-window answers stay in
  * the worker's `--dump`; their count rides here.
  */
-export function entityRecipe(cfg: Pick<EmbedConfig, "metadataModel">, extraction: Pick<Extraction, "windows" | "coverage" | "retried" | "abortedMs" | "parts">): Recipe {
+export function entityRecipe(cfg: Pick<EmbedConfig, "metadataModel">, extraction: Pick<Extraction, "windows" | "coverage" | "retried" | "escalated" | "abortedMs" | "parts">): Recipe {
   return {
     deterministic: false,
+    // The model the pass ran under; `escalated` names the one that actually
+    // answered when a runaway was remade on OB1_EXTRACT_ESCALATE_MODEL
+    // (SMD-2000) — entities.ts's own derivation record, carried here (cold
+    // read, first review pass: the row named the model that was abandoned).
     model: cfg.metadataModel,
+    ...(extraction.escalated ? { escalated: extraction.escalated } : {}),
     prompt_version: ENTITY_PROMPT_VERSION,
     prompt_hash: promptHash(ENTITY_EXTRACTION_PROMPT),
     windows: extraction.windows,

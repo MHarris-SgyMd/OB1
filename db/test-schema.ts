@@ -9113,7 +9113,8 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   assert(cons.some((d) => /UNIQUE \(artifact_kind, artifact_id, produced_by\)/.test(d)) && cons.some((d) => /array_position\(input_fingerprints, NULL/.test(d)) && cons.some((d) => /deterministic/.test(d) && /COALESCE/.test(d)) && !cons.some((d) => /FOREIGN KEY/.test(d)),
     `keyed by (kind, artifact, pass); parallel arrays with no NULL fingerprint; a boolean deterministic required through COALESCE (a missing key is NULL, and a NULL CHECK passes); no foreign key (${cons.join(" | ")})`);
   const idx = (await q<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE tablename = 'derivations' ORDER BY indexname`)).map((x) => x.d);
-  assert(idx.some((d) => /USING gin \(input_ids\)/.test(d)) && idx.some((d) => /\(artifact_kind, artifact_id\)/.test(d)), `a GIN index on input_ids for the forward walk and a btree on (kind, artifact) (${idx.join(" | ")})`);
+  assert(idx.length === 3 && idx.some((d) => /USING gin \(input_ids\)/.test(d)) && idx.some((d) => /UNIQUE INDEX .* \(artifact_kind, artifact_id, produced_by\)/.test(d)) && !idx.some((d) => /\(artifact_kind, artifact_id\)$/.test(d)),
+    `three indexes — the primary key, the UNIQUE (kind, artifact, pass) which serves the artifact's own rows, and the GIN on input_ids for the forward walk; no separate btree on the prefix (${idx.join(" | ")})`);
   for (const fn of ["ob1_record_derivation", "ob1_actor_agent_id", "ob1_record_vector_lineage", "ob1_drop_thought_derivations", "ob1_drop_proposal_derivation", "record_thought_entities", "record_supersession_proposal", "update_thought"])
     assert((await functionsNamed(fn)) === 1, `one ${fn} — the older arity dropped where it moved`);
   assert((await functionsNamed("upsert_thought")) === 3, "three upsert_thought overloads still");
@@ -9190,6 +9191,10 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   assert(/p_lineage must be a JSON object, got string/.test(await refused(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '"x"'::jsonb)`, [a.id])), "update_thought refuses a scalar lineage envelope (005's guard, for this parameter)");
   assert(/p_payload\.lineage must be a JSON object, got array/.test(await refused(`SELECT upsert_thought('061: a bad envelope', $1::jsonb, NULL::vector)`, [JSON.stringify({ metadata: { source: "mcp" }, lineage: [1] })])), "upsert_thought refuses a non-object lineage envelope");
   assert((await q(`SELECT 1 FROM thoughts WHERE content = '061: a bad envelope'`)).length === 0, "…before any row is written");
+  assert(/p_payload\.lineage\.metadata must be a JSON object carrying a boolean "deterministic", got \{"model": "x"\}/.test(await refused(`SELECT upsert_thought('061: a bad recipe', $1::jsonb, NULL::vector)`, [JSON.stringify({ metadata: { source: "mcp" }, lineage: { metadata: { model: "x" } } })]))
+      && /p_payload\.lineage\.chunks must be a JSON object carrying a boolean "deterministic", got 99/.test(await refused(`SELECT upsert_thought('061: a bad recipe', $1::jsonb, NULL::vector)`, [JSON.stringify({ metadata: { source: "mcp" }, lineage: { chunks: 99 } })]))
+      && /p_lineage\.metadata must be a JSON object carrying a boolean "deterministic"/.test(await refused(`SELECT update_thought($1::uuid, NULL, '{"n": 3}'::jsonb, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"metadata": 7}'::jsonb)`, [a.id])),
+    "a recipe that is not an object with a boolean deterministic — a scalar, or an object without the key — is refused by the key's name in the write function, not three frames down (run-it, first review pass)");
   const badRecipe = await refused(`SELECT ob1_record_derivation('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], 'p', '{"model": "m"}'::jsonb)`);
   const badLength = await refused(`SELECT ob1_record_derivation('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x', 'y'], 'p', '{"deterministic": true}'::jsonb)`);
   const badNull = await refused(`SELECT ob1_record_derivation('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY[NULL::text], 'p', '{"deterministic": true}'::jsonb)`);
@@ -9258,6 +9263,15 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
     await tx.query(`UPDATE thoughts SET embedding = $1::vector WHERE id = $2::uuid`, [unit(9), b.id]);
   });
   assert((await rowOf(b.id, "vector"))!.at === bAt, "under ob1.projecting_replay a vector's write records no lineage — the fold copies this table beside the snapshot (SMD-2117)");
+  // A raw content edit that leaves the vector standing leaves its row naming
+  // the text the vector came from — stale, which is what the census reads;
+  // the first shape re-recorded it at the new text and hid that (run-it,
+  // first review pass).
+  const rawFp0 = rawRow!.fps[0];
+  await db.query(`UPDATE thoughts SET content = '061: a raw row, rewritten', content_fingerprint = content_fingerprint_of('061: a raw row, rewritten') WHERE id = $1::uuid`, [RAW]);
+  const rawAfter = await rowOf(RAW, "vector");
+  assert(rawAfter !== undefined && rawAfter.fps[0] === rawFp0 && rawAfter.fps[0] !== (await fp("061: a raw row, rewritten")) && rawAfter.at === rawRow!.at,
+    "a raw content edit that leaves the vector standing leaves its row at the text the vector came from — stale, as the census reads it — and moves no produced_at");
   await db.query(`UPDATE thoughts SET embedding = NULL WHERE id = $1::uuid`, [RAW]);
   assert((await rowsOf(RAW)).length === 0, "a raw write clearing the vector drops its row");
 

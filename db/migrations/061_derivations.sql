@@ -44,7 +44,8 @@
 --      REPLACES — a thought's chunk SET, a thought's extraction under one key,
 --      one proposal, one vector, one set of tags — so a rewrite upserts one
 --      row and moves produced_at, and a walk from an input is one GIN probe on
---      input_ids per node (026's bound applies to the walk, not here). NO
+--      input_ids per node (026's bound applies to the walk, not here); the
+--      UNIQUE index serves the artifact's own rows. NO
 --      FOREIGN KEY to thoughts (the kind is polymorphic; 060's snapshot has
 --      none either): two AFTER DELETE row triggers drop the rows keyed by a
 --      deleted thought (thoughts_drop_derivations) and by a deleted proposal
@@ -69,7 +70,9 @@
 --        column-scoped trigger with it — 2BP01), nothing under
 --        ob1.projecting_replay (a fold is not a live write; the fold copies
 --        this table beside the snapshot — SMD-2117 owns the copy), nothing when
---        vector, label and key all stand. A vector written records
+--        the vector and its label stand — a text edit alone leaves the row
+--        naming the text the vector came from, stale by design, which is what
+--        the census reads. A vector written records
 --        {deterministic: true, model, dims} for the row at its fingerprint —
 --        the whole recipe the ADR's table names for it; a vector cleared drops
 --        the row. Every writer is covered, a raw INSERT and a vendored server's
@@ -223,13 +226,15 @@ CREATE TABLE IF NOT EXISTS derivations (
   UNIQUE (artifact_kind, artifact_id, produced_by)
 );
 
--- The forward walk: every artifact an input fed, one probe per node.
+-- The forward walk: every artifact an input fed, one probe per node. The
+-- artifact's own rows — what a delete drops, what preflight joins on — are
+-- served by the UNIQUE index, whose first two columns they are (a second
+-- btree on the prefix cost 11% of the table and a write per upsert for
+-- nothing: run-it, first review pass).
 CREATE INDEX IF NOT EXISTS idx_derivations_inputs ON derivations USING GIN (input_ids);
--- The artifact's own rows: what a delete drops, what preflight joins on.
-CREATE INDEX IF NOT EXISTS idx_derivations_artifact ON derivations (artifact_kind, artifact_id);
 
 COMMENT ON TABLE derivations IS
-  'Lineage for every derived artifact (SMD-1731, Phase 1b of SMD-1729): one row per artifact per producing pass, written in the transaction that writes the artifact. artifact_kind names the tier — chunks (a thought''s window set), entities (a thought''s extraction under one extraction_key), proposal (one supersession proposal), vector (a thought''s embedding), metadata (a thought''s capture-time tags); artifact_id is the thought''s id for the four keyed by a thought and the proposal''s id for a proposal. input_ids and input_fingerprints are parallel arrays naming what the artifact was computed from and the text it was computed from — a row whose fingerprints no longer match its inputs'' is stale, which is a read (preflight counts them), not a trigger. produced_by is the pass; recipe is a JSON object carrying a boolean `deterministic` (what SMD-1732''s rebuild will read) and the producer''s own record — model, prompt_version, prompt_hash, window parameters; `legacy: true` on a row 061 backfilled, `declared: false` where a caller sent no recipe. No foreign key: thoughts_drop_derivations and supersession_proposals_drop_derivation drop the rows a deleted thought or proposal keyed. Migration 061 / SMD-1731.';
+  'Lineage for every derived artifact (SMD-1731, Phase 1b of SMD-1729): one row per artifact per producing pass, written in the transaction that writes the artifact. artifact_kind names the tier — chunks (a thought''s window set), entities (a thought''s extraction under one extraction_key), proposal (one supersession proposal), vector (a thought''s embedding), metadata (a thought''s capture-time tags); artifact_id is the thought''s id for the four keyed by a thought and the proposal''s id for a proposal. input_ids and input_fingerprints are parallel arrays naming what the artifact was computed from and the text it was computed from — a row whose fingerprints no longer match its inputs'' is stale, which is a read (preflight counts them), not a trigger. produced_by is the pass; recipe is a JSON object carrying a boolean `deterministic` (what SMD-1732''s rebuild will read) and the producer''s own record — model, prompt_version, prompt_hash, window parameters; `legacy: true` on a row 061 backfilled, `declared: false` where a caller sent no recipe. No foreign key: thoughts_drop_derivations and supersession_proposals_drop_derivation drop the rows a deleted thought or proposal keyed. A `metadata` row outlives tags an edit strips — it reads as stale, and nothing drops it (a read, not a trigger). Migration 061 / SMD-1731.';
 COMMENT ON COLUMN derivations.input_fingerprints IS
   '003''s fingerprint of each input''s text as the producer read it (parallel to input_ids; no NULL element — a row in 018''s state is hashed again). Differing from the input''s current fingerprint means the artifact is stale (migration 061 / SMD-1731).';
 COMMENT ON COLUMN derivations.recipe IS
@@ -339,14 +344,16 @@ BEGIN
   END IF;
   -- Every UPDATE reaches here (the trigger names no column — 060's reason:
   -- a probe that drops one would take the trigger with it, 2BP01, and the
-  -- projector's UPDATE names every column on every event), so an unmoved
-  -- vector, label and key write nothing and move no produced_at. The vectors
-  -- compared through the real[] cast, as 060 compares them: a session with
-  -- pgvector off its search_path has no `=` for the type by name.
+  -- projector's UPDATE names every column on every event). The row is
+  -- re-recorded when the VECTOR or its label moved, and never when the text
+  -- alone did: a raw content edit that leaves the vector standing must leave
+  -- its row naming the text the vector was computed from, or the census that
+  -- compares the two could never see a stale vector (run-it, first review
+  -- pass: the first shape re-recorded on a text move and laundered it). The
+  -- vectors compared through the real[] cast, as 060 compares them: a session
+  -- with pgvector off its search_path has no `=` for the type by name.
   IF TG_OP = 'UPDATE'
-     AND NEW.embedding_model IS NOT DISTINCT FROM OLD.embedding_model
-     AND NEW.content_fingerprint IS NOT DISTINCT FROM OLD.content_fingerprint
-     AND NEW.content IS NOT DISTINCT FROM OLD.content THEN
+     AND NEW.embedding_model IS NOT DISTINCT FROM OLD.embedding_model THEN
     IF NEW.embedding::real[] IS NOT DISTINCT FROM OLD.embedding::real[] THEN
       RETURN NULL;
     END IF;
@@ -373,7 +380,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_record_vector_lineage() IS
-  'AFTER INSERT OR UPDATE on thoughts (thoughts_record_vector_lineage, 061): records the row''s vector in `derivations` (artifact_kind vector, {deterministic: true, model, dims}, the row at its fingerprint) when the vector, its label, the key or the text moved; drops the row when the vector is cleared; nothing under ob1.projecting_replay. Migration 061 / SMD-1731.';
+  'AFTER INSERT OR UPDATE on thoughts (thoughts_record_vector_lineage, 061): records the row''s vector in `derivations` (artifact_kind vector, {deterministic: true, model, dims}, the row at its fingerprint) when the vector or its label moved — a text edit that leaves the vector standing leaves the row naming the text the vector came from, stale as the census reads it; drops the row when the vector is cleared; nothing under ob1.projecting_replay. Migration 061 / SMD-1731.';
 
 DROP TRIGGER IF EXISTS thoughts_record_vector_lineage ON thoughts;
 CREATE TRIGGER thoughts_record_vector_lineage
@@ -397,7 +404,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_drop_thought_derivations() IS
-  'AFTER DELETE on thoughts (thoughts_drop_derivations, 061): drops the `derivations` rows the thought keyed — its chunk set''s, its extractions'', its vector''s, its tags''. A proposal naming it goes by 029''s cascade and takes its own row through supersession_proposals_drop_derivation. Migration 061 / SMD-1731.';
+  'AFTER DELETE on thoughts (thoughts_drop_derivations, 061): drops the `derivations` rows the thought keyed — its chunk set''s, its extractions'', its vector''s, its tags''. A proposal naming it goes by 029''s cascade and takes its own row through supersession_proposals_drop_derivation. Fires under a replay too: a replayed tombstone drops the rows a fold copied, which a fold that copies this table and then replays the log in order expects (SMD-2117). Migration 061 / SMD-1731.';
 
 DROP TRIGGER IF EXISTS thoughts_drop_derivations ON thoughts;
 CREATE TRIGGER thoughts_drop_derivations
@@ -509,6 +516,16 @@ BEGIN
     RAISE EXCEPTION
       'upsert_thought: p_payload.lineage must be a JSON object, got %. A client that binds a JS string to a jsonb parameter double-encodes it — pass an object, or cast explicitly.',
       jsonb_typeof(v_lineage);
+  END IF;
+  -- …and each recipe it names is an object carrying a boolean deterministic,
+  -- refused HERE by the key's name — not three frames down in the writer
+  -- (run-it, first review pass: a scalar was ignored and an object without
+  -- the key failed the capture naming ob1_record_derivation).
+  IF v_lineage ? 'metadata' AND (jsonb_typeof(v_lineage->'metadata') <> 'object' OR COALESCE(jsonb_typeof(v_lineage->'metadata'->'deterministic'), '') <> 'boolean') THEN
+    RAISE EXCEPTION 'upsert_thought: p_payload.lineage.metadata must be a JSON object carrying a boolean "deterministic", got %.', v_lineage->'metadata';
+  END IF;
+  IF v_lineage ? 'chunks' AND (jsonb_typeof(v_lineage->'chunks') <> 'object' OR COALESCE(jsonb_typeof(v_lineage->'chunks'->'deterministic'), '') <> 'boolean') THEN
+    RAISE EXCEPTION 'upsert_thought: p_payload.lineage.chunks must be a JSON object carrying a boolean "deterministic", got %.', v_lineage->'chunks';
   END IF;
 
   -- Transaction-local, so it cannot outlive this call on a pooled connection.
@@ -820,11 +837,19 @@ BEGIN
       'update_thought: p_metadata_patch must be a JSON object, got %. A client that binds a JS string to a jsonb parameter double-encodes it — pass an object, or cast explicitly.',
       jsonb_typeof(p_metadata_patch);
   END IF;
-  -- 061: the same guard for the lineage envelope.
+  -- 061: the same guard for the lineage envelope, and for each recipe it
+  -- names — an object carrying a boolean deterministic, refused by the
+  -- key's name (run-it, first review pass).
   IF p_lineage IS NOT NULL AND jsonb_typeof(p_lineage) <> 'object' THEN
     RAISE EXCEPTION
       'update_thought: p_lineage must be a JSON object, got %. A client that binds a JS string to a jsonb parameter double-encodes it — pass an object, or cast explicitly.',
       jsonb_typeof(p_lineage);
+  END IF;
+  IF p_lineage ? 'metadata' AND (jsonb_typeof(p_lineage->'metadata') <> 'object' OR COALESCE(jsonb_typeof(p_lineage->'metadata'->'deterministic'), '') <> 'boolean') THEN
+    RAISE EXCEPTION 'update_thought: p_lineage.metadata must be a JSON object carrying a boolean "deterministic", got %.', p_lineage->'metadata';
+  END IF;
+  IF p_lineage ? 'chunks' AND (jsonb_typeof(p_lineage->'chunks') <> 'object' OR COALESCE(jsonb_typeof(p_lineage->'chunks'->'deterministic'), '') <> 'boolean') THEN
+    RAISE EXCEPTION 'update_thought: p_lineage.chunks must be a JSON object carrying a boolean "deterministic", got %.', p_lineage->'chunks';
   END IF;
   IF v_set_supersedes AND jsonb_typeof(p_provenance->'supersedes') <> 'null' THEN
     IF jsonb_typeof(p_provenance->'supersedes') <> 'string'
@@ -1131,6 +1156,8 @@ DECLARE
   -- this call wrote or removed any — the lineage row's two gates.
   v_standing   boolean;
   v_touched    int := 0;
+  v_recipe     jsonb;
+  v_recorded   jsonb;
 BEGIN
   IF p_extraction_key IS NULL OR p_extraction_key = '' THEN
     RAISE EXCEPTION 'record_thought_entities: p_extraction_key must name the pass, e.g. extract:<model>@p1 or source:<system>';
@@ -1353,16 +1380,20 @@ BEGIN
   -- take at 053 pruning an old holder with an empty set, an extraction the
   -- gate refused whole — is no artifact, so no row. A structured pass that
   -- wrote and removed nothing (the same set twice) leaves its row where it
-  -- was, as it leaves last_seen_at (053's fourth review pass); an
-  -- extraction always writes and always records.
+  -- was, as it leaves last_seen_at (053's fourth review pass) — unless its
+  -- RECIPE moved, which SMD-1732's rebuild reads (cold read, first review
+  -- pass); an extraction always writes and always records.
   SELECT count(*) INTO v_touched FROM _rte_touched;
+  v_recipe := COALESCE(p_recipe, jsonb_build_object('deterministic', v_structured, 'key', p_extraction_key, 'declared', false));
+  SELECT d.recipe INTO v_recorded FROM derivations d
+   WHERE d.artifact_kind = 'entities' AND d.artifact_id = p_thought_id AND d.produced_by = p_extraction_key;
   v_standing := EXISTS (SELECT 1 FROM thought_entities m WHERE m.thought_id = p_thought_id AND m.extraction_key = p_extraction_key)
              OR EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.thought_id = p_thought_id AND g.extraction_key = p_extraction_key);
   IF NOT v_standing THEN
     DELETE FROM derivations
      WHERE artifact_kind = 'entities' AND artifact_id = p_thought_id
        AND CASE WHEN v_structured THEN produced_by = p_extraction_key ELSE produced_by NOT LIKE 'source:%' END;
-  ELSIF NOT v_structured OR v_mentions > 0 OR v_edges > 0 OR v_touched > 0 THEN
+  ELSIF NOT v_structured OR v_mentions > 0 OR v_edges > 0 OR v_touched > 0 OR v_recorded IS DISTINCT FROM v_recipe THEN
     IF NOT v_structured THEN
       -- The extracted class, replaced: an earlier model's or prompt's row goes
       -- as its mentions and edges went above.
@@ -1372,8 +1403,7 @@ BEGIN
     END IF;
     PERFORM ob1_record_derivation('entities', p_thought_id, ARRAY[p_thought_id],
                                   ARRAY[COALESCE(p_content_fingerprint, v_current_fp)], p_extraction_key,
-                                  COALESCE(p_recipe, jsonb_build_object('deterministic', v_structured, 'key', p_extraction_key, 'declared', false)),
-                                  p_agent_id);
+                                  v_recipe, p_agent_id);
   END IF;
 
   RETURN jsonb_build_object(
