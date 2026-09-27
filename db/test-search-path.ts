@@ -84,6 +84,9 @@ function preflight(extraEnv: Record<string, string | undefined> = {}) {
   return runScript(["bun", join(SERVER, "preflight.ts")], { cwd: SERVER, env: clean });
 }
 
+/** `url` with an options= value on it: the connection string that sets the session's path. */
+const withOptions = (url: string, value: string | undefined) => `${url}${url.includes("?") ? "&" : "?"}options=${value}`;
+
 /** A fresh session that has NOT added the schema — the state the server's connection is in. */
 async function freshSession<T>(fn: (sql: SQL) => Promise<T>): Promise<T> {
   const sql = new SQL({ url: URL_, max: 1 });
@@ -233,7 +236,7 @@ try {
     assert(!!grant && !!pathStmt, `…and the remedy is the GRANT, which SET search_path alone would not fix, then the path (${grant} | ${pathStmt})`);
     // The path from the connection string: the GRANT, then its options= value
     // in the one-sentence form the off-path branch prints (review pass 2).
-    const viaOptions = await preflight({ DATABASE_URL: `${nurl}${nurl.includes("?") ? "&" : "?"}options=-csearch_path%3Dpublic` });
+    const viaOptions = await preflight({ DATABASE_URL: withOptions(nurl, "-csearch_path%3Dpublic") });
     const clientLine = viaOptions.out.split("\n").find((l) => /^\s*→ GRANT USAGE ON SCHEMA/.test(l))?.trim() ?? "";
     assert(new RegExp(`^→ GRANT USAGE ON SCHEMA ${SCHEMA} TO ob1_nousage;  \\(as a role that can\\)  The connection string sets search_path .*\\(separated by %20\\): -csearch_path%3Dpublic%2C%22${SCHEMA}%22  Then reconnect\\.$`).test(clientLine),
            `…and with the path from the connection string, the GRANT and then its options= value (${clientLine})`);
@@ -251,12 +254,10 @@ try {
 
   console.log("\n[5b] A path from the connection string is replaced there, not overridden by ALTER ROLE");
   {
-    const sep = URL_.includes("?") ? "&" : "?";
-    const viaUrl = `${URL_}${sep}options=-csearch_path%3D%22%24user%22%2Cpublic`;
-    const r = await preflight({ DATABASE_URL: viaUrl });
+    const r = await preflight({ DATABASE_URL: withOptions(URL_, "-csearch_path%3D%22%24user%22%2Cpublic") });
     const value = new RegExp(`→ The connection string sets search_path .*\\(separated by %20\\): (-csearch_path%3D%22%24user%22%2Cpublic%2C%22${SCHEMA}%22)  Then reconnect\\.\\n`).exec(r.out)?.[1];
     assert(!!value, `a path from the connection string gets the options= value, with ${SCHEMA} added (${r.out.split("\n").find((l) => /connection string sets search_path/.test(l))?.trim()})`);
-    const replaced = await preflight({ DATABASE_URL: `${URL_}${sep}options=${value}` });
+    const replaced = await preflight({ DATABASE_URL: withOptions(URL_, value) });
     assert(!!value && /vector extension\s+the vector type resolves/.test(replaced.out),
            "…and with the setting replaced as printed, the type resolves");
   }
@@ -266,8 +267,7 @@ try {
     // thoughts and pgvector both off the connection's path: the schema row's
     // statement adds pgvector's schema as well, so the two rows agree, and the
     // one value, followed, puts both on the path (SMD-2238).
-    const sep = URL_.includes("?") ? "&" : "?";
-    const r = await preflight({ DATABASE_URL: `${URL_}${sep}options=-csearch_path%3Dnowhere` });
+    const r = await preflight({ DATABASE_URL: withOptions(URL_, "-csearch_path%3Dnowhere") });
     const rowFix = (name: string) => {
       const ls = r.out.split("\n");
       const i = ls.findIndex((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l));
@@ -276,7 +276,7 @@ try {
     const schemaValue = rowFix("schema"), vectorValue = rowFix("vector extension");
     assert(schemaValue === `-csearch_path%3D%22nowhere%22%2Cpublic%2C%22${SCHEMA}%22` && vectorValue === schemaValue,
            `both rows print one options= value, public and ${SCHEMA} added (${schemaValue} | ${vectorValue})`);
-    const mended = await preflight({ DATABASE_URL: `${URL_}${sep}options=${schemaValue}` });
+    const mended = await preflight({ DATABASE_URL: withOptions(URL_, schemaValue) });
     assert(!!schemaValue && /✓\s+schema\s+thoughts table reachable/.test(mended.out) && /vector extension\s+the vector type resolves/.test(mended.out),
            "…and with it in place, thoughts and the vector type both resolve");
   }
