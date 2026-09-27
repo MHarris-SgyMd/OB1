@@ -41,7 +41,7 @@ import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-porta
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
-import { corpusIngested, docOf, docsOf, INGEST_ACTOR, recordId, recordStructure, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
@@ -2567,9 +2567,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const combined = await reembed("--accept-failed", poisonId, "--retry-failed");
   assert(combined.code === 2 && /do not combine/.test(combined.out), "…and it does not combine with a run's flags");
   const stray = await reembed("--accept-failed", poisonId, "--dry-run", lateId);
-  assert(stray.code === 2 && /not understood: /.test(stray.out) && stray.out.includes(lateId), "…and an id after another flag is refused rather than dropped");
+  assert(stray.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(stray.out) && /--accept-failed <thought-id …> \(right after it, before any other flag\)/.test(stray.out), "…and an id after another flag is refused rather than dropped");
   const twice = await reembed("--accept-failed", poisonId, "--accept-failed", lateId);
-  assert(twice.code === 2 && /--accept-failed is given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
+  assert(twice.code === 2 && /--accept-failed given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
   const jobless = await reembedIn({}, "--job", "--switch-model");
   assert(jobless.code === 2 && /--job needs a value/.test(jobless.out) && (await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = '--switch-model'`)[0].c === 0,
     `a flag that takes a value followed by another flag is refused, not read as the value — no pass runs under the key "--switch-model" (exit ${jobless.code})`);
@@ -2603,7 +2603,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `…and --all passes over it, saying so (exit ${allDry.code})`);
   await sql`DELETE FROM thoughts WHERE id = ${vectorlessId}::uuid`;
   const allAndIds = await reembed("--accept-failed", "--all", poisonId);
-  assert(allAndIds.code === 2 && /not understood: /.test(allAndIds.out) && allAndIds.out.includes(poisonId) && (await claimCounts()).failed === 3,
+  assert(allAndIds.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(allAndIds.out) && (await claimCounts()).failed === 3,
     `…nor does --all take ids beside it — an id after it is a stray argument, refused (exit ${allAndIds.code})`);
   const idsAndAll = await reembed("--accept-failed", poisonId, "--all");
   assert(idsAndAll.code === 2 && /--all takes no ids beside it/.test(idsAndAll.out) && (await claimCounts()).failed === 3,
@@ -4585,6 +4585,13 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   assert(namedAudit?.origin === INGEST_ACTOR.via && namedAudit.actor_name === INGEST_ACTOR.name, "…and its audit row names the ingester as writer and door");
   assert((await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === "" || (await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === null, "…and the envelope does not outlive the record's transaction on the connection");
   ids.push(named.id);
+  // SMD-2212: `--actor` — the import runner's rows carry its own name, through the ingester's door.
+  const byRunner = mk("memory", "test-note-r", "Test note R: written by the import runner under its own name.");
+  assert((await upsertRecord(sql, byRunner, runName(), ingestActor("orchestration-runner"))).outcome === "inserted", "a record under another tool's actor name inserts");
+  const [runnerRow] = await sql`SELECT metadata->>'actor_name' AS n FROM thoughts WHERE id = ${byRunner.id}::uuid`;
+  const [runnerAudit] = await sql`SELECT origin, actor_name FROM thought_audit WHERE thought_id = ${byRunner.id}::uuid AND action = 'capture'`;
+  assert(runnerRow.n === "orchestration-runner" && runnerAudit?.actor_name === "orchestration-runner" && runnerAudit.origin === INGEST_ACTOR.via, `…stamped with that name, and its audit row keeps the ingester as the door (${runnerRow.n}/${runnerAudit?.origin})`);
+  ids.push(byRunner.id);
 
   // A record an adapter mapped (SMD-1867): the row, and in its transaction the
   // canonical, the links and the structured mentions; the same record again
@@ -6425,6 +6432,139 @@ console.log("\n[30] Migration 061 on a real server: the windowed capture's linea
   }
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM derivations`;
+  await sql.close();
+}
+
+console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild_derived — a dry run keeps nothing, a run feeds the three pools and sets the proposal stale, --status reads the census, --orphans sweeps a row whose windows a raw delete removed; the walk rides the GIN index; two sessions racing — a rebuild against a reviewer's accept (serialised by the supersession lock), a forget-arm rebuild against a worker's extraction (the entity lock, no deadlock) (SMD-1732)");
+{
+  // Its own pool, as [30] has.
+  const sql = new SQL({ url: URL_, max: 2 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`DELETE FROM ob1_entities`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const MODEL = EMBEDDING_MODEL;
+  const cfg = Object.fromEntries(((await sql`SELECT key, value FROM ob1_config WHERE key IN ('embedding_model', 'embedding_dim')`) as { key: string; value: string }[]).map((r) => [r.key, r.value]));
+  const REEMBED = `reembed:${cfg.embedding_model}@${cfg.embedding_dim}`;
+  const CUR_KEY = "extract:live@p2", JUDGE = "consolidate:live@p1";
+  const rebuildTs = (...extra: string[]) => runScript(["bun", join(HERE, "rebuild.ts"), "--url", URL_!, ...extra], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: HERE });
+  const claimsOf = async (id: string) => ((await sql`SELECT work_type AS w, status AS s FROM thought_work_claims WHERE thought_id = ${id}::uuid ORDER BY 1`) as { w: string; s: string }[]).map((c) => `${c.w}:${c.s}`).join();
+  const marksOf = async (id: string) => ((await sql`SELECT artifact_kind AS k, stale_reason AS r FROM derivations WHERE artifact_id = ${id}::uuid ORDER BY 1`) as { k: string; r: string | null }[]).map((m) => `${m.k}:${m.r ?? "-"}`).join();
+  const status = async (pid: string) => ((await sql`SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid`) as { status: string }[])[0]?.status;
+
+  // The fixture: an older and a newer thought sharing Alice, the newer with
+  // real windows through the 4-argument form (its chunks row from the
+  // envelope's recipe), a pending proposal; the configured extraction key set
+  // after the captures (016's trigger would enqueue them under it).
+  const older = (await sql`SELECT upsert_thought('063 live: the older note about Alice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string; fingerprint: string };
+  await sql`UPDATE thoughts SET created_at = now() - interval '3 days' WHERE id = ${older.id}::uuid`;
+  const windows = [{ content: "window one", embedding: unit(2) }, { content: "window two", embedding: unit(3) }];
+  const newer = (await sql`SELECT upsert_thought('063 live: the newer note about Alice and Bob', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL, lineage: { chunks: { deterministic: true, model: MODEL, params: { tokens: 300 }, count: 2 } } }}::jsonb, ${unit(2)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string; fingerprint: string };
+  for (const [id, ents] of [[older.id, [{ name: "Alice", type: "person", confidence: 0.9 }]], [newer.id, [{ name: "Alice", type: "person", confidence: 0.9 }, { name: "Bob", type: "person", confidence: 0.9 }]]] as const) {
+    const e = (await sql`SELECT record_thought_entities(${id}::uuid, 'extract:old@p1', ${JSON.stringify(ents)}::text::jsonb, '[]'::jsonb, NULL, NULL, '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { ok: boolean };
+    assert(e.ok === true, "the fixture's extractions stand");
+  }
+  const pid = (await sql`SELECT record_supersession_proposal(${older.id}::uuid, ${newer.id}::uuid, 'newer_supersedes_older', 0.9, 'because', 0.8, ${JUDGE}::text, NULL, NULL, NULL, '{"deterministic": false}'::jsonb) AS id`)[0].id as string;
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${CUR_KEY}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+  assert((await marksOf(newer.id)) === "chunks:-,entities:-,vector:-" && Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`)[0].c) === 2, `the newer thought's three rows, none marked, two windows (${await marksOf(newer.id)})`);
+
+  // The walk rides the GIN index (a small table would seq-scan; the planner
+  // is asked with the scan off, as [15]'s plan check does for its index).
+  const plan = JSON.stringify(await sql.unsafe(`SET enable_seqscan = off; EXPLAIN (FORMAT JSON) SELECT * FROM derivations WHERE input_ids && ARRAY['${newer.id}'::uuid]; RESET enable_seqscan`).simple());
+  assert(/idx_derivations_inputs/.test(plan), `the forward probe uses the GIN index on input_ids (${plan.slice(0, 200)})`);
+
+  // A raw text move, then the door: a dry run reports and keeps nothing; a
+  // run feeds the three pools under the workers' keys and sets the proposal
+  // stale; --status reads it back.
+  await sql`UPDATE thoughts SET content = '063 live: the newer note about Alice and Bob, rewritten', content_fingerprint = content_fingerprint_of('063 live: the newer note about Alice and Bob, rewritten') WHERE id = ${newer.id}::uuid`;
+  await sql`DELETE FROM thought_work_claims WHERE thought_id = ${newer.id}::uuid`;
+  const dry = await rebuildTs("--input", newer.id, "--reason", "live: edit", "--dry-run");
+  assert(dry.code === 0 && /dry run: the call runs and rolls back/.test(dry.out) && /enqueued:\s+3 \(thought, pool\) claim\(s\)/.test(dry.out) && (await claimsOf(newer.id)) === "" && (await status(pid)) === "pending" && (await marksOf(newer.id)) === "chunks:-,entities:-,vector:-",
+    `a dry run prints the report the function would give and keeps nothing (exit ${dry.code}: ${dry.out.split("\n").find((l) => /enqueued/.test(l))?.trim()}; claims "${await claimsOf(newer.id)}")`);
+  const live = await rebuildTs("--input", newer.id, "--reason", "live: edit");
+  assert(live.code === 0 && /rebuilt:\s+0/.test(live.out) && /enqueued:\s+3/.test(live.out) && /marked:\s+3 lineage row\(s\)[^\n]*1 pending proposal\(s\) set stale/.test(live.out) && new RegExp(`${REEMBED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+→\\s+bun db/reembed\\.ts --url <url>`).test(live.out) && /extract:live@p2\s+→\s+bun db\/extract-entities\.ts/.test(live.out) && /consolidate:live@p1\s+→\s+bun db\/consolidate\.ts/.test(live.out),
+    `a run hands the windows and the vector to the reembed pool, the extraction to the configured key, the pair to the judge's, and names the command that drains each (exit ${live.code}: ${live.out.trim().split("\n").slice(2, 6).join(" / ").slice(0, 300)})`);
+  assert((await claimsOf(newer.id)) === `${JUDGE}:pending,${CUR_KEY}:pending,${REEMBED}:pending` && (await status(pid)) === "stale" && (await marksOf(newer.id)) === "chunks:live: edit,entities:live: edit,vector:live: edit",
+    `…the claims stand under the three keys, the proposal is stale, the reason is on every row (${await claimsOf(newer.id)}; ${await marksOf(newer.id)})`);
+  const st = await rebuildTs("--status");
+  assert(st.code === 0 && /marked:\s+3 row\(s\) await a re-run/.test(st.out) && /proposals:\s+1 stale/.test(st.out) && /orphans:\s+0 row\(s\)/.test(st.out) && new RegExp(`${CUR_KEY} \\(1 pending\\)`).test(st.out),
+    `--status reads the census back: the marks, the stale proposal, the pools (${st.out.trim().split("\n").slice(0, 7).join(" / ").slice(0, 300)})`);
+  // A raw delete of the windows leaves an orphan row: the sweep deletes it.
+  await sql`DELETE FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`;
+  const sweep = await rebuildTs("--orphans");
+  assert(sweep.code === 0 && /orphans:\s+1 thought\(s\)/.test(sweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\)/.test(sweep.out) && (await marksOf(newer.id)) === "entities:live: edit,vector:live: edit",
+    `--orphans deletes the chunks row whose windows are gone and leaves the rest (exit ${sweep.code}: ${sweep.out.trim().split("\n").slice(0, 2).join(" / ")})`);
+  assert(/orphans: none/.test((await rebuildTs("--orphans")).out), "…and a second sweep finds none");
+  // The door's array bind (first review pass: Bun bound a string[] as the
+  // bare text "a,b" — malformed array literal), and a fresh process on a
+  // thought whose only lineage row is a proposal (the record variable with
+  // no shape, same pass).
+  const gone = await rebuildTs("--input", newer.id, "--gone", "--fingerprints", "live-old-fp,live-\"quoted\"-fp", "--dry-run");
+  assert(gone.code === 0 && /input:\s+[0-9a-f-]{36} \(leaving/.test(gone.out) && /cascade:\s+1 proposal\(s\)/.test(gone.out), `the forget arm through the door with two fingerprints, one carrying a quote, runs dry and reports the cascade (exit ${gone.code}: ${gone.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 240)})`);
+  const P0 = (await sql`SELECT upsert_thought('063 live: a vectorless older note', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`)[0].r as { id: string };
+  await sql`UPDATE thoughts SET created_at = now() - interval '4 days' WHERE id = ${P0.id}::uuid`;
+  const Q0 = (await sql`SELECT upsert_thought('063 live: a vectorless newer note', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`)[0].r as { id: string };
+  await sql`SELECT record_supersession_proposal(${P0.id}::uuid, ${Q0.id}::uuid, 'conflict_undirected', 0.5, 'first', 0.5, ${JUDGE}::text)`;
+  const firstRow = await rebuildTs("--input", Q0.id, "--reason", "live: first");
+  assert(firstRow.code === 0 && /walked:\s+1 lineage row/.test(firstRow.out) && /current:\s+1/.test(firstRow.out), `a fresh process's first rebuild on a thought whose only row is a proposal runs (exit ${firstRow.code}: ${firstRow.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 200)})`);
+  // The fingerprints reach the function for real: two planted snapshot rows
+  // — one with a quote, one with a backslash — go with Q0's forget; a third,
+  // not passed, stays (second review pass: the dry run above proved only the
+  // exit code).
+  for (const f of ['live-"quoted"-fp', "live-back\\slash-fp", "live-unpassed-fp"]) await sql`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES (${f}, ${MODEL}, ${unit(4)}::vector, ${EMBEDDING_DIM}) ON CONFLICT DO NOTHING`;
+  const goneReal = await rebuildTs("--input", Q0.id, "--gone", "--fingerprints", 'live-"quoted"-fp,live-back\\slash-fp');
+  const snapLeft = ((await sql`SELECT content_fingerprint AS f FROM ob1_embedding_snapshot WHERE content_fingerprint LIKE 'live-%' ORDER BY 1`) as { f: string }[]).map((r) => r.f).join();
+  assert(goneReal.code === 0 && /deleted:\s+2 /.test(goneReal.out) && snapLeft === "live-unpassed-fp", `a real forget through the door deletes the snapshot rows at the passed fingerprints, quotes and backslashes intact, and leaves the one not passed (exit ${goneReal.code}; left: ${snapLeft})`);
+  await sql`DELETE FROM ob1_embedding_snapshot WHERE content_fingerprint LIKE 'live-%'`;
+
+  // Two sessions: a rebuild inside an open transaction against a reviewer
+  // accepting the same proposal — the reviewer waits on the supersession
+  // lock the rebuild took first (036's order), then acts on the row the
+  // rebuild left. Bun's SQL is lazy: the blocked call is dispatched with
+  // execute() (test-live [30]'s lesson).
+  await sql`UPDATE supersession_proposals SET status = 'pending' WHERE id = ${pid}::uuid`;
+  const cA = new SQL({ url: URL_, max: 1 }), cB = new SQL({ url: URL_, max: 1 });
+  try {
+    await cA`BEGIN`;
+    const rA = (await cA`SELECT rebuild_derived(${newer.id}::uuid, 'race: rebuild') AS r`)[0].r as { ok: boolean; marked: number };
+    const pB = cB`SELECT review_supersession_proposal(${pid}::uuid, 'accept', 'raced', NULL, ${JSON.stringify(ACTOR)}::text::jsonb, true) AS r`.execute();
+    let waited = 0;
+    for (let i = 0; i < 40 && !waited; i++) {
+      await Bun.sleep(50);
+      waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+    }
+    await cA`COMMIT`;
+    const rB = (await pB)[0].r as { ok: boolean; status?: string; error?: string };
+    assert(rA.ok === true && waited === 1 && rB.ok === true && rB.status === "accepted" && (await status(pid)) === "accepted",
+      `the reviewer waited on the rebuild's lock and then accepted the stale row with p_force (waited ${waited}; ${JSON.stringify(rB)})`);
+
+    // A forget-arm rebuild against a worker writing the same thought's
+    // extraction: the worker holds the entity from its upsert; the rebuild
+    // locks the entities FIRST (016's order) and waits, then deletes the
+    // mentions the worker wrote — no 40P01, the graph empty at the end.
+    await cA`BEGIN`;
+    const eA = (await cA`SELECT record_thought_entities(${newer.id}::uuid, ${CUR_KEY}::text, '[{"name": "Alice", "type": "person", "confidence": 0.9}, {"name": "Carol", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL, '{"deterministic": false}'::jsonb) AS r`)[0].r as { ok: boolean };
+    const pF = cB`SELECT rebuild_derived(${newer.id}::uuid, 'race: forget', true) AS r`.execute();
+    waited = 0;
+    for (let i = 0; i < 40 && !waited; i++) {
+      await Bun.sleep(50);
+      waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+    }
+    await cA`COMMIT`;
+    const rF = (await pF)[0].r as { ok: boolean; deleted: number; cascading: { proposals: number } };
+    const ents = ((await sql`SELECT name FROM ob1_entities ORDER BY name`) as { name: string }[]).map((e) => e.name).join();
+    assert(eA.ok === true && waited === 1 && rF.ok === true && Number((await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${newer.id}::uuid`)[0].c) === 0 && ents === "Alice" && rF.cascading.proposals === 1,
+      `the forget arm waited on the worker's entity lock, then removed the mentions the worker had just written — Carol pruned, Alice (the older's) kept, the proposal counted for the cascade (waited ${waited}; entities ${ents}; ${JSON.stringify(rF)})`);
+  } finally {
+    await cA.close();
+    await cB.close();
+  }
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`DELETE FROM ob1_entities`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql.close();
 }
 

@@ -536,7 +536,7 @@ export class PostgrestStore implements ThoughtStore {
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseDerivative);
   }
 
-  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]> {
+  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number }): Promise<SupersessionProposal[]> {
     // Migration 029's function is plain, so PostgREST reaches it over rpc like
     // the provenance pair above. NULL args take its defaults.
     const { data, error } = await this.client.rpc("list_supersession_proposals", {

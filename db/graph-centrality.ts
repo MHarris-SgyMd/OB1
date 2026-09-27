@@ -207,6 +207,7 @@ import { ENTITY_TYPES, NUMERIC_NAME_RE, type EntityType } from "../server-portab
 import { isoTimestampOrNull, UUID_RE } from "../server-portable/store.ts";
 import { cleanForDisplay } from "../server-portable/consolidate.ts";
 import { RESERVED_SYSTEMS } from "./ingest-items.ts";
+import { readNumber, scanArgs, scriptArgv } from "./cli.ts";
 
 /** `(text, params) → rows` — Bun's `sql.unsafe` or PGlite's `query(...).rows`. */
 export type Runner = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -999,57 +1000,43 @@ export type Parsed = { url?: string; subject: string | null; opts: Options; json
 
 /** argv → options and subject, or a usage error. Exported for the suite. */
 export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
+  // Every argument accounted for by db/cli.ts's scanner; what the values mean is checked here.
+  const scanned = scanArgs(argv, {
+    url: "one", limit: "one", types: "one", status: "one",
+    "decay-done": "none", startable: "none", "decay-blocked": "none", "keep-numeric": "none", "no-edges": "none", json: "none",
+  }, { positionals: Infinity });
+  if ("error" in scanned) return scanned;
   const opts: Options = { ...DEFAULT_OPTIONS };
-  let url: string | undefined;
-  let json = false;
-  const positional: string[] = [];
-  const seen = new Set<string>();
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith("--")) {
-      if (seen.has(a)) return { error: `${a} given twice` };
-      seen.add(a);
-    }
-    const value = (): string | { error: string } => {
-      const v = argv[i + 1];
-      if (v === undefined || v.startsWith("--")) return { error: `${a} needs a value` };
-      i++;
-      return v;
-    };
-    if (a === "--url") {
-      const v = value();
-      if (typeof v !== "string") return v;
-      url = v;
-    } else if (a === "--limit") {
-      const v = value();
-      if (typeof v !== "string") return v;
-      // Decimal digits only: Number() would read "0x10", "1e2" and " 7" as integers.
-      const n = /^\d+$/.test(v) ? Number(v) : NaN;
-      if (!Number.isInteger(n) || n < 1 || n > 500) return { error: `--limit must be a decimal integer from 1 to 500, got ${JSON.stringify(v)}` };
-      opts.limit = n;
-    } else if (a === "--types") {
-      const v = value();
-      if (typeof v !== "string") return v;
-      const types = [...new Set(v.split(",").map((t) => t.trim()).filter(Boolean))];
-      const bad = types.filter((t) => !(ENTITY_TYPES as readonly string[]).includes(t));
-      if (bad.length || types.length === 0) return { error: `--types takes a comma list of ${ENTITY_TYPES.join(", ")}; ${bad.length ? `not ${bad.map((b) => JSON.stringify(b)).join(", ")}` : "none given"}` };
-      opts.types = types as EntityType[];
-    } else if (a === "--status") {
-      const v = value();
-      if (typeof v !== "string") return v;
-      if (!Object.hasOwn(LIFECYCLE_FILTERS, v)) return { error: `--status takes one of ${Object.keys(LIFECYCLE_FILTERS).join(", ")}; not ${JSON.stringify(v)}` };
-      opts.status = v as LifecycleFilter;
-    } else if (a === "--decay-done") opts.decayDone = true;
-    else if (a === "--startable") opts.startable = true;
-    else if (a === "--decay-blocked") opts.decayBlocked = true;
-    else if (a === "--keep-numeric") opts.excludeNumeric = false;
-    else if (a === "--no-edges") opts.edges = false;
-    else if (a === "--json") json = true;
-    else if (a.startsWith("--")) return { error: `unknown flag ${a}` };
-    else if (a.trim() === "") return { error: "the subject is empty; leave it out for the whole graph" };
-    else positional.push(a);
+  const limit = scanned.value("limit");
+  if (limit !== undefined) {
+    const n = readNumber("--limit", limit, { min: 1, max: 500 });
+    if (typeof n !== "number") return n;
+    opts.limit = n;
   }
-  if (positional.length > 1) return { error: `one subject at a time; got ${positional.map((p) => JSON.stringify(p)).join(", ")} — quote a name with spaces` };
+  const typeList = scanned.value("types");
+  if (typeList !== undefined) {
+    const types = [...new Set(typeList.split(",").map((t) => t.trim()).filter(Boolean))];
+    const bad = types.filter((t) => !(ENTITY_TYPES as readonly string[]).includes(t));
+    // What is allowed, not what was given (cli.ts's rule): the value may be a pasted key or URL.
+    if (bad.length || types.length === 0) return { error: `--types takes a comma list of ${ENTITY_TYPES.join(", ")}; ${bad.length ? `${bad.length} of the ${types.length} given ${bad.length === 1 ? "is" : "are"} not one` : "none given"}` };
+    opts.types = types as EntityType[];
+  }
+  const status = scanned.value("status");
+  if (status !== undefined) {
+    if (!Object.hasOwn(LIFECYCLE_FILTERS, status)) return { error: `--status takes one of ${Object.keys(LIFECYCLE_FILTERS).join(", ")}` };
+    opts.status = status as LifecycleFilter;
+  }
+  if (scanned.has("decay-done")) opts.decayDone = true;
+  if (scanned.has("startable")) opts.startable = true;
+  if (scanned.has("decay-blocked")) opts.decayBlocked = true;
+  if (scanned.has("keep-numeric")) opts.excludeNumeric = false;
+  if (scanned.has("no-edges")) opts.edges = false;
+  const url = scanned.value("url");
+  const json = scanned.has("json");
+  const positional = [...scanned.positionals];
+  if (positional.some((p) => p.trim() === "")) return { error: "the subject is empty; leave it out for the whole graph" };
+  // Counted, not repeated: a URL given without --url is a positional too (cli.ts's rule).
+  if (positional.length > 1) return { error: `one subject at a time; got ${positional.length} — quote a name with spaces` };
   // Decay weighs the completed and canceled thoughts; a filter other than
   // `all` drops them or keeps only them, so the two are two answers to one
   // question — and under `done` a uniform weight would change nothing.
@@ -1085,10 +1072,11 @@ export async function schemaProblem(run: Runner, opts: Pick<Options, "startable"
 }
 
 if (import.meta.main) {
-  const parsed = parseArgs(process.argv.slice(2));
+  const USAGE = `usage: bun graph-centrality.ts --url postgres://… ["subject"] [--limit N (1-500)] [--types a,b] [--keep-numeric] [--no-edges] [--status all|open|active|done] [--decay-done] [--startable | --decay-blocked] [--json]   (exit 0 ranked, 1 no entity, 3 excluded by the numeric rule, 2 error)`;
+  const parsed = parseArgs(scriptArgv(USAGE));
   if ("error" in parsed) {
     console.error(parsed.error);
-    console.error(`usage: bun graph-centrality.ts --url postgres://… ["subject"] [--limit N (1-500)] [--types a,b] [--keep-numeric] [--no-edges] [--status all|open|active|done] [--decay-done] [--startable | --decay-blocked] [--json]   (exit 0 ranked, 1 no entity, 3 excluded by the numeric rule, 2 error)`);
+    console.error(USAGE);
     process.exit(2);
   }
   const url = parsed.url ?? process.env.DATABASE_URL;

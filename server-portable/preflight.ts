@@ -162,6 +162,7 @@ const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
+const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -750,7 +751,7 @@ if (configFailed) {
   if (built) {
     /**
      * Every schema check below is gated on the SQL store, because they read
-     * pg_proc and information_schema over a direct connection that the PostgREST
+     * pg_proc and pg_attribute over a direct connection that the PostgREST
      * path does not have. That has been true since migration 004's check and is
      * a limitation of the deployment shape rather than of any one migration.
      *
@@ -779,33 +780,61 @@ if (configFailed) {
       // that holds it here (the alias included), and for PostgREST — which has
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
-      // public.thoughts present but not resolving for this role — no USAGE on
-      // public, public off its search_path, or both — is not a brain to migrate
-      // (SMD-2062). Probed only when thoughts itself fails: 42P01 on the count
-      // (in any lc_messages; any other failure spares the second connection)
-      // and the probe's own to_regclass('thoughts') NULL — an RLS function
-      // reading some other missing table fails the count the same way. public
-      // alone: a thoughts elsewhere is another tool's. Each cause is named with
-      // its statement (SMD-2242). The path is parsed, never
-      // echoed, and not read from current_schemas(), which hides a schema
-      // without USAGE (search-path.ts); with USAGE held, thoughts not resolving
-      // means off the path whatever the parse says. The GRANT names
-      // current_user, whose privilege the count used; the ALTER ROLE names
-      // session_user, whose settings load, IN DATABASE since a role's setting
-      // there outranks its plain one and the database's. A path from the
-      // connection (source `client`) or SET after login (`session`) outranks
-      // it; an unread source gets that caveat. The connection's path is
-      // replaced, never appended to: Bun joins two options with a comma, libpq
-      // keeps the last, and Bun's search_path= parameter outranks options.
-      // Over PostgREST there is no catalog to ask, and a failed probe asks
-      // nothing.
-      let offPath: { causes: string[]; fixes: string[] } | null = null;
-      if (built.kind === "sql" && conn && String((e as { errno?: unknown }).errno ?? "") === "42P01") {
+      /** GRANT CONNECT for the connection string's database and user, each as the server reads it (no case folding); placeholders where the URL names none. */
+      const connectGrant = (url: string) => {
+        let db = "<the database>", user = "<the role>";
+        try {
+          const u = new URL(url);
+          if (u.username) user = quoteIdent(decodeURIComponent(u.username));
+          if (u.pathname.length > 1) db = quoteIdent(decodeURIComponent(u.pathname.slice(1)));
+          else if (u.username) db = user;
+        } catch { /* placeholders stand */ }
+        return `GRANT CONNECT ON DATABASE ${db} TO ${user};`;
+      };
+      // The count's failure, by SQLSTATE — never the message or severity,
+      // which a server's lc_messages translates (review pass 3). On 42P01 or
+      // 42501 a probe on a second connection reads the catalog, and the
+      // remedy is the first of these that holds:
+      // - public.thoughts present and not resolving (SMD-2062): no USAGE on
+      //   public, public off the path, or both, each named with its statement
+      //   (SMD-2242). The path is parsed, never echoed, and not read from
+      //   current_schemas(), which hides a schema without USAGE
+      //   (search-path.ts); with USAGE held, thoughts not resolving means off
+      //   the path whatever the parse says. The GRANT names current_user,
+      //   whose privilege the count used; the ALTER ROLE names session_user,
+      //   whose settings load, IN DATABASE since a role's setting there
+      //   outranks its plain one and the database's. A path from the
+      //   connection (source `client`) or SET after login (`session`)
+      //   outranks it; an unread source gets that caveat. The connection's
+      //   path is replaced, never appended to: Bun joins two options with a
+      //   comma, libpq keeps the last, and Bun's search_path= outranks options.
+      // - thoughts resolving to another schema's table: another tool's, never
+      //   granted on; public goes ahead of it, and then, if the brain's table
+      //   is missing, the migrations.
+      // - 42501 without SELECT on public.thoughts: the grant.
+      // - 42501 with row_security off on a table with row-level security.
+      // - otherwise (42P01, or 42501 with SELECT held): a read the count
+      //   reaches, the row-level security policies a SELECT by this role meets.
+      // The probe's query needs no privilege, so a 42501 on it is a refusal
+      // at connection (no CONNECT, a connection-string setting the role may
+      // not make, a login trigger), which the count met too. Over PostgREST
+      // there is no catalog to ask; a probe that fails otherwise (no
+      // connection slot) leaves the SQLSTATE's own remedy below.
+      const errno = String((e as { errno?: unknown }).errno ?? "");
+      let probeErrno = "";
+      let found: { detail: string; remedy: string } | null = null;
+      if (built.kind === "sql" && conn && (errno === "42P01" || errno === "42501")) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
           try {
+            // The policies a SELECT by this role meets: FOR SELECT or ALL, TO
+            // PUBLIC or a role whose privileges it has.
             const [r] = (await probe`
+              WITH pol AS (
+                SELECT quote_ident(p.polname) AS name FROM pg_policy p
+                 WHERE p.polrelid = to_regclass('thoughts') AND p.polcmd IN ('r', '*')
+                   AND (0 = ANY (p.polroles) OR EXISTS (SELECT 1 FROM unnest(p.polroles) g WHERE g <> 0 AND pg_has_role(current_user, g, 'USAGE'))))
               SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
                      to_regclass('thoughts') IS NULL AS unresolved,
@@ -814,7 +843,21 @@ if (configFailed) {
                      current_setting('server_version_num')::int AS version,
                      quote_ident(current_user::text) AS role,
                      quote_ident(session_user::text) AS login,
-                     quote_ident(current_database()::text) AS db`) as { present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string }[];
+                     quote_ident(current_database()::text) AS db,
+                     current_user::text AS "roleName",
+                     (SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE c.oid = to_regclass('thoughts')) AS resolved,
+                     (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE c.oid = to_regclass('thoughts')) AS "resolvedSchema",
+                     has_table_privilege(to_regclass('thoughts'), 'SELECT') AS "canSelect",
+                     (SELECT c.relrowsecurity FROM pg_class c WHERE c.oid = to_regclass('thoughts')) AS rls,
+                     current_setting('row_security') AS "rowSecurity",
+                     (SELECT string_agg(name, ', ' ORDER BY name) FROM pol) AS policies,
+                     (SELECT count(*)::int FROM pol) AS "policyCount"`) as {
+              present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
+              roleName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
+              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number;
+            }[];
             if (r?.present && r.unresolved) {
               let source: string | null = null;
               try {
@@ -844,18 +887,86 @@ if (configFailed) {
                   ? `${alter}  (unless the connection string sets search_path, which outranks it)`
                   : alter);
               }
-              offPath = { causes, fixes };
+              found = {
+                detail: `public.thoughts exists but does not resolve for this role (${causes.join("; ")})`,
+                remedy: `${fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`,
+              };
+            } else if (r?.resolved && r.resolvedSchema !== "public") {
+              // Another schema's thoughts, first on the path: another tool's
+              // table, never one to grant on or to call the brain's (review
+              // pass 1: the GRANT printed for it, run, passed this row against
+              // it). The brain's table missing is still a brain to migrate.
+              // The migrator's CREATE TABLE IF NOT EXISTS thoughts is
+              // unqualified too: run with that schema first on the path, it
+              // finds the other table and fails (review pass 2), so the path
+              // comes first either way. A schema named for the role is the
+              // default path's "$user".
+              const other = quoteIdent(String(r.resolvedSchema));
+              const named = r.resolvedSchema === r.roleName && searchPathSchemas(String(r.path ?? ""), Number(r.version)).includes("$user") ? ` (the path's "$user")` : "";
+              const putAhead = `put public ahead of ${other}${named} on this connection's search_path — the role's setting, or the connection string's where it sets one — or take ${other} off it`;
+              found = r.present
+                ? {
+                    detail: `thoughts resolves to ${r.resolved}, not the brain's public.thoughts`,
+                    remedy: `${r.usage ? "" : `GRANT USAGE ON SCHEMA public TO ${r.role};  then `}${putAhead}: the server reads the first thoughts on the path.  The brain's table is there, so migrating would not change it.`.replace(/^./, (c) => c.toUpperCase()),
+                  }
+                : {
+                    detail: `thoughts resolves to ${r.resolved}, another tool's table; the brain's public.thoughts does not exist`,
+                    remedy: `${putAhead.replace(/^./, (c) => c.toUpperCase())}, then apply the migrations: cd db && bun migrate.ts --url ${urlArg}  — the migrator's CREATE TABLE IF NOT EXISTS thoughts would otherwise find ${r.resolved}.`,
+                  };
+            } else if (r?.resolved && errno === "42501" && r.canSelect === false) {
+              // --grant takes the name raw, so it goes to the shell quoted.
+              const grantArg = /^[A-Za-z0-9_.-]+$/.test(r.roleName) ? r.roleName : `'${r.roleName.replaceAll("'", `'\\''`)}'`;
+              found = {
+                detail: `role ${r.role} has no SELECT on ${r.resolved}`,
+                remedy: `GRANT SELECT ON ${r.resolved} TO ${r.role};  — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant ${grantArg}  (db/README.md, Grants for a capturing role)`,
+              };
+            } else if (r?.resolved && errno === "42501" && r.rls && r.rowSecurity === "off") {
+              // row_security off: Postgres refuses a read a policy would
+              // filter rather than skip the policies — no grant or policy
+              // change fixes that.
+              found = {
+                detail: `row_security is off for this session and ${r.resolved} has row-level security, so Postgres refuses the read rather than skip its policies`,
+                remedy: `Turn row_security back on for this connection (it is off in a role's or the database's settings, or the connection string), or, for a role that should read every row, ALTER ROLE ${r.role} BYPASSRLS;  (as a superuser).  The table is there, so migrating would not change it.`,
+              };
+            } else if (r?.resolved) {
+              const whence = errno === "42501"
+                ? `thoughts resolves (${r.resolved}) and this role may read it, so the refusal comes from`
+                : `thoughts resolves (${r.resolved}), so the missing relation is read by`;
+              const plural = r.policyCount > 1;
+              const where = r.policies ? (plural ? "the policies" : "the policy") : "what the count reaches";
+              found = {
+                detail: r.policies
+                  ? `${whence} what the count reaches: row-level security ${plural ? "policies" : "policy"} ${r.policies} on it`
+                  : `${whence} something the count reaches, not the table itself`,
+                remedy: `${errno === "42501"
+                  ? `Grant this role what the error names, or change ${where} to use only what the role may.`
+                  : `Fix ${where}, or a function called there, so nothing reads a relation that does not exist.`}  The table is there, so migrating would not change it.`,
+              };
             }
           } finally {
             await probe.close();
           }
-        } catch { /* the remedy below stays the migrate command */ }
+        } catch (pe) { probeErrno = String((pe as { errno?: unknown }).errno ?? ""); }
       }
       add("schema", "fail",
-          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.causes.join("; ")})` : msg,
-          offPath
-            ? `${offPath.fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`
-            : /does not exist|relation/i.test(msg)
+          found ? `${msg} — ${found.detail}` : msg,
+          found
+            ? found.remedy
+            // A connection refused before any query: the database it names is
+            // not there (3D000), or the role is refused (28000: it does not
+            // exist under trust auth — under a password, 28P01 hides that — it
+            // may not log in, or pg_hba.conf has no line for it).
+            : conn && errno === "3D000"
+            ? `Correct the database name in $${conn.from} — or, for a new brain, create it (CREATE DATABASE, as a role that may) and apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
+            : conn && errno === "28000"
+            ? `Check the role in $${conn.from}: the server refused it before any query — it must exist, be allowed to log in (LOGIN), and be admitted by pg_hba.conf from this host.`
+            : conn && errno === "42501" && probeErrno === "42501"
+            ? `The server refused this role at connection, before any query: grant it CONNECT on the database (${connectGrant(conn.url)}  as its owner), take out a setting $${conn.from} makes that the role may not (a parameter, or -c in options=), or, on PostgreSQL 17, see the login event triggers.`
+            // A query's refusal the probe could not explain (it failed, or
+            // opened no connection): the table's privilege, or a policy.
+            : conn && errno === "42501"
+            ? `Grant this role SELECT on public.thoughts — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant <the role> — or, if it holds that, fix the row-level security policy on thoughts that refuses it.`
+            : errno === "42P01" || /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
     }
@@ -1679,10 +1790,14 @@ if (configFailed) {
           const EVENT_COLUMNS = ["actor_kind", "trust", "origin", "stance", "cites", "valid_from", "valid_until", "backfilled_at"];
           // The eight names spelled into the query, not bound as an array: Bun's
           // SQL binds a JS array to ANY() as one text value (SMD-1803's trap).
+          // From pg_attribute, which shows every role the columns:
+          // information_schema shows a role none of a table it holds no
+          // privilege on, and told a reader to re-apply 046 (SMD-2238).
           const evCols = (await sql`
-            SELECT column_name AS c FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'thought_audit'
-              AND column_name IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at')`) as { c: string }[];
+            SELECT a.attname AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thought_audit' AND a.attnum > 0 AND NOT a.attisdropped
+              AND a.attname IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at')`) as { c: string }[];
           const missingCols = EVENT_COLUMNS.filter((c) => !evCols.some((r) => r.c === c));
           const bodies = (await sql`
             SELECT p.proname AS name, p.prosrc AS src
@@ -1902,7 +2017,7 @@ if (configFailed) {
             add("audit events", "skip", `not checked — this role cannot read the census (${msg}); the shape is checked, the waiting keys are not`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${group}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
-            add("audit events", "warn", `could not verify: ${msg}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
+            add("audit events", "warn", `could not verify: ${msg}`, "The check reads pg_attribute, pg_proc, ob1_agents and thought_audit.");
           }
         }
 
@@ -1926,7 +2041,12 @@ if (configFailed) {
          * counted as coverage, not failed: nothing on a
          * row from before 061 says the extractor tagged it, and the file
          * backfilled none. Stale rows (the input's text moved since) are what
-         * SMD-1732's rebuild will re-derive; counted, not failed.
+         * rebuild_derived (063, SMD-1732) re-derives or hands to the workers;
+         * counted, not failed — as are the rows it has marked for a re-run. A
+         * lineage row whose ARTIFACT is gone while its thought stands (a raw
+         * delete of windows or mentions, a vector cleared under a replay) is
+         * the other direction, which 061 did not read and 063's rebuild
+         * deletes: a WARN naming `db/rebuild.ts --orphans` (SMD-1732).
          */
         try {
           const [tab] = (await sql`SELECT to_regclass('public.derivations') IS NOT NULL AS present, to_regclass('public.page_sections') IS NOT NULL AS pages`) as { present: boolean; pages: boolean }[];
@@ -1947,16 +2067,28 @@ if (configFailed) {
             // called the rest "every producer"). The vector trigger must also
             // be ATTACHED and enabled — its function standing alone records
             // nothing (cold read, third review pass).
+            // …and 063's three bodies, where 063 has landed (the mark's column
+            // stands): the writer clears the mark, the proposal writer replaces
+            // a stale row, the candidate filter yields a stale pair. 061 (or
+            // 029) re-applied by hand over 063 puts older bodies back that keep
+            // 061's sentinel, so the probe above stays green while every mark
+            // stands for ever and a stale pair is never replaced (cold read,
+            // 063's second review pass: this suite's own ladder proved it).
             const [bodies] = (await sql`
               SELECT bool_and(p.prosrc LIKE '%ob1:derivation-recorded-with-its-artifact%' AND p.prosrc LIKE '%ob1_record_derivation(%') AS records, count(*)::int AS n,
                      EXISTS (SELECT 1 FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN pg_namespace tn ON tn.oid = c.relnamespace
-                              WHERE tn.nspname = 'public' AND c.relname = 'thoughts' AND tg.tgname = 'thoughts_record_vector_lineage' AND tg.tgenabled <> 'D') AS trigger_on
+                              WHERE tn.nspname = 'public' AND c.relname = 'thoughts' AND tg.tgname = 'thoughts_record_vector_lineage' AND tg.tgenabled <> 'D') AS trigger_on,
+                     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'derivations' AND column_name = 'stale_since') AS has_063,
+                     (SELECT w.prosrc LIKE '%ob1:rerun-clears-the-mark%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)')) AS marks_clear,
+                     (SELECT w.prosrc LIKE '%supersession_proposals.status = ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)')) AS replaces_stale,
+                     (SELECT w.prosrc LIKE '%p.status <> ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS yields_stale
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number };
+            const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
@@ -1990,10 +2122,18 @@ if (configFailed) {
                    se AS (SELECT NULL::uuid AS id WHERE false),
                    pg_s AS (SELECT NULL::uuid AS id WHERE false),
                    pg AS (SELECT NULL::uuid AS id WHERE false),`}
-                   al AS (SELECT id, artifact_kind, input_ids, input_fingerprints, recipe FROM public.derivations LIMIT ${BOUND}),
+                   al AS (SELECT d.id, d.artifact_kind, d.artifact_id, d.produced_by, d.input_ids, d.input_fingerprints, d.recipe,
+                                 (to_jsonb(d) ->> 'stale_since')::timestamptz AS stale_since
+                            FROM public.derivations d LIMIT ${BOUND}),
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
                            WHERE d.artifact_kind <> 'proposal'
-                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content)))
+                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
+                   orph AS (SELECT d.id, d.artifact_kind FROM al d
+                             WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
+                                OR (d.artifact_kind = 'entities' AND NOT EXISTS (SELECT 1 FROM public.thought_entities m WHERE m.thought_id = d.artifact_id AND m.extraction_key = d.produced_by)
+                                                                 AND NOT EXISTS (SELECT 1 FROM public.ob1_entity_edges g WHERE g.thought_id = d.artifact_id AND g.extraction_key = d.produced_by))
+                                OR (d.artifact_kind = 'vector'   AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = d.artifact_id AND t.embedding IS NOT NULL))
+                                OR (d.artifact_kind = 'metadata' AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = d.artifact_id AND (t.metadata ? 'type' OR t.metadata ? 'topics'))))
               SELECT (SELECT count(*)::int FROM ch) AS chunks,    (SELECT array_agg(id::text) FROM (SELECT id FROM ch LIMIT 3) s) AS chunk_ids,
                      (SELECT count(*)::int FROM vc) AS vectors,   (SELECT array_agg(id::text) FROM (SELECT id FROM vc LIMIT 3) s) AS vector_ids,
                      (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
@@ -2002,6 +2142,8 @@ if (configFailed) {
                      (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
                      (SELECT count(*)::int FROM st) AS stale,
+                     (SELECT count(*)::int FROM al WHERE stale_since IS NOT NULL) AS marked,
+                     (SELECT count(*)::int FROM orph) AS orphans, (SELECT array_agg(artifact_kind || ' ' || id::text) FROM (SELECT id, artifact_kind FROM orph LIMIT 3) s) AS orphan_ids,
                      (SELECT count(*)::int FROM al) AS rows,
                      (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
                      (SELECT count(*)::int FROM al WHERE recipe->>'declared' = 'false') AS undeclared,
@@ -2029,7 +2171,7 @@ if (configFailed) {
             // first review pass: the general remedy named 061's backfill, which
             // knows no section).
             const sectionRemedy = Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "";
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -2053,6 +2195,17 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : bodies.records !== true ? "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand), or lost its record line" : "the vector trigger thoughts_record_vector_lineage is dropped or disabled, so a vector written now leaves no row"}: its next write records no lineage (SMD-1731). ${coverage}`,
                   ledgerRemedy("061", APPLY_061));
+            } else if (rebuildOlder && rebuildOlder.length) {
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${rebuildOlder.length === 3 ? "the three bodies 063 redefines are" : `${rebuildOlder.join(" and ")} ${rebuildOlder.length === 1 ? "is" : "are"}`} from before 063 (061 or 029 re-applied by hand over it): a rebuild's mark is never cleared by the producer's next write, and a stale proposal is never replaced by the next judgement (SMD-1732). ${coverage}`,
+                  ledgerRemedy("063", APPLY_063));
+            } else if (Number(c.orphans)) {
+              // The other direction (063): a row whose artifact is gone while
+              // its thought stands — nothing it describes exists, and the
+              // census above cannot see it (it starts from the artifacts).
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${n(c.orphans)} lineage row(s) name an artifact that is gone (${(c.orphan_ids ?? []).join(", ")}) — a raw delete of windows or mentions, or a vector cleared under a replay, left the row behind (SMD-1732). ${coverage}`,
+                  "Run bun db/rebuild.ts --url <url> --orphans: it deletes each such row through rebuild_derived, which touches no row whose artifact stands.");
             } else {
               // A capped read says so in the headline, before the count that
               // a reader stops at (run-it, second review pass: a missing row
@@ -2897,9 +3050,12 @@ if (configFailed) {
         // boundary of its own took every later check with it.
         try {
           const { CHUNK_CONTEXT: wantContext } = await import("../db/config.mjs");
+          // pg_attribute, not information_schema, which hides the column from a
+          // role with no privilege on the table and said "apply 013" (SMD-2238).
           const ctxCol = await sql`
-            SELECT count(*)::int AS c FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'thought_chunks' AND column_name = 'context'`;
+            SELECT count(*)::int AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thought_chunks' AND a.attname = 'context' AND a.attnum > 0 AND NOT a.attisdropped`;
           const haveCtxCol = Number(ctxCol[0].c) >= 1;
           if (wantContext && !haveCtxCol) {
             add("chunk context", "fail",
@@ -2940,7 +3096,7 @@ if (configFailed) {
             }
           }
         } catch (e) {
-          add("chunk context", "warn", `could not verify: ${(e as Error).message}`, "The check reads information_schema.columns and thought_chunks.");
+          add("chunk context", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_attribute and thought_chunks.");
         }
 
         /**
@@ -3047,9 +3203,12 @@ if (configFailed) {
          */
         let haveLabel = false;
         try {
+          // pg_attribute: information_schema hides the column from a role with
+          // no privilege on thoughts, and said --reapply 021 (SMD-2238).
           const labelCol = await sql`
-            SELECT count(*)::int AS c FROM information_schema.columns
-            WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+            SELECT count(*)::int AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thoughts' AND a.attname = 'embedding_model' AND a.attnum > 0 AND NOT a.attisdropped`;
           haveLabel = Number(labelCol[0].c) >= 1;
           if (!haveLabel) {
             add("vector models", "fail",
@@ -3330,8 +3489,15 @@ if (configFailed) {
                      (SELECT count(*)::int FROM consolidation_pool(NULL)) AS thoughts
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; thoughts: number }[];
-            const [{ pending: queued }] = await sql`SELECT count(*)::int AS pending FROM supersession_proposals WHERE status = 'pending'`;
-            const queue = Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "";
+            // 063 (SMD-1732): a stale row is a pending verdict whose texts
+            // moved; the next pass replaces one it finds in conflict again,
+            // and one it does not is the reviewer's — said here, since no
+            // other row counts them (third review pass, cold read).
+            const [{ pending: queued, stale: staleQueued }] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'stale')::int AS stale FROM supersession_proposals`;
+            const queue = [
+              Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "",
+              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again, a reviewer settles one it does not) — cd db && bun consolidate.ts --url $DATABASE_URL --list stale` : "",
+            ].filter(Boolean).join("; ");
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {
               const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };

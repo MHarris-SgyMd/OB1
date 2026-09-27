@@ -634,7 +634,7 @@ export class SqlStore implements ThoughtStore {
     return rows.map(normaliseDerivative);
   }
 
-  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]> {
+  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number }): Promise<SupersessionProposal[]> {
     // Migration 029. NULL status lists every state; the function caps the limit.
     const rows = await this.sql`
       SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int)`;

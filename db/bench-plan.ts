@@ -70,11 +70,13 @@
 
 import { SQL } from "bun";
 import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, matchThoughtsOid, requireDatabaseUrl, resetSchema, routingAt, seededRandom } from "./test-support.ts";
+import { commandLine } from "./cli.ts";
 import type { Branch } from "./test-support.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
+const cli = commandLine("bench-plan.ts", { plans: "none" }, { note: "the rest of its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-plan.ts");
-const PRINT_PLANS = process.argv.includes("--plans");
+const PRINT_PLANS = cli.has("plans");
 
 const DIM = Number(process.env.OB1_BENCH_DIM ?? EMBEDDING_DIM);
 const OPTS = { dim: DIM, model: "stub-embed" };

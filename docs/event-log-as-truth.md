@@ -187,7 +187,7 @@ did not apply it; SMD-1697's bench decides when, and SMD-1947 benches
 | **Ingested** | an external observation handed in through an adapter (SMD-1867's contract; `db/ingest-records.ts`, `db/sync-linear.ts`) — source-faithful, with its observed-at and its trust | first in precedence: `trust = 'ingested'` (an operator's key handing in a page is `actor_kind = 'operator'`, `trust = 'ingested'` — the case that settled two columns in 046). The trust comes from the key's registered kind or a declared lowering, never from the door: the ingester and the board sync declare none, so their rows read as Ingested only once the operator has classified their keys (`set_agent_kind`), which 046 makes the operator's act |
 | **Comprehended, on the row** | the brain's own cognition landing on the thought row: a supersession or derivation pointer (025, 029's accept), a kind label (SMD-1951); a re-embed's vector flip is one until step 2 and a projection refresh with no event after it | second: `action = 'update'` from a worker's door — `origin` names it and the sub-type is the door. Not executable today: no column says which door is a worker's, and each writer passes its own string — `consolidate`, `db/reembed.ts`, `db/sync-linear.ts`, `ingest-records`, the servers' names, and `backfill_thought_actors`, a SQL function's own name set as its `via` by 050 — while the labelling pass left none. A normalised door vocabulary is the gap this read needs closed (below, "Not decided here") |
 | **Expressed** | a direct capture or edit by a person or an agent: "I assert this" | otherwise: `action in ('capture', 'update')` from a server's door, `trust in ('operator', 'agent')`; the `stance`, when declared, says how it was asserted (`stated`, `retrieved`, `inferred`) and moves the verb not at all |
-| **Comprehended, off the row** | extraction (entities, edges), chunking, proposals, calibration, a page's generated sections (064) | not rows of this log — projections with their own lineage row in `derivations` (migration 061, SMD-1731: `input_ids` and `input_fingerprints`, `recipe` with its `deterministic` flag, `artifact_kind`, `produced_by`), written in the transaction that writes the artifact; `rebuild_derived` (SMD-1732; not built) will walk them |
+| **Comprehended, off the row** | extraction (entities, edges), chunking, proposals, calibration, a page's generated sections (064) | not rows of this log — projections with their own lineage row in `derivations` (migration 061, SMD-1731: `input_ids` and `input_fingerprints`, `recipe` with its `deterministic` flag, `artifact_kind`, `produced_by`), written in the transaction that writes the artifact; `rebuild_derived` (migration 063, SMD-1732) walks them forward from an input — re-deriving what the database can, handing the rest to the leased workers with the reason marked on the row, deleting a row whose artifact is gone, and listing the derived prose it cannot reproduce |
 
 A tombstone carries no verb of its own: the delete is the end of the
 aggregate, and the verb of the thought is the verb of the write that made
@@ -397,18 +397,26 @@ leaving the log to fight it:
   text exposure the order guarded was made by 055, already on main, and 060
   widens it by nothing; the one durable store 060 adds is
   `ob1_embedding_snapshot` — a vector for every text ever keyed, edited-away
-  and deleted texts included, no FK and no removal path built — which holds
-  no text, and whose rows' removal is SMD-1732's arm of the same rule (the
-  next bullet). The order moves one step: the redaction lands no
+  and deleted texts included, no FK — which holds no text, and whose rows'
+  removal is SMD-1732's arm of the same rule (the next bullet): since
+  migration 063 `rebuild_derived(id, reason, input_gone => true, fingerprints)`
+  deletes the snapshot rows at a leaving thought's fingerprints — its current
+  one, the ones its own lineage rows recorded, and the earlier texts' the
+  caller reads from the log — where no standing thought holds them. The order moves one step: the redaction lands no
   later than step 3, SMD-2117's fold, which is where a copied log first
   carries text to a server that cannot remove it, and SMD-2117 is blocked by
   SMD-1723 as SMD-2116 was. SMD-1723 itself stands behind SMD-1793 (the raw
   deletes), SMD-1731 and SMD-1732.
 - **Forgetting reaches the projections through the rebuild.** After the
-  amendment, `rebuild_derived` (SMD-1732, not built) will walk the lineage
-  forward and re-derive or delete every descendant — chunks, entities,
-  proposals, the snapshot row for that fingerprint — and report what it
-  could not reproduce.
+  amendment and BEFORE the row delete (061's drop trigger leaves nothing to
+  walk after it), `rebuild_derived(id, 'forget', input_gone => true,
+  fingerprints)` (migration 063, SMD-1732) walks the lineage forward and
+  deletes every mechanical descendant the thought keyed — its windows, its
+  mentions and edges (the entities left with no evidence pruned), their
+  lineage rows, the snapshot rows at its fingerprints — counts the proposals
+  and the vector's and tags' rows the cascade takes at the row delete, and
+  reports the `derived_from` children as irreproducible: derived prose no
+  recipe re-runs, the limit named.
 - **Declined: cryptographic shredding** (a key per thought, forgetting by
   discarding the key). A single-operator brain on one Postgres with an
   amendment gate the trigger enforces does not need it, and a key store is a
@@ -425,7 +433,8 @@ SMD-1729's rule, made concrete:
   a raw write is audited in the same transaction as today.
 - The off-row projections lag by seconds or hours behind their leased
   workers (015, 031) and say so where they are read; `rebuild_derived`
-  (SMD-1732) is what will make the lag safe.
+  (migration 063, SMD-1732) is what makes the lag safe: any stale projection
+  is a call away from its worker's pool, with the reason on the row.
 - **The projector is idempotent by the check under a replay, and exactly-once
   is not needed.** Replaying an event already applied recomputes the same AFTER
   image; the check verifies and nothing moves. A fold from a bound resumes
@@ -532,8 +541,10 @@ bounded fold into a tier that writes on (SMD-2118, Low, blocked by step 3).
   projector does with a redacted thought is decided above.
 - **The graph's fingerprint and every recipe** — decided and landed after this
   record by SMD-1731 (migration 061): `derivations`, the table the projections
-  table above depends on. What stays open is the rebuild that walks it
-  (SMD-1732) and the tags written before 061, which no row can attribute.
+  table above depends on; the rebuild that walks it landed as migration 063
+  (SMD-1732). What stays open is the tags: written before 061 no row can
+  attribute them, and after it no worker re-tags a thought, so a stale tags
+  row is marked by the rebuild and waits for a pool that does not exist yet.
 - **Where a pre-step capture's text comes from on a replay** — the backfill
   or the row store; SMD-2115 measures the backfill on the dogfood log before
   choosing, and leans to the backfill. Until it lands the fold is defined

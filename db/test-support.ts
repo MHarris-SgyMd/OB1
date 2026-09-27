@@ -221,9 +221,14 @@ const FUNCTIONS = [
   "ob1_record_vector_lineage()",
   "ob1_drop_thought_derivations()",
   "ob1_drop_proposal_derivation()",
+  // 063 (SMD-1732): the forward walk and the rebuild primitive; the three
+  // bodies it redefines (the writer, consolidation_candidates,
+  // record_supersession_proposal) keep their signatures and are named above.
+  "derivation_descendants(uuid, int, int)",
+  "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)",
   // 064 (SMD-1812): the page store's nine functions, its four helpers, the
   // page-thought writer, the revisions' refusal trigger and the section drop
-  // trigger; ob1_record_derivation, redefined on 061's body, is named above.
+  // trigger; ob1_record_derivation, redefined on 063's body, is named above.
   "upsert_page(text, text, text, jsonb, text, uuid)",
   "write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)",
   "accept_page_section(uuid, text)",
