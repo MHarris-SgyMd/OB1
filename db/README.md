@@ -717,7 +717,8 @@ run 061, 063, 065 in turn). One body redefined on its own text with no arity cha
 apply time but the DDL; a pair proposed before the file stands for its
 reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
 pair — the listing reads nothing of `derived_from`, the pass never replaces
-it (a text move leaves it `stale` for a reviewer), and the recorder has no
+it (a text move, once `rebuild_derived` runs — `db/rebuild.ts` — leaves it
+`stale` for a reviewer), and the recorder has no
 lineage guard; reject it by hand, and SMD-2313 counts and flags such rows.
 test-schema [60], test-upgrade [20q] (a proposal planted on the pair before
 the file is pending and unmoved after it); `server-portable/test-preflight.ts`

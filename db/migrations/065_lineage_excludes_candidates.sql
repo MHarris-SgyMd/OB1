@@ -42,14 +42,16 @@
 --   thought is re-embedded and extracted like any thought (064), and 064
 --   admits a page as another page's evidence, so a page citing an earlier
 --   page or digest on the same entity is judged against that page's evidence
---   at cosine near 1. Until SMD-2314 lands (ancestors through a bounded
---   trace, or a derivations walk once every derived thought has a row there
---   — SMD-1731), a reviewer reads trace_provenance(newer) and rejects such
---   a proposal. Siblings — two derivations of one input, two pages from one
+--   at cosine near 1; SMD-2314 is the deeper read (ancestors through a
+--   bounded trace, or a derivations walk once every derived thought has a
+--   row there — SMD-1731). Siblings — two derivations of one input, two pages from one
 --   evidence — ARE still judged: they may disagree, and a page superseding
 --   a page is 064's designed state; a reviewer weighs a page's human-owned
 --   sections before accepting, since the archive takes them. The rule
---   filters pairs, not membership: both sides stay in consolidation_pool().
+--   filters pairs, not membership: both sides stay in consolidation_pool()
+--   (a side whose text moved through update_thought leaves the pool until
+--   the re-embed worker fills the vector 021 clears — 032's rule, not this
+--   file's).
 --   A self-reference or a cycle in derived_from (032 stores both — SMD-2315)
 --   is harmless here: a thought is never its own candidate by the entity
 --   join, and the two conditions read each side once. This is the fifth
@@ -93,7 +95,10 @@
 --   itself has no lineage guard — the rule lives in the candidate filter,
 --   which is the worker's one source of pairs. SMD-2313 counts and flags
 --   such rows (preflight, --list); no verdict is written at apply time — a
---   rejection is a reviewer's, with a name on it. test-upgrade [20q] pins
+--   rejection is a reviewer's, with a name on it. Until SMD-2314 lands, a
+--   reviewer handed a proposal whose newer side is a page or a digest reads
+--   trace_provenance(newer) and rejects the pair when it appears there: the
+--   transitive shape THE RULE leaves in. test-upgrade [20q] pins
 --   the standing row: planted before this file, pending and unmoved after
 --   it. MINOR under FORK.md's version rules.
 --

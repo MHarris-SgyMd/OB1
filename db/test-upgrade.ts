@@ -2606,24 +2606,37 @@ console.log("\n[20q] Migration 065 onto a populated brain at the file before it 
   // (e2, page) is planted under 063's body before the file — the row 065
   // leaves standing (second review pass: "left as it stands" was unpinned).
   const e2 = (await sql`SELECT upsert_thought('upgrade 065: the second evidence', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
-  await sql`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id = ${e2.id}::uuid`;
+  // A third, e3, whose proposal is set stale raw (063's status; the table's
+  // one trigger is 061's lineage drop) — under 063's body a stale pair is
+  // re-found, the consequence measured before the file; and the table is
+  // read whole beside stamps(), so "no row moves" is pinned for every row,
+  // not the pending one alone (run-it, third review pass: an auto-reject of
+  // stale rows survived this suite).
+  const e3 = (await sql`SELECT upsert_thought('upgrade 065: the third evidence', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  await sql`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id IN (${e2.id}::uuid, ${e3.id}::uuid)`;
   const pg = (await sql`SELECT upsert_page('upgrade-065', 'Upgrade 065', 'topic', '{}'::jsonb, 'alice') AS r`)[0].r as { page_id: string };
-  const sec = (await sql`SELECT write_page_section(${pg.page_id}::uuid, 'body', 'Generated from the evidence.', 'generated', 'Body', '{"model": "stub"}'::jsonb, ${sql.array([e.id, e2.id], "TEXT")}::uuid[], 10, 'gen') AS r`)[0].r as { action: string };
+  const sec = (await sql`SELECT write_page_section(${pg.page_id}::uuid, 'body', 'Generated from the evidence.', 'generated', 'Body', '{"model": "stub"}'::jsonb, ${sql.array([e.id, e2.id, e3.id], "TEXT")}::uuid[], 10, 'gen') AS r`)[0].r as { action: string };
   const [{ content }] = await sql`SELECT content FROM thoughts WHERE id = ${pg.page_id}::uuid`;
   const re = (await sql`SELECT update_thought(${pg.page_id}::uuid, ${content}::text, NULL::jsonb, ${vec(0)}::vector, NULL::jsonb, NULL::timestamptz, ${actor}::jsonb, ${OPTS.model}::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`)[0].r as { ok: boolean };
-  for (const id of [e.id, e2.id, d.id, pg.page_id]) {
+  for (const id of [e.id, e2.id, e3.id, d.id, pg.page_id]) {
     const x = (await sql`SELECT record_thought_entities(${id}::uuid, 'extract:m@p2', '[{"name": "Alice", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`)[0].r as { ok: boolean };
     assert(x.ok === true, "the corpus at 064 carries an extraction on each thought");
   }
   const pid = (await sql`SELECT record_supersession_proposal(${e2.id}::uuid, ${pg.page_id}::uuid, 'newer_supersedes_older', 0.9, 'a page over its evidence, judged at 064', 0.99, 'consolidate:judge@p3') AS id`)[0].id as string;
   const proposalRow = async () => JSON.stringify((await sql`SELECT status, verdict, judge_key, judged_at::text AS j, reviewed_at::text AS r, older_id, newer_id FROM supersession_proposals WHERE id = ${pid}::uuid`)[0]);
   const proposalBefore = await proposalRow();
-  assert(typeof pid === "string" && /"status":"pending"/.test(proposalBefore), "…and a proposal that the page supersedes its second evidence stands pending, recorded under 063's body");
+  const pid3 = (await sql`SELECT record_supersession_proposal(${e3.id}::uuid, ${pg.page_id}::uuid, 'newer_supersedes_older', 0.9, 'a page over its third evidence, judged at 064', 0.99, 'consolidate:judge@p3') AS id`)[0].id as string;
+  await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${pid3}::uuid`;
+  const proposals = async () => JSON.stringify(await sql`SELECT id, older_id, newer_id, status, reviewed_at::text AS r, review_note FROM supersession_proposals ORDER BY id`);
+  const proposalsBefore = await proposals();
+  assert(typeof pid === "string" && /"status":"pending"/.test(proposalBefore) && typeof pid3 === "string" && (await sql`SELECT status FROM supersession_proposals WHERE id = ${pid3}::uuid`)[0].status === "stale",
+    "…and a proposal that the page supersedes its second evidence stands pending, recorded under 063's body, and one on its third evidence stands stale");
   const cands = async (): Promise<string> => (await sql`SELECT older_id::text AS o FROM consolidation_candidates(${pg.page_id}::uuid, 5, 0) ORDER BY 1`).map((r: { o: string }) => r.o).join();
   const excludes = async () => (await sql`SELECT prosrc LIKE '%ob1:lineage-excludes-the-pair%' AS x, (SELECT count(*)::int FROM pg_proc WHERE proname = 'consolidation_candidates') AS n FROM pg_proc WHERE oid = to_regprocedure(${SIG})`)[0] as { x: boolean; n: number };
   const pre = await excludes();
-  assert(sec.action === "created" && re.ok === true && pre.x === false && Number(pre.n) === 1 && (await cands()) === [d.id, e.id].sort().join(),
-    `before 065 the page's candidates are its own evidence and the unrelated note — the pair SMD-2292 measured — and not the second evidence, whose pair a proposal already holds (029's rule) (${(await cands()).split(",").map((o) => (o === e.id ? "E" : o === d.id ? "D" : o === e2.id ? "E2" : o)).join()})`);
+  const name = (o: string) => (o === e.id ? "E" : o === d.id ? "D" : o === e2.id ? "E2" : o === e3.id ? "E3" : o);
+  assert(sec.action === "created" && re.ok === true && pre.x === false && Number(pre.n) === 1 && (await cands()) === [d.id, e.id, e3.id].sort().join(),
+    `before 065 the page's candidates are its own evidence, the unrelated note and the third evidence whose pair is stale (063 re-finds it) — the pairs SMD-2292 measured — and not the second evidence, whose pending proposal holds the pair (029's rule) (${(await cands()).split(",").map(name).join()})`);
   const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, derived_from, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
   const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, produced_by, produced_at::text AS at, recipe FROM derivations ORDER BY 1, 2, 3`);
   const before = await stamps(), lineageBefore = await lineage();
@@ -2633,7 +2646,7 @@ console.log("\n[20q] Migration 065 onto a populated brain at the file before it 
 
   const post = await excludes();
   assert(post.x === true && Number(post.n) === 1 && (await cands()) === d.id, "…and after: one consolidation_candidates carrying the rule, and the page's candidates are the unrelated note alone");
-  assert((await proposalRow()) === proposalBefore, "…and the proposal planted on the lineage pair stands as it was — pending, unreviewed, the same verdict and key: the file writes no verdict (SMD-2313 will flag it)");
+  assert((await proposalRow()) === proposalBefore && (await proposals()) === proposalsBefore, "…and the proposals planted on the lineage pairs stand as they were — the pending one unreviewed with the same verdict and key, the stale one stale, the table whole: the file writes no verdict (SMD-2313 will flag them)");
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert(Number(auditAfter) === Number(auditBefore) && (await stamps()) === before && (await lineage()) === lineageBefore, "the file is DDL alone: no audit row written, no thought moved, no lineage row moved");
   // The other direction, on a real server: the page moved older than its
@@ -2654,11 +2667,11 @@ console.log("\n[20q] Migration 065 onto a populated brain at the file before it 
   // assertion said only "no".
   const baseline = await migrate("--baseline");
   assert(baseline.code === 0, `--baseline records the ledger over the schema at 065 (exit ${baseline.code})`);
-  const shapeAfter = await shape(sql), stampsAfter = await stamps();
+  const shapeAfter = await shape(sql), stampsAfter = await stamps(), proposalsAfter = await proposals();
   const re2 = await migrate("--reapply");
   const firstDiff = (a: string, b: string) => { const x = JSON.parse(a) as Record<string, unknown>[], y = JSON.parse(b) as Record<string, unknown>[]; for (let i = 0; i < Math.max(x.length, y.length); i++) for (const k of new Set([...Object.keys(x[i] ?? {}), ...Object.keys(y[i] ?? {})])) if (JSON.stringify(x[i]?.[k]) !== JSON.stringify(y[i]?.[k])) return `row ${i} ${k}: ${JSON.stringify(x[i]?.[k])} -> ${JSON.stringify(y[i]?.[k])}`; return ""; };
   const stampsRe = await stamps();
-  const failed = [re2.code !== 0 && `exit ${re2.code}`, JSON.stringify(await shape(sql)) !== JSON.stringify(shapeAfter) && "shape moved", stampsRe !== stampsAfter && `a thought moved (${firstDiff(stampsAfter, stampsRe)})`, (await excludes()).x !== true && "the rule gone", (await cands()) !== d.id && `candidates ${await cands()}`].filter(Boolean);
+  const failed = [re2.code !== 0 && `exit ${re2.code}`, JSON.stringify(await shape(sql)) !== JSON.stringify(shapeAfter) && "shape moved", stampsRe !== stampsAfter && `a thought moved (${firstDiff(stampsAfter, stampsRe)})`, (await proposals()) !== proposalsAfter && "a proposal moved", (await excludes()).x !== true && "the rule gone", (await cands()) !== d.id && `candidates ${await cands()}`].filter(Boolean);
   assert(failed.length === 0, `a re-apply is a no-op: the shape as it left it, no thought moved, the rule standing (${failed.join("; ") || "exit 0"})`);
   await sql.close();
 

@@ -1665,7 +1665,7 @@ else {
   // check reads 065's sentinel and warns naming 065 — before the orphan
   // WARN this ladder's older bodies left (the sweep below clears those).
   const pre065 = await run(SQL_ENV);
-  assert(pre065.code === 0 && /!  lineage\s+every derived row has its lineage row, but consolidation_candidates is from before 065 \(migration 065 not yet applied, or 029 or 063 re-applied by hand over it\): the judge is asked whether a page supersedes its own evidence, and a digest its sources \(SMD-2292\)/.test(pre065.out) && /Apply db\/migrations\/065_lineage_excludes_candidates\.sql\./.test(fix(pre065.out, "lineage")),
+  assert(pre065.code === 0 && /!  lineage\s+every derived row has its lineage row, but consolidation_candidates is from before 065 \(migration 065 not yet applied, or 063 re-applied by hand over it\): the judge is asked whether a page supersedes its own evidence, and a digest its sources \(SMD-2292\)/.test(pre065.out) && /Apply db\/migrations\/065_lineage_excludes_candidates\.sql\./.test(fix(pre065.out, "lineage")),
          `063 re-applied over 065 is a warning on the candidate body, naming 065 as the remedy (${(pre065.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("065") });
   // The older bodies this ladder ran by hand (056's and 060's extraction
