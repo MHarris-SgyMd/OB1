@@ -220,7 +220,7 @@ const FUNCTIONS = [
   // bodies it redefines (the writer, consolidation_candidates,
   // record_supersession_proposal) keep their signatures and are named above.
   "derivation_descendants(uuid, int, int)",
-  "rebuild_derived(uuid, text, boolean, text[], boolean)",
+  "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)",
 ];
 
 /**

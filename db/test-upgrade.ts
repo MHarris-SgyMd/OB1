@@ -2432,7 +2432,7 @@ console.log("\n[20o] Migration 063 onto a populated brain at the file before it 
   await sql`SELECT ob1_record_derivation('chunks', ${newer.id}::uuid, ARRAY[${newer.id}::uuid], ARRAY[${newer.fingerprint}::text], 'capture', '{"deterministic": true, "count": 1}'::jsonb)`;
   await sql`DELETE FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`;
   await sql`UPDATE thoughts SET content = 'upgrade 063: the newer note, rewritten', content_fingerprint = content_fingerprint_of('upgrade 063: the newer note, rewritten') WHERE id = ${newer.id}::uuid`;
-  const [pre] = await sql`SELECT to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean)') IS NULL AS none,
+  const [pre] = await sql`SELECT to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)') IS NULL AS none,
                                  (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'derivations' AND column_name IN ('stale_since', 'stale_reason')) AS cols,
                                  (SELECT count(*)::int FROM derivations) AS rows`;
   assert(pre.none === true && Number(pre.cols) === 0 && Number(pre.rows) === 6, `before 063 there is no rebuild and no mark, and six lineage rows stand — two vectors, two extractions, a proposal, the orphaned chunks row (${pre.rows})`);
@@ -2448,7 +2448,7 @@ console.log("\n[20o] Migration 063 onto a populated brain at the file before it 
 
   const [post] = await sql`SELECT (SELECT count(*)::int FROM derivations WHERE stale_since IS NOT NULL OR stale_reason IS NOT NULL) AS marked,
                                   (SELECT count(*)::int FROM derivations) AS rows,
-                                  to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean)') IS NOT NULL AS rb,
+                                  to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)') IS NOT NULL AS rb,
                                   to_regprocedure('derivation_descendants(uuid, int, int)') IS NOT NULL AS walk,
                                   (SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')) LIKE '%p.status <> ''stale''%' AS cands,
                                   (SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)')) LIKE '%WHERE supersession_proposals.status = ''stale''%' AS writer,
@@ -2463,7 +2463,7 @@ console.log("\n[20o] Migration 063 onto a populated brain at the file before it 
   // recorded, the pending proposal set stale and the pair requeued.
   const r = (await sql`SELECT rebuild_derived(${newer.id}::uuid, 'upgrade') AS r`)[0].r as { ok: boolean; deleted: number; enqueued: number; marked: number; rebuilt: number; pools: string[]; current: number };
   const claims = (await sql`SELECT work_type AS w FROM thought_work_claims WHERE thought_id = ${newer.id}::uuid AND status = 'pending' ORDER BY 1`).map((c: { w: string }) => c.w).join();
-  assert(r.ok === true && r.deleted === 1 && r.enqueued === 3 && r.rebuilt === 0 && r.marked === 3 && r.current === 0 && claims === `consolidate:judge@p3,extract:m@p2,reembed:${OPTS.model}@${OPTS.dim}`
+  assert(r.ok === true && r.deleted === 1 && r.enqueued === 3 && r.rebuilt === 0 && r.marked === 2 && r.current === 0 && claims === `consolidate:judge@p3,extract:m@p2,reembed:${OPTS.model}@${OPTS.dim}`
       && (await sql`SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid`)[0].status === "stale",
     `a rebuild the day after: the orphan row deleted, the extraction, the vector and the pair handed to three pools, the proposal stale (${JSON.stringify(r)}; claims ${claims})`);
   // A re-apply is a no-op: the same shape, no row moved, the marks kept.
@@ -2499,7 +2499,7 @@ console.log("\n[20o] Migration 063 onto a populated brain at the file before it 
   }
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "061" });
   const sql3 = new SQL({ url: URL_, max: 1 });
-  const [present] = await sql3`SELECT to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean)') IS NOT NULL AS rb, (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'derivations' AND column_name IN ('stale_since', 'stale_reason')) AS cols`;
+  const [present] = await sql3`SELECT to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)') IS NOT NULL AS rb, (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'derivations' AND column_name IN ('stale_since', 'stale_reason')) AS cols`;
   assert(present.rb === true && Number(present.cols) === 2, "…and applied once every prerequisite is there: the primitive and the mark's columns are present");
   await sql3.close();
 }

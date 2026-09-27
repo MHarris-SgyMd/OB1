@@ -9371,10 +9371,10 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   const rte = async (id: string, key: string, ents: unknown[], fingerprint: string | null = null, recipe: Record<string, unknown> | null = { deterministic: false, model: "stub" }) =>
     (await one<{ r: { ok: boolean; error?: string; pruned_entities?: number } }>(`SELECT record_thought_entities($1::uuid, $2::text, $3::jsonb, '[]'::jsonb, $4::text, NULL::uuid, $5::jsonb) AS r`,
       [id, key, JSON.stringify(ents), fingerprint, recipe === null ? null : JSON.stringify(recipe)])).r;
-  type Report = { ok: boolean; error?: string; walked: number; depth: number; truncated: boolean; rebuilt: number; enqueued: number; deleted: number; marked: number; unqueued: number; kept: number; current: number; legacy: number; irreproducible: string[]; cascading: { proposals: number; lineage_rows: number }; pools: string[] };
-  const rebuild = async (id: string, reason: string, gone = false, fps: string[] | null = null, force = false) =>
-    (await one<{ r: Report }>(`SELECT rebuild_derived($1::uuid, $2::text, $3::boolean, $4::text[], $5::boolean) AS r`, [id, reason, gone, fps, force])).r;
-  const counts = (r: Report) => `rebuilt ${r.rebuilt} enqueued ${r.enqueued} deleted ${r.deleted} marked ${r.marked} unqueued ${r.unqueued} kept ${r.kept} current ${r.current} legacy ${r.legacy} irreproducible ${r.irreproducible.join()} pools ${r.pools.join()} cascading ${JSON.stringify(r.cascading)}`;
+  type Report = { ok: boolean; error?: string; walked: number; depth: number; at_cap: boolean; rebuilt: number; enqueued: number; deleted: number; marked: number; unqueued: number; stale_proposals: number; kept: number; current: number; legacy: number; irreproducible: string[]; cascading: { proposals: number; lineage_rows: number }; pools: string[] };
+  const rebuild = async (id: string, reason: string, gone = false, fps: string[] | null = null, force = false, orphansOnly = false) =>
+    (await one<{ r: Report }>(`SELECT rebuild_derived($1::uuid, $2::text, $3::boolean, $4::text[], $5::boolean, $6::boolean) AS r`, [id, reason, gone, fps, force, orphansOnly])).r;
+  const counts = (r: Report) => `rebuilt ${r.rebuilt} enqueued ${r.enqueued} deleted ${r.deleted} marked ${r.marked} unqueued ${r.unqueued} stale_proposals ${r.stale_proposals} kept ${r.kept} current ${r.current} legacy ${r.legacy} irreproducible ${r.irreproducible.join()} pools ${r.pools.join()} cascading ${JSON.stringify(r.cascading)}`;
   const claimsOf = async (id: string) => (await q<{ w: string; s: string }>(`SELECT work_type AS w, status AS s FROM thought_work_claims WHERE thought_id = $1::uuid ORDER BY work_type`, [id])).map((c) => `${c.w}:${c.s}`).join();
   const cands = async (id: string) => (await q<{ o: string }>(`SELECT older_id::text AS o FROM consolidation_candidates($1::uuid, 5, 0)`, [id])).map((c) => c.o).join();
   const proposal = async (id: string) => one<{ status: string; judge_key: string; reviewed_at: string | null }>(`SELECT status, judge_key, reviewed_at::text AS reviewed_at FROM supersession_proposals WHERE id = $1::uuid`, [id]);
@@ -9402,7 +9402,7 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     `029's two status CHECKs replaced by 063's named pair: four statuses, and unreviewed = pending or stale (${pcons.join(" | ")})`);
   for (const fn of ["rebuild_derived", "derivation_descendants", "consolidation_candidates", "record_supersession_proposal", "ob1_record_derivation"])
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
-  const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
+  const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
   assert(/ob1:rebuild-acts-on-a-held-frontier/.test(await src(REBUILD_SIG)) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src(REBUILD_SIG)) && /FOR NO KEY UPDATE/.test(await src(REBUILD_SIG)),
     "the primitive carries its sentinel, takes the supersession lock and the row lock in delete_thought's order");
   assert(/ob1:derivation-walk-bounded/.test(await src(WALK_SIG)) && !/WITH RECURSIVE/i.test(await src(WALK_SIG)) && /input_ids && v_frontier/.test(await src(WALK_SIG)), "the walk carries 026's sentinel, is iterative (no recursive CTE) and probes the GIN with && per level");
@@ -9433,6 +9433,17 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   // enqueues a capture and a content move under it, and the teeth below read
   // the rebuild's enqueue alone.
   await db.exec(`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', '${CUR_KEY}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+  // The FIRST rebuild in this session walks a thought whose only row is a
+  // proposal: a record variable assigned on no earlier row has no shape, and
+  // the first expression naming its field raised "record is not assigned
+  // yet" (run-it, first review pass) — this call must come before any other.
+  const P0 = await cap("063: a vectorless older note", null, { metadata: { source: "mcp" } });
+  await db.query(`UPDATE thoughts SET created_at = now() - interval '4 days' WHERE id = $1::uuid`, [P0.id]);
+  const Q0 = await cap("063: a vectorless newer note", null, { metadata: { source: "mcp" } });
+  const p0 = (await one<{ id: string | null }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'conflict_undirected', 0.5, 'first', 0.5, $3::text) AS id`, [P0.id, Q0.id, JUDGE])).id!;
+  const first = await rebuild(Q0.id, "first");
+  assert(first.ok === true && first.walked === 1 && first.current === 1 && (await rowsOf(Q0.id)).length === 0 && (await rowsOf(p0)).length === 1,
+    `the session's first rebuild, on a thought whose only row is a proposal, runs (${first.ok ? counts(first) : first.error})`);
 
   // (a) The walk: one row per artifact at depth 1 in the primitive's order,
   // the child as prose, the self-loop expanded once; the clamps.
@@ -9445,7 +9456,7 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
 
   // (b) Nothing moved: every count zero but current, the child listed.
   let r = await rebuild(A.id, "noop");
-  assert(r.ok === true && r.walked === 7 && r.depth === 1 && r.truncated === false && r.current === 6 && r.rebuilt + r.enqueued + r.deleted + r.marked + r.kept === 0 && r.irreproducible.join() === C.id && r.pools.length === 0,
+  assert(r.ok === true && r.walked === 7 && r.depth === 1 && r.at_cap === false && r.current === 6 && r.rebuilt + r.enqueued + r.deleted + r.marked + r.kept === 0 && r.irreproducible.join() === C.id && r.pools.length === 0,
     `nothing moved: six rows current, the derived_from child reported as irreproducible, nothing enqueued (${counts(r)})`);
   assert((await claimsOf(A.id)) === "" && (await proposal(pid)).status === "pending", "…and nothing was written");
 
@@ -9463,14 +9474,14 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   assert((await claimsOf(A.id)) === `${CUR_KEY}:pending`, "016's trigger requeued the moved text under the configured key already");
   await db.query(`DELETE FROM thought_work_claims WHERE thought_id = $1::uuid`, [A.id]);
   r = await rebuild(A.id, "edit");
-  assert(r.ok === true && r.rebuilt === 0 && r.enqueued === 3 && r.marked === 5 && r.unqueued === 1 && r.kept === 1 && r.current === 0 && r.deleted === 0 && r.pools.slice().sort().join() === [REEMBED, CUR_KEY, JUDGE].sort().join(),
-    `a raw text move: nothing rebuilt (the snapshot's copy is not the text's vector), three pools fed, five rows marked, one with no pool, the structured pass kept (${counts(r)})`);
+  assert(r.ok === true && r.rebuilt === 0 && r.enqueued === 3 && r.marked === 4 && r.stale_proposals === 1 && r.unqueued === 1 && r.kept === 1 && r.current === 0 && r.deleted === 0 && r.pools.slice().sort().join() === [REEMBED, CUR_KEY, JUDGE].sort().join(),
+    `a raw text move: nothing rebuilt (the snapshot's copy is not the text's vector), three pools fed, four rows marked, one with no pool, one proposal set stale, the structured pass kept (${counts(r)})`);
   assert((await claimsOf(A.id)) === `${JUDGE}:pending,${CUR_KEY}:pending,${REEMBED}:pending`, `one claim per pool on A — the reembed pool once for the vector and the windows, the extraction under the configured key, the judge's under the proposal's (${await claimsOf(A.id)})`);
   const marks = (await rowsOf(A.id)).map((x) => `${x.kind}/${x.by}:${x.why ?? "-"}`).join();
   assert(marks === `chunks/capture:edit,entities/${OLD_KEY}:edit,entities/source:test:-,metadata/metadata:edit,vector/thoughts_record_vector_lineage:edit`, `the reason on every row handed on or waiting, none on the kept one (${marks})`);
-  assert((await rowOf(pid, "proposal"))!.why === "edit" && (await proposal(pid)).status === "stale" && (await proposal(pid)).reviewed_at === null, "the pending proposal is stale, unreviewed, its row marked");
+  assert((await rowOf(pid, "proposal"))!.why === null && (await proposal(pid)).status === "stale" && (await proposal(pid)).reviewed_at === null, "the pending proposal is stale, unreviewed — its status is the mark, its lineage row left alone (a reviewer's decision would leave a row mark standing for ever)");
   assert((await cands(A.id)) === B.id, "…and the pair is a candidate again");
-  assert((await q(`SELECT 1 FROM list_supersession_proposals('stale', 20)`)).length === 1 && (await q(`SELECT 1 FROM list_supersession_proposals('pending', 20)`)).length === 0, "the queue lists it under 'stale' and not under 'pending'");
+  assert((await q(`SELECT 1 FROM list_supersession_proposals('stale', 20) WHERE id = $1::uuid`, [pid])).length === 1 && (await q(`SELECT 1 FROM list_supersession_proposals('pending', 20) WHERE id = $1::uuid`, [pid])).length === 0, "the queue lists it under 'stale' and not under 'pending'");
   assert(/check constraint/.test(await refused(`UPDATE supersession_proposals SET reviewed_at = now() WHERE id = $1::uuid`, [pid])) && /check constraint/.test(await refused(`UPDATE supersession_proposals SET status = 'bogus' WHERE id = $1::uuid`, [pid])),
     "the widened CHECKs: a stale row is unreviewed, and a fifth status is refused");
   const rev = await one<{ r: { ok: boolean; error?: string } }>(`SELECT review_supersession_proposal($1::uuid, 'accept', NULL, NULL, $2::jsonb, false) AS r`, [pid, JSON.stringify(ACTOR)]);
@@ -9495,14 +9506,15 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     "the worker's pass under the configured key leaves a clean row and sweeps the marked one");
   await db.query(`UPDATE ob1_embedding_snapshot SET embedding = $2::vector WHERE content_fingerprint = $1 AND embedding_model = $3`, [movedFp, unit(7), MODEL]);
   const vecBefore = (await rowOf(A.id, "vector"))!;
+  const auditN = (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid`, [A.id])).c;
   r = await rebuild(A.id, "edit again");
   const vecAfter = (await rowOf(A.id, "vector"))!;
   assert(r.rebuilt === 1 && vecAfter.fps.join() === movedFp && vecAfter.since === null && vecAfter.at > vecBefore.at && (await one<{ v: string }>(`SELECT embedding::text AS v FROM thoughts WHERE id = $1::uuid`, [A.id])).v === unit(7),
     `a snapshot row with the text's own vector at the model re-derives the vector: the refresh writes it, the trigger re-records the row at the moved text and the mark is gone (${counts(r)})`);
   assert(r.enqueued === 1 && r.marked === 2 && (await claimsOf(A.id)).includes(`${REEMBED}:pending`), `…the windows still wait for the reembed pool, the tags for none (${counts(r)})`);
-  const auditN = (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid`, [A.id])).c;
+  assert((await rowOf(A.id, "chunks"))!.why === "edit" && (await rowOf(A.id, "metadata"))!.why === "edit", "…and a second request leaves the first's reason on the rows already marked (the sweep would otherwise rename an edit)");
   await rebuild(A.id, "once more");
-  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid`, [A.id])).c === auditN, "a rebuild that only enqueues and marks appends no event (the refresh appended none either: 060's projection refresh)");
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid`, [A.id])).c === auditN, "neither the refresh (060's projection refresh) nor a rebuild that only enqueues and marks appends an event");
 
   // (e) Orphans go before anything else: a window set deleted raw leaves its
   // row, which the rebuild deletes; a vector cleared under a replay leaves
@@ -9524,9 +9536,14 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   await db.query(`UPDATE derivations SET recipe = recipe || '{"legacy": true}'::jsonb WHERE artifact_id = $1::uuid AND artifact_kind = 'vector'`, [B.id]);
   r = await rebuild(B.id, "count");
   assert(r.current === 4 && r.legacy === 1 && r.enqueued === 0, `B's four rows — the vector, the tags, the extraction, the proposal it is the older side of — are current, one of them legacy (${counts(r)})`);
+  // …with the extraction key set to '' — unset, as 016's trigger reads it —
+  // so the extraction goes under the row's own key (cold read, first review
+  // pass: '' reached the claims' CHECK and the whole rebuild raised).
+  await db.exec(`UPDATE ob1_config SET value = '' WHERE key = 'entity_extraction_key'`);
   r = await rebuild(B.id, "force", false, null, true);
-  assert(r.current === 0 && r.enqueued === 3 && r.marked === 4 && r.unqueued === 1 && (await claimsOf(B.id)) === `${CUR_KEY}:pending,${REEMBED}:pending` && (await claimsOf(A.id)).includes("consolidate:stub@p2:pending") && (await proposal(pid)).status === "stale",
-    `--force re-runs every row: the vector to the reembed pool (its snapshot row holds the same vector), the extraction to the configured key, the tags marked, the proposal stale and its newer side requeued under the judge's key (${counts(r)})`);
+  assert(r.current === 0 && r.enqueued === 3 && r.marked === 3 && r.stale_proposals === 1 && r.unqueued === 1 && (await claimsOf(B.id)) === `${OLD_KEY}:pending,${REEMBED}:pending` && (await claimsOf(A.id)).includes("consolidate:stub@p2:pending") && (await proposal(pid)).status === "stale",
+    `--force re-runs every row: the vector to the reembed pool (its snapshot row holds the same vector), the extraction to the row's own key (the configured one is empty, so unset), the tags marked, the proposal stale and its newer side requeued under the judge's key (${counts(r)})`);
+  await db.exec(`UPDATE ob1_config SET value = '${CUR_KEY}' WHERE key = 'entity_extraction_key'`);
 
   // (g) The forget arm (SMD-1723 calls it BEFORE the row delete): the
   // windows and the input's graph go — Bob and Open Brain, mentioned by A
@@ -9539,15 +9556,25 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   await db.query(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1::uuid, 0, 'w0', $2::vector)`, [A.id, unit(2)]);
   await one(`SELECT ob1_record_derivation('chunks', $1::uuid, ARRAY[$1::uuid], ARRAY[$2::text], 'capture', '{"deterministic": true, "count": 1}'::jsonb) AS r`, [A.id, movedFp]);
   await db.query(`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES ('063-old-fp', $1, $2::vector, $3)`, [MODEL, unit(4), EMBEDDING_DIM]);
-  assert((await snapshotHas(movedFp)) && (await snapshotHas(B.fingerprint)) && (await rowOf(A.id, "vector")) !== undefined && (await rowsOf(A.id)).length === 5, "the fixture before the forget: a vector row, a window set, two extractions, the tags, and snapshot rows at the input's and B's texts");
-  r = await rebuild(A.id, "forget", true, ["063-old-fp", B.fingerprint]);
+  // B's text moves raw AFTER the proposal recorded it, so the proposal row
+  // carries B's OLD fingerprint at B's position and no standing thought holds
+  // it: only the own-position rule keeps that snapshot row through A's forget
+  // (cold read + mutant, first review pass: with B unmoved the standing-thought
+  // filter kept the row under the every-position mutant too). B's NEW
+  // fingerprint, passed in, is held by B and survives by the other rule.
+  await db.query(`UPDATE thoughts SET content = $2, content_fingerprint = content_fingerprint_of($2) WHERE id = $1::uuid`, [B.id, "063: the older note about Alice, moved"]);
+  const newBFp = await fp("063: the older note about Alice, moved");
+  assert((await snapshotHas(movedFp)) && (await snapshotHas(B.fingerprint)) && (await snapshotHas(newBFp)) && (await rowOf(pid, "proposal"))!.fps[0] === B.fingerprint && (await rowOf(A.id, "vector")) !== undefined && (await rowsOf(A.id)).length === 5,
+    "the fixture before the forget: a vector row, a window set, two extractions, the tags; snapshot rows at the input's text, at B's old text (held by no thought, recorded at B's position on the proposal row) and at B's new one");
+  r = await rebuild(A.id, "forget", true, ["063-old-fp", newBFp]);
   const ents = (await q<{ n: string }>(`SELECT name AS n FROM ob1_entities ORDER BY name`)).map((e) => e.n).join();
   assert(r.ok === true && r.deleted === 6 && r.cascading.proposals === 1 && r.cascading.lineage_rows === 2 && r.irreproducible.join() === C.id && r.enqueued === 0 && r.marked === 0,
     `the forget arm: the windows' row, two extraction rows and three snapshot rows deleted — the current text's, the one the structured pass recorded (the first text's) and the caller's; the proposal and two lineage rows left to the cascade; the child reported (${counts(r)})`);
   assert(!(await snapshotHas(A.fingerprint)), "the first text's snapshot row went too: it was recorded on the input's own lineage row");
   assert((await q(`SELECT 1 FROM thought_chunks WHERE thought_id = $1::uuid`, [A.id])).length === 0 && (await q(`SELECT 1 FROM thought_entities WHERE thought_id = $1::uuid`, [A.id])).length === 0 && ents === "Alice",
     `the windows and the input's mentions are gone; Bob and Open Brain pruned, Alice (B's) kept (${ents})`);
-  assert(!(await snapshotHas(movedFp)) && !(await snapshotHas("063-old-fp")) && (await snapshotHas(B.fingerprint)), "the snapshot rows at the input's current and passed fingerprints are gone; the one a standing thought holds stays");
+  assert(!(await snapshotHas(movedFp)) && !(await snapshotHas("063-old-fp")) && (await snapshotHas(B.fingerprint)) && (await snapshotHas(newBFp)),
+    "the snapshot rows at the input's current and passed fingerprints are gone; B's old one stays by the own-position rule (the proposal row names it at B's position, not A's), B's new one because a standing thought holds it");
   assert((await rowsOf(A.id)).map((x) => x.kind).join() === "metadata,vector" && (await proposal(pid)).status === "stale" && (await q(`SELECT 1 FROM thoughts WHERE id = $1::uuid`, [A.id])).length === 1, "the vector's and the tags' rows and the proposal (stale since the force above) stand for the cascade; the row itself is the caller's to delete");
   const del = await one<{ r: { ok: boolean } }>(`SELECT delete_thought($1::uuid, $2::jsonb, false) AS r`, [A.id, JSON.stringify(ACTOR)]);
   assert(del.r.ok === true && (await rowsOf(A.id)).length === 0 && (await q(`SELECT 1 FROM supersession_proposals WHERE id = $1::uuid`, [pid])).length === 0 && (await rowsOf(pid)).length === 0, "…and the row delete takes them: no lineage row, no proposal");
@@ -9555,11 +9582,12 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   // (h) Refusals as values, and one RAISE.
   assert(/rebuild_derived: p_reason must say why/.test(await refused(`SELECT rebuild_derived($1::uuid, '')`, [B.id])) && /p_reason must say why/.test(await refused(`SELECT rebuild_derived($1::uuid, NULL)`, [B.id])), "an empty reason is refused before any lock");
   assert((await rebuild(A.id, "gone")).error === "NOT_FOUND", "an input with no row is NOT_FOUND");
+  const claimsBefore = await claimsOf(B.id), rowsBefore = JSON.stringify(await rowsOf(B.id));
   const replay = await db.transaction(async (tx) => {
     await tx.exec(`SELECT set_config('ob1.projecting_replay', 'on', true)`);
     return (await tx.query<{ r: Report }>(`SELECT rebuild_derived($1::uuid, 'fold') AS r`, [B.id])).rows[0].r;
   });
-  assert(replay.ok === false && replay.error === "REPLAYING" && (await claimsOf(B.id)) === `${CUR_KEY}:pending,${REEMBED}:pending`, "under ob1.projecting_replay the rebuild answers REPLAYING and moves nothing — the fold copies the table (SMD-2117)");
+  assert(replay.ok === false && replay.error === "REPLAYING" && (await claimsOf(B.id)) === claimsBefore && JSON.stringify(await rowsOf(B.id)) === rowsBefore, "under ob1.projecting_replay the rebuild answers REPLAYING and moves nothing — the fold copies the table (SMD-2117)");
 
   // (i) A decided proposal is kept, whatever moved.
   const D = await cap("063: a note to decide", 5, { metadata: { source: "mcp", type: "note" } });
@@ -9570,6 +9598,23 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   await db.query(`UPDATE thoughts SET content = $2, content_fingerprint = content_fingerprint_of($2) WHERE id = $1::uuid`, [E.id, "063: a newer note to decide, rewritten"]);
   r = await rebuild(E.id, "edit");
   assert(r.kept === 1 && (await proposal(pd)).status === "rejected" && (await rowOf(pd, "proposal"))!.why === null, `a rejected proposal is kept as decided: no status move, no mark (${counts(r)})`);
+
+  // (j) The forget arm reaches mentions that have no lineage row (a producer
+  // from before 061, a raw writer, an entities row swept as an orphan): the
+  // graph goes with the input whatever the walk held (run-it, first review
+  // pass: the graph block sat inside the entities row's branch). And the
+  // orphans-only mode, the sweep's: an orphan deleted, a stale row left with
+  // its own reason unwritten.
+  const F = await cap("063: a note whose extraction has no lineage row", 8, { metadata: { source: "mcp", type: "note" } });
+  assert((await rte(F.id, OLD_KEY, [{ name: "Gina", type: "person", confidence: 0.9 }])).ok, "F's extraction stands");
+  await db.query(`DELETE FROM derivations WHERE artifact_kind = 'entities' AND artifact_id = $1::uuid`, [F.id]);
+  await db.query(`UPDATE thoughts SET content = $2, content_fingerprint = content_fingerprint_of($2) WHERE id = $1::uuid`, [F.id, "063: a note whose extraction has no lineage row, moved"]);
+  r = await rebuild(F.id, "sweep", false, null, false, true);
+  assert(r.ok === true && r.deleted === 0 && r.enqueued === 0 && r.marked === 0 && r.current === 1 && (await rowOf(F.id, "vector"))!.why === null,
+    `orphans only over a thought with a stale row and no orphan: nothing deleted, nothing handed on, no reason written (${counts(r)})`);
+  r = await rebuild(F.id, "forget", true);
+  assert(r.ok === true && Number((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = $1::uuid`, [F.id])).c) === 0 && (await q(`SELECT 1 FROM ob1_entities WHERE name = 'Gina'`)).length === 0,
+    `the forget arm takes the mentions and prunes Gina though no entities row stood in the walk (${counts(r)})`);
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM derivations`);

@@ -138,11 +138,21 @@
 --      width: marked alone, the reason named); an extraction under an
 --      `extract:` key is enqueued under the configured extraction key and
 --      marked, a `source:` pass is KEPT (its input is the external record, not
---      the text); a pending proposal is set stale, marked, and its newer
---      thought requeued under the judge's key, a decided one KEPT (a
---      reviewer's decision; the queue already says edited-since); the tags
---      are marked, a pool named as missing. Enqueued counts distinct
---      (pool, thought) — the vector and the windows share one reembed claim.
+--      the text); a pending proposal is set stale — its status is its mark,
+--      its lineage row left alone, since only the pass's replacement writes
+--      that row again and a reviewer's decision would otherwise leave a mark
+--      standing for ever (cold read, first review pass) — and its newer
+--      thought requeued under the judge's key (the pool by construction:
+--      029's worker writes its job as the key; no config records the current
+--      one, so a judge-model change strands the claim while the pass's own
+--      pool re-judges the pair anyway), a decided one KEPT (a reviewer's
+--      decision; the queue already says edited-since); the tags are marked,
+--      a pool named as missing. An empty config value reads as unset, as
+--      016's trigger reads it (cold read, first pass: '' reached the claims'
+--      CHECK). Enqueued counts distinct (pool, thought) — the vector and the
+--      windows share one reembed claim. With orphans_only (the sweep's mode)
+--      the stale rules do not run: an orphan is deleted, every other row is
+--      current, and a stale row keeps its own reason for its own rebuild.
 --      The workers' order across pools is their own: a requeued judgement may
 --      run before the requeued extraction lands and find no shared entity for
 --      the pair; the next pass finds it.
@@ -172,13 +182,16 @@
 --      input still holds (018's twins; a snapshot row "outlives the thought it
 --      came from on purpose", 060). Derived_from children are listed as
 --      irreproducible; SMD-1723 strips the pointer.
---      THE REPORT: {ok, input, reason, input_gone, force, walked, depth,
---      truncated, rebuilt, enqueued, deleted, marked, unqueued, kept, current,
---      legacy, irreproducible: [ids], cascading: {proposals, lineage_rows},
---      pools: [keys]} — the ticket's four counts and what makes the zeros
---      honest: `kept` and `current` say why nothing moved, `unqueued` says a
---      mark waits for a pool, `pools` says what an operator drains
---      (db/rebuild.ts prints the commands).
+--      THE REPORT: {ok, input, reason, input_gone, force, orphans_only,
+--      walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued,
+--      stale_proposals, kept, current, legacy, irreproducible: [ids],
+--      cascading: {proposals, lineage_rows}, pools: [keys]} — the ticket's
+--      four counts and what makes the zeros honest: `kept` and `current` say
+--      why nothing moved, `unqueued` says a mark waits for a pool,
+--      `stale_proposals` the verdicts the pass will remake, `pools` what an
+--      operator drains (db/rebuild.ts prints the commands); `at_cap` says the
+--      walk returned its cap of rows and whatever stood beyond is the next
+--      call's — the walk is deterministic and shrinks as rows go.
 --
 -- SAFETY
 --   Additive: two nullable columns on derivations; one CHECK widened and one
@@ -606,7 +619,12 @@ CREATE OR REPLACE FUNCTION rebuild_derived(
   p_reason       text,
   p_input_gone   boolean DEFAULT false,
   p_fingerprints text[]  DEFAULT NULL,
-  p_force        boolean DEFAULT false
+  p_force        boolean DEFAULT false,
+  -- 063, first review pass: the orphan sweep (db/rebuild.ts --orphans) acts
+  -- on the rows whose artifact is gone and nothing else — a stale row on the
+  -- same thought keeps its own reason for its own rebuild (cold read: the
+  -- sweep marked and handed on every stale row under the sweep's name).
+  p_orphans_only boolean DEFAULT false
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -632,6 +650,8 @@ DECLARE
   v_windows_done boolean := false;
   v_orphan       boolean;
   v_stale        boolean;
+  v_fp_stale     boolean;
+  v_stale_props  int := 0;
   v_walked       int := 0;
   v_depth        int := 0;
   v_rebuilt      int := 0;
@@ -674,9 +694,11 @@ BEGIN
   v_fp := COALESCE(v_t.content_fingerprint, content_fingerprint_of(v_t.content));
 
   -- The workers' current keys (the pools they drain); NULL where unset.
-  SELECT value INTO v_cfg_model FROM ob1_config WHERE key = 'embedding_model';
-  SELECT value INTO v_cfg_dim   FROM ob1_config WHERE key = 'embedding_dim';
-  SELECT value INTO v_cfg_key   FROM ob1_config WHERE key = 'entity_extraction_key';
+  -- An empty value is unset, as 016's trigger reads the extraction key (and
+  -- 015's claims refuse an empty work_type) — first review pass, cold read.
+  SELECT NULLIF(value, '') INTO v_cfg_model FROM ob1_config WHERE key = 'embedding_model';
+  SELECT NULLIF(value, '') INTO v_cfg_dim   FROM ob1_config WHERE key = 'embedding_dim';
+  SELECT NULLIF(value, '') INTO v_cfg_key   FROM ob1_config WHERE key = 'entity_extraction_key';
 
   -- The input leaving: the snapshot fingerprints, computed while the input's
   -- own lineage rows still stand — its OWN position on each (a proposal's row
@@ -710,12 +732,15 @@ BEGIN
       CONTINUE;
     END IF;
 
-    -- The artifact's thought (the proposal's is the pair; read below).
-    IF v_row.artifact_kind <> 'proposal' THEN
-      SELECT t.id, t.content, t.content_fingerprint, t.embedding, t.embedding_model, t.metadata
-        INTO v_a FROM thoughts t WHERE t.id = v_row.artifact_id;
-      v_a_found := FOUND;
-    END IF;
+    -- The artifact's thought (the proposal's is the pair; read below). The
+    -- SELECT INTO runs on EVERY row: a record variable never assigned has no
+    -- tuple shape, and the first expression that names one of its fields
+    -- raises "record is not assigned yet" — the first rebuild in a session
+    -- whose first row was a proposal failed so (run-it, first review pass).
+    -- A no-row SELECT INTO leaves a NULL row WITH a shape.
+    SELECT t.id, t.content, t.content_fingerprint, t.embedding, t.embedding_model, t.metadata
+      INTO v_a FROM thoughts t WHERE t.id = v_row.artifact_id AND v_row.artifact_kind <> 'proposal';
+    v_a_found := FOUND;
 
     -- ORPHAN rules first: a row whose artifact is gone names nothing to
     -- re-derive, and a vector row on a NULL embedding must never reach the
@@ -725,12 +750,16 @@ BEGIN
       WHEN 'entities' THEN NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.thought_id = v_row.artifact_id AND m.extraction_key = v_row.produced_by)
                        AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.thought_id = v_row.artifact_id AND g.extraction_key = v_row.produced_by)
       WHEN 'vector'   THEN NOT v_a_found OR v_a.embedding IS NULL
-      WHEN 'metadata' THEN NOT v_a_found OR NOT (v_a.metadata ? 'type' OR v_a.metadata ? 'topics')
+      WHEN 'metadata' THEN NOT v_a_found OR NOT COALESCE(v_a.metadata ? 'type' OR v_a.metadata ? 'topics', false)
       WHEN 'proposal' THEN NOT EXISTS (SELECT 1 FROM supersession_proposals p WHERE p.id = v_row.artifact_id)
       ELSE false END;
     IF v_orphan THEN
       DELETE FROM derivations WHERE id = v_row.derivation_id;
       v_deleted := v_deleted + 1;
+      CONTINUE;
+    END IF;
+    IF p_orphans_only THEN
+      v_current := v_current + 1;
       CONTINUE;
     END IF;
     IF v_row.recipe->>'legacy' = 'true' THEN v_legacy := v_legacy + 1; END IF;
@@ -794,12 +823,12 @@ BEGIN
     -- THE INPUT STANDING (or a row fed by the leaving input that another
     -- thought keys): stale when any input's fingerprint moved or the input
     -- has no row; --force says every row is.
-    v_stale := p_force
-            OR (p_input_gone AND p_input = ANY(v_row.input_ids))
-            OR EXISTS (SELECT 1 FROM unnest(v_row.input_ids, v_row.input_fingerprints) AS u(iid, ifp)
-                         LEFT JOIN thoughts t ON t.id = u.iid
-                        WHERE t.id IS NULL
-                           OR u.ifp IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)));
+    v_fp_stale := (p_input_gone AND p_input = ANY(v_row.input_ids))
+               OR EXISTS (SELECT 1 FROM unnest(v_row.input_ids, v_row.input_fingerprints) AS u(iid, ifp)
+                            LEFT JOIN thoughts t ON t.id = u.iid
+                           WHERE t.id IS NULL
+                              OR u.ifp IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)));
+    v_stale := p_force OR v_fp_stale;
     IF NOT v_stale THEN
       v_current := v_current + 1;
       CONTINUE;
@@ -818,7 +847,12 @@ BEGIN
         -- would launder the staleness the census exists to see (061's first
         -- review pass named the same trap on the vector trigger) — run-it,
         -- the build: the smoke's raw move "rebuilt" its own stale vector.
-        v_snap_ok := v_model IS NOT NULL AND EXISTS (
+        -- …and only for a row stale BY FINGERPRINT: under --force alone the
+        -- row's text did not move, so a differing snapshot vector at its key
+        -- is a twin's raw move overwriting it (060's trigger upserts under
+        -- the key), and restoring it would launder the other way (cold read,
+        -- first review pass) — force sends the row to the pool instead.
+        v_snap_ok := v_fp_stale AND v_model IS NOT NULL AND EXISTS (
           SELECT 1 FROM ob1_embedding_snapshot s
            WHERE s.content_fingerprint = v_cur AND s.embedding_model = v_model
              AND s.embedding::real[] IS DISTINCT FROM v_a.embedding::real[]);
@@ -878,11 +912,19 @@ BEGIN
         SELECT p.id, p.status, p.newer_id, p.judge_key INTO v_p
           FROM supersession_proposals p WHERE p.id = v_row.artifact_id FOR UPDATE;
         IF v_p.status IN ('pending', 'stale') THEN
+          -- The proposal's own status is its mark: the lineage row is left
+          -- unmarked, since nothing but the pass's replacement writes it
+          -- again — a reviewer's decision on the stale row would otherwise
+          -- leave a mark standing for ever and the census counting it (cold
+          -- read, first review pass). The judge's key is the pool by
+          -- construction (029: db/consolidate.ts writes its job as the key);
+          -- no config records the current one, so after a judge-model change
+          -- the claim sits under the old key while the pass's own pool
+          -- re-judges the pair anyway — a stray pending row --status shows.
           IF v_p.status = 'pending' THEN
             UPDATE supersession_proposals SET status = 'stale' WHERE id = v_p.id AND status = 'pending';
           END IF;
-          UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
-          v_marked := v_marked + 1;
+          v_stale_props := v_stale_props + 1;
           v_pool := v_p.judge_key;
           IF NOT ((v_pool || '|' || v_p.newer_id::text) = ANY(v_claims)) THEN
             PERFORM requeue_thought_work(v_pool, v_p.newer_id);
@@ -904,6 +946,41 @@ BEGIN
     END CASE;
   END LOOP;
 
+  -- The input leaving, whatever the walk held: mentions written by a producer
+  -- from before 061 (or by a raw writer) have no lineage row, so the windows
+  -- and the graph go here when no row in the walk took them (run-it, first
+  -- review pass: a thought whose entities rows were gone kept its mentions
+  -- for the cascade and its entities for nobody). A worker committing an
+  -- extraction after this ran leaves an entity the caller's row delete does
+  -- not prune — delete_thought's own residue; prune_orphan_entities() is its
+  -- broom.
+  IF p_input_gone AND NOT v_windows_done THEN
+    DELETE FROM thought_chunks WHERE thought_id = p_input;
+    v_windows_done := true;
+  END IF;
+  IF p_input_gone AND NOT v_graph_done THEN
+    SELECT array_agg(DISTINCT e) INTO v_touched
+      FROM (SELECT m.entity_id AS e FROM thought_entities m WHERE m.thought_id = p_input
+            UNION ALL SELECT g.from_entity_id FROM ob1_entity_edges g WHERE g.thought_id = p_input
+            UNION ALL SELECT g.to_entity_id   FROM ob1_entity_edges g WHERE g.thought_id = p_input) AS s;
+    IF v_touched IS NOT NULL THEN
+      PERFORM e.id FROM ob1_entities e WHERE e.id = ANY(v_touched) ORDER BY e.id FOR UPDATE;
+    END IF;
+    WITH d AS (DELETE FROM ob1_entity_edges WHERE thought_id = p_input RETURNING from_entity_id, to_entity_id)
+    SELECT array_agg(x) INTO v_more FROM (SELECT d.from_entity_id FROM d UNION SELECT d.to_entity_id FROM d) AS s(x);
+    v_touched := COALESCE(v_touched, ARRAY[]::uuid[]) || COALESCE(v_more, ARRAY[]::uuid[]);
+    WITH d AS (DELETE FROM thought_entities WHERE thought_id = p_input RETURNING entity_id)
+    SELECT array_agg(d.entity_id) INTO v_more FROM d;
+    v_touched := v_touched || COALESCE(v_more, ARRAY[]::uuid[]);
+    IF cardinality(v_touched) > 0 THEN
+      DELETE FROM ob1_entities e
+       WHERE e.id = ANY(v_touched)
+         AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = e.id)
+         AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = e.id OR g.to_entity_id = e.id);
+    END IF;
+    v_graph_done := true;
+  END IF;
+
   -- The input leaving: the snapshot rows at its fingerprints (060 names this
   -- file as their removal path).
   IF p_input_gone AND v_fps IS NOT NULL THEN
@@ -913,15 +990,19 @@ BEGIN
   END IF;
 
   RETURN jsonb_build_object(
-    'ok', true, 'input', p_input, 'reason', p_reason, 'input_gone', p_input_gone, 'force', p_force,
-    'walked', v_walked, 'depth', v_depth, 'truncated', v_walked >= 2000,
+    'ok', true, 'input', p_input, 'reason', p_reason, 'input_gone', p_input_gone, 'force', p_force, 'orphans_only', p_orphans_only,
+    -- at_cap: the walk returned its cap of rows; whatever stood beyond, if
+    -- anything, is the next call's (the walk is deterministic and shrinks as
+    -- rows are deleted or re-recorded) — first review pass: "truncated" read
+    -- as a cut on exactly the cap.
+    'walked', v_walked, 'depth', v_depth, 'at_cap', v_walked >= 2000,
     'rebuilt', v_rebuilt, 'enqueued', v_enqueued, 'deleted', v_deleted,
-    'marked', v_marked, 'unqueued', v_unqueued, 'kept', v_kept, 'current', v_current, 'legacy', v_legacy,
+    'marked', v_marked, 'unqueued', v_unqueued, 'stale_proposals', v_stale_props, 'kept', v_kept, 'current', v_current, 'legacy', v_legacy,
     'irreproducible', to_jsonb(v_irre),
     'cascading', jsonb_build_object('proposals', v_casc_prop, 'lineage_rows', v_casc_rows),
     'pools', to_jsonb(v_pools));
 END;
 $$;
 
-COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean) IS
-  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key for a pending proposal, which is set stale (enqueued) — with stale_since/stale_reason set on the row (marked; the tags have no pool: unqueued); a source: pass and a decided proposal are kept; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. Returns {ok, input, reason, input_gone, force, walked, depth, truncated, rebuilt, enqueued, deleted, marked, unqueued, kept, current, legacy, irreproducible, cascading, pools}. Migration 063 / SMD-1732.';
+COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) IS
+  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key for a pending proposal, which is set stale (its status is the mark; stale_proposals) — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept); a source: pass and a decided proposal are kept; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migration 063 / SMD-1732.';

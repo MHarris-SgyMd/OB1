@@ -19,7 +19,8 @@
  * and the snapshot rows too), marked with no pool (the tags), kept (a
  * structured pass, a decided proposal), current (nothing moved), and the
  * derived_from children it cannot reproduce. The reason defaults to the flag
- * that asked ('operator: edit', 'operator: forget'); say a better one.
+ * that asked ('operator: edit', 'operator: force', 'operator: forget',
+ * 'operator: orphan sweep'); say a better one.
  *
  * --gone is SMD-1723's shape — the input is leaving. The row must STILL STAND
  * when this runs (061's drop trigger leaves nothing to walk after a delete);
@@ -29,8 +30,9 @@
  *
  * --orphans reads the lineage rows whose artifact is gone while the thought
  * stands (preflight's `lineage` WARN names this flag) and calls
- * rebuild_derived once per thought, which deletes each such row and touches
- * no row whose artifact stands.
+ * rebuild_derived once per thought in its orphans-only mode, which deletes
+ * each such row and touches no row whose artifact stands — a stale row on
+ * the same thought keeps its own reason for its own rebuild.
  *
  * --dry-run runs the call inside a transaction and rolls it back: the report
  * is the function's own, and nothing is kept — the honest preview, since the
@@ -75,11 +77,16 @@ const STATUS = has("status");
 const GONE = has("gone");
 const FORCE = has("force");
 const DRY = has("dry-run");
-const LIMIT = Math.max(1, Math.min(Number(flag("limit") ?? 500), 10000));
+const limitRaw = flag("limit");
+if (limitRaw !== undefined && !/^\d+$/.test(limitRaw)) {
+  console.error(`--limit takes a whole number, got "${limitRaw}"`);
+  process.exit(2);
+}
+const LIMIT = Math.max(1, Math.min(Number(limitRaw ?? 500), 10000));
 const FINGERPRINTS = flag("fingerprints")?.split(",").map((s) => s.trim()).filter(Boolean) ?? null;
 const modes = [INPUT !== undefined, ORPHANS, STATUS].filter(Boolean).length;
 if (modes !== 1) {
-  console.error("Say one thing: --input <id> [--reason …] [--gone] [--force] [--dry-run] | --orphans [--limit N] [--dry-run] | --status");
+  console.error("Say one thing: --input <id> [--reason …] [--gone [--fingerprints …]] [--force] [--dry-run] | --orphans [--limit N] [--dry-run] | --status");
   process.exit(2);
 }
 if (INPUT !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(INPUT)) {
@@ -90,15 +97,31 @@ if ((GONE || FORCE || FINGERPRINTS) && INPUT === undefined) {
   console.error("--gone, --force and --fingerprints go with --input");
   process.exit(2);
 }
-const REASON = flag("reason") ?? (GONE ? "operator: forget" : FORCE ? "operator: force" : "operator: edit");
+if (FINGERPRINTS && !GONE) {
+  console.error("--fingerprints goes with --gone: the earlier texts' fingerprints are what a leaving thought's snapshot rows are found by");
+  process.exit(2);
+}
+const reasonRaw = flag("reason");
+if (reasonRaw !== undefined && reasonRaw.trim() === "") {
+  console.error("--reason needs words: it is recorded on every row marked");
+  process.exit(2);
+}
+const REASON = reasonRaw ?? (GONE ? "operator: forget" : FORCE ? "operator: force" : ORPHANS ? "operator: orphan sweep" : "operator: edit");
+/**
+ * Bun 1.4 binds a JS string[] to a text[] parameter as the bare text `a,b`
+ * (run-it, first review pass: "malformed array literal"), so the Postgres
+ * array literal is built here — each element quoted, quotes and backslashes
+ * escaped — and bound as text.
+ */
+const FPS_LITERAL = FINGERPRINTS ? "{" + FINGERPRINTS.map((s) => `"${s.replace(/(["\\])/g, "\\$1")}"`).join(",") + "}" : null;
 
 const sql = new SQL({ url, max: 1 });
 
 type Report = {
   ok: boolean; error?: string; id?: string;
   input: string; reason: string; input_gone: boolean; force: boolean;
-  walked: number; depth: number; truncated: boolean;
-  rebuilt: number; enqueued: number; deleted: number; marked: number; unqueued: number; kept: number; current: number; legacy: number;
+  walked: number; depth: number; at_cap: boolean;
+  rebuilt: number; enqueued: number; deleted: number; marked: number; unqueued: number; stale_proposals: number; kept: number; current: number; legacy: number;
   irreproducible: string[]; cascading: { proposals: number; lineage_rows: number }; pools: string[];
 };
 
@@ -113,11 +136,11 @@ function drainer(pool: string): string {
 function printReport(r: Report): void {
   console.log(`  input:       ${r.input}${r.input_gone ? " (leaving — the row still stands; the caller deletes it)" : ""}`);
   console.log(`  reason:      ${r.reason}${r.force ? " (--force: every row treated as stale)" : ""}`);
-  console.log(`  walked:      ${r.walked} lineage row(s) to depth ${r.depth}${r.truncated ? " — TRUNCATED at the walk's cap; run again" : ""}`);
+  console.log(`  walked:      ${r.walked} lineage row(s) to depth ${r.depth}${r.at_cap ? " — the walk's cap; whatever stood beyond it is the next call's" : ""}`);
   console.log(`  rebuilt:     ${r.rebuilt} (a vector restored from the snapshot at the model — the one re-derivation the database owns)`);
   console.log(`  enqueued:    ${r.enqueued} (thought, pool) claim(s) for the workers`);
   console.log(`  deleted:     ${r.deleted} (lineage rows whose artifact is gone${r.input_gone ? "; the windows, the graph and the snapshot rows the input keyed" : ""})`);
-  console.log(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, or no configured model)` : ""}`);
+  console.log(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} pending proposal(s) set stale (their status is the mark; the next consolidate pass re-judges them)` : ""}`);
   console.log(`  kept:        ${r.kept} (a structured pass reads its source, not the text; a decided proposal is a reviewer's)`);
   console.log(`  current:     ${r.current} (nothing moved)${r.legacy ? `; ${r.legacy} legacy row(s) read current by construction — --force re-runs them` : ""}`);
   if (r.input_gone) console.log(`  cascade:     ${r.cascading.proposals} proposal(s) and ${r.cascading.lineage_rows} lineage row(s) go with the row delete (029's and 061's triggers)`);
@@ -132,7 +155,7 @@ function printReport(r: Report): void {
 }
 
 async function needs063(): Promise<void> {
-  const [row] = (await sql`SELECT to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean)') IS NOT NULL AS ok`) as { ok: boolean }[];
+  const [row] = (await sql`SELECT to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)') IS NOT NULL AS ok`) as { ok: boolean }[];
   if (!row.ok) {
     console.error("  rebuild_derived is not on this brain: migration 063 (SMD-1732) is missing. Apply it — cd db && bun migrate.ts --url <url> — and run again.");
     await sql.close();
@@ -140,10 +163,10 @@ async function needs063(): Promise<void> {
   }
 }
 
-async function callRebuild(id: string, reason: string, gone: boolean, fps: string[] | null, force: boolean): Promise<Report> {
+async function callRebuild(id: string, reason: string, gone: boolean, fps: string | null, force: boolean, orphansOnly = false): Promise<Report> {
   if (DRY) await sql.unsafe("BEGIN");
   try {
-    const [row] = (await sql`SELECT rebuild_derived(${id}::uuid, ${reason}::text, ${gone}::boolean, ${fps}::text[], ${force}::boolean) AS r`) as { r: Report }[];
+    const [row] = (await sql`SELECT rebuild_derived(${id}::uuid, ${reason}::text, ${gone}::boolean, ${fps}::text::text[], ${force}::boolean, ${orphansOnly}::boolean) AS r`) as { r: Report }[];
     return row.r;
   } finally {
     if (DRY) await sql.unsafe("ROLLBACK");
@@ -185,7 +208,7 @@ try {
   }
   if (INPUT !== undefined) {
     if (DRY) console.log("  dry run: the call runs and rolls back — the report is what it would do");
-    const r = await callRebuild(INPUT, REASON, GONE, FINGERPRINTS, FORCE);
+    const r = await callRebuild(INPUT, REASON, GONE, FPS_LITERAL, FORCE);
     if (!r.ok) {
       console.error(`  refused: ${r.error}${r.error === "NOT_FOUND" ? " — no thought has this id" : r.error === "REPLAYING" ? " — this session is a replay (ob1.projecting_replay); a rebuild is a live operation" : ""}`);
       await sql.close();
@@ -214,20 +237,16 @@ try {
   }
   if (DRY) console.log("  dry run: each call runs and rolls back");
   let deleted = 0, touched = 0;
-  const pools = new Set<string>();
   for (const o of orphans) {
-    const r = await callRebuild(o.id, "operator: orphan sweep", false, null, false);
+    // Orphans only: a stale row on the same thought keeps its own reason
+    // for its own rebuild (cold read, first review pass).
+    const r = await callRebuild(o.id, REASON, false, null, false, true);
     if (!r.ok) { console.error(`  ${o.id}: refused ${r.error}`); continue; }
     touched += 1;
     deleted += r.deleted;
-    for (const p of r.pools) pools.add(p);
   }
   console.log(`  orphans:     ${orphans.length} thought(s) carried a lineage row whose artifact is gone${orphans.length >= LIMIT ? ` (the first ${LIMIT}; run again for the rest)` : ""}`);
-  console.log(`  deleted:     ${deleted} lineage row(s) over ${touched} thought(s)${DRY ? " (rolled back)" : ""}`);
-  if (pools.size) {
-    console.log(`  pools:       ${[...pools].join(", ")} — stale rows on the same thoughts were handed on as well`);
-    for (const p of pools) console.log(`    ${p}  →  ${drainer(p)}`);
-  }
+  console.log(`  deleted:     ${deleted} lineage row(s) over ${touched} thought(s)${DRY ? " (rolled back)" : ""} — nothing else on those thoughts was touched`);
   await sql.close();
   process.exit(0);
 } catch (e) {

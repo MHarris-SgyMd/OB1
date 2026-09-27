@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2101 assertions: 2101 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2106 assertions: 2106 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-three (63) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1770,7 +1770,8 @@ legacy rows, the stale proposals, and the pools with pending rows.
 is the function's own and nothing is kept. The tool calls no model and holds
 no lease. Exit 0 ran; 1 the function refused as a value (`NOT_FOUND`,
 `REPLAYING`) or a run failed; 2 usage, no URL, or a brain without 063. It
-runs `SECURITY INVOKER` code over five groups' tables, so the role needs
+runs `SECURITY INVOKER` code over four groups' tables (capture, worker,
+extraction, and the server group's `SELECT` on `ob1_config`), so the role needs
 every group `migrate.ts --grant` issues — the worker group gained `DELETE`
 on the snapshot for it (the grants table). test-live [31] drives it.
 
@@ -2675,8 +2676,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2101 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 844 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2106 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 846 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

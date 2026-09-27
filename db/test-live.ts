@@ -6478,12 +6478,12 @@ console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild
   assert(dry.code === 0 && /dry run: the call runs and rolls back/.test(dry.out) && /enqueued:\s+3 \(thought, pool\) claim\(s\)/.test(dry.out) && (await claimsOf(newer.id)) === "" && (await status(pid)) === "pending" && (await marksOf(newer.id)) === "chunks:-,entities:-,vector:-",
     `a dry run prints the report the function would give and keeps nothing (exit ${dry.code}: ${dry.out.split("\n").find((l) => /enqueued/.test(l))?.trim()}; claims "${await claimsOf(newer.id)}")`);
   const live = await rebuildTs("--input", newer.id, "--reason", "live: edit");
-  assert(live.code === 0 && /rebuilt:\s+0/.test(live.out) && /enqueued:\s+3/.test(live.out) && /marked:\s+4 lineage row\(s\)/.test(live.out) && new RegExp(`${REEMBED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+→\\s+bun db/reembed\\.ts --url <url>`).test(live.out) && /extract:live@p2\s+→\s+bun db\/extract-entities\.ts/.test(live.out) && /consolidate:live@p1\s+→\s+bun db\/consolidate\.ts/.test(live.out),
+  assert(live.code === 0 && /rebuilt:\s+0/.test(live.out) && /enqueued:\s+3/.test(live.out) && /marked:\s+3 lineage row\(s\)[^\n]*1 pending proposal\(s\) set stale/.test(live.out) && new RegExp(`${REEMBED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+→\\s+bun db/reembed\\.ts --url <url>`).test(live.out) && /extract:live@p2\s+→\s+bun db\/extract-entities\.ts/.test(live.out) && /consolidate:live@p1\s+→\s+bun db\/consolidate\.ts/.test(live.out),
     `a run hands the windows and the vector to the reembed pool, the extraction to the configured key, the pair to the judge's, and names the command that drains each (exit ${live.code}: ${live.out.trim().split("\n").slice(2, 6).join(" / ").slice(0, 300)})`);
   assert((await claimsOf(newer.id)) === `${JUDGE}:pending,${CUR_KEY}:pending,${REEMBED}:pending` && (await status(pid)) === "stale" && (await marksOf(newer.id)) === "chunks:live: edit,entities:live: edit,vector:live: edit",
     `…the claims stand under the three keys, the proposal is stale, the reason is on every row (${await claimsOf(newer.id)}; ${await marksOf(newer.id)})`);
   const st = await rebuildTs("--status");
-  assert(st.code === 0 && /marked:\s+4 row\(s\) await a re-run/.test(st.out) && /proposals:\s+1 stale/.test(st.out) && /orphans:\s+0 row\(s\)/.test(st.out) && new RegExp(`${CUR_KEY} \\(1 pending\\)`).test(st.out),
+  assert(st.code === 0 && /marked:\s+3 row\(s\) await a re-run/.test(st.out) && /proposals:\s+1 stale/.test(st.out) && /orphans:\s+0 row\(s\)/.test(st.out) && new RegExp(`${CUR_KEY} \\(1 pending\\)`).test(st.out),
     `--status reads the census back: the marks, the stale proposal, the pools (${st.out.trim().split("\n").slice(0, 7).join(" / ").slice(0, 300)})`);
   // A raw delete of the windows leaves an orphan row: the sweep deletes it.
   await sql`DELETE FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`;
@@ -6491,6 +6491,18 @@ console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild
   assert(sweep.code === 0 && /orphans:\s+1 thought\(s\)/.test(sweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\)/.test(sweep.out) && (await marksOf(newer.id)) === "entities:live: edit,vector:live: edit",
     `--orphans deletes the chunks row whose windows are gone and leaves the rest (exit ${sweep.code}: ${sweep.out.trim().split("\n").slice(0, 2).join(" / ")})`);
   assert(/orphans: none/.test((await rebuildTs("--orphans")).out), "…and a second sweep finds none");
+  // The door's array bind (first review pass: Bun bound a string[] as the
+  // bare text "a,b" — malformed array literal), and a fresh process on a
+  // thought whose only lineage row is a proposal (the record variable with
+  // no shape, same pass).
+  const gone = await rebuildTs("--input", newer.id, "--gone", "--fingerprints", "live-old-fp,live-\"quoted\"-fp", "--dry-run");
+  assert(gone.code === 0 && /input:\s+[0-9a-f-]{36} \(leaving/.test(gone.out) && /cascade:\s+1 proposal\(s\)/.test(gone.out), `the forget arm through the door with two fingerprints, one carrying a quote, runs dry and reports the cascade (exit ${gone.code}: ${gone.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 240)})`);
+  const P0 = (await sql`SELECT upsert_thought('063 live: a vectorless older note', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`)[0].r as { id: string };
+  await sql`UPDATE thoughts SET created_at = now() - interval '4 days' WHERE id = ${P0.id}::uuid`;
+  const Q0 = (await sql`SELECT upsert_thought('063 live: a vectorless newer note', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`)[0].r as { id: string };
+  await sql`SELECT record_supersession_proposal(${P0.id}::uuid, ${Q0.id}::uuid, 'conflict_undirected', 0.5, 'first', 0.5, ${JUDGE}::text)`;
+  const firstRow = await rebuildTs("--input", Q0.id, "--reason", "live: first");
+  assert(firstRow.code === 0 && /walked:\s+1 lineage row/.test(firstRow.out) && /current:\s+1/.test(firstRow.out), `a fresh process's first rebuild on a thought whose only row is a proposal runs (exit ${firstRow.code}: ${firstRow.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 200)})`);
 
   // Two sessions: a rebuild inside an open transaction against a reviewer
   // accepting the same proposal — the reviewer waits on the supersession
