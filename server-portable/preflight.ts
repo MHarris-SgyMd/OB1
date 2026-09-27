@@ -798,8 +798,14 @@ if (configFailed) {
       // keeps the last, and Bun's search_path= parameter outranks options.
       // Over PostgREST there is no catalog to ask, and a failed probe asks
       // nothing.
-      let offPath: { causes: string[]; fixes: string[] } | null = null;
-      if (built.kind === "sql" && conn && String((e as { errno?: unknown }).errno ?? "") === "42P01") {
+      // The same probe answers the count's other failures with thoughts
+      // resolving (SMD-2238): 42501 without SELECT on it is the grant; 42P01,
+      // or 42501 with SELECT held, is a read something the count reaches makes
+      // — a row-level security policy on the table — and none of them is
+      // fixed by migrating. The SQLSTATE picks the case, never the message.
+      const errno = String((e as { errno?: unknown }).errno ?? "");
+      let found: { detail: string; remedy: string } | null = null;
+      if (built.kind === "sql" && conn && (errno === "42P01" || errno === "42501")) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
@@ -813,7 +819,16 @@ if (configFailed) {
                      current_setting('server_version_num')::int AS version,
                      quote_ident(current_user::text) AS role,
                      quote_ident(session_user::text) AS login,
-                     quote_ident(current_database()::text) AS db`) as { present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string }[];
+                     quote_ident(current_database()::text) AS db,
+                     current_user::text AS "roleName",
+                     (SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE c.oid = to_regclass('thoughts')) AS resolved,
+                     has_table_privilege(to_regclass('thoughts'), 'SELECT') AS "canSelect",
+                     (SELECT string_agg(quote_ident(p.polname), ', ' ORDER BY p.polname) FROM pg_policy p
+                       WHERE p.polrelid = to_regclass('thoughts')) AS policies`) as {
+              present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
+              roleName: string; resolved: string | null; canSelect: boolean | null; policies: string | null;
+            }[];
             if (r?.present && r.unresolved) {
               let source: string | null = null;
               try {
@@ -843,17 +858,49 @@ if (configFailed) {
                   ? `${alter}  (unless the connection string sets search_path, which outranks it)`
                   : alter);
               }
-              offPath = { causes, fixes };
+              found = {
+                detail: `public.thoughts exists but does not resolve for this role (${causes.join("; ")})`,
+                remedy: `${fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`,
+              };
+            } else if (r?.resolved && errno === "42501" && r.canSelect === false) {
+              // --grant takes the name raw, so it goes to the shell quoted.
+              const grantArg = /^[A-Za-z0-9_.-]+$/.test(r.roleName) ? r.roleName : `'${r.roleName.replaceAll("'", `'\\''`)}'`;
+              found = {
+                detail: `role ${r.role} has no SELECT on ${r.resolved}`,
+                remedy: `GRANT SELECT ON ${r.resolved} TO ${r.role};  — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant ${grantArg}  (db/README.md, Grants for a capturing role)`,
+              };
+            } else if (r?.resolved) {
+              const whence = errno === "42501"
+                ? `thoughts resolves (${r.resolved}) and this role may read it, so the refusal comes from`
+                : `thoughts resolves (${r.resolved}), so the missing relation is read by`;
+              const plural = !!r.policies?.includes(",");
+              const where = r.policies ? (plural ? "the policies" : "the policy") : "what the count reaches";
+              found = {
+                detail: r.policies
+                  ? `${whence} what the count reaches: row-level security ${plural ? "policies" : "policy"} ${r.policies} on it`
+                  : `${whence} something the count reaches, not the table itself`,
+                remedy: `${errno === "42501"
+                  ? `Grant this role what the error names, or change ${where} to use only what the role may.`
+                  : `Fix ${where}, or a function called there, so nothing reads a relation that does not exist.`}  The table is there, so migrating would not change it.`,
+              };
             }
           } finally {
             await probe.close();
           }
-        } catch { /* the remedy below stays the migrate command */ }
+        } catch { /* the remedy below stays the one the SQLSTATE names */ }
       }
       add("schema", "fail",
-          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.causes.join("; ")})` : msg,
-          offPath
-            ? `${offPath.fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`
+          found ? `${msg} — ${found.detail}` : msg,
+          found
+            ? found.remedy
+            // A connection refused before any query: the database it names is
+            // not there (3D000), or the role is refused (28000: it does not
+            // exist under trust auth — under a password, 28P01 hides that — it
+            // may not log in, or pg_hba.conf has no line for it).
+            : conn && errno === "3D000"
+            ? `Correct the database name in $${conn.from} — or, for a new brain, create it (CREATE DATABASE, as a role that may) and apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
+            : conn && errno === "28000"
+            ? `Check the role in $${conn.from}: the server refused it before any query — it must exist, may log in (LOGIN), and pg_hba.conf must admit it from this host.`
             : /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
@@ -1660,10 +1707,14 @@ if (configFailed) {
           const EVENT_COLUMNS = ["actor_kind", "trust", "origin", "stance", "cites", "valid_from", "valid_until", "backfilled_at"];
           // The eight names spelled into the query, not bound as an array: Bun's
           // SQL binds a JS array to ANY() as one text value (SMD-1803's trap).
+          // From pg_attribute, which shows every role the columns:
+          // information_schema shows a role none of a table it holds no
+          // privilege on, and told a reader to re-apply 046 (SMD-2238).
           const evCols = (await sql`
-            SELECT column_name AS c FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'thought_audit'
-              AND column_name IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at')`) as { c: string }[];
+            SELECT a.attname AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thought_audit' AND a.attnum > 0 AND NOT a.attisdropped
+              AND a.attname IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at')`) as { c: string }[];
           const missingCols = EVENT_COLUMNS.filter((c) => !evCols.some((r) => r.c === c));
           const bodies = (await sql`
             SELECT p.proname AS name, p.prosrc AS src
@@ -1883,7 +1934,7 @@ if (configFailed) {
             add("audit events", "skip", `not checked — this role cannot read the census (${msg}); the shape is checked, the waiting keys are not`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${group}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
-            add("audit events", "warn", `could not verify: ${msg}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
+            add("audit events", "warn", `could not verify: ${msg}`, "The check reads pg_attribute, pg_proc, ob1_agents and thought_audit.");
           }
         }
 
@@ -2699,9 +2750,12 @@ if (configFailed) {
         // boundary of its own took every later check with it.
         try {
           const { CHUNK_CONTEXT: wantContext } = await import("../db/config.mjs");
+          // pg_attribute, not information_schema, which hides the column from a
+          // role with no privilege on the table and said "apply 013" (SMD-2238).
           const ctxCol = await sql`
-            SELECT count(*)::int AS c FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'thought_chunks' AND column_name = 'context'`;
+            SELECT count(*)::int AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thought_chunks' AND a.attname = 'context' AND a.attnum > 0 AND NOT a.attisdropped`;
           const haveCtxCol = Number(ctxCol[0].c) >= 1;
           if (wantContext && !haveCtxCol) {
             add("chunk context", "fail",
@@ -2742,7 +2796,7 @@ if (configFailed) {
             }
           }
         } catch (e) {
-          add("chunk context", "warn", `could not verify: ${(e as Error).message}`, "The check reads information_schema.columns and thought_chunks.");
+          add("chunk context", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_attribute and thought_chunks.");
         }
 
         /**
@@ -2849,9 +2903,12 @@ if (configFailed) {
          */
         let haveLabel = false;
         try {
+          // pg_attribute: information_schema hides the column from a role with
+          // no privilege on thoughts, and said --reapply 021 (SMD-2238).
           const labelCol = await sql`
-            SELECT count(*)::int AS c FROM information_schema.columns
-            WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+            SELECT count(*)::int AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thoughts' AND a.attname = 'embedding_model' AND a.attnum > 0 AND NOT a.attisdropped`;
           haveLabel = Number(labelCol[0].c) >= 1;
           if (!haveLabel) {
             add("vector models", "fail",

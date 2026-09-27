@@ -2023,6 +2023,22 @@ else {
     assert(new RegExp(`!\\s+migration ledger\\s+the ledger reaches 999, past this server's tree \\(${last}\\) — a newer tree migrated this brain`).test(ahead.out),
            `a ledger past the tree's last file warns the other way (${row(ahead.out, "migration ledger")})`);
 
+    // Refused before any query (SMD-2238): a database that is not there
+    // (3D000) names the connection string, not the migrations alone; a role
+    // that may not log in (28000) names the role.
+    const missingDb = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/[^/?]+(\?|$)/, "/pf_no_such_database$1") });
+    assert(/✗\s+schema\s+database "pf_no_such_database" does not exist\n\s+→ Correct the database name in \$DATABASE_URL — or, for a new brain, create it/.test(missingDb.out),
+           `a missing database names the connection string's database (${row(missingDb.out, "schema")} ${fix(missingDb.out, "schema")})`);
+    await claims.unsafe("DROP ROLE IF EXISTS pf_nologin");
+    await claims.unsafe("CREATE ROLE pf_nologin NOLOGIN PASSWORD 'nologin'");
+    try {
+      const noLogin = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_nologin:nologin@") });
+      assert(/✗\s+schema\s+role "pf_nologin" is not permitted to log in\n\s+→ Check the role in \$DATABASE_URL: the server refused it before any query/.test(noLogin.out),
+             `a role refused at login names the role, not the migrations (${row(noLogin.out, "schema")} ${fix(noLogin.out, "schema")})`);
+    } finally {
+      await claims.unsafe("DROP ROLE pf_nologin");
+    }
+
     // A role that may read the corpus and neither the ledger nor ob1_config
     // (review pass 1): the ledger row says the table is there and unreadable —
     // information_schema hid it from such a role, and the row told it to adopt
@@ -2038,6 +2054,53 @@ else {
              `a role without SELECT on the ledger is told it is unreadable, not absent (${row(asReader.out, "migration ledger")})`);
       assert(/schema version\s+could not verify: permission denied for table ob1_config/.test(asReader.out),
              `…and the version row names the refused ob1_config read (${row(asReader.out, "schema version")})`);
+      // information_schema shows a role no column of a table it holds no
+      // privilege on; pg_attribute shows them all (SMD-2238). A migrated
+      // brain is never told to re-apply 046 or 021, or to apply 013.
+      assert(!/audit events\s+thought_audit lacks/.test(asReader.out) && /audit events\s+not checked — this role cannot read the census \(permission denied for table/.test(asReader.out),
+             `…the audit row finds 046's columns and names the refused census read, not a --reapply (${row(asReader.out, "audit events")})`);
+      assert(!/embedding_model does not exist/.test(asReader.out) && /[✓!]\s+vector models/.test(asReader.out),
+             `…the vector-models row finds 021's column (${row(asReader.out, "vector models")})`);
+      const ctxReader = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@"), OB1_CHUNK_CONTEXT: "on" });
+      assert(/!\s+chunk context\s+could not verify: permission denied for table thought_chunks/.test(ctxReader.out) && !/013_chunk_context/.test(ctxReader.out),
+             `…and with OB1_CHUNK_CONTEXT on, the chunk-context row names the refused read, not 013 (${row(ctxReader.out, "chunk context")})`);
+
+      // No SELECT on thoughts, public on the path (SMD-2238): 42501 on the
+      // count names the grant, never the network. The printed GRANT, run,
+      // makes the row pass.
+      await claims.unsafe("REVOKE SELECT ON thoughts FROM pf_reader");
+      const noSelect = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(/✗\s+schema\s+permission denied for table thoughts — role pf_reader has no SELECT on public\.thoughts\n\s+→ GRANT SELECT ON public\.thoughts TO pf_reader;  — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate\.ts --url <the owner's connection string> --grant pf_reader /.test(noSelect.out)
+               && !/Check credentials and network/.test(fix(noSelect.out, "schema")),
+             `a role without SELECT on thoughts is told the grant (${row(noSelect.out, "schema")} ${fix(noSelect.out, "schema")})`);
+      assert(!/embedding_model does not exist/.test(noSelect.out), `…and the vector-models row does not call 021's column missing (${row(noSelect.out, "vector models")})`);
+      const printedGrant = /→ (GRANT SELECT ON public\.thoughts TO pf_reader;)/.exec(noSelect.out)?.[1];
+      if (printedGrant) await claims.unsafe(printedGrant);
+      const granted = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(!!printedGrant && /✓\s+schema\s+thoughts table reachable/.test(granted.out),
+             `…and that GRANT, run as printed, makes thoughts readable (${row(granted.out, "schema")})`);
+      // --grant takes the role's name raw, so a name the shell would split is
+      // printed shell-quoted; the command, run through sh as printed with the
+      // owner's connection string put in, grants it.
+      await claims.unsafe(`DROP ROLE IF EXISTS "pf reader's"`);
+      await claims.unsafe(`CREATE ROLE "pf reader's" LOGIN PASSWORD 'reader'`);
+      try {
+        const oddUrl = LIVE!.replace(/\/\/[^@]*@/, `//${encodeURIComponent("pf reader's")}:reader@`);
+        const odd = await run({ ...SQL_ENV, DATABASE_URL: oddUrl });
+        const printedCmd = /(bun migrate\.ts --url <the owner's connection string> --grant '(?:[^']|'\\'')*')  \(db\/README/.exec(odd.out)?.[1];
+        assert(/→ GRANT SELECT ON public\.thoughts TO "pf reader's";/.test(odd.out) && printedCmd === `bun migrate.ts --url <the owner's connection string> --grant 'pf reader'\\''s'`,
+               `a role whose name the shell would split gets --grant shell-quoted (${fix(odd.out, "schema")})`);
+        if (printedCmd) {
+          const sh = await runScript(["sh", "-c", printedCmd.replace("<the owner's connection string>", '"$OWNER_URL"')],
+                                     { env: { ...process.env, OWNER_URL: LIVE! } as Record<string, string>, cwd: join(HERE, "..", "db") });
+          const after = await run({ ...SQL_ENV, DATABASE_URL: oddUrl });
+          assert(sh.code === 0 && /✓\s+schema\s+thoughts table reachable/.test(after.out),
+                 `…and that command, run through sh as printed, grants the role (exit ${sh.code}; ${row(after.out, "schema")})`);
+        }
+      } finally {
+        await claims.unsafe(`DROP OWNED BY "pf reader's"`);
+        await claims.unsafe(`DROP ROLE "pf reader's"`);
+      }
 
       // The same role with public off its search path (review pass 2): the
       // ledger exists and does not resolve for it. Never "no schema_migrations
@@ -2235,12 +2298,27 @@ else {
         const rls = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
         assert(/✗\s+schema\s+relation "pf_no_such_table" does not exist/.test(rls.out) && !/public is not on its search_path/.test(rls.out),
                `another relation's "does not exist" is not read as thoughts off the path (${row(rls.out, "schema")})`);
+        // …nor as a brain to migrate: the row names the policy (SMD-2238).
+        assert(/relation "pf_no_such_table" does not exist — thoughts resolves \(public\.thoughts\), so the missing relation is read by what the count reaches: row-level security policy pf_rls on it\n\s+→ Fix the policy, or a function called there, so nothing reads a relation that does not exist\.  The table is there/.test(rls.out)
+                 && !/Apply the migrations/.test(fix(rls.out, "schema")),
+               `…and names the policy, not the migrate command (${row(rls.out, "schema")} ${fix(rls.out, "schema")})`);
+        // A policy calling a function this role may not run: 42501 with SELECT
+        // on thoughts held is the policy's refusal, not a missing grant on it.
+        await claims.unsafe("DROP POLICY pf_rls ON public.thoughts");
+        await claims.unsafe("CREATE FUNCTION public.pf_rls_denied() RETURNS boolean LANGUAGE sql AS $f$ SELECT true $f$");
+        await claims.unsafe("REVOKE EXECUTE ON FUNCTION public.pf_rls_denied() FROM PUBLIC");
+        await claims.unsafe("CREATE POLICY pf_rls ON public.thoughts FOR SELECT TO pf_reader USING (public.pf_rls_denied())");
+        const denied = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/✗\s+schema\s+permission denied for function pf_rls_denied — thoughts resolves \(public\.thoughts\) and this role may read it, so the refusal comes from what the count reaches: row-level security policy pf_rls on it\n\s+→ Grant this role what the error names, or change the policy to use only what the role may\.  The table is there/.test(denied.out)
+                 && !/GRANT SELECT ON public\.thoughts/.test(denied.out),
+               `…and a policy's refusal names the policy, not a GRANT on thoughts (${row(denied.out, "schema")} ${fix(denied.out, "schema")})`);
       } finally {
         try {
           if (!rowSecurity) await claims.unsafe("ALTER TABLE public.thoughts DISABLE ROW LEVEL SECURITY");
         } finally {
           await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts");
           await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_missing()");
+          await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_denied()");
           await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
         }
       }
