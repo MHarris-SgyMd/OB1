@@ -163,6 +163,7 @@ const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
+const APPLY_064 = "Apply db/migrations/064_pass_settles_stale.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -2081,13 +2082,18 @@ if (configFailed) {
                      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'derivations' AND column_name = 'stale_since') AS has_063,
                      (SELECT w.prosrc LIKE '%ob1:rerun-clears-the-mark%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)')) AS marks_clear,
                      (SELECT w.prosrc LIKE '%supersession_proposals.status = ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)')) AS replaces_stale,
-                     (SELECT w.prosrc LIKE '%p.status <> ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS yields_stale
+                     (SELECT w.prosrc LIKE '%p.status <> ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS yields_stale,
+                     -- 064 (SMD-2297), where its settle function stands: rebuild_derived's body reopens a pass-settled proposal
+                     -- on a text move (its sentinel); 063 re-applied by hand over 064 puts the body back that keeps every rejected row.
+                     to_regprocedure('public.settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS has_064,
+                     (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_064: boolean; reopens_settled: boolean | null }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
+            const reopenOlder = bodies.has_064 && bodies.reopens_settled !== true;
             type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
             const [c] = (await sql`
               WITH ch_s AS (SELECT thought_id FROM public.thought_chunks LIMIT ${BOUND}),
@@ -2168,6 +2174,10 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${rebuildOlder.length === 3 ? "the three bodies 063 redefines are" : `${rebuildOlder.join(" and ")} ${rebuildOlder.length === 1 ? "is" : "are"}`} from before 063 (061 or 029 re-applied by hand over it): a rebuild's mark is never cleared by the producer's next write, and a stale proposal is never replaced by the next judgement (SMD-1732). ${coverage}`,
                   ledgerRemedy("063", APPLY_063));
+            } else if (reopenOlder) {
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but rebuild_derived is from before 064 (063 re-applied by hand over it): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again (SMD-2297). ${coverage}`,
+                  ledgerRemedy("064", APPLY_064));
             } else if (Number(c.orphans)) {
               // The other direction (063): a row whose artifact is gone while
               // its thought stands — nothing it describes exists, and the
@@ -3459,13 +3469,14 @@ if (configFailed) {
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; thoughts: number }[];
             // 063 (SMD-1732): a stale row is a pending verdict whose texts
-            // moved; the next pass replaces one it finds in conflict again,
-            // and one it does not is the reviewer's — said here, since no
-            // other row counts them (third review pass, cold read).
+            // moved; 064 (SMD-2297): the next pass replaces one it finds in
+            // conflict again and settles one it does not — said here, since
+            // no other row counts them (063's third review pass, cold read);
+            // the reviewer's --list shows them, and may decide one sooner.
             const [{ pending: queued, stale: staleQueued }] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'stale')::int AS stale FROM supersession_proposals`;
             const queue = [
               Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "",
-              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again, a reviewer settles one it does not) — cd db && bun consolidate.ts --url $DATABASE_URL --list stale` : "",
+              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not) — cd db && bun consolidate.ts --url $DATABASE_URL --list stale` : "",
             ].filter(Boolean).join("; ");
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {

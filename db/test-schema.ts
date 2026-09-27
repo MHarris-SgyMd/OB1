@@ -78,6 +78,7 @@ import {
   resolveSubject, schemaProblem, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
+import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, IDENTIFIER_SHAPES, normalizeEntityName, TRIM_RE } from "../server-portable/entity-gate.ts";
 import { linearAdapter, SAMPLE_ISSUE } from "./ingest-linear.ts";
@@ -7571,7 +7572,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 4 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("063") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("063") && restored[4].startsWith("064") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -9400,8 +9401,10 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   assert(pcons.some((d) => /supersession_proposals_status_check=.*'pending'.*'accepted'.*'rejected'.*'stale'/.test(d)) && pcons.some((d) => /supersession_proposals_unreviewed_check=.*'pending'.*'stale'.*reviewed_at IS NULL/.test(d))
       && !pcons.some((d) => /\(status = 'pending'::text\) = \(reviewed_at IS NULL\)/.test(d)) && pcons.filter((d) => /status = ANY/.test(d) && !/reviewed_at/.test(d)).length === 1,
     `029's two status CHECKs replaced by 063's named pair: four statuses, and unreviewed = pending or stale (${pcons.join(" | ")})`);
-  for (const fn of ["rebuild_derived", "derivation_descendants", "consolidation_candidates", "record_supersession_proposal", "ob1_record_derivation"])
+  for (const fn of ["derivation_descendants", "consolidation_candidates", "record_supersession_proposal", "ob1_record_derivation"])
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
+  // rebuild_derived's last definer is 064 (SMD-2297: the proposal arm reopens a pass-settled row); [59] asserts it.
+  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("064"), `one rebuild_derived, 064 its last definer (${lastDefinerOf("rebuild_derived")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
   assert(/ob1:rebuild-acts-on-a-held-frontier/.test(await src(REBUILD_SIG)) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src(REBUILD_SIG)) && /FOR NO KEY UPDATE/.test(await src(REBUILD_SIG)),
     "the primitive carries its sentinel, takes the supersession lock and the row lock in delete_thought's order");
@@ -9664,6 +9667,159 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   await db.exec(`DELETE FROM ob1_entities`);
   await db.exec(`DELETE FROM ob1_embedding_snapshot`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
+}
+
+console.log("\n[59] Migration 064: the consolidation pass settles a stale proposal it no longer finds in conflict — settle_supersession_proposal rejects the row with the pass's marker note and re-records its lineage at the texts judged; rebuild_derived (063's body) sets a pass-settled row stale again on a later text move and keeps a person's decision; the marker is one string in the SQL and the TypeScript (SMD-2297)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const ACTOR = { name: "op-key", via: "test-door" };
+  const PASS_ACTOR = { name: "consolidator", via: "consolidate", session: "consolidate:stub@p2" };
+  type Lin = { id: string; kind: string; artifact: string; inputs: string[]; fps: string[]; by: string; recipe: Record<string, unknown>; since: string | null; why: string | null; agent: string | null };
+  const rowsOf = async (artifact: string) => q<Lin>(`SELECT id::text AS id, artifact_kind AS kind, artifact_id::text AS artifact, input_ids::text[] AS inputs, input_fingerprints AS fps, produced_by AS by, recipe, stale_since::text AS since, stale_reason AS why, canonical_agent_id::text AS agent FROM derivations WHERE artifact_id = $1::uuid ORDER BY artifact_kind, produced_by`, [artifact]);
+  const fp = async (content: string) => (await one<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [content])).f;
+  const cap = async (content: string, at: number, extra: Record<string, unknown> = {}) =>
+    (await one<{ r: { id: string; fingerprint: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`,
+      [content, JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL, ...extra }), unit(at)])).r;
+  const rte = async (id: string, key: string, ents: unknown[]) =>
+    (await one<{ r: { ok: boolean } }>(`SELECT record_thought_entities($1::uuid, $2::text, $3::jsonb, '[]'::jsonb, NULL::text, NULL::uuid, '{"deterministic": false, "model": "stub"}'::jsonb) AS r`, [id, key, JSON.stringify(ents)])).r;
+  const move = async (id: string, content: string) => { await db.query(`UPDATE thoughts SET content = $2, content_fingerprint = content_fingerprint_of($2) WHERE id = $1::uuid`, [id, content]); return fp(content); };
+  type Report = { ok: boolean; error?: string; enqueued: number; marked: number; stale_proposals: number; kept: number; current: number; pools: string[] };
+  const rebuild = async (id: string, reason: string, force = false) =>
+    (await one<{ r: Report }>(`SELECT rebuild_derived($1::uuid, $2::text, false, NULL::text[], $3::boolean, false) AS r`, [id, reason, force])).r;
+  const counts = (r: Report) => `enqueued ${r.enqueued} marked ${r.marked} stale_proposals ${r.stale_proposals} kept ${r.kept} current ${r.current} pools ${r.pools.join()}`;
+  const claimsOf = async (id: string) => (await q<{ w: string; s: string }>(`SELECT work_type AS w, status AS s FROM thought_work_claims WHERE thought_id = $1::uuid ORDER BY work_type`, [id])).map((c) => `${c.w}:${c.s}`).join();
+  const cands = async (id: string) => (await q<{ o: string }>(`SELECT older_id::text AS o FROM consolidation_candidates($1::uuid, 5, 0)`, [id])).map((c) => c.o).join();
+  type Prop = { status: string; judge_key: string; reviewed_at: string | null; review_note: string | null; older_fingerprint: string | null; newer_fingerprint: string | null };
+  const proposal = async (id: string) => one<Prop>(`SELECT status, judge_key, reviewed_at::text AS reviewed_at, review_note, older_fingerprint, newer_fingerprint FROM supersession_proposals WHERE id = $1::uuid`, [id]);
+  type Settled = { ok: boolean; error?: string; status?: string; settled?: boolean; older_id?: string; newer_id?: string };
+  const settle = async (id: string, note: string, key: string, ofp: string | null, nfp: string | null, recipe: Record<string, unknown> = { deterministic: false, model: "stub-judge-2", settled: "unrelated" }) =>
+    (await one<{ r: Settled }>(`SELECT settle_supersession_proposal($1::uuid, $2::text, $3::jsonb, $4::text, $5::text, $6::text, $7::jsonb, NULL::uuid) AS r`, [id, note, JSON.stringify(PASS_ACTOR), key, ofp, nfp, JSON.stringify(recipe)])).r;
+  const listed = async (status: string, id: string) => (await q(`SELECT 1 FROM list_supersession_proposals($1::text, 50) WHERE id = $2::uuid`, [status, id])).length === 1;
+
+  await restoreShipped("rebuild_derived", "settle_supersession_proposal");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+  await db.exec(`DELETE FROM ob1_entities`);
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
+  const KEY = "extract:stub@p1", JUDGE = "consolidate:stub@p1", JUDGE2 = "consolidate:stub@p2";
+  const SETTLE_SIG = "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)", REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)";
+
+  // The shape: one settle function, 064 the last definer of both, the two
+  // sentinels, the marker literal held to the TypeScript constant, the
+  // comments naming 064.
+  assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("064") && lastDefinerOf("rebuild_derived").startsWith("064"),
+    `one settle function; 064 is the last definer of it and of rebuild_derived (${lastDefinerOf("rebuild_derived")})`);
+  const rebuildSrc = await src(REBUILD_SIG), settleSrc = await src(SETTLE_SIG);
+  assert(/ob1:pass-settled-is-the-pass-to-reopen/.test(rebuildSrc) && /ob1:rebuild-acts-on-a-held-frontier/.test(rebuildSrc) && /ob1:settle-records-the-texts-it-judged/.test(settleSrc),
+    "the reopen and the settle carry their sentinels; 063's frontier sentinel stands");
+  assert(rebuildSrc.includes(`review_note LIKE '${PASS_SETTLED_PREFIX}%'`) && settleSrc.includes(`NOT LIKE '${PASS_SETTLED_PREFIX}%'`) && PASS_SETTLED_PREFIX === "settled by the pass:",
+    `the marker is one string in rebuild_derived, settle_supersession_proposal and server-portable/consolidate.ts (${PASS_SETTLED_PREFIX})`);
+  assert(/reviewed_at = NULL, review_note = NULL/.test(rebuildSrc) && /status IN \('pending', 'rejected'\)/.test(rebuildSrc), "the reopen clears reviewed_at and the note as 063's replacement does, from pending or from the pass's rejection");
+  for (const sig of [REBUILD_SIG, SETTLE_SIG]) assert(/064/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? ""), `${sig}'s comment names 064`);
+  const statusComment = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["supersession_proposals", "status"])).c ?? "";
+  assert(/064/.test(statusComment) && statusComment.includes(PASS_SETTLED_PREFIX) && /064/.test((await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["supersession_proposals"])).c ?? ""),
+    "the status column's and the table's comments, re-issued, name 064 and the marker");
+
+  // The fixture: B older by three days, A newer, sharing Alice; a pending
+  // proposal on the pair under the first judge's key.
+  const B = await cap("064: the older note about Alice", 1);
+  await db.query(`UPDATE thoughts SET created_at = now() - interval '3 days' WHERE id = $1::uuid`, [B.id]);
+  const A = await cap("064: the newer note about Alice", 2);
+  assert((await rte(B.id, KEY, [{ name: "Alice", type: "person", confidence: 0.9 }])).ok && (await rte(A.id, KEY, [{ name: "Alice", type: "person", confidence: 0.9 }])).ok, "the extractions stand");
+  const pid = (await one<{ id: string | null }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'because', 0.8, $3::text, NULL, NULL, NULL, '{"deterministic": false, "model": "stub-judge"}'::jsonb) AS id`, [B.id, A.id, JUDGE])).id!;
+  const bFp = B.fingerprint;
+
+  // (a) The settle refuses what it must, as a RAISE or a value.
+  assert(/p_note must begin with 'settled by the pass:'/.test(await refused(`SELECT settle_supersession_proposal($1::uuid, 'no conflict', '{}'::jsonb, $2::text, 'x', 'y', '{"deterministic": false}'::jsonb)`, [pid, JUDGE2]))
+      && /the judge key and both fingerprints/.test(await refused(`SELECT settle_supersession_proposal($1::uuid, $2::text, '{}'::jsonb, $3::text, NULL, 'y', '{"deterministic": false}'::jsonb)`, [pid, `${PASS_SETTLED_PREFIX} x`, JUDGE2])),
+    "a note without the marker and a missing fingerprint are refused before any lock");
+  let s = await settle(pid, `${PASS_SETTLED_PREFIX} judged again after a text moved — unrelated`, JUDGE2, bFp, A.fingerprint);
+  assert(s.ok === false && s.error === "NOT_STALE" && s.status === "pending" && (await proposal(pid)).status === "pending", "a PENDING row is a reviewer's: the settle answers NOT_STALE and moves nothing");
+  assert((await settle("00000000-0000-0000-0000-000000000000", `${PASS_SETTLED_PREFIX} x`, JUDGE2, "a", "b")).error === "NOT_FOUND", "a missing row is NOT_FOUND");
+
+  // (b) A raw text move sets the proposal stale (063); the pass re-judges,
+  // finds no conflict, and settles: rejected with the marker note,
+  // reviewed_at set, the lineage row rewritten at the texts judged under
+  // the settling pass's key.
+  const aFp2 = await move(A.id, "064: the newer note about Alice, rewritten so the two agree");
+  let r = await rebuild(A.id, "edit");
+  assert(r.ok === true && r.stale_proposals === 1 && (await proposal(pid)).status === "stale" && (await cands(A.id)) === B.id, `the move sets the proposal stale and the pair is a candidate again (${counts(r)})`);
+  const note = `${PASS_SETTLED_PREFIX} judged again after a text moved — unrelated at ${JUDGE2}`;
+  const auditOf = async () => (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid OR thought_id = $2::uuid`, [A.id, B.id])).c;
+  const auditB = await auditOf();
+  s = await settle(pid, note, JUDGE2, bFp, aFp2);
+  const p1 = await proposal(pid);
+  assert(s.ok === true && s.settled === true && s.older_id === B.id && s.newer_id === A.id && p1.status === "rejected" && p1.reviewed_at !== null && p1.review_note === note,
+    `the settle rejects the stale row with the pass's note and reviewed_at set (${JSON.stringify(s)})`);
+  const lin1 = await rowsOf(pid);
+  assert(lin1.length === 1 && lin1[0].by === JUDGE2 && lin1[0].inputs.join() === `${B.id},${A.id}` && lin1[0].fps.join() === `${bFp},${aFp2}` && lin1[0].why === null && lin1[0].recipe.settled === "unrelated",
+    `…and rewrites the proposal's one lineage row at the fingerprints judged, under the settling key, with the pass's recipe (${lin1.map((l) => `${l.by}:${l.fps.join("/")}`).join()})`);
+  assert(p1.judge_key === JUDGE && p1.newer_fingerprint === A.fingerprint, "the proposal row itself keeps the verdict as proposed — its judge key and the fingerprints it was judged at; the lineage row carries the texts the settle judged");
+  assert((await cands(A.id)) === "" && (await listed("rejected", pid)) && !(await listed("stale", pid)), "a settled pair is out of the candidates (029: a rejected pair is not proposed again) and listed under rejected, not stale");
+  assert((await auditOf()) === auditB, "the settle appended no event: it writes the proposal and its lineage row, never thoughts");
+
+  // (c) A rebuild with NO further move leaves the settled row alone: its
+  // lineage row is at the current texts, so it reads current — not kept,
+  // not reopened (the mutant: a settle that left the lineage row at the old
+  // texts would reopen the row on every rebuild, and the pass would settle
+  // it again, for ever).
+  r = await rebuild(A.id, "noop");
+  assert(r.ok === true && r.stale_proposals === 0 && r.kept === 0 && (await proposal(pid)).status === "rejected" && (await rowsOf(pid))[0].why === null,
+    `no move since the settle: the settled row is current, neither reopened nor counted as kept (${counts(r)})`);
+  // …and under --force it IS the pass's to reopen: every row is stale.
+  r = await rebuild(A.id, "force", true);
+  const pf = await proposal(pid);
+  assert(r.stale_proposals === 1 && pf.status === "stale" && pf.reviewed_at === null && pf.review_note === null && (await claimsOf(A.id)).includes(`${JUDGE}:pending`),
+    `--force reopens a pass-settled row: stale, unreviewed, the note cleared, the pair requeued under the row's judge key (${counts(r)})`);
+  s = await settle(pid, note, JUDGE2, bFp, aFp2);
+  assert(s.ok === true && (await proposal(pid)).status === "rejected", "…which the pass settles again");
+  await db.query(`DELETE FROM thought_work_claims WHERE thought_id = $1::uuid`, [A.id]);
+
+  // (d) A later text move reopens the pass-settled row (the maintainer's
+  // choice, 2026-09-27): stale again, unreviewed, the note cleared, the pair
+  // requeued; the next judgement may replace it in place (063) or settle it
+  // again.
+  const aFp3 = await move(A.id, "064: the newer note about Alice, rewritten a second time");
+  const auditD = await auditOf();
+  r = await rebuild(A.id, "edit again");
+  const p2 = await proposal(pid);
+  assert(r.ok === true && r.stale_proposals === 1 && r.kept === 0 && p2.status === "stale" && p2.reviewed_at === null && p2.review_note === null && (await claimsOf(A.id)).includes(`${JUDGE}:pending`) && (await cands(A.id)) === B.id,
+    `a text move under a pass-settled rejection sets the row stale again — unreviewed, no note, the pair requeued and a candidate (${counts(r)})`);
+  assert(/check constraint/.test(await refused(`UPDATE supersession_proposals SET reviewed_at = now() WHERE id = $1::uuid`, [pid])), "063's unreviewed CHECK still binds the reopened row");
+  const pid2 = (await one<{ id: string | null }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'conflict_undirected', 0.7, 'again', 0.8, $3::text, NULL, $4::text, $5::text, '{"deterministic": false, "model": "stub-judge-2"}'::jsonb) AS id`, [B.id, A.id, JUDGE2, bFp, aFp3])).id;
+  const p3 = await proposal(pid);
+  assert(pid2 === pid && p3.status === "pending" && p3.judge_key === JUDGE2 && p3.review_note === null && (await rowsOf(pid)).length === 1 && (await rowsOf(pid))[0].fps.join() === `${bFp},${aFp3}`,
+    `the next judgement finding the conflict again replaces the reopened row in place: pending, the new key, one lineage row at the moved text (${JSON.stringify(p3)})`);
+  assert((await auditOf()) === auditD, "neither the reopen nor the replacement appended an event: the pass writes proposals, never thoughts");
+
+  // (e) A PERSON's rejection stands whatever moves — a note without the
+  // marker, and one that mentions the marker mid-sentence; an accepted row
+  // too.
+  assert((await one<{ r: { ok: boolean } }>(`SELECT review_supersession_proposal($1::uuid, 'reject', 'no: the operator read both', NULL, $2::jsonb, false) AS r`, [pid, JSON.stringify(ACTOR)])).r.ok === true, "a person rejects the pending row");
+  await move(A.id, "064: the newer note about Alice, rewritten a third time");
+  r = await rebuild(A.id, "edit once more");
+  assert(r.kept === 1 && r.stale_proposals === 0 && (await proposal(pid)).status === "rejected" && (await proposal(pid)).review_note === "no: the operator read both", `a person's rejection is kept as decided on a text move (${counts(r)})`);
+  await db.query(`UPDATE supersession_proposals SET review_note = $2 WHERE id = $1::uuid`, [pid, `the operator wrote: ${PASS_SETTLED_PREFIX} is what the pass would say`]);
+  await move(A.id, "064: the newer note about Alice, rewritten a fourth time");
+  r = await rebuild(A.id, "edit yet again");
+  assert(r.kept === 1 && (await proposal(pid)).status === "rejected", `a note that mentions the marker mid-sentence is a person's — the marker is a prefix (${counts(r)})`);
+  assert((await settle(pid, note, JUDGE2, bFp, aFp3)).error === "NOT_STALE", "…and the pass cannot settle a person's rejection");
+  const D = await cap("064: a note to accept", 5);
+  await db.query(`UPDATE thoughts SET created_at = now() - interval '2 days' WHERE id = $1::uuid`, [D.id]);
+  const E = await cap("064: a newer note to accept", 6);
+  const pd = (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'accept', 0.8, $3::text) AS id`, [D.id, E.id, JUDGE])).id;
+  const acc = await one<{ r: { ok: boolean; error?: string } }>(`SELECT review_supersession_proposal($1::uuid, 'accept', NULL, NULL, $2::jsonb, false) AS r`, [pd, JSON.stringify(ACTOR)]);
+  assert(acc.r.ok === true, `the proposal is accepted (${JSON.stringify(acc.r)})`);
+  await move(E.id, "064: a newer note to accept, rewritten");
+  r = await rebuild(E.id, "edit");
+  assert(r.kept === 1 && (await proposal(pd)).status === "accepted", `an accepted row is kept on a text move (${counts(r)})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+  await db.exec(`DELETE FROM ob1_entities`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

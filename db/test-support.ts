@@ -221,6 +221,9 @@ const FUNCTIONS = [
   // record_supersession_proposal) keep their signatures and are named above.
   "derivation_descendants(uuid, int, int)",
   "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)",
+  // 064 (SMD-2297): the pass's settle of a stale proposal; rebuild_derived
+  // keeps its signature and is named above.
+  "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)",
 ];
 
 /**

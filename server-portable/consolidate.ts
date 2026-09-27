@@ -244,6 +244,28 @@ export function consolidateKey(model: string): string {
   return `${CONSOLIDATE_KEY_PREFIX}${model}@p${CONSOLIDATE_PROMPT_VERSION}`;
 }
 
+/**
+ * The marker on a proposal the PASS settled (migration 064, SMD-2297): the
+ * first characters of `review_note` on a row db/consolidate.ts rejected
+ * itself after re-judging a stale pair and finding no conflict. One string
+ * in two places — this constant and the literal in 064's
+ * `settle_supersession_proposal` and `rebuild_derived` bodies (db/test-schema
+ * holds them to each other): rebuild_derived reads it to set such a row stale
+ * again on a later text move, where a person's rejection stands; the queue
+ * groups the pass's rejections by it. A person's --note never starts with it.
+ */
+export const PASS_SETTLED_PREFIX = "settled by the pass:";
+
+/** The pass's note on a row it settles: the marker, why, and the key that judged. */
+export function passSettledNote(why: string, key: string): string {
+  return `${PASS_SETTLED_PREFIX} ${why} at ${key}`;
+}
+
+/** Whether a review_note is the pass's (begins with the marker) rather than a person's. */
+export function isPassSettled(note: string | null | undefined): boolean {
+  return typeof note === "string" && note.startsWith(PASS_SETTLED_PREFIX);
+}
+
 /** The model a pass key names, or null for a key of another shape. */
 export function parseConsolidateKey(key: string): { model: string; version: number } | null {
   if (!key.startsWith(CONSOLIDATE_KEY_PREFIX)) return null;

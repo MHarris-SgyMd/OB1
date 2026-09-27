@@ -62,6 +62,31 @@
  * records it, the second finds it decided. Each proposal carries the key that
  * judged it, so there is no recorded "current key" and no --switch-key.
  *
+ * ── Stale proposals ─────────────────────────────────────────────────────────
+ * A pending proposal whose text moved under the verdict is set `stale` by
+ * migration 063's rebuild_derived (a text edit, a supersession, a forget) and
+ * its newer thought requeued under the key that judged it. A stale row is
+ * THIS pass's work, whatever key wrote it (migration 064, SMD-2297): every
+ * run first re-pools each stale row's newer thought under its own key (one
+ * with a vector and no live or failed claim here — a failed claim is
+ * --retry-failed's, 015's rule), then judges the pair again — a stale pair
+ * the top-k left out is judged anyway when it still meets the candidate
+ * rule. A conflict at the floor REPLACES the row in place (063:
+ * record_supersession_proposal, back to pending under this key); agree,
+ * unrelated or a conflict under the floor SETTLES it — the row is rejected
+ * with a note beginning `settled by the pass:` (the marker rebuild_derived
+ * reads: a later text move under a pass-settled row sets it stale again,
+ * where a person's rejection stands for ever) and its lineage row rewritten
+ * at the texts judged, through settle_supersession_proposal. A stale pair the
+ * rule no longer admits for a reason that means "no conflict" — no shared
+ * entity, under the similarity floor, a side superseded — is settled with a
+ * note saying so; one a side of which has no vector yet waits for the reembed
+ * pool and the next run. A malformed answer on a stale pair leaves the row
+ * stale and the thought failed, as any malformed answer does. 029's posture
+ * stands: the pass proposes and never applies — a rejection applies nothing.
+ * --status and --list stale say where each stale row stands against the
+ * pools (in a pass's pool, waiting for the next run, failed in a pass).
+ *
  * ── Identity ────────────────────────────────────────────────────────────────
  * As extract-entities.ts: OB1_WORKER_KEY holds a raw access key whose hash is
  * in MCP_ACCESS_KEYS, and the run resolves it through resolve_agent, so
@@ -88,7 +113,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import {
-  actorKindOf, cleanForDisplay, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
+  actorKindOf, cleanForDisplay, consolidateKey, judgePair, passSettledNote, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX,
   type Judgement,
 } from "../server-portable/consolidate.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
@@ -301,6 +326,31 @@ if (WRITES) {
   }
 }
 
+/**
+ * The pass as an actor for review_supersession_proposal — a person's review
+ * through --accept/--reject, or the pass's own settle of a stale row (064).
+ * `via`, the door (046's origin column) — `source` until SMD-1730, when the
+ * trigger stopped reading an actor's source.
+ */
+const passActor = () => ({ name: actorName, via: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) });
+
+/**
+ * 064: where a stale row stands against the judge pools, read from its newer
+ * thought's claims under any consolidate key — `pooled` (a live claim: a pass
+ * has it or will), `failed` (a pass failed on it and none holds it:
+ * --retry-failed), else `waiting` (no claim, or a finished one: the next run
+ * re-pools it). One SQL fragment for --status, --list and db/rebuild.ts.
+ */
+type StaleStanding = "pooled" | "failed" | "waiting";
+const STALE_STANDING_SQL = `CASE
+  WHEN EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = p.newer_id AND c.work_type LIKE 'consolidate:%' AND c.status IN ('pending', 'claimed')) THEN 'pooled'
+  WHEN EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = p.newer_id AND c.work_type LIKE 'consolidate:%' AND c.status = 'failed') THEN 'failed'
+  ELSE 'waiting' END`;
+const standingText = (s: StaleStanding | string): string =>
+  s === "pooled" ? "in a pass's pool" : s === "failed" ? "failed in a pass — --retry-failed" : "waiting for the next run to re-pool it";
+const staleClause = (n: number, pooled: number, failed: number, waiting: number): string =>
+  `${n} stale (a text moved under the verdict: ${[pooled ? `${pooled} in a pass's pool` : "", waiting ? `${waiting} waiting for the next run` : "", failed ? `${failed} failed in a pass — --retry-failed` : ""].filter(Boolean).join(", ")}; the pass replaces one it finds in conflict again and settles one it does not)`;
+
 // ── Review: --list, --accept, --reject, --stale ─────────────────────────────
 
 type Listed = {
@@ -333,8 +383,17 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     return 0;
   }
   console.log(`  ${rows.length} ${status ?? ""} proposal(s), most confident first:\n`);
+  // 064: a stale row's standing against the pools, beside its status. (A
+  // row the pass settled needs no tag: its note begins with the marker.)
+  // (The ids travel as one comma-joined text and are split in SQL: Bun binds
+  // a JS string[] to an array parameter as bare "a,b", which uuid[] refuses —
+  // 063's lesson, met again here by run-it.)
+  const staleIds = rows.filter((p) => p.status === "stale").map((p) => p.id);
+  const standing = new Map<string, string>(staleIds.length
+    ? ((await sql.unsafe(`SELECT p.id::text AS id, ${STALE_STANDING_SQL} AS standing FROM supersession_proposals p WHERE p.id = ANY(string_to_array($1, ',')::uuid[])`, [staleIds.join(",")])) as { id: string; standing: string }[]).map((r) => [r.id, r.standing])
+    : []);
   rows.forEach((p, i) => {
-    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.status !== "pending" ? `  (${p.status}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
+    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.status !== "pending" ? `  (${p.status}${p.status === "stale" ? ` — ${standingText(standing.get(p.id) ?? "waiting")}` : ""}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
     if (p.reason) console.log(`     ${cleanForDisplay(p.reason)}`);
     console.log(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
     console.log(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
@@ -342,8 +401,9 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     if (p.status === "pending" || p.status === "stale") {
       // Commands as they run: a placeholder the shell cannot parse rather
       // than `newer|older`, which it would read as a pipe (review pass 3).
-      // A stale row (063: a text moved under the verdict) is the reviewer's
-      // too — its texts moved, so an accept takes --force.
+      // A stale row (063: a text moved under the verdict) is the next pass's
+      // to replace or settle (064), and a reviewer's to decide sooner — its
+      // texts moved, so an accept takes --force.
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
       const force = p.older_edited || p.newer_edited || p.status === "stale" ? " --force" : "";
       console.log(`     --accept ${p.id}${dir}${force}    --reject ${p.id}`);
@@ -371,11 +431,8 @@ if (REVIEW_ONLY) {
   if (ACCEPT || REJECT) {
     const decision = ACCEPT ? "accept" : "reject";
     const id = (ACCEPT ?? REJECT)!;
-    // `via`, the door (046's origin column) — `source` until SMD-1730, when
-    // the trigger stopped reading an actor's source.
-    const actor = { name: actorName, via: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) };
     const [{ r }] = await sql`
-      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${actor}::jsonb, ${FORCE}::boolean) AS r`;
+      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`;
     const res = r as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
     if (res.ok) {
       if (decision === "accept") {
@@ -430,20 +487,44 @@ function printCounts(c: Counts, label: string): void {
 }
 
 async function printQueue(): Promise<void> {
-  const [q] = await sql`
+  // 063 (SMD-1732): a stale row is a pending verdict whose texts moved under
+  // it; 064 (SMD-2297): the next pass judges the pair again and REPLACES the
+  // row when it finds the conflict again, and SETTLES it — a rejection with
+  // the pass's note — when it does not. The rejected count says how many are
+  // the pass's; each stale row is placed against the pools (see the header).
+  const [q] = (await sql.unsafe(`
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending,
            count(*) FILTER (WHERE status = 'accepted')::int AS accepted,
            count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+           count(*) FILTER (WHERE status = 'rejected' AND review_note LIKE $1)::int AS settled,
            count(*) FILTER (WHERE status = 'stale')::int AS stale,
+           count(*) FILTER (WHERE status = 'stale' AND (${STALE_STANDING_SQL}) = 'pooled')::int AS stale_pooled,
+           count(*) FILTER (WHERE status = 'stale' AND (${STALE_STANDING_SQL}) = 'failed')::int AS stale_failed,
            count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected
-    FROM supersession_proposals`;
-  // 063 (SMD-1732): a stale row is a pending verdict whose texts moved under
-  // it. The next pass judges the pair again and REPLACES the row when it
-  // finds the conflict again; a pair it no longer finds in conflict (this
-  // pass writes a proposal only for a conflict at its confidence floor)
-  // leaves the row stale, and that one is the reviewer's: --list stale,
-  // --reject.
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.stale ? `, ${q.stale} stale (a text moved — the next pass replaces one it finds in conflict again; --list stale / --reject settles one it does not)` : ""} — --list shows them; --accept / --reject decides one`);
+    FROM supersession_proposals p`, [`${PASS_SETTLED_PREFIX}%`])) as { pending: number; accepted: number; rejected: number; settled: number; stale: number; stale_pooled: number; stale_failed: number; undirected: number }[];
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${q.stale ? `, ${staleClause(q.stale, q.stale_pooled, q.stale_failed, q.stale - q.stale_pooled - q.stale_failed)}` : ""} — --list shows them; --accept / --reject decides one`);
+}
+
+/**
+ * 064: the newer thoughts of stale proposals this run must re-pool under its
+ * own key — those with a vector (without one the pair cannot be judged; the
+ * reembed pool writes it, and the run after sees the thought here) and no
+ * live or failed claim here: a pass under another key never had them, a pass
+ * under this key finished them before the row went stale (a claim 063's
+ * rebuild requeued under the ROW's key sits pending there — the operator's
+ * hint, not this pass's pool), and a failed claim is --retry-failed's (015).
+ * The `enqueue_thoughts` before it leaves a pending row, which this skips.
+ */
+const STALE_REPOOL_SQL = `SELECT DISTINCT p.newer_id AS id
+    FROM supersession_proposals p
+    JOIN thoughts t ON t.id = p.newer_id AND t.embedding IS NOT NULL
+    LEFT JOIN thought_work_claims c ON c.thought_id = p.newer_id AND c.work_type = $1
+   WHERE p.status = 'stale' AND (c.thought_id IS NULL OR c.status = 'succeeded')`;
+async function staleToRepool(): Promise<number> {
+  return Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM (${STALE_REPOOL_SQL}) s`, [JOB])) as { n: number }[])[0].n);
+}
+async function repoolStale(): Promise<number> {
+  return Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM (SELECT requeue_thought_work($1, s.id) FROM (${STALE_REPOOL_SQL}) s) r`, [JOB])) as { n: number }[])[0].n);
 }
 
 async function printFailures(limit = 10): Promise<void> {
@@ -465,10 +546,11 @@ if (STATUS_ONLY || DRY_RUN) {
     await printFailures();
   }
   if (DRY_RUN) {
-    const todo = c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0);
+    const restale = await staleToRepool();
+    const todo = c.pending + c.unpooled + restale + (RETRY_FAILED ? c.failed : 0);
     console.log(
       `\n  would: ${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
-        `add ${c.unpooled} thoughts to the pool; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${cfg.judgeModel} ` +
+        `add ${c.unpooled} thoughts to the pool${restale ? ` and re-pool ${restale} for stale proposals` : ""}; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${cfg.judgeModel} ` +
         `and ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`
     );
   }
@@ -496,7 +578,12 @@ let beats = 0;
 /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
 let judged = 0;
 let llmMs = 0;
-const totals = { pairs: 0, agree: 0, unrelated: 0, conflict: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0 };
+const totals = { pairs: 0, agree: 0, unrelated: 0, conflict: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
+  // 064: the stale rows this run met — replaced in place (a conflict found
+  // again), settled after a judgement of no conflict, settled because the
+  // pair no longer meets the candidate rule, left waiting for a vector, or
+  // decided by a reviewer or another pass between the read and the write.
+  replaced: 0, settled: 0, settledOut: 0, staleWait: 0, staleRaced: 0 };
 const activeWorkers = new Set<string>();
 const started = Date.now();
 let total = 0;
@@ -519,27 +606,68 @@ function progress(force = false): void {
 }
 
 /** A thought as read for judging: the text and 016's hash of it, taken together, so the proposal records what the judge saw. */
-type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null };
+type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null; has_vector: boolean };
 type Candidate = { older_id: string; similarity: number; shared_entities: number };
 type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" };
+/** 064: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
+type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; similarity: number | null };
+
+/**
+ * 064: the pass settles a stale row — rejected with the marker note, its
+ * lineage re-recorded at the texts judged under this key — through
+ * settle_supersession_proposal. NOT_STALE and NOT_FOUND are facts about the
+ * row (a reviewer decided it, another pass replaced it, its thought is gone
+ * between the read and this write), counted and not failed.
+ */
+async function settleStale(s: StaleRow, why: string, newerFp: string, settled: string): Promise<boolean> {
+  const recipe = { ...proposalRecipe(cfg, { similarity: s.similarity ?? NaN, candidates: K, minSimilarity: MIN_SIM }), settled };
+  if (s.similarity === null) delete (recipe as { similarity?: number }).similarity;
+  const [{ r }] = await sql`
+    SELECT settle_supersession_proposal(${s.id}::uuid, ${passSettledNote(why, JOB)}::text, ${passActor()}::jsonb, ${JOB}::text,
+                                        ${s.older_fingerprint}::text, ${newerFp}::text, ${recipe}::jsonb, ${agentId}::uuid) AS r`;
+  const res = r as { ok: boolean; error?: string; status?: string };
+  if (res.ok) return true;
+  totals.staleRaced++;
+  console.error(`  ${s.id}: not settled — ${res.error === "NOT_STALE" ? `the row is ${res.status} now (a reviewer or another pass reached it first)` : res.error}`);
+  return false;
+}
 
 async function processRow(row: Row): Promise<Outcome> {
-  const candidates = (await sql`SELECT older_id, similarity, shared_entities FROM consolidation_candidates(${row.id}::uuid, ${K}::int, ${MIN_SIM}::float)`) as Candidate[];
+  // 064: the stale rows on this thought — 063's rebuild set them stale when
+  // a text moved under the verdict, and this pass replaces or settles each
+  // (see the header). Read before the candidates so a stale pair the top-k
+  // leaves out is judged anyway when it still meets the candidate rule.
+  const stale = (await sql`
+    SELECT p.id, p.older_id, content_fingerprint_of(o.content) AS older_fingerprint, (o.embedding IS NULL) AS older_vectorless,
+           CASE WHEN o.embedding IS NOT NULL AND me.embedding IS NOT NULL THEN 1 - (o.embedding <=> me.embedding) END AS similarity
+      FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts me ON me.id = p.newer_id
+     WHERE p.newer_id = ${row.id}::uuid AND p.status = 'stale'`) as StaleRow[];
+  const staleByOlder = new Map(stale.map((s) => [s.older_id, s]));
+  let candidates = (await sql`SELECT older_id, similarity, shared_entities FROM consolidation_candidates(${row.id}::uuid, ${K}::int, ${MIN_SIM}::float)`) as Candidate[];
+  const leftOut = stale.filter((s) => !candidates.some((c) => c.older_id === s.older_id)).map((s) => s.older_id);
+  if (leftOut.length) {
+    const more = (await sql`
+      SELECT older_id, similarity, shared_entities FROM consolidation_candidates(${row.id}::uuid, 2147483647, ${MIN_SIM}::float)
+      WHERE older_id = ANY(${sql.array(leftOut, "TEXT")}::uuid[])`) as Candidate[];
+    candidates = candidates.concat(more);
+  }
   if (candidates.length === 0) {
     totals.noCandidates++;
-    return { outcome: "succeeded" };
+    if (stale.length === 0) return { outcome: "succeeded" };
   }
-  const olders = (await sql`
-    SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata FROM thoughts
+  const olders = candidates.length === 0 ? [] : (await sql`
+    SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector FROM thoughts
     WHERE id = ANY(${sql.array(candidates.map((c) => c.older_id), "TEXT")}::uuid[])`) as Row[];
   const byId = new Map(olders.map((o) => [o.id, o]));
   const problems: string[] = [];
+  const judgedOlders = new Set<string>();
   // No early exit on `stopping` here: a thought is at most --k calls, bounded
   // by the lease arithmetic above, and a thought released succeeded with pairs
   // unjudged would be terminal with the pairs never judged (review pass 1).
   for (const c of candidates) {
     const older = byId.get(c.older_id);
     if (!older) continue; // deleted between the candidate query and the read
+    const staleRow = staleByOlder.get(c.older_id);
     const t0 = Date.now();
     let j: Judgement;
     try {
@@ -568,35 +696,44 @@ async function processRow(row: Row): Promise<Outcome> {
     }
     llmMs += Date.now() - t0;
     totals.pairs++;
+    judgedOlders.add(c.older_id);
     if (j.malformed) {
       totals.malformed++;
-      problems.push(`pair with ${c.older_id}: the model's answer was not JSON of the expected shape`);
+      problems.push(`pair with ${c.older_id}: the model's answer was not JSON of the expected shape${staleRow ? " (its stale proposal stands)" : ""}`);
       continue;
     }
     totals[j.verdict]++;
     const verdict = proposalVerdict(j);
     let proposalId: string | null = null;
-    let recorded: "proposed" | "under-confidence" | "already" | null = null;
-    if (verdict !== null) {
-      if (j.confidence < MIN_CONFIDENCE) {
+    let recorded: "proposed" | "under-confidence" | "already" | "replaced" | "settled" | null = null;
+    if (verdict === null || j.confidence < MIN_CONFIDENCE) {
+      if (verdict !== null) {
         totals.underConfidence++;
         recorded = "under-confidence";
-      } else {
-        // The fingerprints of the texts the judge was sent, not of the rows as
-        // they are at this write: an edit that landed during the call is then
-        // visible to the reviewer (review pass 4).
-        // 061: the judge's recipe — model, prompt version and hash, the
-        // candidate parameters this pair was found under — recorded in
-        // `derivations` with the proposal, beside both fingerprints (SMD-1731).
-        const [{ id }] = await sql`
-          SELECT record_supersession_proposal(${c.older_id}::uuid, ${row.id}::uuid, ${verdict}::text,
-                                              ${j.confidence}::numeric, ${j.reason || null}::text, ${c.similarity}::float,
-                                              ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
-                                              ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM })}::jsonb) AS id`;
-        proposalId = (id as string | null) ?? null;
-        if (proposalId) { totals.proposed++; recorded = "proposed"; if (verdict === "conflict_undirected") totals.undirected++; }
-        else { totals.alreadyProposed++; recorded = "already"; }
       }
+      // 064: no conflict at the floor on a pair whose proposal is stale — the
+      // pass settles it, at the fingerprints the judge was sent.
+      if (staleRow && await settleStale(staleRow, verdict === null ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — a conflict at confidence ${j.confidence.toFixed(2)}, under the floor ${MIN_CONFIDENCE}`, row.fingerprint, verdict === null ? j.verdict : "under-confidence")) {
+        totals.settled++;
+        recorded = "settled";
+      }
+    } else {
+      // The fingerprints of the texts the judge was sent, not of the rows as
+      // they are at this write: an edit that landed during the call is then
+      // visible to the reviewer (review pass 4).
+      // 061: the judge's recipe — model, prompt version and hash, the
+      // candidate parameters this pair was found under — recorded in
+      // `derivations` with the proposal, beside both fingerprints (SMD-1731).
+      const [{ id }] = await sql`
+        SELECT record_supersession_proposal(${c.older_id}::uuid, ${row.id}::uuid, ${verdict}::text,
+                                            ${j.confidence}::numeric, ${j.reason || null}::text, ${c.similarity}::float,
+                                            ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
+                                            ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM })}::jsonb) AS id`;
+      proposalId = (id as string | null) ?? null;
+      // 064: the same id back on a stale pair is 063's replacement in place.
+      if (proposalId && staleRow && proposalId === staleRow.id) { totals.replaced++; recorded = "replaced"; if (verdict === "conflict_undirected") totals.undirected++; }
+      else if (proposalId) { totals.proposed++; recorded = "proposed"; if (verdict === "conflict_undirected") totals.undirected++; }
+      else { totals.alreadyProposed++; recorded = "already"; }
     }
     if (DUMP) {
       appendFileSync(DUMP, JSON.stringify({
@@ -605,6 +742,17 @@ async function processRow(row: Row): Promise<Outcome> {
         proposal: proposalId, recorded,
       }) + "\n");
     }
+  }
+  // 064: the stale rows no judgement reached — pairs the candidate rule no
+  // longer admits. A side without a vector is "not yet" (the reembed pool
+  // writes it; the next run re-pools this thought); the rest — no shared
+  // entity, under the similarity floor, a side superseded — mean no conflict
+  // and are settled at the current texts. A pair whose judgement was
+  // malformed is in `problems` above, its row left stale for --retry-failed.
+  for (const s of stale) {
+    if (judgedOlders.has(s.older_id)) continue;
+    if (!row.has_vector || s.older_vectorless) { totals.staleWait++; continue; }
+    if (await settleStale(s, `no longer a candidate pair (no shared entity, under the similarity floor ${MIN_SIM}, or a side superseded)`, row.fingerprint, "not-a-candidate")) totals.settledOut++;
   }
   if (problems.length) return { outcome: "failed", error: `${problems.length} of ${candidates.length} pair(s) not judged: ${problems.join("; ").slice(0, 400)}` };
   return { outcome: "succeeded" };
@@ -660,7 +808,7 @@ async function worker(n: number): Promise<void> {
         const ids = batch.map((b) => b.thought_id);
         hb.claimed(ids);
         const rows = (await sql`
-          SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata
+          SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector
             FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {
@@ -807,8 +955,13 @@ async function pass(): Promise<Counts> {
   // against the entity table, which is what it costs to be sure a thought is
   // judged only once extraction has reached it.
   const added = Number((await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(SELECT consolidation_pool(${JOB}))) AS added`)[0].added);
+  // 064: a stale proposal is this pass's work whatever key wrote it — its
+  // newer thought re-pooled here where the pool rule above could not add it
+  // (a terminal claim under this key, or a claim 063 left under the row's
+  // key, which is another pool).
+  const restaled = await repoolStale();
   const before = await counts();
-  if (added > 0 || !FOLLOW) console.log(`  pool: ${added} thought(s) added`);
+  if (added > 0 || restaled > 0 || !FOLLOW) console.log(`  pool: ${added} thought(s) added${restaled ? ` (${restaled} more re-pooled for stale proposals)` : ""}`);
   if (firstPass && before.thoughts === 0) console.log("  no thought has extracted entities and a vector — run db/extract-entities.ts first; this pass pairs thoughts by the entities they share" + (FOLLOW ? ", and will poll until some do" : ""));
   firstPass = false;
   total += before.pending + before.claimed;
@@ -846,6 +999,17 @@ console.log(
     `${totals.malformed ? `, ${totals.malformed} answer(s) not JSON of the expected shape` : ""}`
 );
 if (totals.pairs > 0) console.log(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
+// 064: what became of the stale proposals this run met (a line only when it met one).
+if (totals.replaced + totals.settled + totals.settledOut + totals.staleWait + totals.staleRaced > 0) {
+  console.log(
+    `  stale proposals: ` + [
+      totals.settled + totals.settledOut ? `${totals.settled + totals.settledOut} settled by the pass (${[totals.settled ? `${totals.settled} judged again with no conflict at the floor` : "", totals.settledOut ? `${totals.settledOut} no longer a candidate pair` : ""].filter(Boolean).join(", ")})` : "",
+      totals.replaced ? `${totals.replaced} replaced in place — the conflict found again` : "",
+      totals.staleWait ? `${totals.staleWait} wait on a vector the reembed pool writes (re-pooled by the next run)` : "",
+      totals.staleRaced ? `${totals.staleRaced} decided by a reviewer or another pass meanwhile` : "",
+    ].filter(Boolean).join("; ")
+  );
+}
 printCounts(after, "after");
 await printQueue();
 if (after.failed > 0) {
