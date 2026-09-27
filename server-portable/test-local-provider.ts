@@ -675,6 +675,25 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(mw.entities.some((e) => e.name === "Bigfoot"), "the escalation model's answer merged into the thought's entities");
   providerMW.stop(true);
 
+  // The `first.malformed` guard (SMD-1879, shared by the SMD-2000 escalation): a
+  // budgeted answer that PARSES cleanly but happens to finish at `length` is the
+  // thought's answer, not a runaway — so it is neither retried NOR escalated, and
+  // costs one call. Without the conjunct a complete answer that closed exactly at
+  // the budget would be re-called and overwritten by the retry/escalation.
+  let lenCalls = 0;
+  const providerLen = Bun.serve({
+    port: 0,
+    fetch() {
+      lenCalls++;
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Complete", type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "length" }] });
+    },
+  });
+  const cfgLen = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerLen.port}/v1`, OB1_METADATA_MODEL: "small-len", OB1_EXTRACT_ESCALATE_MODEL: "big-len" });
+  const lenEx = await extractEntities(short, cfgLen, undefined, { kind: "extraction" });
+  assert(!lenEx.malformed && lenEx.retried === undefined && lenEx.escalated === undefined && lenCalls === 1 && lenEx.entities[0]?.name === "Complete",
+    `a budgeted answer that parses but finished at 'length' is kept — not retried, not escalated, one call (${lenCalls})`);
+  providerLen.stop(true);
+
   // SMD-1960: the answer is streamed and a runaway is aborted at the third copy
   // of one item, before its budget, then retried under the penalty as a cut
   // one is. The stub streams a loop one item per frame and records, per

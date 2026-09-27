@@ -2203,11 +2203,14 @@ console.log("\n[7b] The extraction escalation model is probed under its own --de
   assert(chatModels.length === 2 && chatModels.includes("meta-7b") && chatModels.includes("big-esc"), `…two probes, one per model, judge sharing the metadata model (${chatModels.join(", ")})`);
   assert(/made once more on big-esc \(OB1_EXTRACT_ESCALATE_MODEL\), unpenalised/.test(own.out), "…and the extraction window row names it as the unpenalised retry target (describeExtractWindow)");
 
-  // Equal to the metadata model: windowingFor drops it — no row, no probe.
+  // Equal to the metadata model: windowingFor drops it — no row, no probe. A
+  // DISTINCT judge is set so the row's absence isolates the !=metadata gate: were
+  // it the judge-dedup instead, a gate-bypass mutant (escalate from the raw knob)
+  // would probe meta-7b a second time under an escalation row here.
   chatModels.length = 0;
-  const same = await run({ ...ENV, OB1_EXTRACT_ESCALATE_MODEL: "meta-7b" }, "--deep");
-  assert(!/extraction escalation model/.test(same.out) && chatModels.length === 1 && chatModels[0] === "meta-7b",
-         `escalate == metadata: no escalation row and no extra probe (${chatModels.join(", ")})`);
+  const same = await run({ ...ENV, OB1_JUDGE_MODEL: "big-judge", OB1_EXTRACT_ESCALATE_MODEL: "meta-7b" }, "--deep");
+  assert(!/extraction escalation model/.test(same.out) && chatModels.length === 2 && chatModels.filter((m) => m === "meta-7b").length === 1,
+         `escalate == metadata: no escalation row, meta-7b probed once (not again as escalation) beside the distinct judge (${chatModels.join(", ")})`);
 
   // Reasoning on: no budget, so no runaway to escalate — windowingFor returns
   // none, and the probe does not fire for a model the worker would never dial.
