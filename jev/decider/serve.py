@@ -136,10 +136,14 @@ async def decide(req: Request):
         return JSONResponse({"error": f"this service serves {MODEL_NAME}, not {body['model']}"}, status_code=409)
     t = time.time()
     results = []
-    for dd in body["decisions"]:
-        labels, ids = labels_ids(dd)
-        r = d.decide(dd["context"], [{"question": dd.get("proposition") or dd["question"], "options": labels}])
-        results.append(result_from(dd, ids, r[0]["probs_list"]))
+    try:
+        for dd in body["decisions"]:
+            labels, ids = labels_ids(dd)
+            r = d.decide(dd["context"], [{"question": dd.get("proposition") or dd["question"], "options": labels}])
+            results.append(result_from(dd, ids, r[0]["probs_list"]))
+    except Exception as e:
+        # the contract's 500 shape ({error}), as jev/serve.ts returns on a model failure
+        return JSONResponse({"error": f"the model failed: {str(e)[:200]}"}, status_code=500)
     return JSONResponse({"contract": CONTRACT, "model": MODEL_INFO, "results": results, "ms": (time.time() - t) * 1000})
 
 if __name__ == "__main__":
