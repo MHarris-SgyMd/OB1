@@ -17,6 +17,7 @@
  *                     capture_thought is registered only for a write-scoped key
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
  *   PORT - the port the export at the tail listens on (default 8000; the image and k8s/openbrain.yml leave it)
+ *   OB1_STOP_GRACE - the pod's terminationGracePeriodSeconds, whole seconds (default 10, Docker's; k8s/openbrain.yml sets 30); a stop drains for 2 s less
  */
 
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
@@ -606,9 +607,47 @@ app.all("*", async (c) => {
   return response;
 });
 
+// ob1-fork (SMD-2250): stopping on SIGTERM. The image runs this as the container's PID 1,
+// where the kernel gives SIGTERM no default action, so until this handler every rollout and
+// pod deletion waited out terminationGracePeriodSeconds (30 s) and ended in SIGKILL, with
+// requests cut off. server-portable/shutdown.ts is the core server's handler and says more;
+// this is it cut to what this server has. Bun hands the server it serves from the export
+// below to no one but the fetch handler, so the first request passes it on; before that
+// nothing can be in flight. Only as the entry: extensions/test-auth.ts imports the module.
+// The pod's grace period less 2 s for the pool's close and the exit, read as the core server
+// reads OB1_STOP_GRACE (server-portable/shutdown.ts drainBoundFrom): whole seconds from 1 to
+// 3600, 10 unless set, anything else said and read as 10. k8s/openbrain.yml sets it to 30
+// beside terminationGracePeriodSeconds.
+const graceText = process.env.OB1_STOP_GRACE?.trim() ?? "";
+const graceValid = /^\d+$/.test(graceText) && Number(graceText) >= 1 && Number(graceText) <= 3_600;
+if (graceText && !graceValid) console.warn(`OB1_STOP_GRACE="${graceText}" is not a whole number of seconds from 1 to 3600, with no unit; the stop drains as for 10 s (SMD-2250)`);
+const DRAIN_BOUND_MS = Math.max(500, (graceValid ? Number(graceText) : 10) * 1000 - 2_000);
+let bunServer: { stop(closeActiveConnections?: boolean): Promise<void>; readonly pendingRequests: number } | undefined;
+if (import.meta.main) {
+  let stopping = false;
+  let drained = false;
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.on(signal, async () => {
+      if (stopping) process.exit(drained ? 0 : 1); // a second signal: not waiting for the rest, 0 once everything was answered
+      stopping = true;
+      const t0 = performance.now();
+      console.log(`${signal}: no longer accepting; ${bunServer?.pendingRequests ?? 0} in flight, waited on for up to ${DRAIN_BOUND_MS / 1000} s (SMD-2250)`);
+      // A stop() that rejects has stopped accepting all the same (review pass 3).
+      drained = await Promise.race([bunServer ? bunServer.stop().then(() => true, () => true) : true, Bun.sleep(DRAIN_BOUND_MS).then(() => false)]);
+      // 250 ms after a cut, as the core's CLOSE_AFTER_CUT_MS: the cut calls' queries hold close() (review pass 4).
+      await Promise.race([sql.close().catch(() => {}), Bun.sleep(drained ? 1_000 : 250)]);
+      console.log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s${drained ? "" : `, ${bunServer?.pendingRequests} cut off at the bound`}; exit ${drained ? 0 : 1}`);
+      process.exit(drained ? 0 : 1);
+    });
+  }
+}
+
 // Bun's entry shape, the core server's (SMD-1799): `bun index.ts` serves it on PORT, default 8000 —
 // what the image runs (SMD-1800), so k8s/openbrain.yml names no PORT.
 export default {
   port: Number(process.env.PORT || 8000),
-  fetch: app.fetch,
+  fetch: (...args: Parameters<typeof app.fetch>) => {
+    if (!bunServer && typeof (args[1] as typeof bunServer)?.stop === "function") bunServer = args[1] as typeof bunServer;
+    return app.fetch(...args);
+  },
 };

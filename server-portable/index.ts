@@ -14,6 +14,7 @@ import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Princi
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
 import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
+import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 
 /**
  * Runtime-portable env access.
@@ -41,6 +42,13 @@ type Env = {
   DATABASE_URL?: string;
   /** The SQL store's connection pool size (store-sql.ts); default 10. */
   OB1_PG_POOL?: string;
+  /**
+   * The platform's grace period for a stop, in seconds; the server drains for
+   * 2 s less (shutdown.ts). Default 10, Docker's. Read once, at start-up, from
+   * the process's environment: the handlers go in before the first request
+   * seeds the rest.
+   */
+  OB1_STOP_GRACE?: string;
   /**
    * The opt-in trigram index. The migrator builds it; in the server's process
    * db/config.mjs reads it (TRGM_INDEX), which preflight.ts imports to tell the
@@ -779,6 +787,15 @@ export function currentSearchHint(msg: string): string {
     : "";
 }
 
+/**
+ * The tool calls running, counted for the stop (SMD-2250, review pass 3): a
+ * call runs on after its client has gone, and a stop that waited only on the
+ * requests Bun counts exited under it.
+ */
+const toolCalls = createCallCount();
+/** How many tool calls are running now, for test-server [13d]. */
+export const toolCallsRunning = (): number => toolCalls.running;
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
@@ -786,6 +803,13 @@ function buildServer(principal: Principal): McpServer {
     // here said 1.0.0 from before the fork had a version scheme until 1.1.0.
     version: FORK_VERSION,
   });
+  // Every tool registered below runs inside toolCalls.track: registerTool's
+  // last argument is the handler, whatever its overload.
+  const registerTool = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
+  (server as unknown as { registerTool: (...args: unknown[]) => unknown }).registerTool = (...args: unknown[]) => {
+    const handler = args[args.length - 1] as (...call: unknown[]) => unknown;
+    return registerTool(...args.slice(0, -1), (...call: unknown[]) => toolCalls.track(() => handler(...call)));
+  };
 
   // The opt-in query log (migration 034, SMD-1295). Off unless OB1_QUERY_LOG=on,
   // and best-effort either way: a log write is never allowed to fail a search, a
@@ -2750,6 +2774,17 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
   return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
 }
 
+/**
+ * The same close when the server's own stop made it: the request was still
+ * running when the stop closed it — at the drain bound, or on a second
+ * signal (shutdown.ts) — and the process exits next, so the call does not run
+ * to its end (review pass 1 of SMD-2250 — before, this was logged as the
+ * client leaving).
+ */
+export function cutByStopLine(label: string, elapsedMs: number): string {
+  return `request cut off by the server's stop after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — still running when the stop closed it, and the process exits now; a capture may or may not have landed (SMD-2250)`;
+}
+
 // The MCP endpoint, registered for MCP_METHODS only. The transport is built per
 // request and is sessionless, so a GET has no server stream to open: before
 // change 75 an authenticated GET cost an agent-registry resolve and a server
@@ -2775,7 +2810,7 @@ app.on(MCP_METHODS, "*", async (c) => {
   let label = "?";
   let settled = false;
   const abandoned = () => {
-    if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
+    if (!settled) console.warn((cutByStop ? cutByStopLine : abandonedRequestLine)(label, performance.now() - started));
   };
   signal.addEventListener("abort", abandoned, { once: true });
   if (signal.aborted) {
@@ -2881,11 +2916,38 @@ app.notFound((c) =>
   c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS),
 );
 
+// Stopping on SIGTERM, what is in flight finished (SMD-2250; shutdown.ts says
+// why the image needs it). Bun serves the default export below itself and
+// hands the server to no one but the fetch handler, as its second argument, so
+// the first request passes it on; before that nothing can be in flight. Only
+// when this module is Bun's entry: never on Workers, whose second argument is
+// its bindings, nor in a suite that imports the module.
+const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
+let bunServer: Stoppable | undefined;
+/** Set once the stop closes what is still in flight at its bound, so the route's close line names the stop, not the client. */
+let cutByStop = false;
+if (SERVES_ON_BUN) {
+  const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
+  if (grace.problem) console.warn(grace.problem);
+  drainOnSignal({
+    drainBoundMs: grace.drainBoundMs,
+    server: () => bunServer,
+    calls: toolCalls,
+    // The pool only if a request opened one: a store that failed to build has
+    // none, and the PostgREST store holds no pooled connection to close.
+    close: async () => (_store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : false),
+    onCut: () => { cutByStop = true; },
+  });
+}
+
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
   // No `idleTimeout`: a tool call outlives the default by the keepalive above,
   // and the default is the right reaper for a dead socket (SMD-1864).
   // An empty PORT is unset, not port 0 (a random port, silently) — `||`, the rule the vendored servers' tails share (SMD-1799).
   port: Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.PORT || 8000),
-  fetch: app.fetch,
+  fetch: (...args: Parameters<typeof app.fetch>) => {
+    if (SERVES_ON_BUN && !bunServer && isStoppable(args[1])) bunServer = args[1];
+    return app.fetch(...args);
+  },
 };
