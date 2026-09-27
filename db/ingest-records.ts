@@ -740,13 +740,11 @@ async function main(): Promise<void> {
     url: "one", source: "one", linear: "one", "memory-dir": "one", markdown: "one", items: "one", allow: "one", tier: "one", since: "one",
     "dry-run": "none", "self-check": "none",
   }, { hints: { url: "<postgres://…>", source: "<all|fork|commit|linear|memory|markdown|items>", linear: "<dump.json>", "memory-dir": "<path>", markdown: "<vault root>", items: "<file.jsonl | ->", allow: "<scope,scope> (or OB1_INGEST_ALLOW)", tier: "<stable|canary|working>", since: "<ref>" } });
-  const flag = cli.value;
-  const has = cli.has;
 
-  if (has("self-check")) process.exit(selfCheck());
+  if (cli.has("self-check")) process.exit(selfCheck());
 
-  const dryRun = has("dry-run");
-  const sourceArg = flag("source") ?? "all";
+  const dryRun = cli.has("dry-run");
+  const sourceArg = cli.value("source") ?? "all";
   if (sourceArg !== "all" && !SOURCES.includes(sourceArg as Source)) {
     console.error(`--source must be all or one of ${SOURCES.join(", ")}.`);
     process.exit(2);
@@ -754,19 +752,19 @@ async function main(): Promise<void> {
   const wanted = sourceArg === "all" ? new Set<Source>(SOURCES) : new Set<Source>([sourceArg as Source]);
 
   // A blank OB1_TIER is unset (the fork's string-knob rule), defaulting to stable; a blank --tier is refused by the scanner, as every flag's blank value is.
-  const tier = ((flag("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
+  const tier = ((cli.value("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
   if (!TIERS.includes(tier)) {
     console.error(`--tier / OB1_TIER must be one of ${TIERS.join(", ")}.`);
     process.exit(2);
   }
 
-  const since = flag("since") ?? "upstream-pin-9543c29";
-  const linearPath = flag("linear");
-  const memoryDir = flag("memory-dir") ?? process.env.OB1_MEMORY_DIR;
-  const markdownDir = flag("markdown") ?? process.env.OB1_MARKDOWN_DIR;
-  const itemsPath = flag("items");
+  const since = cli.value("since") ?? "upstream-pin-9543c29";
+  const linearPath = cli.value("linear");
+  const memoryDir = cli.value("memory-dir") ?? process.env.OB1_MEMORY_DIR;
+  const markdownDir = cli.value("markdown") ?? process.env.OB1_MARKDOWN_DIR;
+  const itemsPath = cli.value("items");
   // SMD-1813's allowlist: the flag, else the environment; empty clears nothing.
-  const allow = allowlistOf(flag("allow") ?? process.env.OB1_INGEST_ALLOW);
+  const allow = allowlistOf(cli.value("allow") ?? process.env.OB1_INGEST_ALLOW);
 
   // Gather. A source in the wanted set with no input to read is skipped with a
   // word on stderr, not an error — `--source all` on a bare checkout ingests
@@ -887,7 +885,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const url = flag("url") ?? process.env.DATABASE_URL;
+  const url = cli.value("url") ?? process.env.DATABASE_URL;
   if (!url) { console.error("No database URL. Pass --url or set DATABASE_URL."); process.exit(2); }
 
   const sql = new SQL({ url, max: 1 });

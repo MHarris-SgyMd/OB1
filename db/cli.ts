@@ -217,11 +217,15 @@ export function readNumber(flag: string, raw: string, rule: { min: number; max?:
  */
 export function scriptArgv(usage: string): string[] {
   const argv = process.argv.slice(2);
-  if (argv.includes("--help")) {
-    console.log(usage);
-    process.exit(0);
-  }
+  answerHelp(argv, usage);
   return argv;
+}
+
+/** `--help` anywhere in argv: print `text` and exit 0 — the one rule both doors share. */
+function answerHelp(argv: readonly string[], text: string): void {
+  if (!argv.includes("--help")) return;
+  console.log(text);
+  process.exit(0);
 }
 
 /**
@@ -231,10 +235,7 @@ export function scriptArgv(usage: string): string[] {
  */
 export function commandLine<K extends string>(script: string, spec: FlagSpec<K>, options: ScanOptions<K> & { note?: string } = {}, argv: readonly string[] = process.argv.slice(2)): CommandLine<K> {
   const list = `${flagList(spec, options.hints)}${options.note ? `\n  ${options.note}` : ""}`;
-  if (argv.includes("--help")) {
-    console.log(`usage: bun db/${script} [flags]\n${list}\n  The header of db/${script} says what each does.`);
-    process.exit(0);
-  }
+  answerHelp(argv, `usage: bun db/${script} [flags]\n${list}\n  The header of db/${script} says what each does.`);
   const refuse = (error: string): never => {
     console.error(`${error}\n${list}`);
     process.exit(2);

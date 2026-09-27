@@ -726,13 +726,12 @@ const VERB_USAGE =
  * but --a-key/--b-key are accepted for a URL that has none.
  */
 export function parseCompareArgs(args: string[]): CompareArgs {
-  const USAGE = COMPARE_USAGE;
   // Every argument accounted for (db/cli.ts); the two values after --compare are the brain references.
   const cli = commandLine("tier.ts", {
     compare: "two", "a-key": "one", "b-key": "one", "queries-file": "one", "from-log": "one", since: "one", query: "repeated",
     replay: "none", hybrid: "none", json: "none",
-  }, { hints: { compare: "<a> <b>", "a-key": "<key>", "b-key": "<key>", "queries-file": "<path>", "from-log": "<brain>", since: "<iso>", query: "<q>" }, note: USAGE.trimStart() }, args);
-  const refuse = (why: string): never => { console.error(`${why}\n${USAGE}`); process.exit(2); };
+  }, { hints: { compare: "<a> <b>", "a-key": "<key>", "b-key": "<key>", "queries-file": "<path>", "from-log": "<brain>", since: "<iso>", query: "<q>" }, note: COMPARE_USAGE.trimStart() }, args);
+  const refuse = (why: string): never => { console.error(`${why}\n${COMPARE_USAGE}`); process.exit(2); };
   if (!cli.has("compare")) refuse("--compare needs two brains.");
   const [a, b] = cli.values("compare");
   const out: CompareArgs = { a, b, replay: cli.has("replay"), hybrid: cli.has("hybrid"), queries: [], json: cli.has("json") };
@@ -748,13 +747,13 @@ export function parseCompareArgs(args: string[]): CompareArgs {
     if (Number.isNaN(Date.parse(since))) refuse("--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).");
     out.since = since;
   }
-  if (out.hybrid && !out.replay) { console.error(`--hybrid only applies with --replay.\n${USAGE}`); process.exit(2); }
-  if (out.fromLog && out.queries.length > 0) { console.error(`--from-log and --query/--queries-file are two query sources; pass one.\n${USAGE}`); process.exit(2); }
-  if (out.fromLog && out.hybrid) { console.error(`--hybrid does not apply to --from-log: each logged search replays on the arm that ran it.\n${USAGE}`); process.exit(2); }
-  if (out.fromLog && !out.replay) { console.error(`--from-log only applies with --replay.\n${USAGE}`); process.exit(2); }
-  if (out.since && !out.fromLog) { console.error(`--since only applies with --from-log (it windows the logged searches).\n${USAGE}`); process.exit(2); }
-  if (out.queries.length > 0 && !out.replay) { console.error(`--query/--queries-file only apply with --replay (without it, no retrieval runs).\n${USAGE}`); process.exit(2); }
-  if (out.replay && out.queries.length === 0 && !out.fromLog) { console.error(`--replay needs a query source: --query <q> (repeatable), --queries-file <path>, or --from-log <brain>.\n${USAGE}`); process.exit(2); }
+  if (out.hybrid && !out.replay) refuse("--hybrid only applies with --replay.");
+  if (out.fromLog && out.queries.length > 0) refuse("--from-log and --query/--queries-file are two query sources; pass one.");
+  if (out.fromLog && out.hybrid) refuse("--hybrid does not apply to --from-log: each logged search replays on the arm that ran it.");
+  if (out.fromLog && !out.replay) refuse("--from-log only applies with --replay.");
+  if (out.since && !out.fromLog) refuse("--since only applies with --from-log (it windows the logged searches).");
+  if (out.queries.length > 0 && !out.replay) refuse("--query/--queries-file only apply with --replay (without it, no retrieval runs).");
+  if (out.replay && out.queries.length === 0 && !out.fromLog) refuse("--replay needs a query source: --query <q> (repeatable), --queries-file <path>, or --from-log <brain>.");
   return out;
 }
 
@@ -788,24 +787,22 @@ async function main(): Promise<void> {
   const cli = commandLine("tier.ts", {
     from: "one", to: "one", since: "one", tier: "one", refresh: "none", replay: "none", diff: "none", promote: "none",
   }, { hints: { from: "<postgres://…>", to: "<postgres://…>", since: "<iso-ts>", tier: "<canary|working>" } }, args);
-  const flag = cli.value;
-  const has = cli.has;
 
-  const verbs = (["refresh", "replay", "diff", "promote"] as const).filter((v) => has(v));
+  const verbs = (["refresh", "replay", "diff", "promote"] as const).filter((v) => cli.has(v));
   if (verbs.length !== 1) {
     console.error(`Give exactly one verb (--refresh, --replay, --diff, --promote), not ${verbs.length}.`);
     process.exit(2);
   }
   const verb = verbs[0];
-  const from = flag("from");
-  const to = flag("to");
+  const from = cli.value("from");
+  const to = cli.value("to");
   if (!from || !to) {
     console.error(`--${verb} needs --from and --to.`);
     process.exit(2);
   }
 
   if (verb === "refresh") {
-    const tier = (flag("tier") ?? "canary") as Tier;
+    const tier = (cli.value("tier") ?? "canary") as Tier;
     if (!TIERS.includes(tier) || tier === "stable") {
       console.error(`--tier must be canary or working (stable is the source, ingest-records.ts writes it).`);
       process.exit(2);
@@ -823,7 +820,7 @@ async function main(): Promise<void> {
   }
 
   // replay | diff
-  const since = flag("since") ?? null;
+  const since = cli.value("since") ?? null;
   const stable = new SQL({ url: from, max: 4 });
   const canary = new SQL({ url: to, max: 4 });
   try {
