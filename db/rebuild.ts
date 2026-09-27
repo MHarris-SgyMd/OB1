@@ -54,6 +54,7 @@
  */
 
 import { SQL } from "bun";
+import { staleStandingCounts, staleStandingsText, STALE_STANDING_COUNTS_SQL } from "../server-portable/consolidate.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -208,22 +209,19 @@ try {
              (SELECT count(*)::int FROM st) AS stale,
              (SELECT count(*)::int FROM orph) AS orphans,
              (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
-             (SELECT count(*)::int FROM supersession_proposals WHERE status = 'stale') AS stale_proposals,
-             -- 064: where each stale row stands against the judge pools — a live claim on its newer thought under any consolidate key
-             -- (a pass has it or will), a failed one and no live one (--retry-failed), else waiting for the next run to re-pool it.
-             (SELECT count(*)::int FROM supersession_proposals p WHERE p.status = 'stale'
-                AND EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = p.newer_id AND c.work_type LIKE 'consolidate:%' AND c.status IN ('pending', 'claimed'))) AS stale_pooled,
-             (SELECT count(*)::int FROM supersession_proposals p WHERE p.status = 'stale'
-                AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = p.newer_id AND c.work_type LIKE 'consolidate:%' AND c.status IN ('pending', 'claimed'))
-                AND EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = p.newer_id AND c.work_type LIKE 'consolidate:%' AND c.status = 'failed')) AS stale_failed`) as { rows: number; by_kind: Record<string, number> | null; marked: number; stale: number; orphans: number; legacy: number; stale_proposals: number; stale_pooled: number; stale_failed: number }[];
+             (SELECT count(*)::int FROM supersession_proposals WHERE status = 'stale') AS stale_proposals`) as { rows: number; by_kind: Record<string, number> | null; marked: number; stale: number; orphans: number; legacy: number; stale_proposals: number }[];
+    // 064: where each stale row stands against the judge pools — the one SQL
+    // db/consolidate.ts's --status reads (server-portable/consolidate.ts), so
+    // the two doors never disagree (first review pass, mutant: a copy here
+    // read one way while the worker's read another).
+    const standings = staleStandingCounts((await sql.unsafe(STALE_STANDING_COUNTS_SQL)) as { s: string; n: number }[]);
     const bound = Number(c.rows) >= 10001 ? " (the first 10,001 lineage rows read; the rest not)" : "";
     console.log(`  lineage:     ${c.rows} row(s)${bound}: ${Object.entries(c.by_kind ?? {}).map(([k, n]) => `${n} ${k}`).join(", ") || "none"}`);
     console.log(`  stale:       ${c.stale} row(s) whose input's text moved since (the census's read) — bun db/rebuild.ts --input <id> acts on a thought's`);
     console.log(`  marked:      ${c.marked} row(s) await a re-run rebuild_derived asked for`);
     console.log(`  orphans:     ${c.orphans} row(s) whose artifact is gone${Number(c.orphans) ? " — bun db/rebuild.ts --orphans deletes them" : ""}`);
     console.log(`  legacy:      ${c.legacy} row(s) backfilled by 061 at the thought's current text (read as current; --force re-records a vector and re-runs the rest)`);
-    const staleWaiting = Number(c.stale_proposals) - Number(c.stale_pooled) - Number(c.stale_failed);
-    console.log(`  proposals:   ${c.stale_proposals} stale (a text moved under the verdict${Number(c.stale_proposals) ? `: ${[Number(c.stale_pooled) ? `${c.stale_pooled} in a pass's pool` : "", staleWaiting ? `${staleWaiting} waiting for the next run of bun db/consolidate.ts to re-pool` : "", Number(c.stale_failed) ? `${c.stale_failed} failed in a pass — bun db/consolidate.ts --retry-failed` : ""].filter(Boolean).join(", ")}` : ""}; the pass replaces one it finds in conflict again and settles one it does not — a reviewer may decide one sooner: --list stale)`);
+    console.log(`  proposals:   ${c.stale_proposals} stale (a text moved under the verdict${standings.total ? `: ${staleStandingsText(standings, "bun db/consolidate.ts --retry-failed")}` : ""}; the pass replaces one it finds in conflict again and settles one it does not — a reviewer may decide one sooner: bun db/consolidate.ts --list stale)`);
     const pools = (await sql`SELECT work_type AS w, count(*)::int AS n FROM thought_work_claims WHERE status = 'pending' GROUP BY 1 ORDER BY 1`) as { w: string; n: number }[];
     console.log(`  pools:       ${pools.length ? pools.map((p) => `${p.w} (${p.n} pending)`).join(", ") : "nothing pending"}`);
     for (const p of pools) console.log(`    ${p.w}  →  ${drainer(p.w)}`);

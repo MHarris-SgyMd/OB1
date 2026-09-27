@@ -43,12 +43,16 @@
 --      the candidate rule no longer admits for a reason that means "no
 --      conflict" — no shared entity, under the similarity floor, a side
 --      superseded — too, with a note that says so; one a side of which has
---      no vector yet waits (the reembed pool writes it; the next run
---      re-pools it). The pass also re-pools every stale row's newer thought
---      under its OWN key at the start of a run, so a pass under a new judge
---      key, or one whose earlier claim on the thought is terminal, reaches
---      the row 063 requeued under the row's key. 029's posture — the pass
---      proposes, never applies — is not crossed: a rejection applies nothing.
+--      no vector yet waits (the reembed pool writes it; the run after that
+--      re-pools it); one whose call timed out, was refused by the egress
+--      gate or drew a malformed answer stays stale with the thought recorded
+--      failed, for --retry-failed. The pass also re-pools every stale row's
+--      newer thought under its OWN key at the start of a run — a pair both
+--      sides of which have a vector, with no live or failed claim there — so
+--      a pass under a new judge key, or one whose earlier claim on the
+--      thought is terminal, reaches the row 063 requeued under the row's
+--      key. 029's posture — the pass proposes, never applies — is not
+--      crossed: a rejection applies nothing.
 --   2. THE REOPEN is this file's. rebuild_derived is redefined on 063's body
 --      verbatim, the proposal arm alone changed: a rejected row whose
 --      review_note begins 'settled by the pass:' is the pass's, so a text

@@ -266,6 +266,51 @@ export function isPassSettled(note: string | null | undefined): boolean {
   return typeof note === "string" && note.startsWith(PASS_SETTLED_PREFIX);
 }
 
+/**
+ * 064: where a stale proposal stands against the judge pools — one SQL CASE
+ * over `supersession_proposals p`, read by db/consolidate.ts (--status,
+ * --list stale) and db/rebuild.ts (--status) so the three never disagree
+ * (063's first review pass found three copies of one rule once already, in
+ * consolidation_pool). Ranked: `vector` (a side has no vector — the pair
+ * cannot be judged until the reembed pool writes it; the pass does not pool
+ * it), `failed` (a pass failed on the newer thought under some judge key —
+ * --retry-failed under that key; ranked above a live claim because 063's
+ * requeue leaves a pending row under the ROW's key after a judge change,
+ * which would otherwise read as pooled for ever), `pooled` (a live claim
+ * under any consolidate key: a pass has it or will), else `waiting` (the
+ * next run re-pools it).
+ */
+export type StaleStanding = "vector" | "failed" | "pooled" | "waiting";
+export const STALE_STANDINGS: readonly StaleStanding[] = ["pooled", "vector", "failed", "waiting"];
+export const STALE_STANDING_SQL = `CASE
+  WHEN EXISTS (SELECT 1 FROM thoughts t WHERE t.id IN (p.older_id, p.newer_id) AND t.embedding IS NULL) THEN 'vector'
+  WHEN EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = p.newer_id AND c.work_type LIKE '${CONSOLIDATE_KEY_PREFIX}%' AND c.status = 'failed') THEN 'failed'
+  WHEN EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = p.newer_id AND c.work_type LIKE '${CONSOLIDATE_KEY_PREFIX}%' AND c.status IN ('pending', 'claimed')) THEN 'pooled'
+  ELSE 'waiting' END`;
+/** The grouped read both scripts run: `[{ s, n }]` over the stale rows. */
+export const STALE_STANDING_COUNTS_SQL = `SELECT (${STALE_STANDING_SQL}) AS s, count(*)::int AS n FROM supersession_proposals p WHERE p.status = 'stale' GROUP BY 1`;
+
+/** One standing as --list stale prints it beside the status. `retry` is the --retry-failed command as this door spells it. */
+export function staleStandingText(s: string, retry = "--retry-failed"): string {
+  return s === "pooled" ? "in a pass's pool"
+    : s === "vector" ? "waiting for a vector the reembed pool writes"
+    : s === "failed" ? `failed in a pass — ${retry} under its key`
+    : "waiting for the next run to re-pool it";
+}
+
+/** The standings' counts as one clause body: "1 in a pass's pool, 2 waiting for a vector the reembed pool writes, …" (only the non-zero ones). */
+export function staleStandingsText(counts: Partial<Record<StaleStanding, number>>, retry = "--retry-failed"): string {
+  const part = (s: StaleStanding, text: string) => (counts[s] ? `${counts[s]} ${text}` : "");
+  return [part("pooled", "in a pass's pool"), part("vector", "waiting for a vector the reembed pool writes"), part("failed", `failed in a pass — ${retry} under its key`), part("waiting", "waiting for the next run")].filter(Boolean).join(", ");
+}
+
+/** The counts as the grouped read returns them, keyed by standing. */
+export function staleStandingCounts(rows: { s: string; n: number }[]): Partial<Record<StaleStanding, number>> & { total: number } {
+  const out: Partial<Record<StaleStanding, number>> & { total: number } = { total: 0 };
+  for (const r of rows) { out[r.s as StaleStanding] = (out[r.s as StaleStanding] ?? 0) + Number(r.n); out.total += Number(r.n); }
+  return out;
+}
+
 /** The model a pass key names, or null for a key of another shape. */
 export function parseConsolidateKey(key: string): { model: string; version: number } | null {
   if (!key.startsWith(CONSOLIDATE_KEY_PREFIX)) return null;

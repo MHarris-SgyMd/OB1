@@ -67,9 +67,9 @@
  * migration 063's rebuild_derived (a text edit, a supersession, a forget) and
  * its newer thought requeued under the key that judged it. A stale row is
  * THIS pass's work, whatever key wrote it (migration 064, SMD-2297): every
- * run first re-pools each stale row's newer thought under its own key (one
- * with a vector and no live or failed claim here — a failed claim is
- * --retry-failed's, 015's rule), then judges the pair again — a stale pair
+ * run first re-pools each stale row's newer thought under its own key (a pair
+ * both sides of which have a vector, with no live or failed claim here — a
+ * failed claim is --retry-failed's, 015's rule), then judges the pair again — a stale pair
  * the top-k left out is judged anyway when it still meets the candidate
  * rule. A conflict at the floor REPLACES the row in place (063:
  * record_supersession_proposal, back to pending under this key); agree,
@@ -81,11 +81,13 @@
  * rule no longer admits for a reason that means "no conflict" — no shared
  * entity, under the similarity floor, a side superseded — is settled with a
  * note saying so; one a side of which has no vector yet waits for the reembed
- * pool and the next run. A malformed answer on a stale pair leaves the row
- * stale and the thought failed, as any malformed answer does. 029's posture
- * stands: the pass proposes and never applies — a rejection applies nothing.
- * --status and --list stale say where each stale row stands against the
- * pools (in a pass's pool, waiting for the next run, failed in a pass).
+ * pool and the run after its write. A stale pair whose call timed out, was
+ * refused by the egress gate or drew a malformed answer leaves the row stale
+ * and the thought failed, as any such pair does — --retry-failed revisits it.
+ * 029's posture stands: the pass proposes and never applies — a rejection
+ * applies nothing. --status and --list stale say where each stale row stands
+ * against the pools (in a pass's pool, waiting for a vector, failed in a
+ * pass, waiting for the next run).
  *
  * ── Identity ────────────────────────────────────────────────────────────────
  * As extract-entities.ts: OB1_WORKER_KEY holds a raw access key whose hash is
@@ -113,7 +115,8 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import {
-  actorKindOf, cleanForDisplay, consolidateKey, judgePair, passSettledNote, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX,
+  actorKindOf, cleanForDisplay, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandingCounts, staleStandingsText, staleStandingText,
+  DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_COUNTS_SQL, STALE_STANDING_SQL,
   type Judgement,
 } from "../server-portable/consolidate.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
@@ -214,6 +217,13 @@ if (DIRECTION !== undefined && (!ACCEPT || !["newer", "older"].includes(DIRECTIO
 }
 if (FORCE && !ACCEPT) {
   console.error("--force goes with --accept: it accepts a proposal whose thought was edited after it was judged.");
+  process.exit(2);
+}
+// 064: the marker is the pass's own — a person's note beginning with it would
+// be read by rebuild_derived as the pass's decision and reopened on a text
+// move (second review pass's brief, cold read: the door admitted it).
+if (NOTE !== undefined && NOTE.trimStart().startsWith(PASS_SETTLED_PREFIX)) {
+  console.error(`--note may not begin with "${PASS_SETTLED_PREFIX}": that marker is the pass's own (migration 064) — rebuild_derived reads a rejection carrying it as the pass's and sets it stale again when a text moves.`);
   process.exit(2);
 }
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
@@ -334,22 +344,9 @@ if (WRITES) {
  */
 const passActor = () => ({ name: actorName, via: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) });
 
-/**
- * 064: where a stale row stands against the judge pools, read from its newer
- * thought's claims under any consolidate key — `pooled` (a live claim: a pass
- * has it or will), `failed` (a pass failed on it and none holds it:
- * --retry-failed), else `waiting` (no claim, or a finished one: the next run
- * re-pools it). One SQL fragment for --status, --list and db/rebuild.ts.
- */
-type StaleStanding = "pooled" | "failed" | "waiting";
-const STALE_STANDING_SQL = `CASE
-  WHEN EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = p.newer_id AND c.work_type LIKE 'consolidate:%' AND c.status IN ('pending', 'claimed')) THEN 'pooled'
-  WHEN EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = p.newer_id AND c.work_type LIKE 'consolidate:%' AND c.status = 'failed') THEN 'failed'
-  ELSE 'waiting' END`;
-const standingText = (s: StaleStanding | string): string =>
-  s === "pooled" ? "in a pass's pool" : s === "failed" ? "failed in a pass — --retry-failed" : "waiting for the next run to re-pool it";
-const staleClause = (n: number, pooled: number, failed: number, waiting: number): string =>
-  `${n} stale (a text moved under the verdict: ${[pooled ? `${pooled} in a pass's pool` : "", waiting ? `${waiting} waiting for the next run` : "", failed ? `${failed} failed in a pass — --retry-failed` : ""].filter(Boolean).join(", ")}; the pass replaces one it finds in conflict again and settles one it does not)`;
+/** 064: the stale rows' standings against the pools, as --status prints them (server-portable/consolidate.ts holds the one SQL and the words; db/rebuild.ts reads the same). */
+const staleClause = (counts: ReturnType<typeof staleStandingCounts>): string =>
+  `${counts.total} stale (a text moved under the verdict: ${staleStandingsText(counts)}; the pass replaces one it finds in conflict again and settles one it does not)`;
 
 // ── Review: --list, --accept, --reject, --stale ─────────────────────────────
 
@@ -393,7 +390,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     ? ((await sql.unsafe(`SELECT p.id::text AS id, ${STALE_STANDING_SQL} AS standing FROM supersession_proposals p WHERE p.id = ANY(string_to_array($1, ',')::uuid[])`, [staleIds.join(",")])) as { id: string; standing: string }[]).map((r) => [r.id, r.standing])
     : []);
   rows.forEach((p, i) => {
-    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.status !== "pending" ? `  (${p.status}${p.status === "stale" ? ` — ${standingText(standing.get(p.id) ?? "waiting")}` : ""}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
+    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.status !== "pending" ? `  (${p.status}${p.status === "stale" ? ` — ${staleStandingText(standing.get(p.id) ?? "waiting")}` : ""}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
     if (p.reason) console.log(`     ${cleanForDisplay(p.reason)}`);
     console.log(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
     console.log(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
@@ -492,34 +489,39 @@ async function printQueue(): Promise<void> {
   // row when it finds the conflict again, and SETTLES it — a rejection with
   // the pass's note — when it does not. The rejected count says how many are
   // the pass's; each stale row is placed against the pools (see the header).
-  const [q] = (await sql.unsafe(`
+  const [q] = await sql`
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending,
            count(*) FILTER (WHERE status = 'accepted')::int AS accepted,
            count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
-           count(*) FILTER (WHERE status = 'rejected' AND review_note LIKE $1)::int AS settled,
-           count(*) FILTER (WHERE status = 'stale')::int AS stale,
-           count(*) FILTER (WHERE status = 'stale' AND (${STALE_STANDING_SQL}) = 'pooled')::int AS stale_pooled,
-           count(*) FILTER (WHERE status = 'stale' AND (${STALE_STANDING_SQL}) = 'failed')::int AS stale_failed,
+           count(*) FILTER (WHERE status = 'rejected' AND review_note LIKE ${`${PASS_SETTLED_PREFIX}%`})::int AS settled,
            count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected
-    FROM supersession_proposals p`, [`${PASS_SETTLED_PREFIX}%`])) as { pending: number; accepted: number; rejected: number; settled: number; stale: number; stale_pooled: number; stale_failed: number; undirected: number }[];
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${q.stale ? `, ${staleClause(q.stale, q.stale_pooled, q.stale_failed, q.stale - q.stale_pooled - q.stale_failed)}` : ""} — --list shows them; --accept / --reject decides one`);
+    FROM supersession_proposals`;
+  const stale = staleStandingCounts((await sql.unsafe(STALE_STANDING_COUNTS_SQL)) as { s: string; n: number }[]);
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""} — --list shows them; --accept / --reject decides one`);
 }
 
 /**
  * 064: the newer thoughts of stale proposals this run must re-pool under its
- * own key — those with a vector (without one the pair cannot be judged; the
- * reembed pool writes it, and the run after sees the thought here) and no
- * live or failed claim here: a pass under another key never had them, a pass
- * under this key finished them before the row went stale (a claim 063's
- * rebuild requeued under the ROW's key sits pending there — the operator's
- * hint, not this pass's pool), and a failed claim is --retry-failed's (015).
- * The `enqueue_thoughts` before it leaves a pending row, which this skips.
+ * own key — those of a pair BOTH sides of which have a vector (without one
+ * the pair cannot be judged; the reembed pool writes it, and the run after
+ * sees the thought here — the older side too, or a row whose older thought
+ * lost its vector re-pooled the newer on every run and re-judged its other
+ * pairs each time, first review pass, run-it) and no live or failed claim
+ * here: a pass under another key never had them, a pass under this key
+ * finished them before the row went stale (a claim 063's rebuild requeued
+ * under the ROW's key sits pending there — the operator's hint, not this
+ * pass's pool), and a failed claim is --retry-failed's (015). A thought the
+ * pool rule itself would add (no claim row under this key at all) is left to
+ * `enqueue_thoughts`, so --dry-run's count and the run agree (first review
+ * pass, run-it: the dry run counted such a thought twice).
  */
 const STALE_REPOOL_SQL = `SELECT DISTINCT p.newer_id AS id
     FROM supersession_proposals p
     JOIN thoughts t ON t.id = p.newer_id AND t.embedding IS NOT NULL
+    JOIN thoughts o ON o.id = p.older_id AND o.embedding IS NOT NULL
     LEFT JOIN thought_work_claims c ON c.thought_id = p.newer_id AND c.work_type = $1
-   WHERE p.status = 'stale' AND (c.thought_id IS NULL OR c.status = 'succeeded')`;
+   WHERE p.status = 'stale' AND (c.thought_id IS NULL OR c.status = 'succeeded')
+     AND p.newer_id NOT IN (SELECT consolidation_pool($1))`;
 async function staleToRepool(): Promise<number> {
   return Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM (${STALE_REPOOL_SQL}) s`, [JOB])) as { n: number }[])[0].n);
 }
@@ -583,7 +585,7 @@ const totals = { pairs: 0, agree: 0, unrelated: 0, conflict: 0, proposed: 0, alr
   // again), settled after a judgement of no conflict, settled because the
   // pair no longer meets the candidate rule, left waiting for a vector, or
   // decided by a reviewer or another pass between the read and the write.
-  replaced: 0, settled: 0, settledOut: 0, staleWait: 0, staleRaced: 0 };
+  replaced: 0, settled: 0, settledOut: 0, staleWait: 0, staleRaced: 0, staleGone: 0 };
 const activeWorkers = new Set<string>();
 const started = Date.now();
 let total = 0;
@@ -619,16 +621,24 @@ type StaleRow = { id: string; older_id: string; older_fingerprint: string; older
  * row (a reviewer decided it, another pass replaced it, its thought is gone
  * between the read and this write), counted and not failed.
  */
-async function settleStale(s: StaleRow, why: string, newerFp: string, settled: string): Promise<boolean> {
+async function settleStale(s: StaleRow, why: string, olderFp: string, newerFp: string, settled: string): Promise<boolean> {
   const recipe = { ...proposalRecipe(cfg, { similarity: s.similarity ?? NaN, candidates: K, minSimilarity: MIN_SIM }), settled };
   if (s.similarity === null) delete (recipe as { similarity?: number }).similarity;
   const [{ r }] = await sql`
     SELECT settle_supersession_proposal(${s.id}::uuid, ${passSettledNote(why, JOB)}::text, ${passActor()}::jsonb, ${JOB}::text,
-                                        ${s.older_fingerprint}::text, ${newerFp}::text, ${recipe}::jsonb, ${agentId}::uuid) AS r`;
+                                        ${olderFp}::text, ${newerFp}::text, ${recipe}::jsonb, ${agentId}::uuid) AS r`;
   const res = r as { ok: boolean; error?: string; status?: string };
   if (res.ok) return true;
-  totals.staleRaced++;
-  console.error(`  ${s.id}: not settled — ${res.error === "NOT_STALE" ? `the row is ${res.status} now (a reviewer or another pass reached it first)` : res.error}`);
+  if (res.error === "NOT_FOUND") {
+    // The pair's thought was deleted between the stale read and this write:
+    // 029's cascade took the row (first review pass, cold read: counted as a
+    // decision before).
+    totals.staleGone++;
+    console.error(`  ${s.id}: not settled — the row is gone with a deleted thought`);
+  } else {
+    totals.staleRaced++;
+    console.error(`  ${s.id}: not settled — ${res.error === "NOT_STALE" ? `the row is ${res.status} now (a reviewer or another pass reached it first)` : res.error}`);
+  }
   return false;
 }
 
@@ -660,13 +670,20 @@ async function processRow(row: Row): Promise<Outcome> {
     WHERE id = ANY(${sql.array(candidates.map((c) => c.older_id), "TEXT")}::uuid[])`) as Row[];
   const byId = new Map(olders.map((o) => [o.id, o]));
   const problems: string[] = [];
-  const judgedOlders = new Set<string>();
+  // 064: every candidate the loop REACHED — judged, or attempted and left in
+  // `problems` (a timeout, an egress refusal, a malformed answer). A stale
+  // row on a reached pair is never a leftover: the leftover rule below reads
+  // "the candidate rule no longer admits the pair", and a pair the judge was
+  // asked about was admitted (first review pass, run-it: a stale pair whose
+  // call timed out was settled as "no longer a candidate").
+  const reachedOlders = new Set<string>();
   // No early exit on `stopping` here: a thought is at most --k calls, bounded
   // by the lease arithmetic above, and a thought released succeeded with pairs
   // unjudged would be terminal with the pairs never judged (review pass 1).
   for (const c of candidates) {
     const older = byId.get(c.older_id);
     if (!older) continue; // deleted between the candidate query and the read
+    reachedOlders.add(c.older_id);
     const staleRow = staleByOlder.get(c.older_id);
     const t0 = Date.now();
     let j: Judgement;
@@ -696,7 +713,6 @@ async function processRow(row: Row): Promise<Outcome> {
     }
     llmMs += Date.now() - t0;
     totals.pairs++;
-    judgedOlders.add(c.older_id);
     if (j.malformed) {
       totals.malformed++;
       problems.push(`pair with ${c.older_id}: the model's answer was not JSON of the expected shape${staleRow ? " (its stale proposal stands)" : ""}`);
@@ -713,7 +729,10 @@ async function processRow(row: Row): Promise<Outcome> {
       }
       // 064: no conflict at the floor on a pair whose proposal is stale — the
       // pass settles it, at the fingerprints the judge was sent.
-      if (staleRow && await settleStale(staleRow, verdict === null ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — a conflict at confidence ${j.confidence.toFixed(2)}, under the floor ${MIN_CONFIDENCE}`, row.fingerprint, verdict === null ? j.verdict : "under-confidence")) {
+      // (The older's fingerprint from the read the judge was sent, not the
+      // stale read before the candidates — a move between the two would
+      // record a text the judge did not see; first review pass, cold read.)
+      if (staleRow && await settleStale(staleRow, verdict === null ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — a conflict at confidence ${j.confidence.toFixed(2)}, under the floor ${MIN_CONFIDENCE}`, older.fingerprint, row.fingerprint, verdict === null ? j.verdict : "under-confidence")) {
         totals.settled++;
         recorded = "settled";
       }
@@ -743,16 +762,18 @@ async function processRow(row: Row): Promise<Outcome> {
       }) + "\n");
     }
   }
-  // 064: the stale rows no judgement reached — pairs the candidate rule no
+  // 064: the stale rows no candidate reached — pairs the candidate rule no
   // longer admits. A side without a vector is "not yet" (the reembed pool
-  // writes it; the next run re-pools this thought); the rest — no shared
-  // entity, under the similarity floor, a side superseded — mean no conflict
-  // and are settled at the current texts. A pair whose judgement was
-  // malformed is in `problems` above, its row left stale for --retry-failed.
+  // writes it; the run after that re-pools this thought); the rest — no
+  // shared entity, under the similarity floor, a side superseded — mean no
+  // conflict and are settled at the current texts. A pair whose call timed
+  // out, was refused by the egress gate or drew a malformed answer is in
+  // `problems` above and was reached: its row stays stale, the thought is
+  // recorded failed, and --retry-failed revisits it.
   for (const s of stale) {
-    if (judgedOlders.has(s.older_id)) continue;
+    if (reachedOlders.has(s.older_id)) continue;
     if (!row.has_vector || s.older_vectorless) { totals.staleWait++; continue; }
-    if (await settleStale(s, `no longer a candidate pair (no shared entity, under the similarity floor ${MIN_SIM}, or a side superseded)`, row.fingerprint, "not-a-candidate")) totals.settledOut++;
+    if (await settleStale(s, `no longer a candidate pair (no shared entity, under the similarity floor ${MIN_SIM}, or a side superseded)`, s.older_fingerprint, row.fingerprint, "not-a-candidate")) totals.settledOut++;
   }
   if (problems.length) return { outcome: "failed", error: `${problems.length} of ${candidates.length} pair(s) not judged: ${problems.join("; ").slice(0, 400)}` };
   return { outcome: "succeeded" };
@@ -1000,13 +1021,14 @@ console.log(
 );
 if (totals.pairs > 0) console.log(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
 // 064: what became of the stale proposals this run met (a line only when it met one).
-if (totals.replaced + totals.settled + totals.settledOut + totals.staleWait + totals.staleRaced > 0) {
+if (totals.replaced + totals.settled + totals.settledOut + totals.staleWait + totals.staleRaced + totals.staleGone > 0) {
   console.log(
     `  stale proposals: ` + [
       totals.settled + totals.settledOut ? `${totals.settled + totals.settledOut} settled by the pass (${[totals.settled ? `${totals.settled} judged again with no conflict at the floor` : "", totals.settledOut ? `${totals.settledOut} no longer a candidate pair` : ""].filter(Boolean).join(", ")})` : "",
       totals.replaced ? `${totals.replaced} replaced in place — the conflict found again` : "",
-      totals.staleWait ? `${totals.staleWait} wait on a vector the reembed pool writes (re-pooled by the next run)` : "",
+      totals.staleWait ? `${totals.staleWait} wait on a vector the reembed pool writes (re-pooled by the run after it lands)` : "",
       totals.staleRaced ? `${totals.staleRaced} decided by a reviewer or another pass meanwhile` : "",
+      totals.staleGone ? `${totals.staleGone} gone with a deleted thought` : "",
     ].filter(Boolean).join("; ")
   );
 }

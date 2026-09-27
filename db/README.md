@@ -1751,8 +1751,9 @@ rule stops vouching for that thought's vector, as after any edit.
 verdict is set `stale` by `rebuild_derived` (an edit, a supersession, a
 forget) and its newer thought requeued under the key that judged it. A stale
 row is the next pass's work whatever key wrote it: every run re-pools each
-stale row's newer thought under its own key (one with a vector and no live or
-failed claim there — a failed claim is `--retry-failed`'s), judges the pair
+stale row's newer thought under its own key (a pair both sides of which have a
+vector, with no live or failed claim there — a failed claim is
+`--retry-failed`'s), judges the pair
 again — a stale pair the top-k left out is judged anyway when it still meets
 the candidate rule — and either **replaces** the row in place (a conflict at
 the floor: `record_supersession_proposal`, back to pending under this key) or
@@ -1762,8 +1763,11 @@ unsuperseded side): a rejection whose note begins `settled by the pass:`, the
 lineage row rewritten at the texts judged (`settle_supersession_proposal`). A
 text move under a pass-settled row sets it stale again; a person's rejection
 stands for ever. A side without a vector waits for the reembed pool and the
-next run. `--status` places each stale row against the pools — in a pass's
-pool, waiting for the next run, failed in a pass — and counts the pass's
+run after its write; a stale pair whose call timed out, was refused by the
+egress gate or drew a malformed answer leaves the row stale and the thought
+failed, for `--retry-failed`. `--status` places each stale row against the
+pools — in a pass's pool, waiting for a vector, failed in a pass, waiting for
+the next run — and counts the pass's
 rejections apart from a person's; `--list stale` tags each row's standing
 and still offers the reviewer's decision (an accept takes `--force`).
 
@@ -2745,7 +2749,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2146 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 869 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 883 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

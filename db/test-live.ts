@@ -4167,11 +4167,21 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(/1 stale \(a text moved under the verdict: 1 in a pass's pool; the pass replaces one it finds in conflict again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in a pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
     const staleList = await consolidate("--list", "stale");
     assert(staleList.code === 0 && /1 stale proposal\(s\)/.test(staleList.out) && /\(stale — in a pass's pool\)/.test(staleList.out) && staleList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`), `--list stale tags the row's standing and still offers the reviewer's decision (${staleList.out.split("\n").find((l) => /stale —/.test(l))?.trim().slice(0, 200)})`);
+    // The standing reads a live claim under ANY consolidate key (a pass under
+    // another judge model): the row's-key claim gone and one requeued under
+    // another key still reads pooled; the run then adds the thought through
+    // the pool rule (no claim under its key), not the re-pool — --dry-run
+    // and the run count it once (first review pass, mutant + run-it).
+    await sql`DELETE FROM thought_work_claims WHERE thought_id = ${atlasNew}::uuid AND work_type = ${KEY}`;
+    await sql`SELECT requeue_thought_work(${consolidateKey("other-judge")}, ${atlasNew}::uuid)`;
+    assert(/1 in a pass's pool;/.test((await consolidate("--status")).out) && /\(stale — in a pass's pool\)/.test((await consolidate("--list", "stale")).out), "a live claim under another judge's key reads as pooled too");
+    const dryOnce = await consolidate("--dry-run");
+    assert(/would: add 1 thoughts to the pool; judge 1 thought\(s\)/.test(dryOnce.out), `a thought the pool rule adds is not counted again as a re-pool (${dryOnce.out.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
     seen.length = 0;
     const settled = await consolidate();
     const atlasAfter = await proposalRow(atlas!.id);
     const settledNote = passSettledNote("judged again after a text moved — unrelated", KEY);
-    assert(settled.code === 0 && seen.some((p) => /monthly/.test(p.a) && /deploy calendar/.test(p.b)) && /stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\)/.test(settled.out),
+    assert(settled.code === 0 && /pool: 1 thought\(s\) added\s*$/m.test(settled.out) && seen.some((p) => /monthly/.test(p.a) && /deploy calendar/.test(p.b)) && /stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\)/.test(settled.out),
            `the pass judges the stale pair again and reports settling it (exit ${settled.code}: ${staleLine(settled.out)})`);
     assert(atlasAfter.status === "rejected" && atlasAfter.reviewed_at !== null && atlasAfter.review_note === settledNote,
            `…the row is rejected with the pass's marker note and reviewed_at set (${JSON.stringify(atlasAfter)})`);
@@ -4209,10 +4219,17 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     await rebuild(beaconNew);
     await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${beaconNew}::uuid`;
     const waited = await consolidate();
-    assert(waited.code === 0 && /stale proposals: 1 wait on a vector the reembed pool writes \(re-pooled by the next run\)/.test(waited.out) && (await proposalRow(beacon.id)).status === "stale",
+    assert(waited.code === 0 && /stale proposals: 1 wait on a vector the reembed pool writes \(re-pooled by the run after it lands\)/.test(waited.out) && (await proposalRow(beacon.id)).status === "stale",
            `a stale row whose newer thought has no vector is left stale and reported waiting (exit ${waited.code}: ${staleLine(waited.out)})`);
     const waitStatus = await consolidate("--status");
-    assert(/1 stale \(a text moved under the verdict: 1 waiting for the next run; the pass replaces/.test(waitStatus.out), `--status places it as waiting for the next run — its claim finished (${waitStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
+    assert(/1 stale \(a text moved under the verdict: 1 waiting for a vector the reembed pool writes; the pass replaces/.test(waitStatus.out) && /\(stale — waiting for a vector the reembed pool writes\)/.test((await consolidate("--list", "stale")).out),
+           `--status and --list stale place it as waiting for a vector (${waitStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
+    // …and a run meanwhile does not re-pool it (the mutant dropping the
+    // vector condition from the re-pool churned a claim every run — first
+    // review pass, mutant).
+    seen.length = 0;
+    const idle = await consolidate();
+    assert(idle.code === 0 && !/re-pooled/.test(idle.out) && !/stale proposals:/.test(idle.out) && seen.length === 0 && (await proposalRow(beacon.id)).status === "stale", `a run while the vector is missing re-pools nothing and calls no judge (${idle.out.split("\n").find((l) => /pool:/.test(l))?.trim()})`);
     await sql`UPDATE thoughts SET embedding = ${unit(10)}::vector WHERE id = ${beaconNew}::uuid`;
     const dryRepool = await consolidate("--dry-run");
     assert(dryRepool.code === 0 && /add 0 thoughts to the pool and re-pool 1 for stale proposals/.test(dryRepool.out) && (await proposalRow(beacon.id)).status === "stale", `--dry-run counts the thought the next run re-pools for its stale row and writes nothing (${dryRepool.out.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 200)})`);
@@ -4228,6 +4245,54 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(fellOut.code === 0 && /stale proposals: 1 settled by the pass \(1 no longer a candidate pair\)/.test(fellOut.out) && beaconOut.status === "rejected" && beaconOut.review_note === passSettledNote(`no longer a candidate pair (no shared entity, under the similarity floor 0.6, or a side superseded)`, KEY) && (await lineageOf(beacon.id))[0].recipe.settled === "not-a-candidate",
            `a stale pair with no shared entity left is settled as no longer a candidate, at the current texts (exit ${fellOut.code}: ${staleLine(fellOut.out)}; ${JSON.stringify(beaconOut)})`);
     assert(beaconOut.review_note!.startsWith(PASS_SETTLED_PREFIX) && (await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "every settle carries the marker, and none appended an audit row: the pass never wrote thoughts");
+    // A stale pair whose judge call TIMES OUT was reached, not left out: the
+    // row stays stale, the thought is recorded failed, --retry-failed
+    // revisits it — and a run meanwhile does not re-pool a failed thought
+    // (first review pass, run-it: the timed-out pair fell to the leftover
+    // rule and was settled as "no longer a candidate"; mutant: a re-pool that
+    // took failed claims judged it every run).
+    const cedarOld = await seed("Backups run monthly for the cedar vault.", 11, 12, ["cedar"]);
+    const cedarNew = await seed("Backups run annually for the cedar vault.", 11, 0, ["cedar"]);
+    await consolidate();
+    const cedar = (await proposals()).find((p) => p.older_id === cedarOld && p.newer_id === cedarNew)!;
+    assert(cedar?.status === "pending", "the cedar pair is proposed pending");
+    await moveRaw(cedarNew, "Backups for the cedar vault follow the deploy calendar.");
+    await rebuild(cedarNew);
+    slowMs = 2500;
+    seen.length = 0;
+    const timedOut = await consolidate("--timeout", "1");
+    slowMs = 0;
+    assert(timedOut.code === 1 && /timed out after 1 s/.test(timedOut.out) && !/stale proposals:/.test(timedOut.out) && (await proposalRow(cedar.id)).status === "stale",
+           `a stale pair whose call timed out is left stale with the thought failed, not settled (exit ${timedOut.code}: ${timedOut.out.split("\n").find((l) => /timed out/.test(l))?.trim().slice(0, 160)})`);
+    assert(/1 stale \(a text moved under the verdict: 1 failed in a pass — --retry-failed under its key;/.test((await consolidate("--status")).out) && /\(stale — failed in a pass — --retry-failed under its key\)/.test((await consolidate("--list", "stale")).out),
+           "--status and --list stale place it as failed in a pass, with the remedy");
+    seen.length = 0;
+    const notRepooled = await consolidate();
+    assert(notRepooled.code === 1 && !/re-pooled/.test(notRepooled.out) && !seen.some((p) => /cedar/.test(p.a + p.b)) && (await proposalRow(cedar.id)).status === "stale", "a run meanwhile leaves the failed thought to --retry-failed: no re-pool, no judge call on the pair");
+    const retried = await consolidate("--retry-failed");
+    assert(retried.code === 0 && /stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\)/.test(retried.out) && (await proposalRow(cedar.id)).status === "rejected", `--retry-failed judges the pair again and the pass settles it (${staleLine(retried.out)})`);
+    // The OLDER side without a vector waits too, and is not re-pooled every
+    // run (first review pass, run-it: it was, with a judge call on the
+    // thought's other pairs each time).
+    await moveRaw(cedarNew, "Backups for the cedar vault: see the deploy calendar, second edit.");
+    const rbCedar = await rebuild(cedarNew);
+    assert(rbCedar.stale_proposals === 1 && (await proposalRow(cedar.id)).status === "stale", "a move under the pass-settled cedar row reopens it");
+    await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${cedarOld}::uuid`;
+    const olderWait = await consolidate();
+    assert(olderWait.code === 0 && /stale proposals: 1 wait on a vector/.test(olderWait.out) && (await proposalRow(cedar.id)).status === "stale" && /1 waiting for a vector the reembed pool writes;/.test((await consolidate("--status")).out),
+           `a stale row whose OLDER thought has no vector waits, and --status says for what (${staleLine(olderWait.out)})`);
+    seen.length = 0;
+    const olderIdle = await consolidate();
+    assert(olderIdle.code === 0 && !/re-pooled/.test(olderIdle.out) && !/stale proposals:/.test(olderIdle.out) && seen.length === 0, `…and a run meanwhile re-pools nothing and calls no judge (${olderIdle.out.split("\n").find((l) => /pool:/.test(l))?.trim()})`);
+    await sql`UPDATE thoughts SET embedding = ${unit(11)}::vector WHERE id = ${cedarOld}::uuid`;
+    const olderBack = await consolidate();
+    assert(olderBack.code === 0 && /\(1 more re-pooled for stale proposals\)/.test(olderBack.out) && /stale proposals: 1 settled by the pass/.test(olderBack.out) && (await proposalRow(cedar.id)).status === "rejected", `the run after the vector lands re-pools the thought and settles the row (${staleLine(olderBack.out)})`);
+    assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "…still without an audit row");
+    // A person may not borrow the marker: rebuild_derived would read the
+    // rejection as the pass's and reopen it on a move.
+    const borrowed = await consolidate("--reject", cedar.id, "--note", `${PASS_SETTLED_PREFIX} by hand`);
+    assert(borrowed.code === 2 && /that marker is the pass's own/.test(borrowed.out) && (await proposalRow(cedar.id)).review_note?.startsWith(PASS_SETTLED_PREFIX) === true && /judged again/.test((await proposalRow(cedar.id)).review_note ?? ""),
+           `--note beginning with the marker is refused as usage, the row untouched (exit ${borrowed.code})`);
   }
 
   // SMD-1803: the CLI's day() over a proposal thought with no ISO-form date.
