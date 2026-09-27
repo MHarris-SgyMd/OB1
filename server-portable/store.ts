@@ -428,6 +428,35 @@ export type LoggedSearchRow = {
  */
 export type LoggedSearchPage = { searches: LoggedSearchRow[]; truncated: boolean };
 
+/**
+ * One background-work pool's state (SMD-2131) — the counts the workers compute over
+ * `thought_work_claims` (migration 015), per `work_type`, so an operator or agent can
+ * ask a running brain "what is queued / in flight / failed / stalled" without SQL.
+ * The four status counts and `thoughts`/`unpooled` match `db/extract-entities.ts`'s
+ * `counts()`; `stale` and `active` are added on top.
+ */
+export type WorkerStatusRow = {
+  /** The pass and its target, e.g. "extract:qwen2.5:7b@p2". */
+  workType: string;
+  pending: number;
+  /** status='claimed' — in flight, INCLUDING stale leases, as the workers count it (the reaper is lazy). */
+  claimed: number;
+  succeeded: number;
+  failed: number;
+  /** Thoughts with no claim row for this work_type — what a run would enqueue. The generic definition (exact for extraction; reembed/consolidate have model-aware pool rules). */
+  unpooled: number;
+  /** The whole corpus's thought count — the same for every row. */
+  thoughts: number;
+  /** Of `claimed`, how many are past `ttl_expires_at` — a dead worker's lease the reaper has not yet reclaimed. */
+  stale: number;
+  /** The oldest stale lease's `claimed_at`, or null when none is stale. */
+  oldestStaleClaimedAt: string | null;
+  /** The `worker_id` holding that oldest stale lease, or null. */
+  staleWorkerId: string | null;
+  /** Whether this work_type is the brain's active pool (`ob1_config.entity_extraction_key`, or `reembed:<model>@<dim>`); null when the kind records no active key (consolidate). */
+  active: boolean | null;
+};
+
 export type ListFilters = {
   limit: number;
   type?: string;
@@ -1007,6 +1036,14 @@ export interface ThoughtStore {
    * or the window holds none. Telemetry only — no thought content, no keys.
    */
   listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage>;
+
+  /**
+   * The background-work pools' state (SMD-2131), one row per `work_type` over
+   * `thought_work_claims`, for a read-only queue view over MCP/REST. SQL-backend
+   * only — the table is not published to PostgREST (migration 015), so the shim
+   * throws. Read-only: no lock, no reaper, no write.
+   */
+  workerStatus(): Promise<WorkerStatusRow[]>;
 
   /**
    * Everything thought_stats needs, aggregated by the store. The two backends
