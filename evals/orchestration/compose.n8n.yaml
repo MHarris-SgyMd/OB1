@@ -33,6 +33,7 @@ services:
   #   to read and leave nothing running.
   orchestration-runner:
     volumes:
-      - ../evals/orchestration/runner/pipelines.json:/app/deploy/orchestration/pipelines.json:ro
+      # With the shipped mounts' options, so the kit runs them too (review pass 5).
+      - ../evals/orchestration/runner/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z
       - ../evals/orchestration/runner/emit-fixture.py:/app/evals/orchestration/runner/emit-fixture.py:ro
-      - ../evals/orchestration/runner/imports:/imports:ro
+      - ../evals/orchestration/runner/imports:/imports:ro,z

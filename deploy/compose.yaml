@@ -639,9 +639,10 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    # As n8n's: a missing key exits 2 and `ps` shows the service restarting,
-    # with the reason in its log. The runner waits 30 s before that exit, so
-    # the restarts are not a hot loop. A server should come back after a reboot.
+    # As n8n's: a configuration refusal (a missing key) exits 2 and the policy
+    # restarts it. The runner waits 30 s before that exit, so `ps` shows it up
+    # for under 30 s at a time rather than a hot loop, and its log says why
+    # each time. A server should come back after a reboot.
     restart: unless-stopped
     # A stop waits for a running step to hand back what it holds: the runner
     # gives it two SIGTERMs and up to 5 s (review pass 4).

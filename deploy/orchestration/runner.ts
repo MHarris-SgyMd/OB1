@@ -45,7 +45,8 @@
  */
 import { SQL } from "bun";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SYSTEM_RE } from "../../db/ingest-contract.ts";
@@ -355,8 +356,12 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
   // An export the emitter's uid cannot read looked like no export at all: a
   // green run with nothing emitted (review pass 4: Python's glob answers an
   // unreadable directory with nothing). Asked as that uid, before it runs. A
-  // pipeline with no directory (a live-API emitter) is not asked.
-  if (existsSync(input)) {
+  // pipeline with no directory (a live-API emitter) is not asked; one behind
+  // an imports root the runner cannot search is refused, naming the root
+  // (review pass 5: it read as absent and skipped the probe).
+  const where = inputState(input);
+  if (where === "blocked") return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `the runner cannot search ${c.importsDir} to reach ${input}: the imports directory must be searchable (mode o+x) — deploy/imports/README.md`, emitted: 0 };
+  if (where === "present") {
     const probe = c.probe(p, input);
     const readable = probe ? (await step(probe, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000 })).code === 0 : canRead(input);
     if (!readable) return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `${p.name}'s emitter${probe ? ` runs as uid ${emitterUid(p.name)}, which` : ""} cannot read ${input}: make the export readable to it (deploy/imports/README.md)`, emitted: 0 };
@@ -401,13 +406,20 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
     before.then(() => release());
   }
   const reembed = { exit: re.code, tail: shownTail(`${re.out}\n${re.err}`, 1500), unembedded };
-  // reembed exits 2 when it refuses to start: a model switch it was not told
-  // of, a width mismatch, an egress gate refusing everything. No next run
-  // embeds anything then, so the report says so and why (review pass 4).
+  // reembed exits 2 before embedding anything, for two kinds of reason
+  // (review pass 5: pass 4 took every exit 2 for the first, and quoted
+  // reembed's last line, which is advice, not the reason):
+  // - a refusal no rerun fixes: a model switch it was not told of, a width
+  //   mismatch, an egress policy refusing everything;
+  // - a provider that did not answer, or a start that met another claimer:
+  //   the next run tries again.
   if (unembedded > 0 && re.code === 2) {
+    const { reason, configuration } = reembedRefusal(re.err);
     return {
       ...base, ok: false, stage: "reembed", exit: 2, reembed,
-      why: `the rows are written, and reembed refused to run (${reembed.tail.at(-1) ?? "no reason printed"}), so ${unembedded} of ${p.system}'s rows have no vector and no run will embed them until that is fixed. The runner takes the server's model settings when it is created: after changing them, recreate it (compose --profile orchestration up -d --force-recreate orchestration-runner)`,
+      why: configuration
+        ? `the rows are written, and reembed refused to run: ${reason} So ${unembedded} of ${p.system}'s rows have no vector, and no run embeds them until that is fixed. The runner takes the server's model and egress settings when it is created: after changing them, recreate both (compose --profile orchestration up -d --force-recreate server orchestration-runner)`
+        : `the rows are written, and reembed could not run this time: ${reason} ${unembedded} of ${p.system}'s rows have no vector yet; the next run tries again`,
     };
   }
   if (unembedded > 0) {
@@ -473,6 +485,23 @@ export function serve(c: Config, port = DEFAULT_PORT) {
 const SU_EXEC = ["/sbin/su-exec", "/usr/bin/su-exec"].find((f) => existsSync(f));
 
 /** The service's configuration from its environment; throws with the reason. */
+/**
+ * reembed's reason for an exit 2: the first line of the last paragraph it
+ * printed to stderr (its refusals are a paragraph, the reason first and advice
+ * after), masked. And whether it is a refusal of the configuration, which no
+ * rerun fixes, or something the next run may not meet.
+ */
+export function reembedRefusal(stderr: string): { reason: string; configuration: boolean } {
+  const paragraphs = redact(stderr).split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+  const reason = (paragraphs.at(-1)?.split("\n")[0].trim() ?? "") || "no reason printed";
+  return { reason, configuration: /^(Refusing to re-embed|thoughts\.embedding is vector|Nothing would be re-embedded)/.test(reason) };
+}
+
+/** Where a pipeline's imports directory stands, as the runner sees it: there, not there, or behind a directory the runner cannot search. */
+export function inputState(dir: string): "present" | "absent" | "blocked" {
+  try { statSync(dir); return "present"; } catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "blocked"; }
+}
+
 /** Whether this process can list a directory: the runner's own access, where emitters share its uid. */
 function canRead(dir: string): boolean {
   try { accessSync(dir, constants.R_OK | constants.X_OK); return true; } catch { return false; }
@@ -511,7 +540,8 @@ export function configFrom(env: Record<string, string | undefined>, uid = proces
     asEmitter: (p) => (uid === 0 ? [SU_EXEC!, `${emitterUid(p.name)}:${emitterUid(p.name)}`] : []),
     asPipeline: uid === 0 ? [SU_EXEC!, PIPELINE_USER] : [],
     sweep: (p) => (uid === 0 ? [SU_EXEC!, `${emitterUid(p.name)}:${emitterUid(p.name)}`, "kill", "-9", "-1"] : null),
-    probe: (p, dir) => (uid === 0 ? [SU_EXEC!, `${emitterUid(p.name)}:${emitterUid(p.name)}`, "test", "-r", dir, "-a", "-x", dir] : null),
+    // The kernel's own answer, as that uid: busybox's `test -r` reads the mode bits and ignores ACLs, so it refused an export the documented setfacl made readable (review pass 5).
+    probe: (p, dir) => (uid === 0 ? [SU_EXEC!, `${emitterUid(p.name)}:${emitterUid(p.name)}`, "python3", "-c", "import os, sys; sys.exit(0 if os.access(sys.argv[1], os.R_OK | os.X_OK) else 1)", dir] : null),
   };
 }
 
@@ -538,7 +568,8 @@ async function selfCheck(): Promise<number> {
   const good = { name: "fixture", system: "fixture", scope: "fixture:export", emitter: ["bun", "x.ts", "{input}"], everyHours: 24 };
   const one = (p: object) => JSON.stringify([{ ...good, ...p }]);
   expect("a good pipeline parses", parsePipelines(one({}))[0].name === "fixture");
-  expect("the shipped allowlist parses", Array.isArray(loadPipelines()));
+  // In the image this runs before pipelines.json is copied (its own layer, then --check-emitters); from a checkout it is there.
+  expect("the shipped allowlist parses", !existsSync(PIPELINES_FILE) || Array.isArray(loadPipelines()));
   expect("a name that is not a label is refused", throws(() => parsePipelines(one({ name: "../x" })), /name must match/));
   expect("a name listed twice is refused", throws(() => parsePipelines(JSON.stringify([good, good])), /listed twice/));
   // Stand-in pipelines below share the stand-in system; each is parsed on its own.
@@ -556,10 +587,23 @@ async function selfCheck(): Promise<number> {
   expect("a URL's userinfo is masked in anything a step printed", redact("via https://u:SECRET@host/v1, postgres://p:q@db/x, https://plain/") === "via https://***@host/v1, postgres://***@db/x, https://plain/");
   expect("a raw @ inside a password is masked with the rest", redact("https://u:p@ss@host/v1") === "https://***@host/v1");
   // The shipped file is not read here: at build time it may name an emitter the image does not hold yet, which the build's own --check-emitters step reports (review pass 4).
-  const emptyFile = `${HERE}/.self-check.${process.pid}.pipelines.json`;
+  const emptyFile = join(tmpdir(), `ob1-runner-self-check.${process.pid}.pipelines.json`);
   writeFileSync(emptyFile, "[]");
   let shipped: Config;
   try { shipped = configFrom({ OB1_RUNNER_KEY: "k".repeat(40), DATABASE_URL: "postgres://x" }, 1000, emptyFile); } finally { rmSync(emptyFile, { force: true }); }
+  const transient = reembedRefusal("\n  job: x\n\n  The embedding provider is not usable: fetch failed http://u:SECRET@host/v1\n");
+  const width = reembedRefusal("\n  thoughts.embedding is vector(1024) but OB1_EMBEDDING_DIM=768.\n  This tool re-embeds at the column's width.\n  (with OB1_EMBEDDING_DIMENSIONS=on …) or stop here.");
+  expect("a provider that did not answer is not a configuration refusal, and its reason is masked", !transient.configuration && /^The embedding provider is not usable: fetch failed http:\/\/\*\*\*@host/.test(transient.reason));
+  expect("a width mismatch is a configuration refusal, named by its first line", width.configuration && width.reason.startsWith("thoughts.embedding is vector(1024)"));
+  const blockedRoot = join(tmpdir(), `ob1-runner-blocked.${process.pid}`);
+  mkdirSync(join(blockedRoot, "p"), { recursive: true });
+  chmodSync(blockedRoot, 0o000);
+  try {
+    expect("an imports root the runner cannot search is 'blocked', not 'absent'", process.getuid?.() === 0 || (inputState(join(blockedRoot, "p")) === "blocked" && inputState(join(tmpdir(), "ob1-nowhere-" + process.pid)) === "absent"));
+  } finally {
+    chmodSync(blockedRoot, 0o700);
+    rmSync(blockedRoot, { recursive: true, force: true });
+  }
   expect("a missing emitter is told to go into the image by runner.Dockerfile and .dockerignore, not only to rebuild", /runner\.Dockerfile/.test(missingEmitterHelp(["x: y.py"])) && /\.dockerignore/.test(missingEmitterHelp(["x: y.py"])));
   expect("the ingester and reembed get the database, not the runner's own key", shipped.env.OB1_RUNNER_KEY === undefined && shipped.env.DATABASE_URL === "postgres://x" && shipped.asEmitter(parsePipelines(one({}))[0]).length === 0 && shipped.sweep(parsePipelines(one({}))[0]) === null);
   expect("an emitter script the image lacks is named, after a flag, after `bun run`, or bare; an inline one, a module and a present one are not", JSON.stringify(missingEmitters(each([
@@ -706,7 +750,7 @@ async function selfCheck(): Promise<number> {
   mkdirSync(lockedDir, { recursive: true });
   const refusing = serve(config({
     pipelines: four, env: process.env,
-    commands: { ...commands, reembed: () => ["bun", "-e", `console.error("  The embedding model differs from ob1_config's: pass --switch-model"); process.exit(2)`], unembedded: async (x) => (x.name === "refused" ? 3 : 0) },
+    commands: { ...commands, reembed: () => ["bun", "-e", `console.error("\\n  Refusing to re-embed with a model other than the one ob1_config records without --switch-model.\\n  Every vector in the corpus would be replaced.\\n  If OB1_EMBEDDING_MODEL is simply set wrong in this shell, fix it instead."); process.exit(2)`], unembedded: async (x) => (x.name === "refused" ? 3 : 0) },
     probe: (x) => (x.name === "locked" ? ["bun", "-e", "process.exit(1)"] : null),
   }), 0);
   const go = (path: string) => fetch(`http://127.0.0.1:${refusing.port}${path}`, { method: "POST", headers: { "x-runner-key": key } });
@@ -716,7 +760,7 @@ async function selfCheck(): Promise<number> {
     expect(`an export its emitter's uid cannot read is 422 naming the path, not a run with nothing emitted (${lk.status} ${lkr.why})`, lk.status === 422 && /cannot read .*locked/.test(lkr.why ?? ""));
     const rf = await go("/run/refused");
     const rfr = await rf.json() as Report;
-    expect(`reembed refusing to start is said as that, with its reason, and no "next run" promise (${rfr.why?.slice(0, 90)})`, rf.status === 500 && /reembed refused to run \(.*--switch-model\)/.test(rfr.why ?? "") && !/next run/.test(rfr.why ?? ""));
+    expect(`reembed refusing to start is said as that, with its reason (the paragraph's first line, not its advice), and no "next run" promise (${rfr.why?.slice(0, 120)})`, rf.status === 500 && /reembed refused to run: Refusing to re-embed with a model other than/.test(rfr.why ?? "") && !/simply set wrong/.test(rfr.why ?? "") && !/next run/.test(rfr.why ?? ""));
     const t0 = Date.now();
     const running = go("/run/longrun");
     await Bun.sleep(500);
@@ -795,7 +839,13 @@ if (import.meta.main) {
     console.error("runner: not root, so every emitter runs as this user and can read the runner's environment — the runner's image runs it as root to separate them");
   }
   // New requests are refused at once; a step still running is stopped the way a deadline stops it, so reembed hands its leases back (review pass 4).
-  const stop = async () => { s.stop(true); await stopLive(); process.exit(0); };
+  const stop = async () => {
+    s.stop(true);
+    // Said, so a run the stop cut off leaves a trace here as well as a 502 at the door (review pass 5).
+    if (live.size) console.error(`runner: stopping; ${live.size} running step(s) stopped, and the run(s) they belong to get no report`);
+    await stopLive();
+    process.exit(0);
+  };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 }

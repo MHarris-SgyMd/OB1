@@ -23,8 +23,11 @@ setfacl -R -m u:<uid>:rX -m d:u:<uid>:rX imports/<pipeline>
 chmod -R o-rwx imports/<pipeline>
 ```
 
-Then check it from inside, as another uid, which must fail:
-`compose exec orchestration-runner su-exec 30001:30001 ls /imports/<pipeline>`.
+Then check it from inside. As the pipeline's own uid it must succeed, and as
+another uid it must fail:
+`compose exec orchestration-runner su-exec <uid>:<uid> ls /imports/<pipeline>`,
+then the same with `30001:30001`. The runner asks the kernel the same
+question as the pipeline's uid before each run, so an ACL counts.
 
 That holds where the engine enforces the host's file modes:
 - **Rootful Docker or podman on Linux:** it holds as written.
@@ -40,5 +43,9 @@ Renaming a pipeline gives it a new uid; grant the new one.
 Everything here except this file and `.gitignore` is ignored by git. It is
 also kept out of every image's build context (the root `.dockerignore`),
 since an export is private data. `IMPORTS_DIR` in `deploy/.env` points
-the runner at another directory. `deploy/README.md` ("Orchestration") has
+the runner at another directory. Give it one of its own: on an SELinux host
+compose relabels the whole directory for the container (`:z`), and on a
+filesystem without extended attributes (NFS, vfat) that relabel fails the
+start. The directory itself must be searchable by others (mode `o+x`): the
+runner refuses a run it cannot reach. `deploy/README.md` ("Orchestration") has
 the whole flow.

@@ -28,9 +28,7 @@ COPY evals/linear-corpus.ts /app/evals/
 #   .dockerignore:      !recipes/<recipe>/emit.py
 #   here:               COPY recipes/<recipe>/emit.py /app/recipes/<recipe>/
 #                       RUN pip install --no-cache-dir --break-system-packages <package>==<version>
-# pipelines.json is copied for the check below; compose mounts the checkout's
-# copy over it, the one provisioning reads.
-COPY deploy/orchestration/runner.ts deploy/orchestration/pipelines.json /app/deploy/orchestration/
+COPY deploy/orchestration/runner.ts /app/deploy/orchestration/
 # A module the graph gained and this file does not copy, or an npm package (the
 # image installs none), fails the build here, not the first run: every import
 # resolved, then the runner's own rules. The one package named external is
@@ -38,8 +36,12 @@ COPY deploy/orchestration/runner.ts deploy/orchestration/pipelines.json /app/dep
 # imported lazily, for Workers); the bundler follows it anyway.
 RUN bun build db/ingest-records.ts db/reembed.ts deploy/orchestration/runner.ts --target=bun --external @supabase/supabase-js --outdir=/tmp/resolve \
  && rm -rf /tmp/resolve \
- && bun deploy/orchestration/runner.ts --self-check \
- && bun deploy/orchestration/runner.ts --check-emitters
+ && bun deploy/orchestration/runner.ts --self-check
+# pipelines.json in a layer of its own, after the self-check, so an allowlist
+# edit rebuilds only this; compose mounts the checkout's copy over it, the one
+# provisioning reads. Every emitter it names must be in the image.
+COPY deploy/orchestration/pipelines.json /app/deploy/orchestration/
+RUN bun deploy/orchestration/runner.ts --check-emitters
 # Root, so that it can hand each step to its own user; compose drops every
 # capability but those two and the one that signals a step's process. The
 # runner refuses to start as root without su-exec.

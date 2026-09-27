@@ -842,10 +842,13 @@ lines naming the same one are refused.
     --retry-failed`.
   - A row it refuses every time is an item to fix or remove in the export,
     and then its thought to delete.
-  - When reembed refuses to run at all (a model switch it was not told of,
-    a width that does not match, an egress policy refusing everything), the
-    report says so, with reembed's reason. No run embeds anything until
-    that is fixed.
+  - When reembed refuses to run at all, the report quotes reembed's reason,
+    and says which kind of refusal it is:
+    - a model switch it was not told of, a width that does not match, or
+      an egress policy refusing everything: no run embeds anything until
+      that is fixed;
+    - a provider that did not answer, or a start that met another claimer:
+      the next run tries again.
   - The runner takes the server's model and egress settings when it is
     created. After changing them, recreate it with the server: `compose up
     -d --force-recreate server orchestration-runner`.

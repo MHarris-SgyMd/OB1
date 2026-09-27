@@ -702,6 +702,8 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
       `${key.minted ? "API key minted through the internal /rest endpoints" : "API key reused"} (expires ${expires}; ${key.revoked} earlier revoked)`,
       ...inheritedNote,
       `credentials: ${n.created} created, ${n.patched} patched${skippedCreds.size ? `, ${skippedCreds.size} optional skipped` : ""}`,
+      // Each by name, with the value it lacks (review pass 5: only counted).
+      ...[...skippedCreds.values()].map((why) => `skipped ${why}`),
       `workflows: ${n.workflowsCreated} created, ${n.workflowsReplaced} replaced, ${ordered.length} published`,
       ...[...skippedFlows].map(([stem, why]) => `skipped workflow ${stem}: it ${why}`),
       ...unpublished.map(({ name, why }) => `unpublished "${name}": ${why}`),
@@ -1059,7 +1061,7 @@ async function selfCheck(): Promise<number> {
       // Review pass 1: unsetting the key, or dropping a pipeline, left the old workflows published.
       f.s.unpublished.length = 0; f.s.deletedCreds.length = 0;
       const unset = await run(keys16);
-      expect(`unsetting the optional key again unpublishes its workflows and deletes its credential (${f.s.unpublished.join(",")}; ${f.s.deletedCreds.join(",")})`, f.s.unpublished.sort().join() === "Sub,Top" && f.s.deletedCreds.join() === "vendor" && unset.steps.some((l) => /unpublished "Top": its template was skipped this run/.test(l)) && unset.steps.some((l) => /deleted credential "vendor"/.test(l)));
+      expect(`unsetting the optional key again unpublishes its workflows and deletes its credential (${f.s.unpublished.join(",")}; ${f.s.deletedCreds.join(",")})`, f.s.unpublished.sort().join() === "Sub,Top" && f.s.deletedCreds.join() === "vendor" && unset.steps.some((l) => /unpublished "Top": its template was skipped this run/.test(l)) && unset.steps.some((l) => /deleted credential "vendor"/.test(l)) && unset.steps.some((l) => /^skipped credential "vendor" \(VENDOR_KEY is not set\)$/.test(l)));
       f.s.unpublished.length = 0;
       const dropped = await provision(opts({ ...base, ...file(), ...keys16 }, { credentials: [credFile], workflows: templatesIn(tdir), pipelines: [pipes[0]] }));
       expect(`a pipeline taken out of the allowlist has its instance unpublished, and nothing else, saying why (${f.s.unpublished.join(",")})`, f.s.unpublished.join() === "Import beta" && dropped.steps.some((l) => /unpublished "Import beta": its pipeline is not in pipelines\.json/.test(l)));
