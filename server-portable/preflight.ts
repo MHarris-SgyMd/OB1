@@ -163,6 +163,7 @@ const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
+const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
 const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
@@ -2102,11 +2103,12 @@ if (configFailed) {
                      -- 067 (SMD-2297), where its settle function stands: rebuild_derived's body reopens a pass-settled proposal
                      -- on a text move (its sentinel); 063 re-applied by hand over 067 puts the body back that keeps every rejected row.
                      to_regprocedure('public.settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS has_067,
-                     (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled
+                     (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
+                     (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
@@ -2221,6 +2223,13 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${rebuildOlder.length === 3 ? "the three bodies 063 redefines are" : `${rebuildOlder.join(" and ")} ${rebuildOlder.length === 1 ? "is" : "are"}`} from before 063 (061 or 029 re-applied by hand over it): a rebuild's mark is never cleared by the producer's next write, and a stale proposal is never replaced by the next judgement (SMD-1732). ${coverage}`,
                   ledgerRemedy("063", APPLY_063));
+            } else if (bodies.has_063 && bodies.excludes_lineage !== true) {
+              // 066 (SMD-2292): 029's or 063's candidate body over 066's — the
+              // exclusion of a thought's derived_from members gone, the pass
+              // asks the judge whether a page supersedes its own evidence.
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but consolidation_candidates is from before 066 (migration 066 not yet applied, or 063 re-applied by hand over it): the judge is asked whether a page supersedes its own evidence, and a digest its sources (SMD-2292). ${coverage}`,
+                  ledgerRemedy("066", APPLY_066));
             } else if (reopenOlder) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but rebuild_derived is from before 067 (063 re-applied by hand over it): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again (SMD-2297). ${coverage}`,
