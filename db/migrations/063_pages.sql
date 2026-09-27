@@ -454,7 +454,9 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION USING MESSAGE = format('%s: no page %s', p_what, p_page_id), ERRCODE = 'no_data_found';
   END IF;
-  PERFORM 1 FROM pages WHERE id = p_page_id FOR UPDATE;
+  -- FOR NO KEY UPDATE on both: enough to serialise the writers, and no conflict
+  -- with the KEY SHARE a section's foreign key takes on the page row.
+  PERFORM 1 FROM pages WHERE id = p_page_id FOR NO KEY UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION USING MESSAGE = format('%s: no page %s', p_what, p_page_id), ERRCODE = 'no_data_found';
   END IF;
@@ -702,10 +704,11 @@ DECLARE
   v_kind   text  := COALESCE(NULLIF(trim(COALESCE(p_page_kind, '')), ''), 'topic');
   v_meta   jsonb := COALESCE(p_metadata, '{}'::jsonb);
   v_actor  text  := ob1_page_actor(p_actor);
-  v_id     uuid;
-  v_render text;
-  v_twin   uuid;
-  v_res    jsonb;
+  v_id      uuid;
+  v_created boolean := true;
+  v_render  text;
+  v_twin    uuid;
+  v_res     jsonb;
 BEGIN
   IF v_slug IS NULL THEN
     RAISE EXCEPTION USING MESSAGE = 'upsert_page: slug is required', ERRCODE = 'invalid_parameter_value';
@@ -759,7 +762,7 @@ BEGIN
   IF v_id IS NOT NULL THEN
     PERFORM 1 FROM thoughts WHERE id = v_id FOR NO KEY UPDATE;
     IF FOUND THEN
-      PERFORM 1 FROM pages WHERE id = v_id FOR UPDATE;
+      PERFORM 1 FROM pages WHERE id = v_id FOR NO KEY UPDATE;
     END IF;
     IF NOT FOUND THEN
       v_id := NULL;
@@ -773,12 +776,8 @@ BEGIN
            updated_by = v_actor
      WHERE id = v_id;
     PERFORM ob1_render_page_thought(v_id, p_supersedes);
-    IF p_supersedes IS NOT NULL THEN
-      UPDATE pages SET status = 'archived', updated_at = now(), updated_by = v_actor WHERE id = p_supersedes AND status <> 'archived';
-    END IF;
-    RETURN jsonb_build_object('page_id', v_id, 'created', false);
-  END IF;
-
+    v_created := false;
+  ELSE
   -- A new page: its thought first. The render of a page with no sections is
   -- its title line; 003's one-text-one-row rule makes two such pages with one
   -- title collide, so the collision is refused by name here rather than
@@ -815,10 +814,12 @@ BEGIN
       MESSAGE = format('upsert_page: another writer created page %L meanwhile — retry, and the call will update it', v_slug),
       ERRCODE = 'unique_violation';
   END;
+  END IF;
+  -- Either way: the superseded page, when it is one, is archived.
   IF p_supersedes IS NOT NULL THEN
     UPDATE pages SET status = 'archived', updated_at = now(), updated_by = v_actor WHERE id = p_supersedes AND status <> 'archived';
   END IF;
-  RETURN jsonb_build_object('page_id', v_id, 'created', true);
+  RETURN jsonb_build_object('page_id', v_id, 'created', v_created);
 END;
 $$;
 
@@ -1024,6 +1025,7 @@ DECLARE
   v_row   page_sections%ROWTYPE;
   v_ids   uuid[];
   v_fps   text[];
+  v_fps_now text[];
 BEGIN
   SELECT page_id INTO v_page FROM page_sections WHERE id = p_section_id;
   IF v_page IS NULL THEN
@@ -1042,13 +1044,13 @@ BEGIN
   -- name (SMD-1729); regenerate the draft. The fingerprints recorded are the
   -- ones parked with it — the text the draft was generated from, not the text
   -- the evidence holds now (cold read, first review pass).
-  SELECT o_ids INTO v_ids FROM ob1_page_evidence(v_row.pending_evidence_thought_ids, 'accept_page_section', v_row.page_id);
+  SELECT o_ids, o_fps INTO v_ids, v_fps_now FROM ob1_page_evidence(v_row.pending_evidence_thought_ids, 'accept_page_section', v_row.page_id);
   IF cardinality(v_ids) = 0 THEN
     RAISE EXCEPTION USING
       MESSAGE = format('accept_page_section: the parked draft on section %s names no evidence — a generated body without lineage is refused (SMD-1729); regenerate it', p_section_id),
       ERRCODE = 'invalid_parameter_value';
   END IF;
-  v_fps := COALESCE(v_row.pending_evidence_fingerprints, (SELECT o_fps FROM ob1_page_evidence(v_ids, 'accept_page_section', v_row.page_id)));
+  v_fps := COALESCE(v_row.pending_evidence_fingerprints, v_fps_now);
   -- Accepting keeps the section human-owned: the machine proposes next time
   -- too (its writes keep parking). release_page_section is the other choice.
   UPDATE page_sections
