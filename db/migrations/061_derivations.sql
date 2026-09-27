@@ -154,10 +154,13 @@
 --   tables, not functions (db/README.md, "Grants for a capturing role"), so a
 --   brain that revoked EXECUTE on either by hand re-grants it by hand. Every
 --   positional caller in the tree sends the old arity or fewer and resolves
---   through the defaults; the named-argument calls — 032's and 036's
---   update_thought(…, p_actor => …, p_provenance => …) in the delete path,
---   the PostgREST store's rpc — name arguments every form keeps, and the new
---   one defaults (cold read, third review pass). No return shape
+--   through the defaults. Two callers name their arguments: the PostgREST
+--   store's rpc names p_lineage on every edit, so it needs THIS form (as the
+--   SQL store's eleven positional arguments do — preflight's edit-signature
+--   check refuses an older form alone); 032's and 036's delete bodies name
+--   p_actor and p_provenance, which every form keeps, and 042 and 060
+--   replaced those bodies — a test re-creates them, nothing live calls them
+--   (cold read, third and fourth review passes). No return shape
 --   changes. The backfill is four reads of the artifact tables (ACCESS SHARE)
 --   into one table, the length of a read of them; measured on a copy of the
 --   dogfood brain in the record (changes/smd-1731.md). A brain that reverts

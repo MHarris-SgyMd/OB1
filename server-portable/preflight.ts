@@ -2000,8 +2000,7 @@ if (configFailed) {
             // any artifact table, and its verdict is exact (cold read, third
             // review pass: one flag said "the rest not read" of tables read
             // whole; run-it: the capped line said the disclosure twice).
-            const cappedSources = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read].some((r) => Number(r) >= BOUND);
-            const capped = cappedSources;
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read].some((r) => Number(r) >= BOUND);
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
@@ -2422,10 +2421,8 @@ if (configFailed) {
             ORDER BY (p.pronargs = ${ARITY}) DESC, p.oid`) as { nargs: number; sig: string; src: string }[];
           // 046 (SMD-1730) gave update_thought a tenth argument, the write
           // event, by dropping the 9-argument form — 032's mechanism, one form
-          // later. A 9-argument form ALONE is a brain that predates 046: every
-          // edit still resolves (the servers send nine by name; a defaulted
-          // tenth is the same call), so it is a WARN naming what is lost — the
-          // event — where a 7- or 8-argument form alone is the FAIL it was.
+          // later; what a 9-argument form alone means under THIS server is
+          // said with the 10-argument case below.
           const current = ut.filter((r) => Number(r.nargs) === ARITY);
           const extra = ut.filter((r) => Number(r.nargs) !== ARITY).map((r) => r.sig);
           // 061 (SMD-1731) gave update_thought an eleventh argument, the

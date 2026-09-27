@@ -1705,9 +1705,11 @@ export const ROLE_GRANTS = Object.freeze({
     // the vector trigger upserts (and, a vector cleared, deletes) the vector's
     // row; the write functions upsert the windows' and the tags' rows and
     // delete a replaced set's. A role without these fails EVERY capture and
-    // edit inside the trigger — a vectorless one too, since the trigger
-    // drops the vector's row when none is carried (run-it, third review
-    // pass) — so all four are hard here (SMD-1731). The workers' passes write through the same table, and
+    // every content edit inside the trigger — a vectorless capture too, since
+    // the trigger drops the vector's row when none is carried; a tags-only
+    // edit that moves no vector touches the table only under the extractor's
+    // recipe (run-it, third review pass; fourth) — so all four are hard here
+    // (SMD-1731). The workers' passes write through the same table, and
     // --grant issues every group.
     Object.freeze({ table: "derivations",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "061" }),
   ]),

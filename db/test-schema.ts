@@ -9242,14 +9242,19 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   // The rows align to what STANDS, not to the pass's key (cold read, third
   // review pass: two extractions racing under different keys leave the
   // first's mentions standing — 016's race — and a delete by key took their
-  // lineage row, a start refused). A lineage row under a key with nothing
-  // standing goes on the next pass, whatever its key; one whose rows stand
-  // survives a pass under another class.
+  // lineage row, a start refused; test-live [30] runs the race). A lineage
+  // row under a key with nothing standing goes on the next pass, whatever
+  // its key: an extracted-class ghost swept by a STRUCTURED pass alone,
+  // which the delete by key never reached (fourth review pass: the tooth
+  // that ran an extraction first passed on the old body too); one whose
+  // rows stand survives a pass under another class.
   await one(`SELECT ob1_record_derivation('entities', $1::uuid, ARRAY[$1::uuid], ARRAY['stale-fp'], 'extract:ghost@p1', '{"deterministic": false}'::jsonb) AS r`, [t.id]);
-  er = await rte(t.id, "extract:standing@p1", [{ name: "Alice", type: "person", confidence: 0.9 }], t.fingerprint, null);
   er = await rte(t.id, "source:test", [{ name: "Open Brain", type: "project", confidence: 1 }], null, null);
   ens = (await rowsOf(t.id)).filter((r) => r.kind === "entities");
-  assert(er.ok === true && ens.map((r) => r.by).sort().join() === "extract:standing@p1,source:test", `a lineage row with nothing standing under its key is swept by the next pass, and a row whose mentions stand survives a pass of the other class (${ens.map((r) => r.by).join()})`);
+  assert(er.ok === true && ens.map((r) => r.by).join() === "source:test", `a lineage row with nothing standing under its key is swept by the next pass of EITHER class (${ens.map((r) => r.by).join()})`);
+  er = await rte(t.id, "extract:standing@p1", [{ name: "Alice", type: "person", confidence: 0.9 }], t.fingerprint, null);
+  ens = (await rowsOf(t.id)).filter((r) => r.kind === "entities");
+  assert(er.ok === true && ens.map((r) => r.by).sort().join() === "extract:standing@p1,source:test", `…and a row whose mentions stand survives a pass of the other class (${ens.map((r) => r.by).join()})`);
   await one(`SELECT record_thought_entities($1::uuid, 'source:test', '[]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`, [t.id]);
   await one(`SELECT record_thought_entities($1::uuid, 'extract:standing@p1', '[]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`, [t.id]);
   assert(!(await rowsOf(t.id)).some((r) => r.kind === "entities"), "…and each class emptied leaves no row");

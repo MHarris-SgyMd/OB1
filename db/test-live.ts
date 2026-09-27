@@ -6390,6 +6390,40 @@ console.log("\n[30] Migration 061 on a real server: the windowed capture's linea
   assert((await chunkRow(w2.id)) !== undefined && (await windowsOf(w2.id)) === 2, "a 4-argument re-capture with windows records the set again");
   await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector, '[]'::jsonb)`;
   assert((await chunkRow(w2.id)) === undefined && (await windowsOf(w2.id)) === 0 && (await rowsOf(w2.id)).map((r) => r.kind).join() === "vector", "…and the same text with an empty set drops the windows and their row, leaving the vector's");
+  // Two extractions racing under different keys (016's race; the reason the
+  // lineage rows align to what stands — cold read, third review pass; the
+  // run, fourth): a pass under A committed; A re-extracts in an open
+  // transaction; B's extracted-class DELETE finds the row A deleted and waits
+  // on A; A commits; B's DELETE does not see the rows A inserted after its
+  // snapshot, so A's mention stands beside B's. Every standing (thought, key)
+  // pair has its lineage row — under the delete BY KEY, B took A's with it.
+  // Bun's SQL is lazy: B's call is dispatched with execute() and awaited
+  // after A commits, or the two run serially and prove nothing.
+  const cA = new SQL({ url: URL_, max: 1 }), cB = new SQL({ url: URL_, max: 1 });
+  try {
+    const race = (await cA`SELECT upsert_thought('061 live: two extractions racing', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb, ${unit(9)}::vector) AS r`)[0].r as { id: string };
+    const rte = (c: SQL, key: string, name: string) => c`SELECT record_thought_entities(${race.id}::uuid, ${key}, ${[{ name, type: "person", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL) AS r`;
+    await rte(cA, "extract:a@p1", "Alice");
+    await cA`BEGIN`;
+    await rte(cA, "extract:a@p1", "Alice");
+    await cB`BEGIN`;
+    const pB = rte(cB, "extract:b@p1", "Bob").execute();
+    let waited = 0;
+    for (let i = 0; i < 40 && !waited; i++) {
+      await Bun.sleep(50);
+      waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+    }
+    await cA`COMMIT`;
+    await pB;
+    await cB`COMMIT`;
+    const standing = ((await sql`SELECT extraction_key AS key FROM thought_entities WHERE thought_id = ${race.id}::uuid ORDER BY 1`) as { key: string }[]).map((r) => r.key);
+    const lineage = ((await sql`SELECT produced_by AS by FROM derivations WHERE artifact_kind = 'entities' AND artifact_id = ${race.id}::uuid ORDER BY 1`) as { by: string }[]).map((r) => r.by);
+    assert(waited === 1 && standing.join() === "extract:a@p1,extract:b@p1" && lineage.join() === standing.join(),
+      `two extractions racing under different keys: B waited on A's open transaction, both mentions stand (016's race), and each standing key has its lineage row (waited ${waited}; standing ${standing.join()}; lineage ${lineage.join()})`);
+  } finally {
+    await cA.close();
+    await cB.close();
+  }
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM derivations`;
   await sql.close();
