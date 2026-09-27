@@ -188,7 +188,9 @@ async function main() {
     afterId = rows[rows.length - 1].id;
 
     const pct = total ? ((processedRows / total) * 100).toFixed(1) : "?";
-    process.stdout.write(`\rProgress: ${processedRows}/${total ?? "?"} (${pct}%) — updated so far: ${totalUpdated}`);
+    // One line rewritten in place on a terminal; one line per page in a log,
+    // where a carriage return would concatenate them.
+    process.stdout.write(`${process.stdout.isTTY ? "\r" : "\n"}Progress: ${processedRows}/${total ?? "?"} (${pct}%) — updated so far: ${totalUpdated}`);
 
     if (limitReached || rows.length < BATCH_SIZE) break;
   }
