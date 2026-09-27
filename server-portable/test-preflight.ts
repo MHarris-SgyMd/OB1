@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
-import { searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
+import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -322,8 +322,24 @@ console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242
     const got = searchPathSchemas(setting, version);
     assert(JSON.stringify(got) === JSON.stringify(want), `search_path ${shown(setting)} on ${version / 10000} reads as ${shown(want)} (got ${shown(got)})`);
   }
-  assert(withPublic([]) === "public" && withPublic(["$user", "public"]) === '"$user", public' && withPublic(['a"b', "x;y"]) === '"a""b", "x;y", public',
-         "…and the path with public put on it keeps the rest in order, each quoted, public once and last");
+  assert(withPublic([]) === "public" && withPublic(["$user", "public"]) === '"$user", public' && withPublic(['a"b', "x;y"]) === '"a""b", "x;y", public'
+           && withPublic(["public", "a"]) === 'public, "a"',
+         "…and the path with public put on it keeps the rest in order, each quoted, public once — where it stands, or last");
+  // pgvector's schema after them (SMD-2238): once, never public twice, and not
+  // at all when the path has it — the two rows' one statement.
+  assert(withPublic(["$user", "public"], "ext") === '"$user", public, "ext"' && withPublic(["nowhere"], "public") === '"nowhere", public'
+           && withPublic(["ext", "x"], "ext") === '"ext", "x", public' && withPublic(["nowhere"], "Ext x") === '"nowhere", public, "Ext x"'
+           && withPublicInOptions(["$user", "public"], "extensions") === "-csearch_path%3D%22%24user%22%2Cpublic%2C%22extensions%22",
+         "…and with pgvector's schema, it follows public, once, and not when the path has it");
+  {
+    const base = { schemas: ["$user", "public"], extension: "ext", login: "r", role: "r", db: '"d"' };
+    assert(pathFix({ ...base, source: "database" }) === 'ALTER ROLE r IN DATABASE "d" SET search_path = "$user", public, "ext";'
+             && pathFix({ ...base, role: "t", source: "user" }) === 'SET ROLE NONE; ALTER ROLE r IN DATABASE "d" SET search_path = "$user", public, "ext";  (as r, or a superuser)'
+             && pathFix({ ...base, source: null }).endsWith("(unless the connection string sets search_path, which outranks it)")
+             && pathFix({ ...base, source: "session" }).includes("this session's path was SET after login")
+             && pathFix({ ...base, source: "client" }).endsWith("(separated by %20): -csearch_path%3D%22%24user%22%2Cpublic%2C%22ext%22"),
+           "…and the fix is the login role's setting IN DATABASE, SET ROLE NONE first under SET ROLE, the options= value where the connection sets the path, and a caveat where the source is a session's or unread");
+  }
   assert(withPublicInOptions(["nowhere"]) === "-csearch_path%3D%22nowhere%22%2Cpublic" && decodeURIComponent(withPublicInOptions(["a b,c", "x\\y"])) === '-csearch_path="a\\ b,c","x\\\\y",public'
            && withPublicInOptions(["it's!(x)"]) === "-csearch_path%3D%22it%27s%21%28x%29%22%2Cpublic",
          "…and as a connection string's options it has no space between names, escapes a space or backslash inside one, and is percent-encoded, a shell's characters included");
@@ -2325,6 +2341,13 @@ else {
       assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(wide.out)
                && !/Apply the migrations: cd db/.test(wide.out),
              `…and the schema row names the path, not the migrate command (${row(wide.out, "schema")})`);
+      // pgvector in public, off the path too: the vector row prints the schema
+      // row's statement, public once — before, `"$user", public, public` on the
+      // role's plain setting, which its setting in the database outranks (SMD-2238).
+      const schemaStmt = /→ (ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = [^;]*;)/.exec(fix(wide.out, "schema"))?.[1];
+      const vectorStmt = /(ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = [^;]*;)/.exec(fix(wide.out, "vector extension"))?.[1];
+      assert(!!schemaStmt && schemaStmt === vectorStmt && !/public, public/.test(wide.out),
+             `…and the vector row prints the same statement, public once (${fix(wide.out, "vector extension")})`);
 
       // The path's statement is rebuilt from the parsed setting, never
       // echoed (SMD-2242). An empty path reads back as "" — a zero-length
@@ -2440,6 +2463,10 @@ else {
         const acting = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
         const printed = /→ (SET ROLE NONE; ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;)  \(as pf_reader, or a superuser\)/.exec(acting.out)?.[1];
         assert(printed !== undefined, `a login role that SETs ROLE is the one the ALTER ROLE names, after SET ROLE NONE (${row(acting.out, "schema")})`);
+        // pgvector in public, off the path with it: the vector row names the
+        // login role the same way, not the role it SETs (SMD-2238).
+        assert(!!printed && fix(acting.out, "vector extension").includes(`${printed}  (as pf_reader, or a superuser)`),
+               `…and the vector row prints the same statement (${fix(acting.out, "vector extension")})`);
         let resolves = false;
         let refused = "";
         if (printed) {

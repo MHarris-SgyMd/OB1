@@ -266,8 +266,10 @@ provider installed pgvector into a schema off the connection's `search_path`
 (Supabase uses `extensions`), the bare `vector` type does not resolve and every
 capture and search would fail with `type "vector" does not exist` on a database
 that has pgvector. Preflight fails with the schema it found and the exact
-`ALTER ROLE … SET search_path` (or `ALTER DATABASE`) to run — see `FORK.md`
-change 43.
+statement to run: the login role's `ALTER ROLE … IN DATABASE … SET search_path`,
+its own path kept and the schema added — or, where the connection string sets
+the path, the `options=` value to put there instead — see `FORK.md` change 43
+and SMD-2238.
 
 ## Using smoke.sh against a real deployment
 
