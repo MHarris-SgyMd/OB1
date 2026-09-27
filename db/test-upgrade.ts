@@ -570,11 +570,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // kind CHECK and redefines its writer on 063's body, and adds the store's
   // functions over 025's derived_from, 032's validator, 060's write functions
   // and 061's lineage, refusing by name without 025, 032, 060, 061 or 063
-  // ([20p]) — all recorded by the baseline with their prerequisites present,
-  // so none
+  // ([20p]); 065 redefines 056's entity_type_gate on its own body (the SMD-2300
+  // good-shape allowlist) and re-runs apply_entity_type_gate over 016's tables,
+  // refusing by name without 016 or 056 ([20q]) — all recorded by the baseline
+  // with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 35, `030 is among the last thirty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 36, `030 is among the last thirty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2582,6 +2584,37 @@ console.log("\n[20p] Migration 064 onto a populated brain at the file before it 
   const [present] = await sql3`SELECT to_regclass('pages') IS NOT NULL AS t, to_regprocedure('write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)') IS NOT NULL AS w`;
   assert(present.t === true && present.w === true, "…and applied once every prerequisite is there: the table and the guard are present");
   await sql3.close();
+}
+
+console.log("\n[20q] Migration 065 on a schema without 016, and on 016's tables without 056's — refused up front, naming the missing migration and --reapply, and applied once both are there (SMD-2300)");
+{
+  // 065's guard is 056's shape ([20j]): it redefines entity_type_gate (whose SQL
+  // body reads normalize_entity_name, 016) and re-runs apply_entity_type_gate
+  // (056), so a schema stopping before 016 would fail at the CREATE with a bare
+  // "function normalize_entity_name(text) does not exist", and one with 016's
+  // tables but not 056's at the pass with a bare "apply_entity_type_gate() does
+  // not exist".
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "016" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-016 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the065 = MIGRATIONS.find((f) => f.startsWith("065_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the065}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /065_identifier_allowlist\.sql\s+FAILED: migration 065 needs 016 \(ob1_entities\) and 056 \(entity_type_gate, apply_entity_type_gate\); this schema lacks 016/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 065 naming 016 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the065}`)[0].c) === 0, "…065 records nothing");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "016" && f < "056" });
+  const half = await migrate();
+  assert(half.code === 1 && /065_identifier_allowlist\.sql\s+FAILED: migration 065 needs 056 \(entity_type_gate, apply_entity_type_gate\); this schema lacks them/.test(half.out),
+    `…and with 016's tables but not 056's it names 056 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "056" });
+  const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'entity_type_gate(text, text)'::regprocedure`;
+  assert(/SMD-2300/.test(String(body?.s ?? "")) && String(body?.s ?? "").includes("[A-Za-z]{2,}-[0-9]{3,}"), "…and applied once both are there: the live entity_type_gate carries 065's good-shape allowlist (the three-or-more-digit ticket shape)");
+  await sql.close();
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
