@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2182]
-migrations: []
----
-
-## Changelog
-
-`tier.ts --diff` no longer passes a window it replayed nothing from. Both `--diff` and `--replay` print the window and how many searches were replayed and skipped. A `--diff` that compared nothing says `nothing to compare` and exits 3, where it used to say the canary reproduces stable's rankings and exit 0. A database that does not answer is named as `--from` or `--to` with its host and port (SMD-2182).
-
-## FORK
-
-`tier.ts --diff` exits 3 on a window it replayed nothing from, and says which side failed to connect (SMD-2182)
+# 191. `tier.ts --diff` exits 3 on a window it replayed nothing from, and says which side failed to connect (SMD-2182)
 
 **What changed.**
 - `printSummary` prints, on both verbs, `replayed N of M logged searches <window> (K skipped)` and the skip reasons. The window is named with its source: `(--since)`, `(the canary's last refresh)`, or all of stable's log when the canary records no refresh. It returns a verdict:

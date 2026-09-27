@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-2168]
-migrations: []
----
-
-## Changelog
-
-The session-capture hook marks a redacted summary's thought with `metadata.redactions` — the count of secrets blanked from it — riding in `capture_thought`'s `metadata` argument; a clean summary's row is unchanged, and a server that refuses the key gets the summary posted without it (SMD-2168).
-
-## FORK
-
-The session-capture hook records how many secrets it blanked on the thought itself, in `metadata.redactions`, where before the count lived only in the log and the text's markers (SMD-2168)
+# 186. The session-capture hook records how many secrets it blanked on the thought itself, in `metadata.redactions`, where before the count lived only in the log and the text's markers (SMD-2168)
 
 **What changed.** `recipes/session-capture-hook/session-capture.mjs`:
 `postCapture` builds one `metadata` object for `capture_thought` — the

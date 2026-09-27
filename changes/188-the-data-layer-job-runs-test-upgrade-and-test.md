@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2219]
-migrations: []
----
-
-## Changelog
-
-Fork Checks' "SQL data layer against real Postgres" job runs `db/test-upgrade.ts` and `server-portable/test-preflight.ts` side by side, each against its own database on the service container, where they were its two longest steps in series. What the two share across the cluster is scoped in the suites: preflight's repeatable-read default is set on its own database, and test-upgrade counts advisory locks in its own. test-upgrade's `reembed.ts --status` assertion also passes in a shell with `FORCE_COLOR` set (SMD-2219).
-
-## FORK
-
-The data-layer job runs test-upgrade and test-preflight side by side — the job's two longest steps overlap instead of adding up (SMD-2219)
+# 188. The data-layer job runs test-upgrade and test-preflight side by side — the job's two longest steps overlap instead of adding up (SMD-2219)
 
 **What changed.** `.github/workflows/fork-checks.yml`'s job `data-layer` loses its "Incremental upgrade" and "Preflight catches bad configurations" steps for one, "Incremental upgrade and preflight, side by side", at preflight's place.
 - **The step.** It creates a second database, `ob1upgrade`, on the service container and runs `test-upgrade.ts` against it while `test-preflight.ts` runs against `ob1test`. The rest is SMD-2092's step for the schema legs: a log per run, both waited on and printed (a passing one folded, a failing one open), a 10-minute limit on each, and each suite's summary line at the end. The five steps that stood between the two now run before the pair. Each resets its own schema, and none read what test-upgrade left.

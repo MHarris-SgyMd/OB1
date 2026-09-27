@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2242]
-migrations: []
----
-
-## Changelog
-
-Preflight's `schema` row, for a role whose `public.thoughts` exists but does not resolve, now prints the exact search-path fix: the login role's own path parsed as its server's Postgres parses it, every name quoted, `public` added. Where the connection sets the path, the row says to replace that setting with the connection string's `options` value instead; with no USAGE on `public` as well it names both causes; it acts only when thoughts itself does not resolve (SMD-2242).
-
-## FORK
-
-Preflight's `schema` row prints the exact search-path statement — the login role's path parsed as its Postgres parses it, rebuilt quoted, public added (SMD-2242)
+# 207. Preflight's `schema` row prints the exact search-path statement — the login role's path parsed as its Postgres parses it, rebuilt quoted, public added (SMD-2242)
 
 **What changed.** SMD-2062 left the `schema` row a template: `ALTER ROLE r IN DATABASE d SET search_path = <the schemas it has>, public`. With no USAGE on `public`, it offered the path fix only "if public is not on the role's search_path". Now:
 

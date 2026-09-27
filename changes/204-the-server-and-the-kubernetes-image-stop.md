@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2250]
-migrations: []
----
-
-## Changelog
-
-The server stops on SIGTERM: it stops accepting, finishes the requests and tool calls in flight for up to its grace period less 2 s (8 s by default; `OB1_STOP_GRACE` sets the grace period, and compose's `stop_grace_period` reads it too), closes its pool and exits 0 (1 when it had to cut a call off), where every `docker stop` used to wait out the 10 s grace period and kill it, cutting off any call in flight. A stop during preflight ends the container at once, and the Kubernetes image stops the same way (SMD-2250).
-
-## FORK
-
-The server and the Kubernetes image stop on SIGTERM, finishing what is in flight — no more 10 s kill on every stop (SMD-2250)
+# 204. The server and the Kubernetes image stop on SIGTERM, finishing what is in flight — no more 10 s kill on every stop (SMD-2250)
 
 **What changed.**
 - **`server-portable/shutdown.ts`, new.** On SIGTERM or SIGINT it logs `SIGTERM: no longer accepting; N requests in flight`, and calls Bun's `server.stop()`. On Bun 1.4 that refuses new connections, closes idle keep-alive sockets at once, and resolves when the last response body ends, a tool call's SSE stream included (measured). It also waits for the tool calls still running (`createCallCount`, which `index.ts` wraps round every tool handler): Bun counts a request done once its client has gone, while the handler runs on to its end. Then it closes the database pool (bounded at 1 s), logs `stopped in X s; database pool closed; exit 0` (`no database pool was opened` when no request opened one, or the store is PostgREST's) and exits 0.

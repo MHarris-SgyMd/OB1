@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2074]
-migrations: [058]
----
-
-## Changelog
-
-Migration 058 adds `node_state`, one SQL read of a thought's lifecycle, blockers and supersession for every ranking surface — `node_lifecycle()`, `node_dependencies()`, `node_state(ids)` and the two status sets — and `db/graph-centrality.ts`'s `--status`, `--startable` and `--decay-blocked` read it, their reports byte for byte what they were; every mode now needs 058 (SMD-2074).
-
-## FORK
-
-node_state: a thought's lifecycle, blockers and supersession are one SQL read every ranking surface shares, and graph-centrality is its first reader (SMD-2074)
+# 196. node_state: a thought's lifecycle, blockers and supersession are one SQL read every ranking surface shares, and graph-centrality is its first reader (SMD-2074)
 
 **What changed.** `db/migrations/058_node_state.sql`, five functions, all
 `LANGUAGE sql`, SECURITY INVOKER, no SET, not STRICT (a caller's planner inlines

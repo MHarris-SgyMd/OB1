@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2251]
-migrations: []
----
-
-## Changelog
-
-Fork Checks' "Full stack, no Supabase" job builds the three dashboards in the background from its start, while the compose stack and the canary come up, where it built them in series after the stack. "The three dashboards build" now waits for that build and reports each dashboard, and runs when a stack step failed too (SMD-2251).
-
-## FORK
-
-The full-stack job builds the three dashboards in the background while the stack comes up, not in series after it (SMD-2251)
+# 213. The full-stack job builds the three dashboards in the background while the stack comes up, not in series after it (SMD-2251)
 
 **What changed.** `.github/workflows/fork-checks.yml`'s job `deploy-stack` gains a step right after `setup-bun`, "The three dashboards start building, in the background". It starts one background subshell that installs and builds the three dashboards one after another in the old step's order, with the SvelteKit one's `bun run check` now right after its build rather than after all three. The step ends at once.
 - **Each dashboard** writes its own log and a line of exit code and seconds under `$RUNNER_TEMP/dashboards`, and has a limit, 240 s (`timeout --kill-after=10s`), written there once for the wait step's labels and cap. A hang ends as 124, and the next dashboard still builds. When all three have run, the subshell writes a done mark.

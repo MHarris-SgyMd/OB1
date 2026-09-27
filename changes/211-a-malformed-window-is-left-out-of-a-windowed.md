@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2260]
-migrations: []
----
-
-## Changelog
-
-`db/extract-entities.ts` writes a windowed thought's parsed windows when the model answers others with something other than JSON of the expected shape, and records it succeeded with a `partial:` caveat naming the windows left out, where one malformed window failed the whole thought; `--status` and the run's summary count and list these rows apart from a prefix, `--retry-partial` returns both kinds and the new `--retry-left-out` these alone (SMD-2260).
-
-## FORK
-
-A malformed window is left out of a windowed thought, not the thought — the windows that parsed are written and the claim names the rest (SMD-2260)
+# 211. A malformed window is left out of a windowed thought, not the thought — the windows that parsed are written and the claim names the rest (SMD-2260)
 
 **What changed.** `server-portable/entities.ts`: `mergeExtractions` makes a
 thought's answer malformed only when every window's was (a malformed window's

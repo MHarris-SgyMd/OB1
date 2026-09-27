@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2139]
-migrations: []
----
-
-## Changelog
-
-`recipes/thought-enrichment`'s three backfills — `enrich-thoughts.mjs`, `backfill-type.mjs`, `backfill-sensitivity.mjs` — read and write the brain through `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string, the key ignored) where they paged and PATCHed a PostgREST the stack does not run; a refused read or write ends a run in one line and a run with failed rows exits 1, a value that is not `postgres://` is refused without being printed, unknown, valueless and `=`-form flags and non-integer values are refused, `enrich-thoughts.mjs` takes `OPENROUTER_BASE_URL` for a local model and `ENRICH_STATE_DIR` for its checkpoint, `backfill-type.mjs` takes `--limit`; check 24 loses the three entries and `db/test-live.ts` [29] drives all three against a real Postgres (SMD-2139).
-
-## FORK
-
-The thought-enrichment backfills move onto the SQL shim — the class's first writers, `type`, `sensitivity_tier` and metadata through `.update().eq()`, never content or vector, and the live suite drives all three (SMD-2139)
+# 214. The thought-enrichment backfills move onto the SQL shim — the class's first writers, `type`, `sensitivity_tier` and metadata through `.update().eq()`, never content or vector, and the live suite drives all three (SMD-2139)
 
 **What changed.** SMD-2126 sent every maintenance script onto
 `compat/supabase-sql`; SMD-2144 landed the two read-only ones. These three are
