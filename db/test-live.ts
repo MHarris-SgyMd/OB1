@@ -4136,7 +4136,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const [{ n: actorRows }] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`;
   assert(Number(actorRows) === 5, `the worker's audit rows are exactly the reviews: three accepts and two cleared rejects (${actorRows})`);
 
-  // 066 (SMD-2297): a stale proposal — 063's rebuild set it stale when a text
+  // 067 (SMD-2297): a stale proposal — 063's rebuild set it stale when a text
   // moved under the verdict — is the pass's to settle or replace. Through the
   // real worker against the stub judge: the pair judged again with no
   // conflict is REJECTED with the pass's marker note and its lineage row
@@ -4213,7 +4213,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const beaconAfter = await proposalRow(beacon.id);
     assert(replaced.code === 0 && /stale proposals: 1 replaced in place — the conflict found again/.test(replaced.out) && beaconAfter.status === "pending" && beaconAfter.review_note === null && (await lineageOf(beacon.id)).length === 1 && (await lineageOf(beacon.id))[0].fps[1] === beaconFp2,
            `a stale pair the pass finds in conflict again is replaced in place: pending, one lineage row at the moved text (exit ${replaced.code}: ${staleLine(replaced.out)}; ${JSON.stringify(beaconAfter)})`);
-    // A later move under the pass-settled atlas row reopens it (066's arm), and the pass settles it again.
+    // A later move under the pass-settled atlas row reopens it (067's arm), and the pass settles it again.
     await moveRaw(atlasNew, "Invoices for the atlas account: see the deploy calendar, second edit.");
     const rb2 = await rebuild(atlasNew);
     const reopened = await proposalRow(atlas!.id);

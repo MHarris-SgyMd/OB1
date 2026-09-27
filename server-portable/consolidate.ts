@@ -245,10 +245,10 @@ export function consolidateKey(model: string): string {
 }
 
 /**
- * The marker on a proposal the PASS settled (migration 066, SMD-2297): the
+ * The marker on a proposal the PASS settled (migration 067, SMD-2297): the
  * first characters of `review_note` on a row db/consolidate.ts rejected
  * itself after re-judging a stale pair and finding no conflict. One string
- * in two places — this constant and the literal in 066's
+ * in two places — this constant and the literal in 067's
  * `settle_supersession_proposal` and `rebuild_derived` bodies (db/test-schema
  * holds them to each other): rebuild_derived reads it to set such a row stale
  * again on a later text move, where a person's rejection stands; the queue
@@ -262,7 +262,7 @@ export function passSettledNote(why: string, key: string): string {
 }
 
 /**
- * 066: where a stale proposal stands against the judge pools. One SQL read
+ * 067: where a stale proposal stands against the judge pools. One SQL read
  * over the stale rows — a side's vector missing, the judge keys under which
  * the newer thought's claim FAILED, the keys under which one is LIVE — and
  * one ranking in TypeScript, shared by db/consolidate.ts (--status, --list

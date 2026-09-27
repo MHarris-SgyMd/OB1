@@ -1146,7 +1146,7 @@ else {
   const olderWriter = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
   assert(olderWriter.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 extraction\\(s\\) \\(${tid} under extract:old@p2\\) — written by a producer from before 061`).test(olderWriter.out) && /Apply db\/migrations\/061_derivations\.sql\. Its backfill records every artifact standing, at the thought's current text, marked legacy\./.test(olderWriter.out) && !/Every producer is 061's/.test(olderWriter.out),
          `an extraction written by 056's writer — a producer from before 061 — does not start, the pair named, the file the remedy and not the raw writer (exit ${olderWriter.code}: ${olderWriter.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") || f.startsWith("063") || f.startsWith("066") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") || f.startsWith("063") || f.startsWith("067") });
   assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\): 1 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and 061 re-applied records the pair as legacy and leaves the one writer: ok again");
   await ctx.unsafe(`UPDATE thought_chunks SET context = 'Situating blurb.' WHERE context IS NULL`);
   const allCtxOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -1379,7 +1379,7 @@ else {
   await claims`UPDATE supersession_proposals SET status = 'stale' WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[1]}::uuid`;
   const consStale = await run(SQL_ENV);
   assert(/consolidate pass\s+none unfinished; 1 stale \(a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not\) — cd db && bun consolidate\.ts --url \$DATABASE_URL --list stale\s*$/m.test(consStale.out),
-         `a stale proposal alone is counted with the pass's rule (066) and the reviewer's command (${consStale.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim().slice(0, 240)})`);
+         `a stale proposal alone is counted with the pass's rule (067) and the reviewer's command (${consStale.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim().slice(0, 240)})`);
   await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, ${CONS}, NULL)`;
   const consBoth = await run(SQL_ENV);
   assert(/consolidate pass\s+none unfinished; 1 proposal\(s\) pending review — cd db && bun consolidate\.ts --url \$DATABASE_URL --list; 1 stale \(/.test(consBoth.out),
@@ -1546,7 +1546,7 @@ else {
   const fortyTwoBody = await run(SQL_ENV);
   assert(/!  delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone, but its body is from before migration 060 \(migration 060 not yet applied, or 042 re-applied by hand\): the row is deleted first and the trigger derives the tombstone after it/.test(fortyTwoBody.out) && /Apply db\/migrations\/060_append_then_project\.sql\./.test(fortyTwoBody.out),
          "…which 042 re-applied performs, leaving 042's body: one form, and a warning naming 060 for the body (SMD-2116)");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") || f.startsWith("066") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") || f.startsWith("067") });
   assert(/✓  delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone, with 060's body/.test((await run(SQL_ENV)).out), "…and 060 after it is the shipped body, said as such");
   // A brain that stopped at 036 — a server deployed ahead of the migration:
   // the two-argument form alone. Every delete the server sends would fail at
@@ -1636,7 +1636,7 @@ else {
   const pre060 = await run(SQL_ENV);
   assert(/!  audit events\s+046's event shape present and every key classified, 055's payload in the capture event, but the audit trigger's body is from before 060 \(migration 060 not yet applied, or 055 re-applied by hand\): it derives the event after the write and checks no projected row against its event/.test(pre060.out) && /Apply db\/migrations\/060_append_then_project\.sql\./.test(pre060.out),
          "…055 re-applied over 060 puts a trigger back that checks nothing: the event check warns, naming 060 (SMD-2116)");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") || f.startsWith("066") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") || f.startsWith("067") });
   const shippedPair = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped — the 3-argument body \(061's\) carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event \(046\) and append it first, projecting the row from it \(060\); the 3-argument body records the tags' lineage with the write \(061\); the 2-argument body \(060's\) refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
          "…and 060 then 061 re-applied is the shipped pair again, said as such");
@@ -1676,15 +1676,15 @@ else {
   assert(pre063.code === 0 && /!  lineage\s+every derived row has its lineage row, but ob1_record_derivation and record_supersession_proposal are from before 063 \(061 or 029 re-applied by hand over it\): a rebuild's mark is never cleared/.test(pre063.out) && /Apply db\/migrations\/063_rebuild_derived\.sql\./.test(fix(pre063.out, "lineage")),
          `061 re-applied over 063 is a warning on the two bodies 061 puts back, naming 063 as the remedy (${(pre063.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("063_") });
-  // 063 re-applied by hand over 066 (SMD-2297): 063's rebuild_derived keeps
+  // 063 re-applied by hand over 067 (SMD-2297): 063's rebuild_derived keeps
   // every rejected row, so a proposal the pass settled is never judged again
   // when a text moves under it. The check reads the reopen sentinel where
-  // 066's settle function stands and warns naming 066 — 063's own lesson
+  // 067's settle function stands and warns naming 067 — 063's own lesson
   // about 061 over 063, applied to the file after it.
-  const pre066 = await run(SQL_ENV);
-  assert(pre066.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 066 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre066.out) && /Apply db\/migrations\/066_pass_settles_stale\.sql\./.test(fix(pre066.out, "lineage")),
-         `063 re-applied over 066 is a warning on rebuild_derived, naming 066 as the remedy (${(pre066.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("066_") });
+  const pre067 = await run(SQL_ENV);
+  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql\./.test(fix(pre067.out, "lineage")),
+         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 as the remedy (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") });
   // The older bodies this ladder ran by hand (056's and 060's extraction
   // writer) replaced mention rows without sweeping their lineage rows, and
   // 061's backfill recorded pairs that later passes replaced — lineage rows

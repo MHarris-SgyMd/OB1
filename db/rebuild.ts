@@ -146,7 +146,7 @@ function printReport(r: Report): void {
   console.log(`  rebuilt:     ${r.rebuilt} (a vector restored from the snapshot at the model — the one re-derivation the database owns${r.force ? "; or, under --force, a vector at the configured model whose text did not move, its record renewed" : ""})`);
   console.log(`  enqueued:    ${r.enqueued} (thought, pool) claim(s) for the workers`);
   console.log(`  deleted:     ${r.deleted} (lineage rows whose artifact is gone${r.input_gone ? "; the windows, the graph and the snapshot rows the input keyed" : ""})`);
-  console.log(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, a generated page section, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} proposal(s) set stale — pending ones, and ones the consolidate pass itself had settled (066) — their status the mark; the next pass replaces one it finds in conflict again and settles one it does not` : ""}`);
+  console.log(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, a generated page section, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} proposal(s) set stale — pending ones, and ones the consolidate pass itself had settled (067) — their status the mark; the next pass replaces one it finds in conflict again and settles one it does not` : ""}`);
   console.log(`  kept:        ${r.kept} (a structured pass reads its source, not the text; a person's decision on a proposal stands)`);
   console.log(`  current:     ${r.current} (nothing moved)${r.legacy ? `; ${r.legacy} legacy row(s) read current by construction — --force re-runs them` : ""}`);
   if (r.input_gone) console.log(`  cascade:     ${r.cascading.proposals} proposal(s) and ${r.cascading.lineage_rows} lineage row(s) go with the row delete (029's and 061's triggers)`);
@@ -199,7 +199,7 @@ try {
              (SELECT count(*)::int FROM orph) AS orphans,
              (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
              (SELECT count(*)::int FROM supersession_proposals WHERE status = 'stale') AS stale_proposals`) as { rows: number; by_kind: Record<string, number> | null; marked: number; stale: number; orphans: number; legacy: number; stale_proposals: number }[];
-    // 066: where each stale row stands against the judge pools — the one read
+    // 067: where each stale row stands against the judge pools — the one read
     // and rank db/consolidate.ts's --status uses (server-portable/consolidate.ts),
     // so the two doors never disagree (first review pass, mutant: a copy here
     // read one way while the worker's read another); keyless here, so a
