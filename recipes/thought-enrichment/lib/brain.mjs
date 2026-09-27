@@ -149,10 +149,12 @@ export function refuseUnknownFlags(argv, known, withValue = []) {
 }
 
 /**
- * A run's end, on both paths: the pool is closed so the process ends on its
- * own with the code set (its connections would keep it alive), and a failure
- * is one line on stderr — `ERROR: <message>` — with the stack under DEBUG.
- * `client` is read at the end, so a run that never connected closes nothing.
+ * A run's end, on both paths: the pool is closed so the process ends promptly
+ * with the code set whatever the driver does with idle connections (SMD-2144's
+ * port saw a pool hold the process open; Bun 1.4 lets it end — the close is
+ * hygiene either way), and a failure is one line on stderr — `ERROR:
+ * <message>` — with the stack under DEBUG. `client` is read at the end, so a
+ * run that never connected closes nothing.
  */
 export function endWith(run, client) {
   return run
