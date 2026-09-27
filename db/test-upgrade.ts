@@ -2467,12 +2467,14 @@ console.log("\n[20o] Migration 063 onto a populated brain at the file before it 
       && (await sql`SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid`)[0].status === "stale",
     `a rebuild the day after: the orphan row deleted, the extraction, the vector and the pair handed to three pools, the proposal stale (${JSON.stringify(r)}; claims ${claims})`);
   // A re-apply is a no-op: the same shape, no row moved, the marks kept.
-  const shapeAfter = await shape(sql), again = await stamps(), lineageAfter = await lineage();
+  const checks = async () => JSON.stringify(await sql`SELECT conname, pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = 'supersession_proposals'::regclass AND contype = 'c' ORDER BY conname`);
+  const shapeAfter = await shape(sql), again = await stamps(), lineageAfter = await lineage(), checksAfter = await checks();
   const marksAfter = JSON.stringify(await sql`SELECT id, stale_since::text AS s, stale_reason AS r FROM derivations ORDER BY 1`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("063") });
   assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await stamps()) === again && (await lineage()) === lineageAfter && JSON.stringify(await sql`SELECT id, stale_since::text AS s, stale_reason AS r FROM derivations ORDER BY 1`) === marksAfter
+      && (await checks()) === checksAfter && /'stale'/.test(checksAfter)
       && (await sql`SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid`)[0].status === "stale",
-    "re-applying 063 is a no-op: the shape as it left it, no row moved, the marks and the stale status kept");
+    "re-applying 063 is a no-op: the shape as it left it, the proposal CHECKs as it wrote them (dropped and re-added by the same definitions), no row moved, the marks and the stale status kept");
   await sql.close();
 
   // The guard, driven ([20g]'s shape): a brain baselined at a ledger through

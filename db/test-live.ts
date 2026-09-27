@@ -6503,6 +6503,15 @@ console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild
   await sql`SELECT record_supersession_proposal(${P0.id}::uuid, ${Q0.id}::uuid, 'conflict_undirected', 0.5, 'first', 0.5, ${JUDGE}::text)`;
   const firstRow = await rebuildTs("--input", Q0.id, "--reason", "live: first");
   assert(firstRow.code === 0 && /walked:\s+1 lineage row/.test(firstRow.out) && /current:\s+1/.test(firstRow.out), `a fresh process's first rebuild on a thought whose only row is a proposal runs (exit ${firstRow.code}: ${firstRow.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 200)})`);
+  // The fingerprints reach the function for real: two planted snapshot rows
+  // — one with a quote, one with a backslash — go with Q0's forget; a third,
+  // not passed, stays (second review pass: the dry run above proved only the
+  // exit code).
+  for (const f of ['live-"quoted"-fp', "live-back\\slash-fp", "live-unpassed-fp"]) await sql`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES (${f}, ${MODEL}, ${unit(4)}::vector, ${EMBEDDING_DIM}) ON CONFLICT DO NOTHING`;
+  const goneReal = await rebuildTs("--input", Q0.id, "--gone", "--fingerprints", 'live-"quoted"-fp,live-back\\slash-fp');
+  const snapLeft = ((await sql`SELECT content_fingerprint AS f FROM ob1_embedding_snapshot WHERE content_fingerprint LIKE 'live-%' ORDER BY 1`) as { f: string }[]).map((r) => r.f).join();
+  assert(goneReal.code === 0 && /deleted:\s+2 /.test(goneReal.out) && snapLeft === "live-unpassed-fp", `a real forget through the door deletes the snapshot rows at the passed fingerprints, quotes and backslashes intact, and leaves the one not passed (exit ${goneReal.code}; left: ${snapLeft})`);
+  await sql`DELETE FROM ob1_embedding_snapshot WHERE content_fingerprint LIKE 'live-%'`;
 
   // Two sessions: a rebuild inside an open transaction against a reviewer
   // accepting the same proposal — the reviewer waits on the supersession

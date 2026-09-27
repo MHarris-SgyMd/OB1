@@ -162,6 +162,7 @@ const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
+const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -1952,15 +1953,27 @@ if (configFailed) {
             // called the rest "every producer"). The vector trigger must also
             // be ATTACHED and enabled — its function standing alone records
             // nothing (cold read, third review pass).
+            // …and 063's three bodies, where 063 has landed (the mark's column
+            // stands): the writer clears the mark, the proposal writer replaces
+            // a stale row, the candidate filter yields a stale pair. 061 (or
+            // 029) re-applied by hand over 063 puts older bodies back that keep
+            // 061's sentinel, so the probe above stays green while every mark
+            // stands for ever and a stale pair is never replaced (cold read,
+            // 063's second review pass: this suite's own ladder proved it).
             const [bodies] = (await sql`
               SELECT bool_and(p.prosrc LIKE '%ob1:derivation-recorded-with-its-artifact%' AND p.prosrc LIKE '%ob1_record_derivation(%') AS records, count(*)::int AS n,
                      EXISTS (SELECT 1 FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN pg_namespace tn ON tn.oid = c.relnamespace
-                              WHERE tn.nspname = 'public' AND c.relname = 'thoughts' AND tg.tgname = 'thoughts_record_vector_lineage' AND tg.tgenabled <> 'D') AS trigger_on
+                              WHERE tn.nspname = 'public' AND c.relname = 'thoughts' AND tg.tgname = 'thoughts_record_vector_lineage' AND tg.tgenabled <> 'D') AS trigger_on,
+                     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'derivations' AND column_name = 'stale_since') AS has_063,
+                     (SELECT w.prosrc LIKE '%ob1:rerun-clears-the-mark%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)')) AS marks_clear,
+                     (SELECT w.prosrc LIKE '%supersession_proposals.status = ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)')) AS replaces_stale,
+                     (SELECT w.prosrc LIKE '%p.status <> ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS yields_stale
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
+            const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
             const [c] = (await sql`
               WITH ch_s AS (SELECT thought_id FROM public.thought_chunks LIMIT ${BOUND}),
@@ -1981,7 +1994,9 @@ if (configFailed) {
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = s.id)),
-                   al AS (SELECT id, artifact_kind, artifact_id, produced_by, input_ids, input_fingerprints, recipe, stale_since FROM public.derivations LIMIT ${BOUND}),
+                   al AS (SELECT d.id, d.artifact_kind, d.artifact_id, d.produced_by, d.input_ids, d.input_fingerprints, d.recipe,
+                                 (to_jsonb(d) ->> 'stale_since')::timestamptz AS stale_since
+                            FROM public.derivations d LIMIT ${BOUND}),
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
                            WHERE d.artifact_kind <> 'proposal'
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
@@ -2035,6 +2050,10 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : bodies.records !== true ? "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand), or lost its record line" : "the vector trigger thoughts_record_vector_lineage is dropped or disabled, so a vector written now leaves no row"}: its next write records no lineage (SMD-1731). ${coverage}`,
                   ledgerRemedy("061", APPLY_061));
+            } else if (rebuildOlder && rebuildOlder.length) {
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${rebuildOlder.length === 3 ? "the three bodies 063 redefines are" : `${rebuildOlder.join(" and ")} ${rebuildOlder.length === 1 ? "is" : "are"}`} from before 063 (061 or 029 re-applied by hand over it): a rebuild's mark is never cleared by the producer's next write, and a stale proposal is never replaced by the next judgement (SMD-1732). ${coverage}`,
+                  ledgerRemedy("063", APPLY_063));
             } else if (Number(c.orphans)) {
               // The other direction (063): a row whose artifact is gone while
               // its thought stands — nothing it describes exists, and the

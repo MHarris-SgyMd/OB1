@@ -9540,9 +9540,15 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   // so the extraction goes under the row's own key (cold read, first review
   // pass: '' reached the claims' CHECK and the whole rebuild raised).
   await db.exec(`UPDATE ob1_config SET value = '' WHERE key = 'entity_extraction_key'`);
+  const bVecBefore = (await rowOf(B.id, "vector"))!;
   r = await rebuild(B.id, "force", false, null, true);
-  assert(r.current === 0 && r.enqueued === 3 && r.marked === 3 && r.stale_proposals === 1 && r.unqueued === 1 && (await claimsOf(B.id)) === `${OLD_KEY}:pending,${REEMBED}:pending` && (await claimsOf(A.id)).includes("consolidate:stub@p2:pending") && (await proposal(pid)).status === "stale",
-    `--force re-runs every row: the vector to the reembed pool (its snapshot row holds the same vector), the extraction to the row's own key (the configured one is empty, so unset), the tags marked, the proposal stale and its newer side requeued under the judge's key (${counts(r)})`);
+  const bVec = (await rowOf(B.id, "vector"))!;
+  assert(r.current === 0 && r.rebuilt === 1 && r.enqueued === 2 && r.marked === 2 && r.stale_proposals === 1 && r.unqueued === 1 && (await claimsOf(B.id)) === `${OLD_KEY}:pending` && (await claimsOf(A.id)).includes("consolidate:stub@p2:pending") && (await proposal(pid)).status === "stale",
+    `--force re-runs every row: the vector, current by fingerprint, re-RECORDED rather than sent to a pool that could not clear its mark, the extraction to the row's own key (the configured one is empty, so unset), the tags marked, the proposal stale and its newer side requeued under the judge's key (${counts(r)})`);
+  assert(bVec.recipe.legacy === undefined && bVec.since === null && bVec.at > bVecBefore.at && bVec.fps.join() === B.fingerprint && bVec.recipe.model === MODEL && bVec.recipe.dims === EMBEDDING_DIM,
+    `…the re-recorded vector row: no longer legacy, unmarked, produced_at moved, the same fingerprint, the recipe as the trigger writes it (${JSON.stringify(bVec.recipe)})`);
+  r = await rebuild(B.id, "force again", false, null, true);
+  assert(r.rebuilt === 1 && r.stale_proposals === 0 && (await proposal(pid)).status === "stale" && (await rowOf(B.id, "entities"))!.why === "force", `a second force re-records the vector again, requeues the already-stale proposal without counting it again, and leaves the first reason on the marked rows (${counts(r)})`);
   await db.exec(`UPDATE ob1_config SET value = '${CUR_KEY}' WHERE key = 'entity_extraction_key'`);
 
   // (g) The forget arm (SMD-1723 calls it BEFORE the row delete): the
@@ -9582,6 +9588,7 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   // (h) Refusals as values, and one RAISE.
   assert(/rebuild_derived: p_reason must say why/.test(await refused(`SELECT rebuild_derived($1::uuid, '')`, [B.id])) && /p_reason must say why/.test(await refused(`SELECT rebuild_derived($1::uuid, NULL)`, [B.id])), "an empty reason is refused before any lock");
   assert((await rebuild(A.id, "gone")).error === "NOT_FOUND", "an input with no row is NOT_FOUND");
+  assert(/p_input_gone and p_orphans_only exclude each other/.test(await refused(`SELECT rebuild_derived($1::uuid, 'x', true, NULL, false, true)`, [B.id])), "a leaving input and an orphans-only sweep exclude each other, refused before any lock");
   const claimsBefore = await claimsOf(B.id), rowsBefore = JSON.stringify(await rowsOf(B.id));
   const replay = await db.transaction(async (tx) => {
     await tx.exec(`SELECT set_config('ob1.projecting_replay', 'on', true)`);

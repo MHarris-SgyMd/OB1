@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2106 assertions: 2106 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2109 assertions: 2109 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-three (63) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -582,17 +582,23 @@ under a replay) is deleted; a stale row — an input's fingerprint moved, or
 `--force` — is re-derived where the database can (a vector whose current text
 has a snapshot row at the model, by `ob1_refresh_thought_vector`; a snapshot
 vector identical to the row's is 060's copy of the old vector under the new
-key and is not a rebuild) and otherwise handed to the worker that owns the
-recipe through 016's `requeue_thought_work` under the worker's CURRENT key
-(the reembed pool for a vector or the windows, `ob1_config`'s extraction key
-for an `extract:` pass, the judge's key for a proposal), with the reason
-marked on the row (`stale_since`, `stale_reason`, two new columns the
-writer's next upsert clears); a `source:` pass and a decided proposal are
-kept; a pending proposal whose texts moved takes the new `stale` status
-(029's CHECKs widened; `consolidation_candidates` yields the pair again;
+key and is not a rebuild; under `--force` a vector whose text did not move is
+re-recorded, not re-embedded — the record is what force renews) and otherwise
+handed to the worker that owns the recipe through 016's `requeue_thought_work`
+under the worker's CURRENT key (the reembed pool for a vector or the windows,
+`ob1_config`'s extraction key for an `extract:` pass), with the reason
+marked on the lineage row (`stale_since`, `stale_reason`, two new columns the
+writer's next upsert clears; the first request standing is kept); a `source:`
+pass and a decided proposal are kept; a pending proposal whose texts moved
+takes the new `stale` status — its status is its mark, its lineage row is
+left alone — and its newer thought is requeued under the judge's key (029's
+CHECKs widened; `consolidation_candidates` yields the pair again;
 `record_supersession_proposal` replaces the stale row in place, back to
-pending; a reviewer may still accept it with `p_force`); the tags are marked
-with no pool to feed (no worker re-tags a thought). With `p_input_gone` —
+pending, when the pass finds the conflict again; a pair the pass no longer
+finds in conflict leaves the row stale for a reviewer — `consolidate.ts
+--list stale`, `--reject`; a reviewer may also accept it with `p_force`); the
+tags are marked with no pool to feed (no worker re-tags a thought). With
+`p_input_gone` —
 SMD-1723's forget, called BEFORE the row delete, in one transaction — the
 windows, the input's mentions and edges (the entities locked first, then the
 orphans pruned: 016's rule) and their lineage rows go, the snapshot rows at
@@ -601,10 +607,13 @@ standing thought holds them (060's "removal path, not built", built), and
 the proposals and the vector's and tags' rows are counted for the cascade the
 row delete runs. The walk is held whole before anything moves; the locks are
 delete_thought's (the supersession advisory lock first, then the row); under
-`ob1.projecting_replay` the call answers `REPLAYING`. The report:
-`{rebuilt, enqueued, deleted, marked, unqueued, kept, current, legacy,
-irreproducible: [ids], cascading, pools}`. Preflight's `lineage` check counts
-the marked rows and warns on orphans, naming `rebuild.ts --orphans`. The
+`ob1.projecting_replay` the call answers `REPLAYING`; `p_orphans_only` (the
+sweep's mode) runs the orphan rule alone. The report:
+`{rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept,
+current, legacy, at_cap, irreproducible: [ids], cascading, pools}`.
+Preflight's `lineage` check counts the marked rows, warns on orphans naming
+`rebuild.ts --orphans`, and warns when 061 or 029 is re-applied by hand over
+063 (the three bodies it redefines read as older). The
 operator's door is `rebuild.ts` (its own section below); the worker group
 gains `DELETE` on the snapshot (the grants table). Additive; three bodies
 redefined on their own text with no arity change. test-schema [58], test-live
@@ -2676,8 +2685,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2106 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 846 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2109 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 847 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

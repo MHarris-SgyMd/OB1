@@ -19,8 +19,9 @@
  * and the snapshot rows too), marked with no pool (the tags), kept (a
  * structured pass, a decided proposal), current (nothing moved), and the
  * derived_from children it cannot reproduce. The reason defaults to the flag
- * that asked ('operator: edit', 'operator: force', 'operator: forget',
- * 'operator: orphan sweep'); say a better one.
+ * that asked ('operator: edit', 'operator: force', 'operator: forget'); say
+ * a better one. The sweep marks no row, so it takes no --reason (its call
+ * carries 'operator: orphan sweep' as the report's label only).
  *
  * --gone is SMD-1723's shape — the input is leaving. The row must STILL STAND
  * when this runs (061's drop trigger leaves nothing to walk after a delete);
@@ -106,6 +107,20 @@ if (reasonRaw !== undefined && reasonRaw.trim() === "") {
   console.error("--reason needs words: it is recorded on every row marked");
   process.exit(2);
 }
+// A flag outside its mode is a usage error, not a silent no-op (second
+// review pass: --reason on the sweep landed nowhere — the sweep marks no row).
+if (reasonRaw !== undefined && INPUT === undefined) {
+  console.error("--reason goes with --input: the sweep marks no row and --status writes nothing, so there is nothing to record it on");
+  process.exit(2);
+}
+if (limitRaw !== undefined && !ORPHANS) {
+  console.error("--limit goes with --orphans");
+  process.exit(2);
+}
+if (DRY && STATUS) {
+  console.error("--dry-run goes with --input or --orphans: --status writes nothing");
+  process.exit(2);
+}
 const REASON = reasonRaw ?? (GONE ? "operator: forget" : FORCE ? "operator: force" : ORPHANS ? "operator: orphan sweep" : "operator: edit");
 /**
  * Bun 1.4 binds a JS string[] to a text[] parameter as the bare text `a,b`
@@ -140,7 +155,7 @@ function printReport(r: Report): void {
   console.log(`  rebuilt:     ${r.rebuilt} (a vector restored from the snapshot at the model — the one re-derivation the database owns)`);
   console.log(`  enqueued:    ${r.enqueued} (thought, pool) claim(s) for the workers`);
   console.log(`  deleted:     ${r.deleted} (lineage rows whose artifact is gone${r.input_gone ? "; the windows, the graph and the snapshot rows the input keyed" : ""})`);
-  console.log(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} pending proposal(s) set stale (their status is the mark; the next consolidate pass re-judges them)` : ""}`);
+  console.log(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} pending proposal(s) set stale (their status is the mark; the next consolidate pass replaces one it finds in conflict again, a reviewer settles one it does not)` : ""}`);
   console.log(`  kept:        ${r.kept} (a structured pass reads its source, not the text; a decided proposal is a reviewer's)`);
   console.log(`  current:     ${r.current} (nothing moved)${r.legacy ? `; ${r.legacy} legacy row(s) read current by construction — --force re-runs them` : ""}`);
   if (r.input_gone) console.log(`  cascade:     ${r.cascading.proposals} proposal(s) and ${r.cascading.lineage_rows} lineage row(s) go with the row delete (029's and 061's triggers)`);
@@ -198,8 +213,8 @@ try {
     console.log(`  stale:       ${c.stale} row(s) whose input's text moved since (the census's read) — bun db/rebuild.ts --input <id> acts on a thought's`);
     console.log(`  marked:      ${c.marked} row(s) await a re-run rebuild_derived asked for`);
     console.log(`  orphans:     ${c.orphans} row(s) whose artifact is gone${Number(c.orphans) ? " — bun db/rebuild.ts --orphans deletes them" : ""}`);
-    console.log(`  legacy:      ${c.legacy} row(s) backfilled by 061 at the thought's current text (read as current; --force re-runs them)`);
-    console.log(`  proposals:   ${c.stale_proposals} stale (a text moved under a pending verdict; the next consolidate pass re-judges them)`);
+    console.log(`  legacy:      ${c.legacy} row(s) backfilled by 061 at the thought's current text (read as current; --force re-records a vector and re-runs the rest)`);
+    console.log(`  proposals:   ${c.stale_proposals} stale (a text moved under a pending verdict; the next consolidate pass replaces one it finds in conflict again — one it does not stays for a reviewer: bun db/consolidate.ts --list stale / --reject)`);
     const pools = (await sql`SELECT work_type AS w, count(*)::int AS n FROM thought_work_claims WHERE status = 'pending' GROUP BY 1 ORDER BY 1`) as { w: string; n: number }[];
     console.log(`  pools:       ${pools.length ? pools.map((p) => `${p.w} (${p.n} pending)`).join(", ") : "nothing pending"}`);
     for (const p of pools) console.log(`    ${p.w}  →  ${drainer(p.w)}`);

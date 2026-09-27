@@ -436,9 +436,12 @@ async function printQueue(): Promise<void> {
            count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected
     FROM supersession_proposals`;
   // 063 (SMD-1732): a stale row is a pending verdict whose texts moved under
-  // it; the next pass re-judges the pair in place, so it is the pass's to
-  // clear, not the reviewer's.
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.stale ? `, ${q.stale} stale (a text moved — the next pass re-judges them)` : ""} — --list shows them; --accept / --reject decides one`);
+  // it. The next pass judges the pair again and REPLACES the row when it
+  // finds the conflict again; a pair it no longer finds in conflict (this
+  // pass writes a proposal only for a conflict at its confidence floor)
+  // leaves the row stale, and that one is the reviewer's: --list stale,
+  // --reject.
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.stale ? `, ${q.stale} stale (a text moved — the next pass replaces one it finds in conflict again; --list stale / --reject settles one it does not)` : ""} — --list shows them; --accept / --reject decides one`);
 }
 
 async function printFailures(limit = 10): Promise<void> {

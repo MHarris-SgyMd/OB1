@@ -138,14 +138,24 @@
 --      width: marked alone, the reason named); an extraction under an
 --      `extract:` key is enqueued under the configured extraction key and
 --      marked, a `source:` pass is KEPT (its input is the external record, not
---      the text); a pending proposal is set stale — its status is its mark,
+--      the text); under --force a vector whose text did not move is
+--      re-RECORDED rather than re-embedded (a deterministic model at the
+--      fingerprint the row carries: the record is what force renews, and a
+--      pool could not clear the mark — the trigger records nothing when the
+--      re-embedding reproduces the vector; second review pass); a pending
+--      proposal is set stale — its status is its mark,
 --      its lineage row left alone, since only the pass's replacement writes
 --      that row again and a reviewer's decision would otherwise leave a mark
 --      standing for ever (cold read, first review pass) — and its newer
 --      thought requeued under the judge's key (the pool by construction:
 --      029's worker writes its job as the key; no config records the current
 --      one, so a judge-model change strands the claim while the pass's own
---      pool re-judges the pair anyway), a decided one KEPT (a reviewer's
+--      pool re-judges the pair anyway; the pass REPLACES the row when it
+--      finds the conflict again, and a pair it no longer finds in conflict —
+--      the likely outcome when the edit resolved it — leaves the row stale
+--      for a reviewer, `consolidate.ts --list stale` and `--reject`, since
+--      the pass writes a proposal only for a conflict at its confidence
+--      floor; second review pass), a decided one KEPT (a reviewer's
 --      decision; the queue already says edited-since); the tags are marked,
 --      a pool named as missing. An empty config value reads as unset, as
 --      016's trigger reads it (cold read, first pass: '' reached the claims'
@@ -350,8 +360,10 @@ COMMENT ON FUNCTION ob1_record_derivation(text, uuid, uuid[], text[], text, json
 --    writer — redefined on their own text.
 -- ---------------------------------------------------------------------------
 -- 029 named neither constraint, so each is found by its definition and
--- dropped by name; the two this file adds are named, so a re-apply drops and
--- re-adds them (IF EXISTS) and moves nothing.
+-- dropped by name. On a re-apply the first pattern matches this file's own
+-- two named constraints as well (both spell `status = ANY (ARRAY[`), so the
+-- loop drops them and the ADD below re-creates them — the same definitions,
+-- nothing moved; the IF EXISTS after the loop is the belt for the second.
 DO $st$
 DECLARE
   v_name text;
@@ -492,7 +504,8 @@ BEGIN
         older_fingerprint  = EXCLUDED.older_fingerprint,
         newer_fingerprint  = EXCLUDED.newer_fingerprint,
         judged_at          = now(),
-        status             = 'pending'
+        status             = 'pending',
+        review_note        = NULL
     WHERE supersession_proposals.status = 'stale'
   RETURNING id INTO v_id;
   -- ob1:derivation-recorded-with-its-artifact — a CONTRACT SENTINEL, not prose
@@ -679,6 +692,11 @@ BEGIN
       MESSAGE = 'rebuild_derived: p_reason must say why (forget, edit, trust, sweep ...) - it is recorded on every row marked',
       ERRCODE = 'invalid_parameter_value';
   END IF;
+  IF p_input_gone AND p_orphans_only THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'rebuild_derived: p_input_gone and p_orphans_only exclude each other - a leaving input takes every artifact it keyed, a sweep takes orphans alone',
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
   IF COALESCE(current_setting('ob1.projecting_replay', true), '') = 'on' THEN
     RETURN jsonb_build_object('ok', false, 'error', 'REPLAYING', 'id', p_input);
   END IF;
@@ -728,7 +746,9 @@ BEGIN
     -- Prose: a derived_from child. Listed; its text did not move, and its
     -- recipe is a synthesis no rebuild re-runs — the limit, named.
     IF v_row.prose THEN
-      v_irre := v_irre || v_row.artifact_id;
+      -- (Not under orphans_only: the sweep reproduces nothing, so it reports
+      -- nothing as irreproducible — second review pass, cold read.)
+      IF NOT p_orphans_only THEN v_irre := v_irre || v_row.artifact_id; END IF;
       CONTINUE;
     END IF;
 
@@ -838,6 +858,21 @@ BEGIN
       WHEN 'vector' THEN
         v_cur   := COALESCE(v_a.content_fingerprint, content_fingerprint_of(v_a.content));
         v_model := COALESCE(v_row.recipe->>'model', v_a.embedding_model, v_cfg_model);
+        IF NOT v_fp_stale THEN
+          -- --force on a vector whose text did not move: the vector IS the
+          -- current text's (a deterministic model, the fingerprint the row
+          -- carries), so what force renews is the RECORD — the row is written
+          -- again under the recipe as it stands, which drops `legacy` and
+          -- clears the mark. Sending it to the pool would mark a row no worker
+          -- could clear: the re-embedding reproduces the vector, and the
+          -- trigger returns before recording when nothing moved (second
+          -- review pass, cold read and run-it).
+          PERFORM ob1_record_derivation('vector', v_a.id, ARRAY[v_a.id], ARRAY[v_cur], v_row.produced_by,
+                                        jsonb_build_object('deterministic', true, 'dims', array_length(v_a.embedding::real[], 1))
+                                          || jsonb_strip_nulls(jsonb_build_object('model', v_model)),
+                                        ob1_actor_agent_id());
+          v_rebuilt := v_rebuilt + 1;
+        ELSE
         -- A usable snapshot row: the current text at the model, holding a
         -- vector OTHER than the one the row carries. An identical vector is
         -- not the new text's: 060's snapshot trigger records the standing
@@ -877,6 +912,7 @@ BEGIN
             v_enqueued := v_enqueued + 1;
             IF NOT (v_pool = ANY(v_pools)) THEN v_pools := v_pools || v_pool; END IF;
           END IF;
+        END IF;
         END IF;
       WHEN 'chunks' THEN
         -- The windows: split and embedded by db/reembed.ts under the
@@ -921,10 +957,15 @@ BEGIN
           -- no config records the current one, so after a judge-model change
           -- the claim sits under the old key while the pass's own pool
           -- re-judges the pair anyway — a stray pending row --status shows.
+          -- A row already stale is requeued again and not counted again: the
+          -- pass may have found no conflict the last time and written nothing
+          -- (db/consolidate.ts records a proposal only for a conflict at or
+          -- above its confidence floor), which leaves the row stale for a
+          -- reviewer — `--list stale` and `--reject` (cold read, second pass).
           IF v_p.status = 'pending' THEN
             UPDATE supersession_proposals SET status = 'stale' WHERE id = v_p.id AND status = 'pending';
+            v_stale_props := v_stale_props + 1;
           END IF;
-          v_stale_props := v_stale_props + 1;
           v_pool := v_p.judge_key;
           IF NOT ((v_pool || '|' || v_p.newer_id::text) = ANY(v_claims)) THEN
             PERFORM requeue_thought_work(v_pool, v_p.newer_id);
@@ -1005,4 +1046,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) IS
-  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key for a pending proposal, which is set stale (its status is the mark; stale_proposals) — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept); a source: pass and a decided proposal are kept; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migration 063 / SMD-1732.';
+  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal, its status set stale (the status is the mark; stale_proposals; the next judgement replaces the row when it finds the conflict again, a reviewer settles one it does not); under p_force a vector whose text did not move is re-recorded, not re-embedded; a source: pass and a decided proposal are kept; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migration 063 / SMD-1732.';
