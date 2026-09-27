@@ -2206,7 +2206,7 @@ if (configFailed) {
               // exclusion of a thought's derived_from members gone, the pass
               // asks the judge whether a page supersedes its own evidence.
               add("lineage", "warn",
-                  `every derived row has its lineage row, but consolidation_candidates is from before 065 (migration 065 not yet applied, or 029 or 063 re-applied by hand over it): the judge is asked whether a page supersedes its own evidence, and a digest its sources (SMD-2292)`,
+                  `every derived row has its lineage row, but consolidation_candidates is from before 065 (migration 065 not yet applied, or 029 or 063 re-applied by hand over it): the judge is asked whether a page supersedes its own evidence, and a digest its sources (SMD-2292). ${coverage}`,
                   ledgerRemedy("065", APPLY_065));
             } else if (Number(c.orphans)) {
               // The other direction (063): a row whose artifact is gone while

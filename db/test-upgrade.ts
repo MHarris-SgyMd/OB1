@@ -2626,6 +2626,17 @@ console.log("\n[20q] Migration 065 onto a populated brain at the file before it 
   assert(post.x === true && Number(post.n) === 1 && (await cands()) === d.id, "…and after: one consolidation_candidates carrying the rule, and the page's candidates are the unrelated note alone");
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert(Number(auditAfter) === Number(auditBefore) && (await stamps()) === before && (await lineage()) === lineageBefore, "the file is DDL alone: no audit row written, no thought moved, no lineage row moved");
+  // The other direction, on a real server: the page moved older than its
+  // evidence (a created_at set by hand), E never lists it while D does. After
+  // the DDL-alone read: the raw UPDATE moves updated_at through 001's
+  // trigger, so the created_at is put back and the re-apply's stamps are
+  // taken after it (run-it, first review pass: the condition's drop survived
+  // this suite).
+  const [{ c0 }] = await sql`SELECT created_at AS c0 FROM thoughts WHERE id = ${pg.page_id}::uuid`;
+  await sql`UPDATE thoughts SET created_at = now() - interval '20 days' WHERE id = ${pg.page_id}::uuid`;
+  const listsPage = async (id: string) => (await sql`SELECT 1 FROM consolidation_candidates(${id}::uuid, 5, 0) WHERE older_id = ${pg.page_id}::uuid`).length === 1;
+  assert((await listsPage(e.id)) === false && (await listsPage(d.id)) === true, "…and the older page is never a candidate of the evidence it names, while it is one of the note it does not");
+  await sql`UPDATE thoughts SET created_at = ${c0} WHERE id = ${pg.page_id}::uuid`;
   // A re-apply moves nothing. The ledger first: the suite's applier writes
   // none, and the migrator's first run would create schema_migrations — a
   // shape move that is the ledger's, not the file's (run-it, the build; a

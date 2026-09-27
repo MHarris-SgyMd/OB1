@@ -48,8 +48,15 @@
 --   drop every row): the sentinel `ob1:lineage-excludes-the-pair` marks the
 --   body for preflight, which warns when 029 or 063 is re-applied by hand
 --   over this file (the exclusion gone, the pass would propose the pairs
---   again). 025's GIN index on derived_from serves the reverse containment;
---   the forward one is a read of the one `me` row.
+--   again). Neither condition needs an index: o is reached by primary key
+--   from the shared-entity join (tens of rows), and both containments are
+--   per-row reads of rows already fetched. The containment is byte-exact, as
+--   025's find_derivatives is: every function write since 025 stores the
+--   elements lowercased (025's upsert_thought, 032's validate_derived_from,
+--   064's page writer), so a mixed-case or malformed element reaches the
+--   column only by a raw write, and such an element matches nothing — the
+--   pair is judged, and no call errors (measured: [1], [null], an object, a
+--   non-UUID string).
 --
 -- SAFETY
 --   One body redefined on its own text with no arity change (CREATE OR
@@ -61,8 +68,8 @@
 --
 -- Prerequisites
 --   025 (thoughts.derived_from), 029 (consolidation_candidates,
---   supersession_proposals), 063 (the stale status the body reads). Applied
---   by `bun db/migrate.ts`.
+--   supersession_proposals), 063 (the stale status the body reads — probed
+--   on the status CHECK 063 names). Applied by `bun db/migrate.ts`.
 -- =============================================================================
 
 -- Refused up front, by name, on a schema the ledger records but does not
@@ -84,8 +91,8 @@ BEGIN
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'derivations' AND column_name = 'stale_since') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'supersession_proposals_status_check' AND pg_get_constraintdef(oid) LIKE '%''stale''%') THEN
     RAISE EXCEPTION USING
       MESSAGE = 'migration 065 needs 063 (the stale proposal status this body reads); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',

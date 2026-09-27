@@ -10049,10 +10049,15 @@ console.log("\n[60] Migration 065: a derivation and its inputs are never paired 
   const body = await src(SIG);
   assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("065") && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body),
     `one consolidation_candidates, 065 its last definer, the sentinel and 063's stale clause in the body (${lastDefinerOf("consolidation_candidates")})`);
+  // The spelling, not only the behaviour: `'["a"]'::jsonb @> '"a"'` is TRUE
+  // in Postgres (array-contains-scalar is membership), so to_jsonb(id::text)
+  // would be the same rule and every behavioural assertion below would pass
+  // it; this regex is what pins the array form 025's readers use (run-it,
+  // first review pass).
   assert(/NOT COALESCE\(me\.derived_from @> jsonb_build_array\(o\.id::text\), false\)/.test(body) && /NOT COALESCE\(o\.derived_from @> jsonb_build_array\(me\.id::text\), false\)/.test(body),
     "both directions read, NULL-safe — a thought naming nothing holds NULL there, and NOT NULL would drop every row");
   const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
-  assert(/065/.test(comment) && /063/.test(comment) && /derived_from/.test(comment), "the comment names 029, 063 and 065 and the rule");
+  assert(/029/.test(comment) && /063/.test(comment) && /065/.test(comment) && /derived_from/.test(comment), "the comment names 029, 063 and 065 and the rule");
 
   // The corpus, ten days old: E, the evidence; D, an unrelated note near E
   // in vector space (the same axis); X, a second source on another axis.
