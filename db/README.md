@@ -2717,9 +2717,11 @@ refused too, and never printed); one client constructor; and one answer to
 `PGHOST`), or `OB1_ALLOW_REMOTE_DB=1`. `tier.ts --refresh` and the suites'
 `dropSchema` both ask it, and print why not. The rule reads the URL's
 hostname; where a client actually connects can differ (Bun's `?path=` socket,
-libpq's `?host=`), which is its own ticket. A script that exits with a code of
-its own returns it from `closeThenExit`, which closes the pool and flushes its
-output first.
+libpq's `?host=`), which is SMD-2317. `hnsw-graph.ts`,
+`graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
+after connecting and return it from `closeThenExit`, which closes the pool and
+flushes their output first (the claim workers still close before each exit
+themselves, SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks
 that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.

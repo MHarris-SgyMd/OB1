@@ -64,7 +64,7 @@ const SCALE = 150_000;
 /**
  * What passes through from the shell to the spawned bench: the build's own
  * knobs (only run 1 builds, and neither can tell a reused answer from a
- * computed one) and the remote-database flags, so a database this suite
+ * computed one) and the remote-database override, so a database this suite
  * accepted is not refused by the bench it spawns. Every other OB1_* name is
  * stripped (a width or a query count from the shell would change what is
  * measured), and runScript keeps db/.env out of the spawned bun too.

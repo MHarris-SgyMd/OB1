@@ -43,8 +43,10 @@ export function databaseUrl(flag: string | undefined, env: Record<string, string
 /**
  * The refusal of a URL that does not parse. Bun's client would throw a
  * TypeError whose dump prints the URL whole as its `input` — the password with
- * it, when that holds an unencoded `/`, `#`, `?` or `@` (review pass 1; so it
- * did before SMD-2302). Nothing of it is shown here.
+ * it, when an unencoded `/`, `#` or `?` in it breaks the parse (review pass 1;
+ * so it did before SMD-2302). Nothing of it is shown here. (When the part
+ * before that character reads as a port, the URL parses as another host and
+ * path instead, as it did before; tier.ts's where() asks about that shape.)
  */
 export const UNPARSEABLE_DATABASE_URL = "The database URL does not parse — is its password percent-encoded? (Nothing of it is printed.)";
 
@@ -79,7 +81,7 @@ function parsedDatabaseUrl(url: string): URL | null {
  * query's `database=`/`user=` to the server over it, where libpq tools read
  * the same URL differently again. Reconciling the two by parsing the URL
  * leaked twice in review (passes 1 and 2 — the second wrote a refresh into its
- * source); deciding from the live connection instead is a follow-up of its own.
+ * source); deciding from the live connection instead is SMD-2317.
  */
 export function openSql(url: string, opts: { max?: number } = {}): SQL {
   if (parsedDatabaseUrl(url) === null) throw new Error(UNPARSEABLE_DATABASE_URL);
@@ -136,7 +138,7 @@ export function hostOf(url: string): string | null {
  * It reads the URL's hostname, as both rules before SMD-2302 did. Where a
  * client actually goes can differ — Bun connects through a unix socket for
  * `?path=`, libpq follows `?host=` and has no fragment — and closing that is
- * deciding from the live connection, a follow-up of its own (review pass 3).
+ * deciding from the live connection, SMD-2317 (review pass 3).
  */
 export function notThrowaway(url: string): string | null {
   const host = hostOf(url);

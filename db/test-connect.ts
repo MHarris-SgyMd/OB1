@@ -165,8 +165,16 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   }
   const set = child(RESOLVE, { DATABASE_URL: `postgres://u:${MARK}@h/db` });
   ok(set.code === 0 && set.out.trim() === `resolved postgres://u:${MARK}@h/db` && !set.err.includes(MARK), "a set DATABASE_URL resolves, and nothing is printed of it");
-  // A password holding an unencoded / # ? makes the URL unparseable; the
-  // client's own error printed it whole as `input` (review pass 1).
+  // postgresql:// is the other name libpq and deploy/tier.sh write.
+  const pgql = child(`import { databaseUrl, openSql } from "./connect.ts"; const u = databaseUrl(undefined); const s = openSql(u); console.log("opened " + s.options.hostname); await s.close();`, { DATABASE_URL: `postgresql://u:${MARK}@127.0.0.1:1/x` });
+  ok(pgql.code === 0 && pgql.out.trim() === "opened 127.0.0.1", `a postgresql:// URL resolves and opens, like postgres:// (exit ${pgql.code}: ${pgql.err.trim().split("\n")[0]})`);
+  // The suites' own resolver has the same blank rule (review pass 1).
+  const blankSuite = child(`import { requireDatabaseUrl } from "./test-support.ts"; console.log("resolved " + requireDatabaseUrl("x.ts"));`, { DATABASE_URL: "   " });
+  ok(blankSuite.code === 2 && /DATABASE_URL is not set/.test(blankSuite.err) && !blankSuite.out.includes("resolved"), `requireDatabaseUrl reads a blank DATABASE_URL as unset (exit ${blankSuite.code})`);
+  // A password holding an unencoded / # ? usually makes the URL unparseable —
+  // not when what comes before it reads as a port, which parses as another
+  // host and path (tier.ts's where() asks about that shape); the client's own
+  // error printed an unparseable one whole as `input` (review pass 1).
   // A password with a bad percent-escape parses, then the client threw a
   // URIError; another scheme built a MySQL or SQLite client (review pass 2).
   for (const [bad, what] of [
@@ -229,16 +237,25 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
 
   // What the body wrote reaches a slow pipe whole: an exit cut a 5 MB
   // process.stdout.write short, since Bun hands it on asynchronously.
+  // A failing code flushes too: --diff prints its moved rankings, then exits 1.
   const BYTES = 100 * 50000;
-  for (const [how, stream] of [["process.stdout.write", "stdout"], ["console.log", "stdout"], ["process.stderr.write", "stderr"]] as const) {
+  for (const [how, stream, exit] of [["process.stdout.write", "stdout", 0], ["console.log", "stdout", 0], ["process.stderr.write", "stderr", 0], ["process.stdout.write", "stdout", 1]] as const) {
     const write = how === "console.log" ? `for (let i = 0; i < 50000; i++) console.log(line);` : `${how}((line + "\\n").repeat(50000));`;
-    const p = Bun.spawn(["bun", "--no-env-file", "-e", `import { closeThenExit } from "./connect.ts"; await closeThenExit([], async () => { const line = "x".repeat(99); ${write} return 0; });`], { cwd: HERE, env: BASE_ENV, stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn(["bun", "--no-env-file", "-e", `import { closeThenExit } from "./connect.ts"; await closeThenExit([], async () => { const line = "x".repeat(99); ${write} return ${exit}; });`], { cwd: HERE, env: BASE_ENV, stdout: "pipe", stderr: "pipe" });
+    // A door that never flushes fails this check rather than hanging the suite.
+    const killer = setTimeout(() => p.kill(), 30_000);
     const drain = async (s: ReadableStream<Uint8Array>, slow: boolean) => { const reader = s.getReader(); let n = 0; for (;;) { const { done, value } = await reader.read(); if (done) break; n += value.length; if (slow) await Bun.sleep(1); } return n; };
     const [nOut, nErr] = await Promise.all([drain(p.stdout, stream === "stdout"), drain(p.stderr, stream === "stderr")]);
     const code = await p.exited;
+    clearTimeout(killer);
     const n = stream === "stdout" ? nOut : nErr;
-    ok(code === 0 && n === BYTES, `${how} of 5 MB through the door reaches a slow reader of ${stream} whole (${n} of ${BYTES} bytes, exit ${code})`);
+    ok(code === exit && n === BYTES, `${how} of 5 MB through the door, exiting ${exit}, reaches a slow reader of ${stream} whole (${n} of ${BYTES} bytes, exit ${code})`);
   }
+
+  // A script on the door keeps its codes: graph-centrality's rule is 2 for a
+  // failure, never 1 (which means "not in the graph"), and a dead port is one.
+  const failed = spawn(["graph-centrality.ts", "--url", `postgres://u:${MARK}@127.0.0.1:1/x`]);
+  ok(failed.code === 2 && /graph-centrality failed:/.test(failed.err) && !failed.err.includes(MARK), `graph-centrality.ts at a dead port: exit 2 through the door, not 1 (exit ${failed.code}: ${failed.err.trim().split("\n")[0]})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +329,18 @@ function callText(text: string, from: number): string {
   for (const must of ["hnsw-graph.ts", "graph-centrality.ts", "tier.ts"]) ok(onDoor.includes(must), `${must} exits through the door`);
   const EXITS = /\bexit\s*\(|process\s*\[\s*["'`]exit["'`]\s*\]|=\s*process\.exit\b/;
   const CLOSES = /\.\s*(close|end)\s*\(/;
+  /**
+   * The pools a door is handed: its first argument must name only clients from
+   * openSql, at least one, and every such client its body uses — a pool left
+   * out is the unclosed pool the door exists to prevent (review pass 4).
+   */
+  const doorPools = (text: string, call: string): { handed: string[]; bound: string[]; used: string[] } => {
+    const bound = [...text.matchAll(/(?:const|let)\s+(\w+)\s*=\s*openSql\(/g)].map((m) => m[1]);
+    const first = call.slice("closeThenExit(".length, call.indexOf(", async () =>"));
+    const handed = [...first.matchAll(/\w+/g)].map((m) => m[0]);
+    const body = call.slice(call.indexOf(", async () =>"));
+    return { handed, bound, used: bound.filter((b) => new RegExp(`\\b${b}\\b`).test(body)) };
+  };
   for (const f of onDoor) {
     const text = read(f);
     for (let at = text.indexOf("closeThenExit("); at !== -1; at = text.indexOf("closeThenExit(", at + 1)) {
@@ -319,8 +348,16 @@ function callText(text: string, from: number): string {
       ok(call.includes("async () =>") && /\}\s*\)$/.test(call), `${f}: the door's call reads to its own close (${call.length} chars)`);
       ok(!EXITS.test(call), `${f}: nothing inside the door's body exits — it returns its code, and the door closes then exits`);
       ok(!CLOSES.test(call), `${f}: the door's body closes nothing itself`);
+      const { handed, bound, used } = doorPools(text, call);
+      ok(handed.length > 0 && handed.every((h) => bound.includes(h)) && used.every((u) => handed.includes(u)), `${f}: the door is handed its clients — [${handed.join(", ")}], every one from openSql, none its body uses left out (uses: ${used.join(", ") || "none by name"})`);
     }
   }
+  // …with teeth: a pool dropped from the door, or none handed, is seen.
+  const TWO = `const stable = openSql(a); const canary = openSql(b);`;
+  const dropped = doorPools(TWO, `closeThenExit([stable], async () => { await reach(stable); await reach(canary); return 0; })`);
+  ok(!dropped.used.every((u) => dropped.handed.includes(u)), "the door census sees a pool its body uses left out of the door");
+  const none = doorPools(TWO, `closeThenExit([], async () => { return 0; })`);
+  ok(none.handed.length === 0, "…and a door handed no pool");
   // The census has teeth: the shapes an exit or a close takes in a body are seen,
   // and a parenthesis in a string or a comment does not end the call early.
   for (const s of ["process.exit(2)", "process.exit (2)", `process["exit"](2)`, "const exit = process.exit; exit(2)", "quitWith(); process.exit(1)"]) ok(EXITS.test(s), `the door census sees ${s}`);
