@@ -243,10 +243,10 @@ current matches than asked for, that one past it may have been missed (raise
 unknown status does not demote a thought (superseded still does), and ties go
 to the current one. An exact identifier hit on a settled thought is demoted
 too: to look a finished ticket up by its key, leave the flag off. Since
-migration 066 each candidate's lifecycle is a lookup in a table the thoughts
+migration 068 each candidate's lifecycle is a lookup in a table the thoughts
 triggers keep current, so the server's role needs the capture group's grants on
 `ob1_ticket_head` and `ob1_superseded_by`, and keeps the server group's SELECT
-on `thought_sources` (a brain before 066 reads it; since 066 PostgreSQL 16 and
+on `thought_sources` (a brain before 068 reads it; since 068 PostgreSQL 16 and
 17 skip it, which is observed, not documented — `db/README.md`); without them,
 or without 059, that search is refused naming the fix and every other search
 runs.

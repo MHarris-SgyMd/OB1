@@ -1668,7 +1668,7 @@ if (configFailed) {
               + (snapshotMiss ? " (060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector)" : "")
               + (lineageMiss ? " (061's vector lineage trigger and the write functions record derivations as the caller on every capture and edit, and drop a replaced set's row)" : ""));
             if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
-            // 066's triggers reconcile the node_state projection as the caller on
+            // 068's triggers reconcile the node_state projection as the caller on
             // a write of a ticket row or a pointer, and node_lifecycle() reads it:
             // a plain capture returns before touching it (SMD-2256).
             const projectionMiss = PROJECTION.flatMap((t) => missingByTable.get(t) ?? []);
@@ -1680,7 +1680,7 @@ if (configFailed) {
               // missing breaks the reads as well.
               fails.push((projectionMiss.includes("SELECT") ? "every lifecycle read (node_lifecycle, node_state, search_thoughts' prefer_current) and " : "")
                 + "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included"
-                + " (066's triggers keep the node_state projection as the caller)");
+                + " (068's triggers keep the node_state projection as the caller)");
             }
             const why = ` — so ${fails.join(", and ")} would fail`;
             if (missingByTable.size) {
@@ -2745,11 +2745,11 @@ if (configFailed) {
          * default is REPEATABLE READ or SERIALIZABLE (a role or database
          * setting, a pooler) reads its transaction's snapshot instead, and
          * 042's guard then cannot see a citation committed after that
-         * snapshot — its source goes from under it. Before 066 a warning, not a
+         * snapshot — its source goes from under it. Before 068 a warning, not a
          * refusal: the server still worked, the guarantees named did not (third
          * review pass, SMD-1712).
          */
-        // Since 066 REPEATABLE READ is more than a lost guarantee: the node_state
+        // Since 068 REPEATABLE READ is more than a lost guarantee: the node_state
         // projection's triggers refuse, under it, every write that moves a
         // ticket's key, status or watermark or a supersedes pointer — captures
         // naming supersedes, and deletes of ticket rows or of any superseded
@@ -2774,11 +2774,11 @@ if (configFailed) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
           } else if (projection && /^repeatable read$/i.test(level)) {
             add("transaction isolation", "fail",
-                `default_transaction_isolation is ${level}: migration 066's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included) — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included) — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
                 fixIsolation);
           } else {
             add("transaction isolation", "warn",
-                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? "; and 066's node_state projection stays exact only if every writer of ticket rows is serializable" : ""}`,
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? "; and 068's node_state projection stays exact only if every writer of ticket rows is serializable" : ""}`,
                 fixIsolation);
           }
         } catch (e) {

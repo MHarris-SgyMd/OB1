@@ -4209,7 +4209,7 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
 
   // No supersession lock: inside one transaction a capture naming supersedes
   // holds ONE advisory lock of the write path's — the fingerprint's. At 033 it
-  // held two. 066's projection locks (the two-key form, classes 22560–22562:
+  // held two. 068's projection locks (the two-key form, classes 22560–22562:
   // the shared global and the pointer target's) are counted apart.
   let heldNaming = -1, heldProjection = -1;
   await db.transaction(async (tx) => {
@@ -4220,7 +4220,7 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
     heldProjection = held.find((h) => h.projection)?.c ?? 0;
     await tx.rollback();
   });
-  assert(heldNaming === 1 && heldProjection === 2, `a capture naming supersedes holds one advisory lock of the write path's while its transaction is open — the fingerprint's, not the supersession lock — and 066's two for the projection (${heldNaming}, ${heldProjection})`);
+  assert(heldNaming === 1 && heldProjection === 2, `a capture naming supersedes holds one advisory lock of the write path's while its transaction is open — the fingerprint's, not the supersession lock — and 068's two for the projection (${heldNaming}, ${heldProjection})`);
   assert(Number((await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)).rows[0].c) === 0, "…and none once it ends");
 
   // The COMMENTs say so: the 3-argument form's states the rule and the
@@ -8302,7 +8302,7 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
       && (skewKnown ?? "").includes("this brain's migration 058 knows triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled). Update whichever is behind.")
       && (skewSettled ?? "").includes("knows triage,backlog,unstarted,started,completed,canceled (settled: completed)") && reordered === null,
     `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); a known or settled set that is not the script's is refused naming both, and the same members in another order are not (${skewKnown})`);
-  // The replays above left 058's bodies; 066 redefines two of them over its
+  // The replays above left 058's bodies; 068 redefines two of them over its
   // projection, and the sections after read the shipped ones.
   await restoreShipped("node_state");
 
@@ -8363,7 +8363,7 @@ console.log("\n[55] Migration 059: search_thoughts_current — the hybrid with s
   assert(fn?.result === `${hybridCols}, fused double precision, demoted text[], window_rows integer, window_known integer, window_demoted integer, window_synced_at text, window_exact boolean)`
       && fn.vol === "s" && fn.lang === "plpgsql" && !fn.definer && !fn.strict && JSON.stringify(fn.config) === '["jit=off"]' && (fn.comment ?? "").includes("Migration 059 / SMD-2255")
       && wt.w === 0.25 && wt.vol === "i",
-    `search_thoughts_current: the hybrid's eleven columns in order, then fused, demoted and the window's five; STABLE, LANGUAGE plpgsql since 066 (its plan cached), invoker, not strict, jit off alone; the weight IMMUTABLE and 0.25 (${fn?.result?.slice(-160)})`);
+    `search_thoughts_current: the hybrid's eleven columns in order, then fused, demoted and the window's five; STABLE, LANGUAGE plpgsql since 068 (its plan cached), invoker, not strict, jit off alone; the weight IMMUTABLE and 0.25 (${fn?.result?.slice(-160)})`);
 
   // Nothing demotable: plain rows only (a filter keeps the demotable ones out).
   const plain: string[] = [];
@@ -8517,13 +8517,13 @@ console.log("\n[55] Migration 059: search_thoughts_current — the hybrid with s
   };
   const withServer = await asGroups(["capture", "server"]);
   const captureOnly = await asGroups(["capture"]);
-  // Since 066 the columns the wrapper reads come from its projection, and the
+  // Since 068 the columns the wrapper reads come from its projection, and the
   // dependency subqueries that name thought_sources are removed before they
   // are planned — so their tables are not checked, and the capture group alone
   // runs it (at 059 it was refused on thought_sources; the dependency read
   // still is, [54]).
   assert(withServer === "5 rows" && captureOnly === "5 rows" && ROLE_GRANTS.server.some((r) => (r as { table?: string }).table === "thought_sources"),
-    `a role with the capture and server groups runs it, and since 066 the capture group alone does too (${withServer}; ${captureOnly})`);
+    `a role with the capture and server groups runs it, and since 068 the capture group alone does too (${withServer}; ${captureOnly})`);
 
   // A later migration reshapes the wrapper by DROP and CREATE; --reapply
   // replays 059 over it, which drops it first.
@@ -8534,7 +8534,7 @@ console.log("\n[55] Migration 059: search_thoughts_current — the hybrid with s
   try { await reapply("059"); } catch (e) { replayError = (e as Error).message; }
   const [reshaped] = await q<{ r: string }>(`SELECT pg_get_function_result(to_regprocedure($1)) AS r`, [SEARCH_THOUGHTS_CURRENT_SIGNATURE]);
   assert(replayError === "" && reshaped.r === fn?.result, `059 replays over a reshaped wrapper — it drops it first — and leaves its own columns (${replayError || "replayed"})`);
-  // 059's replay put its sql body back; 066 re-creates the shipped plpgsql one.
+  // 059's replay put its sql body back; 068 re-creates the shipped plpgsql one.
   await restoreShipped("search_thoughts_current");
 
   await db.exec(`DELETE FROM thoughts`);
@@ -8602,7 +8602,7 @@ console.log("\n[56] Migration 060: the write functions append then project — t
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
   assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
-    `thirteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 066 the node_state projection's four ([60]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+    `thirteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -10042,7 +10042,7 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
   await db.exec(`DELETE FROM derivations`);
 }
 
-// ── 60. Migration 066: the node_state projection (SMD-2256) ──
+// ── 60. Migration 068: the node_state projection (SMD-2256) ──
 //
 // node_lifecycle() and node_state() read two tables the thoughts triggers keep
 // current — every ticket's head, every thought's newest superseder — instead of
@@ -10056,7 +10056,7 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
 // the replays; the rebuild after a write with triggers disabled; REPEATABLE
 // READ refused, SERIALIZABLE run; the lock bound; TRUNCATE. The races are
 // test-live's.
-console.log("\n[60] Migration 066: node_state reads a stored projection kept current on write — the catalog, 058's rows after every kind of write, the plan, the grant, the replays, the rebuild, the isolation levels, the lock bound and TRUNCATE (SMD-2256)");
+console.log("\n[62] Migration 068: node_state reads a stored projection kept current on write — the catalog, 058's rows after every kind of write, the plan, the grant, the replays, the rebuild, the isolation levels, the lock bound and TRUNCATE (SMD-2256)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   await db.exec(`DELETE FROM thoughts`);
@@ -10072,7 +10072,7 @@ console.log("\n[60] Migration 066: node_state reads a stored projection kept cur
            (SELECT string_agg(tgname || ':' || (tgtype & 1)::text || ':' || coalesce(tgoldtable::text, '-') || ':' || coalesce(tgnewtable::text, '-'), ' ' ORDER BY tgname)
               FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname LIKE 'thoughts_node_projection_%') AS trig,
            (SELECT count(*)::int FROM pg_proc WHERE proname LIKE 'ob1\\_%node\\_projection%' OR proname IN ('ob1_superseders_of', 'ob1_ticket_heads_of') AND prosecdef) AS defs,
-           (SELECT bool_and(obj_description(oid, 'pg_proc') LIKE '%Migration 058 / SMD-2074%' AND obj_description(oid, 'pg_proc') LIKE '%066 / SMD-2256%')
+           (SELECT bool_and(obj_description(oid, 'pg_proc') LIKE '%Migration 058 / SMD-2074%' AND obj_description(oid, 'pg_proc') LIKE '%068 / SMD-2256%')
               FROM pg_proc WHERE oid IN ('node_lifecycle()'::regprocedure, 'node_state(uuid[])'::regprocedure)) AS comments,
            (SELECT prosrc FROM pg_proc WHERE oid = 'node_lifecycle()'::regprocedure) AS "lifeBody",
            (SELECT prosrc FROM pg_proc WHERE oid = 'node_state(uuid[])'::regprocedure) AS "stateBody",
@@ -10084,7 +10084,7 @@ console.log("\n[60] Migration 066: node_state reads a stored projection kept cur
       && cat.trig === "thoughts_node_projection_delete:0:old_rows:- thoughts_node_projection_insert:0:-:new_rows thoughts_node_projection_truncate:0:-:- thoughts_node_projection_update:0:old_rows:new_rows"
       && secdef === 0 && cat.comments === true && !/^\s*WITH\b/i.test(cat.stateBody) && !/row_number/.test(cat.lifeBody + cat.stateBody)
       && /ob1_ticket_head/.test(cat.lifeBody) && /ob1_superseded_by/.test(cat.stateBody) && cat.rows === 100,
-    `the two tables, their columns and no foreign key either way; the md5 index on the issue key; four statement triggers (tgtype bit 0 clear), the row-change three with transition tables; no ob1_* function SECURITY DEFINER; node_lifecycle and node_state name 058 and 066 in their COMMENTs, read the tables, hold no window and node_state no top-level WITH; the hybrid estimates 100 rows (${cat.trig}; rows ${cat.rows})`);
+    `the two tables, their columns and no foreign key either way; the md5 index on the issue key; four statement triggers (tgtype bit 0 clear), the row-change three with transition tables; no ob1_* function SECURITY DEFINER; node_lifecycle and node_state name 058 and 068 in their COMMENTs, read the tables, hold no window and node_state no top-level WITH; the hybrid estimates 100 rows (${cat.trig}; rows ${cat.rows})`);
 
   // 058's two formulas, verbatim from its file: what the projection must equal.
   const src058 = readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith("058_"))!), "utf8");
@@ -10118,7 +10118,7 @@ console.log("\n[60] Migration 066: node_state reads a stored projection kept cur
     };
     const ids = async () => (await q<{ id: string }>(`SELECT id::text AS id FROM thoughts ORDER BY id`)).map((r) => r.id);
     const some = async (n: number) => { const all = await ids(); return Array.from({ length: n }, () => pick(all)).filter(Boolean); };
-    const content = () => `[60] thought ${seed}-${++serial}`;
+    const content = () => `[62] thought ${seed}-${++serial}`;
     for (let k = 0; k < 20; k++) await db.query(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb)`, [content(), JSON.stringify(meta())]);
     for (let step = 0; step < 220 && !failure; step++) {
       const r = rnd();
@@ -10253,27 +10253,27 @@ console.log("\n[60] Migration 066: node_state reads a stored projection kept cur
     return out;
   };
   const writes = async () => {
-    const [a] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[60] a granted ticket', '{"issue": "G-1", "status_type": "started"}') RETURNING id::text AS id`);
-    const [b] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[60] its successor', '{"issue": "G-1", "status_type": "completed"}') RETURNING id::text AS id`);
+    const [a] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[62] a granted ticket', '{"issue": "G-1", "status_type": "started"}') RETURNING id::text AS id`);
+    const [b] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[62] its successor', '{"issue": "G-1", "status_type": "completed"}') RETURNING id::text AS id`);
     await db.query(`UPDATE thoughts SET supersedes = $1 WHERE id = $2`, [a.id, b.id]);
     await q(`SELECT count(*) FROM node_lifecycle()`);
     await db.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[a.id, b.id]]);
   };
   const granted = await asRole("ob1_projection_capture", false, writes);
-  const plainCapture = await asRole("ob1_projection_bare", true, () => q(`INSERT INTO thoughts (content, metadata) VALUES ('[60] a plain capture', '{}')`));
-  const ticketWrite = await asRole("ob1_projection_bare", true, () => q(`INSERT INTO thoughts (content, metadata) VALUES ('[60] a bare ticket', '{"issue": "G-2"}')`));
-  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[60] a %'`);
+  const plainCapture = await asRole("ob1_projection_bare", true, () => q(`INSERT INTO thoughts (content, metadata) VALUES ('[62] a plain capture', '{}')`));
+  const ticketWrite = await asRole("ob1_projection_bare", true, () => q(`INSERT INTO thoughts (content, metadata) VALUES ('[62] a bare ticket', '{"issue": "G-2"}')`));
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[62] a %'`);
   assert(granted === "ok" && plainCapture === "ok" && /permission denied for table ob1_(ticket_head|superseded_by)\b/.test(ticketWrite)
       && ["ob1_ticket_head", "ob1_superseded_by"].every((t) => ROLE_GRANTS.capture.some((r) => (r as { table?: string }).table === t)),
     `the capture and server groups write a ticket row, a pointer and a delete and read lifecycles; without the two tables a plain capture still succeeds and a ticket write is refused on the projection (the head rule reads ob1_superseded_by first; ${granted}; ${plainCapture}; ${ticketWrite})`);
 
-  // Replays: 066 over itself writes nothing; 058 then 066 is the shipped
+  // Replays: 068 over itself writes nothing; 058 then 068 is the shipped
   // state; 058 alone puts back its window (which reads thoughts), and the
   // triggers still keep the tables current under it.
   const snapshot = async () => (await q<{ s: string }>(`SELECT (SELECT string_agg(row(h.*)::text, '|' ORDER BY issue_key) FROM ob1_ticket_head h) || '#' || (SELECT string_agg(row(s.*)::text, '|' ORDER BY old_id) FROM ob1_superseded_by s) AS s`))[0].s;
   const before = await snapshot();
-  await reapply("066");
-  await reapply("066");
+  await reapply("068");
+  await reapply("068");
   const twice = await snapshot();
   const [rebuiltClean] = await q<{ w: number }>(`SELECT heads_written + heads_deleted + superseders_written + superseders_deleted AS w FROM ob1_rebuild_node_projection()`);
   await reapply("058");
@@ -10285,12 +10285,12 @@ console.log("\n[60] Migration 066: node_state reads a stored projection kept cur
   const [x] = await q<{ id: string }>(`SELECT id::text AS id FROM thoughts WHERE metadata->>'issue' IS NOT NULL ORDER BY id LIMIT 1`);
   await db.query(`UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled", "linear_updated_at": "2026-09-09"}' WHERE id = $1`, [x.id]);
   const keptUnderOld = await diverged();
-  await reapply("066");
+  await reapply("068");
   const restored = (await q<{ b: string }>(`SELECT prosrc AS b FROM pg_proc WHERE oid = 'node_lifecycle()'::regprocedure`))[0].b;
   const triggers = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname LIKE 'thoughts_node_projection_%'`))[0].n;
   assert(before === twice && rebuiltClean.w === 0 && /row_number/.test(oldBody) && !underOld.drift && !keptUnderOld.drift && !keptUnderOld.life
       && /ob1_ticket_head/.test(restored) && triggers === 4,
-    `066 replayed twice writes nothing and a rebuild after it finds nothing to fix; 058 replayed alone puts its window back and leaves the tables exact, a ticket write under it keeps them exact, and 066 after it restores the reads and the four triggers (${JSON.stringify(underOld)}, ${JSON.stringify(keptUnderOld)})`);
+    `068 replayed twice writes nothing and a rebuild after it finds nothing to fix; 058 replayed alone puts its window back and leaves the tables exact, a ticket write under it keeps them exact, and 068 after it restores the reads and the four triggers (${JSON.stringify(underOld)}, ${JSON.stringify(keptUnderOld)})`);
 
   // A write with thoughts' user triggers disabled bypasses the projection:
   // drift() sees it, the rebuild repairs it and says what it did.
@@ -10315,7 +10315,7 @@ console.log("\n[60] Migration 066: node_state reads a stored projection kept cur
     return out;
   };
   const rrTicket = await underIso("REPEATABLE READ", `UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled"}' WHERE id = '${x.id}'`);
-  const rrPlain = await underIso("REPEATABLE READ", `INSERT INTO thoughts (content, metadata) VALUES ('[60] a plain capture under repeatable read', '{}')`);
+  const rrPlain = await underIso("REPEATABLE READ", `INSERT INTO thoughts (content, metadata) VALUES ('[62] a plain capture under repeatable read', '{}')`);
   const serTicket = await underIso("SERIALIZABLE", `UPDATE thoughts SET metadata = metadata || '{"status_type": "started", "linear_updated_at": "2026-09-29"}' WHERE id = '${x.id}'`);
   // The rebuild's snapshot must postdate its lock too (second review pass): it
   // refuses outside READ COMMITTED.
@@ -10332,7 +10332,7 @@ console.log("\n[60] Migration 066: node_state reads a stored projection kept cur
   // table at about twenty thousand).
   let held = -1;
   await db.transaction(async (tx) => {
-    for (let k = 0; k < 600; k++) await tx.query(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb)`, [`[60] lock bound ${k}`, JSON.stringify({ issue: `LB-${k}` })]);
+    for (let k = 0; k < 600; k++) await tx.query(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb)`, [`[62] lock bound ${k}`, JSON.stringify({ issue: `LB-${k}` })]);
     held = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND classid BETWEEN 22560 AND 22562`)).rows[0].n;  // one session: PGlite's pg_locks does not carry pg_backend_pid()
     await tx.rollback();
   });
@@ -10344,9 +10344,9 @@ console.log("\n[60] Migration 066: node_state reads a stored projection kept cur
   // stalled every ticket writer). A thousand plain rows, one ticket row and
   // one plain row another supersedes: two buckets, at most. The cascade's
   // correctness is test-live [33]'s paused DELETE.
-  const prune = (await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) SELECT '[60] prune ' || g, '{}' FROM generate_series(1, 1000) g RETURNING id::text AS id`)).map((r) => r.id);
-  const [ticket] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[60] prune ticket', '{"issue": "PR-1"}') RETURNING id::text AS id`);
-  const [kept] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[60] prune kept', '{}') RETURNING id::text AS id`);
+  const prune = (await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) SELECT '[62] prune ' || g, '{}' FROM generate_series(1, 1000) g RETURNING id::text AS id`)).map((r) => r.id);
+  const [ticket] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[62] prune ticket', '{"issue": "PR-1"}') RETURNING id::text AS id`);
+  const [kept] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[62] prune kept', '{}') RETURNING id::text AS id`);
   await db.query(`UPDATE thoughts SET supersedes = $1 WHERE id = $2`, [prune[0], kept.id]);
   let pruneBuckets = -1;
   await db.transaction(async (tx) => {

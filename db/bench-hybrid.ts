@@ -47,13 +47,13 @@
  * migration header records the finding, and this bench is what would catch it
  * coming back.
  *
- * ── prefer_current (059, SMD-2255; stored, 066 / SMD-2256) ───────────────────
+ * ── prefer_current (059, SMD-2255; stored, 068 / SMD-2256) ───────────────────
  * The last blocks time search_thoughts_current against the hybrid on the same
  * rows, after stamping lifecycles and supersession onto them — interleaved in
  * alternating order, the added cost the difference of the two medians (the
  * estimator pre-registered at 059), the median of the paired differences
  * printed beside it — against the budget the flag was pre-registered with (at
- * most the hybrid's own median at 10,000 rows); then what 066's triggers cost
+ * most the hybrid's own median at 10,000 rows); then what 068's triggers cost
  * a writer, against the triggers dropped.
  */
 
@@ -187,9 +187,9 @@ for (const n of SCALES) {
   console.log(`    fused, one needle in 10% of rows        ${fmt(tHybridCommon).padStart(9)}   (probed as common, not paged)`);
   console.log(`      the keyword page it did not fetch     ${fmt(tKeywordCommon).padStart(9)}`);
 
-  // ── prefer_current (059, SMD-2255; stored, 066 / SMD-2256) ─────────────────
+  // ── prefer_current (059, SMD-2255; stored, 068 / SMD-2256) ─────────────────
   // search_thoughts_current reads the hybrid at min(100, 4N) and node_state for
-  // the window; since 066 node_state reads two stored tables by primary key
+  // the window; since 068 node_state reads two stored tables by primary key
   // (at 059 it computed the whole brain's lifecycle per call). Timed after the
   // rows above, so their numbers are what they were: 40% of the rows become
   // ticket rows (tickets of one or two rows, so heads sometimes choose), a
@@ -227,12 +227,12 @@ for (const n of SCALES) {
   const needleP = await paired(hybrid, () => sql`SELECT content, matched_needles FROM search_thoughts_current(${q}::vector, ${text}, 0.0, 10, '{}'::jsonb)`);
   const windowP = await paired(() => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`,
                                () => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 40, '{}'::jsonb)`);
-  // A read of the columns, not count(*): since 066 count(*) reads none, and
+  // A read of the columns, not count(*): since 068 count(*) reads none, and
   // the planner drops every join (first review pass).
   const tState = await time(() => sql`SELECT count(open) + count(superseded_by) FROM node_state()`);
   const tStateAll = await time(() => sql`SELECT count(blockers) + count(open) + count(superseded_by) FROM node_state()`);
   const verdict = (p: { off: number; added: number }) => (n === 10000 ? `; budget ${fmt(p.off)}: ${p.added <= p.off ? "within" : "OVER"}` : "");
-  console.log(`\n  prefer_current (059, stored since 066), ${st.settled.toLocaleString()} settled and ${st.superseded.toLocaleString()} superseded rows, ${ROUNDS} interleaved rounds:\n`);
+  console.log(`\n  prefer_current (059, stored since 068), ${st.settled.toLocaleString()} settled and ${st.superseded.toLocaleString()} superseded rows, ${ROUNDS} interleaved rounds:\n`);
   console.log(`    hybrid, no needle                       ${fmt(plainP.off).padStart(9)}`);
   console.log(`    search_thoughts_current, no needle      ${fmt(plainP.on).padStart(9)}   (+${fmt(plainP.added)}; paired +${fmt(plainP.pairedAdded)}${verdict(plainP)})`);
   console.log(`      the hybrid asked for 40, its window     ${fmt(windowP.on).padStart(9)}   (+${fmt(windowP.added)} over asked for 10, no needle; paired +${fmt(windowP.pairedAdded)})`);
@@ -241,7 +241,7 @@ for (const n of SCALES) {
   console.log(`      node_state()'s lifecycle and superseded_by, every thought ${fmt(tState)}`);
   console.log(`      node_state(), every column (the dependency read too)      ${fmt(tStateAll)}`);
 
-  // What 066's triggers cost a writer, pre-registered: a plain capture at most
+  // What 068's triggers cost a writer, pre-registered: a plain capture at most
   // +0.1 ms, a ticket's status update at most +0.5 ms, a bulk stamp of 40% of
   // the rows at most +20%. Off is the three row-change triggers DROPPED, in
   // alternating blocks, and on is them re-created from their own definitions:
@@ -249,7 +249,7 @@ for (const n of SCALES) {
   // own on a bulk statement (second review pass: DISABLE hid it).
   const triggerDefs = (await sql`SELECT tgname, pg_get_triggerdef(oid) AS def FROM pg_trigger
                                   WHERE tgrelid = 'thoughts'::regclass AND tgname IN ('thoughts_node_projection_insert', 'thoughts_node_projection_update', 'thoughts_node_projection_delete')`) as { tgname: string; def: string }[];
-  if (triggerDefs.length !== 3) throw new Error(`expected 066's three row-change triggers, found ${triggerDefs.length}`);
+  if (triggerDefs.length !== 3) throw new Error(`expected 068's three row-change triggers, found ${triggerDefs.length}`);
   const projectionTriggers = (on: boolean) => sql.unsafe(triggerDefs
     .map((t) => `DROP TRIGGER IF EXISTS ${t.tgname} ON thoughts;${on ? ` ${t.def};` : ""}`).join(" "));
   const writeBlocks = async (call: () => Promise<unknown>) => {
@@ -288,7 +288,7 @@ for (const n of SCALES) {
   const [{ drift }] = await sql`SELECT count(*)::int AS drift FROM ob1_node_projection_drift()`;
   const stampOn = median(stampsOn), tStampOff = median(stampsOff);
   const within = (ok: boolean) => (ok ? "within" : "OVER");
-  console.log(`\n  066's triggers on a writer, against them dropped (medians; the bulk stamp three times each way):\n`);
+  console.log(`\n  068's triggers on a writer, against them dropped (medians; the bulk stamp three times each way):\n`);
   console.log(`    a plain upsert_thought                  ${fmt(capture.on).padStart(9)} vs ${fmt(capture.off)}   (+${fmt(capture.on - capture.off)}; budget 0.10 ms: ${within(capture.on - capture.off <= 0.1)})`);
   console.log(`    a ticket's status update                ${fmt(statusUpdate.on).padStart(9)} vs ${fmt(statusUpdate.off)}   (+${fmt(statusUpdate.on - statusUpdate.off)}; budget 0.50 ms: ${within(statusUpdate.on - statusUpdate.off <= 0.5)})`);
   console.log(`    stamping 40% of the rows                ${fmt(stampOn).padStart(9)} vs ${fmt(tStampOff)}   (${stampOn >= tStampOff ? "+" : ""}${((stampOn / tStampOff - 1) * 100).toFixed(0)}%; budget +20%: ${within(stampOn <= tStampOff * 1.2)})`);

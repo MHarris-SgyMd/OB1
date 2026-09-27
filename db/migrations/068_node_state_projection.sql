@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 066: node_state reads a stored projection kept current on write —
+-- Migration 068: node_state reads a stored projection kept current on write —
 --                every ticket's head and every thought's newest superseder
 --                (SMD-2256)
 -- =============================================================================
@@ -173,13 +173,13 @@
 -- =============================================================================
 
 -- Each prerequisite named on its own, as 058 names its two. Driven by
--- test-upgrade.ts [20r].
+-- test-upgrade.ts [20t].
 DO $g$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                   WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'supersedes') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 066 needs 025 (thoughts.supersedes); this schema lacks it',
+      MESSAGE = 'migration 068 needs 025 (thoughts.supersedes); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character
       -- back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
@@ -187,7 +187,7 @@ BEGIN
   END IF;
   IF to_regprocedure('node_state(uuid[])') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 066 needs 058 (node_state); this schema lacks it',
+      MESSAGE = 'migration 068 needs 058 (node_state); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -208,14 +208,14 @@ CREATE TABLE IF NOT EXISTS ob1_ticket_head (
   synced_at   text                -- the head's metadata->>'linear_updated_at'
 );
 COMMENT ON TABLE ob1_ticket_head IS
-  'Every issue key a thought carries, with its head (the issue row nothing supersedes, then the newest linear_updated_at, then the id) and the head''s status, status_type and synced_at. A projection of thoughts kept current by the thoughts_node_projection_* triggers; ob1_node_projection_drift() checks it, ob1_rebuild_node_projection() repairs it. Migration 066 / SMD-2256.';
+  'Every issue key a thought carries, with its head (the issue row nothing supersedes, then the newest linear_updated_at, then the id) and the head''s status, status_type and synced_at. A projection of thoughts kept current by the thoughts_node_projection_* triggers; ob1_node_projection_drift() checks it, ob1_rebuild_node_projection() repairs it. Migration 068 / SMD-2256.';
 
 CREATE TABLE IF NOT EXISTS ob1_superseded_by (
   old_id uuid PRIMARY KEY,        -- a thought some row's supersedes names
   new_id uuid NOT NULL            -- its newest successor by (created_at, id) descending
 );
 COMMENT ON TABLE ob1_superseded_by IS
-  'Every thought some row supersedes, with its newest successor by (created_at, id) descending. A projection of thoughts kept current by the thoughts_node_projection_* triggers; ob1_node_projection_drift() checks it, ob1_rebuild_node_projection() repairs it. Migration 066 / SMD-2256.';
+  'Every thought some row supersedes, with its newest successor by (created_at, id) descending. A projection of thoughts kept current by the thoughts_node_projection_* triggers; ob1_node_projection_drift() checks it, ob1_rebuild_node_projection() repairs it. Migration 068 / SMD-2256.';
 
 -- Finds an issue's rows for the triggers' keyed recompute. 025's partial
 -- idx_thoughts_supersedes already serves the superseder rule.
@@ -239,7 +239,7 @@ AS $$
    ORDER BY c.old_id, c.created_at DESC, c.new_id DESC
 $$;
 COMMENT ON FUNCTION ob1_superseders_of(uuid[]) IS
-  'The superseder rule, once: for each thought named (every superseded thought when NULL), its newest successor by (created_at, id) descending — 058''s. What ob1_superseded_by holds. Migration 066 / SMD-2256.';
+  'The superseder rule, once: for each thought named (every superseded thought when NULL), its newest successor by (created_at, id) descending — 058''s. What ob1_superseded_by holds. Migration 068 / SMD-2256.';
 
 CREATE OR REPLACE FUNCTION ob1_ticket_heads_of(p_issues text[])
 RETURNS TABLE (issue_key uuid, issue text, head_id uuid, status text, status_type text, synced_at text)
@@ -263,7 +263,7 @@ AS $$
    ORDER BY md5(c.issue)::uuid, c.issue, (x.old_id IS NULL) DESC, c.synced_at DESC NULLS LAST, c.id
 $$;
 COMMENT ON FUNCTION ob1_ticket_heads_of(text[]) IS
-  'The ticket-head rule, once: for each issue key named (every key a row carries when NULL), the issue row nothing supersedes, then the newest linear_updated_at, then the id — 058''s — with its status, status_type and synced_at. Reads ob1_superseded_by for "nothing supersedes it", so it is reconciled first. What ob1_ticket_head holds. Migration 066 / SMD-2256.';
+  'The ticket-head rule, once: for each issue key named (every key a row carries when NULL), the issue row nothing supersedes, then the newest linear_updated_at, then the id — 058''s — with its status, status_type and synced_at. Reads ob1_superseded_by for "nothing supersedes it", so it is reconciled first. What ob1_ticket_head holds. Migration 068 / SMD-2256.';
 
 -- ---------------------------------------------------------------------------
 -- Reconcile: superseders, then heads. Keyed when given keys, every key when
@@ -328,7 +328,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_node_projection_reconcile(text[], uuid[]) IS
-  'Brings ob1_superseded_by, then ob1_ticket_head, to what the two rules compute for the keys given (every key when NULL; an empty array touches neither table): deletes what vanished, upserts what changed, and returns the counts. Takes no lock itself — the triggers and ob1_rebuild_node_projection() do — so it is internal: a direct call races the triggers (call the rebuild instead). Migration 066 / SMD-2256.';
+  'Brings ob1_superseded_by, then ob1_ticket_head, to what the two rules compute for the keys given (every key when NULL; an empty array touches neither table): deletes what vanished, upserts what changed, and returns the counts. Takes no lock itself — the triggers and ob1_rebuild_node_projection() do — so it is internal: a direct call races the triggers (call the rebuild instead). Migration 068 / SMD-2256.';
 
 CREATE OR REPLACE FUNCTION ob1_rebuild_node_projection()
 RETURNS TABLE (heads_written int, heads_deleted int, superseders_written int, superseders_deleted int)
@@ -354,7 +354,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_rebuild_node_projection() IS
-  'Reconciles the whole node_state projection under the exclusive lock (22560, 0) and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 066''s seed, and the repair after a write made with thoughts'' user triggers disabled. Migration 066 / SMD-2256.';
+  'Reconciles the whole node_state projection under the exclusive lock (22560, 0) and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 068''s seed, and the repair after a write made with thoughts'' user triggers disabled. Migration 068 / SMD-2256.';
 
 -- 058's two formulas verbatim, independent of the rule functions above: what
 -- a verifier must not share with the thing it verifies.
@@ -386,7 +386,7 @@ AS $$
    WHERE s.new_id IS DISTINCT FROM f.new_id
 $$;
 COMMENT ON FUNCTION ob1_node_projection_drift() IS
-  'Every row where the node_state projection differs from 058''s formulas computed fresh — projection (head or superseded_by), key, the stored row and the fresh one as text, NULL where one side has none. Zero rows when exact. Computes the whole brain: a check, not a read path. Migration 066 / SMD-2256.';
+  'Every row where the node_state projection differs from 058''s formulas computed fresh — projection (head or superseded_by), key, the stored row and the fresh one as text, NULL where one side has none. Zero rows when exact. Computes the whole brain: a check, not a read path. Migration 068 / SMD-2256.';
 
 -- ---------------------------------------------------------------------------
 -- The triggers: what a statement moved, locked, then reconciled.
@@ -463,7 +463,7 @@ BEGIN
   -- without a conflict (first review pass). SERIALIZABLE is left to SSI.
   IF current_setting('transaction_isolation') = 'repeatable read' THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'this write moves an issue key, a ticket''s status or watermark, a supersedes pointer or a successor''s created_at, and node_state''s projection (migration 066) cannot be kept under REPEATABLE READ',
+      MESSAGE = 'this write moves an issue key, a ticket''s status or watermark, a supersedes pointer or a successor''s created_at, and node_state''s projection (migration 068) cannot be kept under REPEATABLE READ',
       HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of ticket rows is serializable.',
       ERRCODE = 'feature_not_supported';
   END IF;
@@ -516,7 +516,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_node_projection_sync() IS
-  'The thoughts_node_projection_* row-change triggers'' body: from a statement''s transition tables, the issue keys whose head may have moved (both sides of a key''s move, the issues of every pointer target) and the thoughts whose newest successor may have moved; returns at once when the statement touched no row carrying an issue key or a supersedes pointer; refuses under REPEATABLE READ; otherwise takes the advisory locks — 22560 shared, then buckets of 256 per class: 22562 for the superseded thoughts, the rows whose head fields moved and the deleted rows a cascade can need, then 22561 for the issues (bucketed on md5(issue)), the pointer targets'' issues read after the pointer buckets are held — and reconciles. Never writes thoughts. Migration 066 / SMD-2256.';
+  'The thoughts_node_projection_* row-change triggers'' body: from a statement''s transition tables, the issue keys whose head may have moved (both sides of a key''s move, the issues of every pointer target) and the thoughts whose newest successor may have moved; returns at once when the statement touched no row carrying an issue key or a supersedes pointer; refuses under REPEATABLE READ; otherwise takes the advisory locks — 22560 shared, then buckets of 256 per class: 22562 for the superseded thoughts, the rows whose head fields moved and the deleted rows a cascade can need, then 22561 for the issues (bucketed on md5(issue)), the pointer targets'' issues read after the pointer buckets are held — and reconciles. Never writes thoughts. Migration 068 / SMD-2256.';
 
 CREATE OR REPLACE FUNCTION ob1_node_projection_truncate()
 RETURNS trigger
@@ -532,7 +532,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_node_projection_truncate() IS
-  'thoughts_node_projection_truncate''s body: emptying thoughts leaves no head and no superseder, so both tables are emptied, under the truncation''s own lock (first review pass: a cascading truncation left them stale). Migration 066 / SMD-2256.';
+  'thoughts_node_projection_truncate''s body: emptying thoughts leaves no head and no superseder, so both tables are emptied, under the truncation''s own lock (first review pass: a cascading truncation left them stale). Migration 068 / SMD-2256.';
 
 DROP TRIGGER IF EXISTS thoughts_node_projection_insert ON thoughts;
 CREATE TRIGGER thoughts_node_projection_insert
@@ -574,7 +574,7 @@ AS $$
                                AND h.issue = coalesce(t.metadata->>'ticket', t.metadata->>'issue')
 $$;
 COMMENT ON FUNCTION node_lifecycle() IS
-  'Every thought''s lifecycle: status, status_type, synced_at (the source watermark, metadata.linear_updated_at, as text) and created_at. A row carrying `ticket` or `issue` reads its ticket''s head (the issue row nothing supersedes, then the newest sync, then the id), falling back to its own keys; any other row reads its own. The head is ob1_ticket_head''s, kept current on write (066); it reads thoughts and that table. metadata.status_type is a transitional lossy scalar (the transitions are thought_audit''s since 046): SMD-1997''s fold replaces what feeds the table — and node_dependencies()'' gate, the other read of it — not this signature. Migration 058 / SMD-2074; stored, 066 / SMD-2256.';
+  'Every thought''s lifecycle: status, status_type, synced_at (the source watermark, metadata.linear_updated_at, as text) and created_at. A row carrying `ticket` or `issue` reads its ticket''s head (the issue row nothing supersedes, then the newest sync, then the id), falling back to its own keys; any other row reads its own. The head is ob1_ticket_head''s, kept current on write (068); it reads thoughts and that table. metadata.status_type is a transitional lossy scalar (the transitions are thought_audit''s since 046): SMD-1997''s fold replaces what feeds the table — and node_dependencies()'' gate, the other read of it — not this signature. Migration 058 / SMD-2074; stored, 068 / SMD-2256.';
 
 CREATE OR REPLACE FUNCTION node_state(p_ids uuid[] DEFAULT NULL)
 RETURNS TABLE (thought_id uuid, status text, status_type text, synced_at text, created_at timestamptz,
@@ -622,7 +622,7 @@ AS $$
    WHERE p_ids IS NULL OR l.thought_id = ANY(p_ids)
 $$;
 COMMENT ON FUNCTION node_state(uuid[]) IS
-  'Per thought (every thought when p_ids is NULL, else those named): node_lifecycle()''s columns; open (known and not settled, NULL when the status_type is missing or unknown); blocked (open blockers, and the thought itself not settled); blockers (its ticket''s open blockers from gating active links, a blocker settled only by its own known lifecycle, sorted, linear bare and another system''s as system:key, NULL when none — kept on a settled thought); unknown_blockers (those with no known status); in_dependencies (a gating active link names its ticket); superseded_by (the newest thought superseding it, NULL when current — ob1_superseded_by''s). Coverage is open IS NOT NULL; freshness is synced_at and created_at, never updated_at. No top-level WITH, so a caller''s planner pulls it up: a read of the lifecycle and superseded_by columns is primary-key lookups from the caller''s ids, and the dependency joins run only when their columns are read (they still compute every link — SMD-2267). The one read graph-centrality and search rank by. Migration 058 / SMD-2074; stored, 066 / SMD-2256.';
+  'Per thought (every thought when p_ids is NULL, else those named): node_lifecycle()''s columns; open (known and not settled, NULL when the status_type is missing or unknown); blocked (open blockers, and the thought itself not settled); blockers (its ticket''s open blockers from gating active links, a blocker settled only by its own known lifecycle, sorted, linear bare and another system''s as system:key, NULL when none — kept on a settled thought); unknown_blockers (those with no known status); in_dependencies (a gating active link names its ticket); superseded_by (the newest thought superseding it, NULL when current — ob1_superseded_by''s). Coverage is open IS NOT NULL; freshness is synced_at and created_at, never updated_at. No top-level WITH, so a caller''s planner pulls it up: a read of the lifecycle and superseded_by columns is primary-key lookups from the caller''s ids, and the dependency joins run only when their columns are read (they still compute every link — SMD-2267). The one read graph-centrality and search rank by. Migration 058 / SMD-2074; stored, 068 / SMD-2256.';
 
 -- ---------------------------------------------------------------------------
 -- search_thoughts_current in plpgsql: 059's body, columns and settings,

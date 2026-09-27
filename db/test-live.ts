@@ -6700,9 +6700,9 @@ console.log("\n[32] Migration 064 on a real server: the page store under concurr
   await sql.close();
 }
 
-console.log("\n[33] Migration 066's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a row gaining a key while it is superseded holds its own pointer lock; a pointer write waits for a concurrent move of its target's issue; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
+console.log("\n[33] Migration 068's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a row gaining a key while it is superseded holds its own pointer lock; a pointer write waits for a concurrent move of its target's issue; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
 {
-  // test-schema [60] holds the rules on one connection; what it cannot hold is
+  // test-schema [62] holds the rules on one connection; what it cannot hold is
   // a second writer's uncommitted row. Each race below goes stale without the
   // lock it names, and drift() — 058's formulas against the
   // tables — is the check.

@@ -208,7 +208,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300,
-066 SMD-2256).
+068 SMD-2256).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -429,7 +429,7 @@ INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 schema knows, and the two that settle a node); `node_lifecycle()` (per thought:
 status, status_type, the source watermark `synced_at` and `created_at` — a row
 carrying `ticket` or `issue` reads its ticket's head; it read `thoughts`
-alone until 066 stored the heads); `node_dependencies()` (one row per
+alone until 068 stored the heads); `node_dependencies()` (one row per
 `blocks` / `blocked_by` link facet, active or closed, with whether its system
 gates — SMD-2218's rule); and
 `node_state(ids)` (every thought, or those named: the lifecycle beside `open`,
@@ -438,7 +438,7 @@ gates — SMD-2218's rule); and
 lifecycle when `open` is not NULL; its freshness is `synced_at`, never
 `updated_at` — so each consumer counts over what it ranks. At 058 the ids
 narrowed the rows returned, not the work: the whole brain was computed and
-filtered last (066 stores the heads and superseders, below).
+filtered last (068 stores the heads and superseders, below).
 `graph-centrality.ts` is the first reader, its reports byte for byte what they
 were; search is the second (`search_thoughts`' opt-in `prefer_current`, through
 059). `metadata.status_type` is a
@@ -483,11 +483,11 @@ MRR +0.052, live-ticket MRR +0.194; costs disclosed — topical −0.127, a note
 under a Done ticket −0.292, a settled key −0.750); the query log records such a
 search as arm `current` (the CHECK widened), and `db/tier.ts` replays it. The
 server group gains SELECT on `thought_sources`, which `node_state` reads for
-its dependency columns (since 066 the search's columns do not); the wrapper
+its dependency columns (since 068 the search's columns do not); the wrapper
 is dropped before it is created, as 058's three are. At 059 it cost what
 `node_state` cost — the whole brain's lifecycle per call: +10.7 ms
 at 10,000 thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the
-budget pre-registered for it; shipped opt-in on the maintainer's call, and 066
+budget pre-registered for it; shipped opt-in on the maintainer's call, and 068
 made it a lookup.
 
 Migration 060 has the write functions append then project (SMD-2116, step 2 of
@@ -695,7 +695,7 @@ test-schema [59], test-live [32], test-upgrade [20p];
 `server-portable/test-preflight.ts` drives the census, the remedy and the
 repair arms.
 
-Migration 066 stores what `node_state` read per call (SMD-2256):
+Migration 068 stores what `node_state` read per call (SMD-2256):
 `ob1_ticket_head`, every issue key a row carries with its head (058's rule) and
 the head's status, status_type and watermark, and `ob1_superseded_by`, every
 superseded thought with its newest successor. Three statement triggers on
@@ -750,10 +750,10 @@ them still fills their transition tables — and is in `changes/smd-2256.md`.
 when exact) and `ob1_rebuild_node_projection()` repairs them after a write made
 with the triggers disabled (`DISABLE TRIGGER`, `session_replication_role =
 replica`); it refuses to run outside READ COMMITTED, and `migrate.ts` now runs
-every file under READ COMMITTED, so 066's seed is right on a brain whose default
+every file under READ COMMITTED, so 068's seed is right on a brain whose default
 is not. Preflight fails a connection whose default is REPEATABLE READ. The
 triggers run as the writer, so the **capture** group gains the writes on both
-tables: a role granted before 066 fails preflight until `migrate.ts --grant`
+tables: a role granted before 068 fails preflight until `migrate.ts --grant`
 runs again, and a reader of `node_lifecycle()` needs SELECT on
 `ob1_ticket_head`. On PostgreSQL 16 and 17 the search's lifecycle columns no
 longer read `thought_sources` (a removed join's tables are not
@@ -816,12 +816,12 @@ issues every group at once.
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
-| | `ob1_ticket_head` (066) | `SELECT, INSERT, UPDATE, DELETE` — 066's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
-| | `ob1_superseded_by` (066) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
+| | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
+| | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
-| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 066 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
+| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
@@ -1667,7 +1667,7 @@ thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
 thoughts weighed in. The status, and every rule below, is migration 058's
 `node_state` (SMD-2074): `node_lifecycle()` without a dependency flag, which
-reads `thoughts` and, since 066, `ob1_ticket_head` (both the capture group's),
+reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture group's),
 and `node_state()` with one, which reads `thought_sources` too (the
 `structure` group); when SMD-1997 folds
 `thought_audit`'s transitions, the functions' bodies change and this script

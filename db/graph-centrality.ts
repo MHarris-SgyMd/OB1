@@ -146,7 +146,7 @@
  * `LIFECYCLE_TYPES` and `LIFECYCLE_FILTERS.done` — a brain whose 058 knows
  * others is refused (exit 2), as is one without 058. This file is their first
  * reader: without either dependency flag the rows are `node_lifecycle()`'s,
- * which reads `thoughts` and, since 066, `ob1_ticket_head` (both the capture
+ * which reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture
  * group's), so a role without the `structure` group's `thought_sources` runs
  * every other mode; the flags read `node_state()`,
  * which needs it. `metadata.status_type` is a transitional, lossy scalar — the
@@ -341,7 +341,7 @@ function scopeSql(alias: string, scope: Scope, params: unknown[]): { where: stri
  * (first review pass of SMD-1994; the rule's text is 058's now). When SMD-1997
  * folds the transitions `thought_audit` (046) already holds, the function's
  * body changes (and the gate's, in `node_dependencies()`) and this does not.
- * It reads `thoughts` and, since 066, `ob1_ticket_head` (the capture group
+ * It reads `thoughts` and, since 068, `ob1_ticket_head` (the capture group
  * holds both), so a role without `thought_sources` runs every mode but the
  * dependency read.
  */

@@ -1558,7 +1558,7 @@ else {
          "a brain at 036 does not start: every delete the server sends would fail, and the check says so before a user finds out, naming 042 then 060");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") || f.startsWith("060") || f.startsWith("061") });
   // The isolation level every lock-order argument assumes, read from the
-  // connection's default: ok at read committed; since 066 a fail at repeatable
+  // connection's default: ok at read committed; since 068 a fail at repeatable
   // read and a warning at serializable, each with the statement that puts it
   // back where pg_settings says it was set (third review pass). Set on the
   // database, so a fresh session (preflight's) inherits it — the fix line then
@@ -1569,15 +1569,15 @@ else {
   await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
     const rr = await run(SQL_ENV);
-    // Since 066 a fail: the projection's triggers refuse every ticket or
+    // Since 068 a fail: the projection's triggers refuse every ticket or
     // pointer write under repeatable read (SMD-2256, second review pass).
-    assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 066's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
+    assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
              && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a connection defaulting to repeatable read is refused, naming 066's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
+           `a connection defaulting to repeatable read is refused, naming 068's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''serializable''");
     const ser = await run(SQL_ENV);
-    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /066's node_state projection stays exact only if every writer of ticket rows is serializable/.test(ser.out),
-           `a connection defaulting to serializable starts with a warning that names 066's condition (exit ${ser.code})`);
+    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable/.test(ser.out),
+           `a connection defaulting to serializable starts with a warning that names 068's condition (exit ${ser.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
     // …and nowhere else: a session as the same role in `postgres` is still at
     // read committed. The suite's own database is asked of the server, not
@@ -1926,7 +1926,7 @@ else {
       await claims.unsafe("GRANT USAGE ON SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
-      // 066's projection writes, held from the start so the steps below name
+      // 068's projection writes, held from the start so the steps below name
       // only what they revoke; its own step follows the base set (SMD-2256).
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
 
@@ -1985,7 +1985,7 @@ else {
       assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);
 
-      // 066's triggers reconcile the node_state projection as the caller on a
+      // 068's triggers reconcile the node_state projection as the caller on a
       // write that moves a key, a status, a watermark or a pointer, and the
       // lifecycle reads read it. Split by privilege (first review pass): with
       // SELECT held and the writes missing, the check names those writes and
@@ -1994,10 +1994,10 @@ else {
       await claims.unsafe("REVOKE INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
       const projectionWrites = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(projectionWrites.code === 1 &&
-             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included \(066's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionWrites.out)) &&
+             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included \(068's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionWrites.out)) &&
              !/windowed capture|every delete|lifecycle read/.test(writeLine(projectionWrites.out)) &&
              /GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;\s+GRANT INSERT, UPDATE, DELETE ON ob1_superseded_by TO ob1_pf_capture;/.test(projectionWrites.out),
-             `without 066's projection writes the check names the writes that move a key or a pointer — not lifecycle reads, not a plain capture, not every delete — each table with its GRANT (exit ${projectionWrites.code})`);
+             `without 068's projection writes the check names the writes that move a key or a pointer — not lifecycle reads, not a plain capture, not every delete — each table with its GRANT (exit ${projectionWrites.code})`);
       await claims.unsafe("REVOKE SELECT ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
       const projectionAll = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(projectionAll.code === 1 &&

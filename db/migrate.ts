@@ -299,7 +299,7 @@ await sql.unsafe(`SET lock_timeout = '${LOCK_TIMEOUT_S}s'`);
 /**
  * A transaction under READ COMMITTED with the run's lock_timeout set inside it,
  * as its first statements. READ COMMITTED whatever the database's default:
- * the migrations are written for it — 066's seed reads the rows after
+ * the migrations are written for it — 068's seed reads the rows after
  * CREATE TRIGGER's lock, and under REPEATABLE READ its snapshot would predate
  * the writes that lock waited for (SMD-2256, second review pass).
  */
