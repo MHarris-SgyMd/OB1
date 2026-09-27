@@ -456,14 +456,37 @@ they read `/health`. It is a parallel route, deliberately kept out of the `/heal
 BrainInfo body: the queue read is SQL-only and stays off the health path's identity
 budget and its both-backend contract.
 
+## Worker-queue write actions
+
+Two **write-scoped** tools act on the same queues (SMD-2132) — the control plane over
+the existing claim machinery (migration 015), never a worker or a scheduler, and never
+the LLM drain (the server does not run the bulk passes; that is a follow-up, SMD-1869).
+A read or capture key does not see them, and each stamps the calling key as actor into
+the action log, one row per affected thought:
+
+- **`retry_failed(work_type)`** — requeue one pool's `failed` claim rows to `pending`
+  (the `db/*.ts --retry-failed` path), scoped to the one `work_type`; a fresh attempt
+  clears the recorded error and the attempt count.
+- **`release_stale_leases(work_type?, worker_id?, include_live?)`** — return `claimed`
+  rows whose lease has lapsed (a dead worker's, past `ttl_expires_at`) to `pending` — the
+  manual form of the lazy reaper. By default a live lease is left for its holder;
+  reaching one needs `include_live` **and** a `worker_id`, because releasing a live lease
+  risks the holder double-processing (refused as a value otherwise).
+
+Each is mirrored by a keyed **`POST`** — `POST /worker-retry-failed` and
+`POST /worker-release-leases` — with the args in the JSON body, gated by a **write** key
+(stricter than the read routes; a read/capture/no key gets the bodiless `ok`). Like
+`worker_status`, both are SQL-backend only — the PostgREST shim answers that it needs the
+SQL store.
+
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 338 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
-bun test-auth.ts          # 97 — scoped, hashed, named keys
+bun test-server.ts        # 344 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-auth.ts          # 120 — scoped, hashed, named keys
 bun run test:local        # 52 — fully local provider, no credential
-bun run test:sql          # 123 — store conformance, real Postgres in a container
-bun run test:e2e          # 162 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:sql          # 180 — store conformance, real Postgres in a container
+bun run test:e2e          # 265 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 bun run cf:build          # ~342 KiB gzipped (measured 2026-09-20 at change 97; the PostgREST store and supabase-js are in it)
 ```
 

@@ -538,6 +538,16 @@ console.log("\n[8e] workerStatus is SQL-backend only over the PostgREST shim (SM
   assert(/requires the SQL backend/.test(threw) && /thought_work_claims/.test(threw), `the shim says worker_status needs the SQL backend, not a bare error (${threw.slice(0, 80)})`);
 }
 
+console.log("\n[8f] retryFailed and releaseStaleLeases are SQL-backend only over the PostgREST shim (SMD-2132)");
+{
+  let rf = "";
+  try { await store.retryFailed("extract:whatever@p2"); } catch (e) { rf = (e as Error).message; }
+  assert(/requires the SQL backend/.test(rf) && /thought_work_claims/.test(rf), `the shim says retry_failed needs the SQL backend (${rf.slice(0, 80)})`);
+  let rl = "";
+  try { await store.releaseStaleLeases({}); } catch (e) { rl = (e as Error).message; }
+  assert(/requires the SQL backend/.test(rl) && /thought_work_claims/.test(rl), `the shim says release_stale_leases needs the SQL backend (${rl.slice(0, 80)})`);
+}
+
 console.log("\n[9] Provenance rides the envelope and reads back over PostgREST too (migration 025)");
 {
   const { id: parent } = await store.captureThought({
