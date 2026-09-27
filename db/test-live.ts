@@ -5730,7 +5730,7 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
     const { p: releaseP, open: release } = gate();
     let cHolding = false, aPid = -1, bPid = -1, errors = "";
     const cDone = connC.begin(async (tx: SQL) => {
-      await tx`SELECT pg_advisory_xact_lock(22561, hashtext('M-1') & 255)`;  // M-1's bucket, as the trigger takes it
+      await tx`SELECT pg_advisory_xact_lock(22561, hashtext(md5('M-1')) & 255)`;  // M-1's bucket, as the trigger takes it (on its md5 key)
       cHolding = true;
       await releaseP;
     }).catch((e: Error) => { errors += e.message; });
@@ -5787,12 +5787,62 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
       `two successors written at once serialise on the target's key (class 22562): the newer one is its superseder, and no drift (${sb?.id === s2 ? "s2" : sb?.id}; ${errors || "clean"})`);
   }
 
+  // A multi-row DELETE mixing a keyed row with a plain row that another row
+  // supersedes (third review pass). The DELETE's own firing locks D-1's issue
+  // bucket; the ON DELETE SET NULL cascade then fires the trigger again, for
+  // the plain row X2's pointer bucket. Before the fix only keyed rows took
+  // their bucket in the first firing, so the cascade asked for X2's after an
+  // issue bucket — and a single-row status write of P (a D-1 row whose id
+  // shares X2's bucket) holding X2's bucket and waiting for D-1's closed a
+  // cycle. A test trigger sorting between the two firings pauses the DELETE
+  // there; now P's writer waits on X2's bucket instead, and both commit.
+  const xk1 = await row("[28] X1, D-1's row, deleted", { kind: "race2256", issue: "D-1", status_type: "started", linear_updated_at: "2026-09-01" });
+  const xp2 = await row("[28] X2, plain, deleted", { kind: "race2256" });
+  await row("[28] W2, superseding X2", { kind: "race2256" }).then((id) => db`UPDATE thoughts SET supersedes = ${xp2}::uuid WHERE id = ${id}::uuid`);
+  const [{ b: x2bucket }] = await db`SELECT hashtext(${xp2}) & 255 AS b`;
+  let pk = "";
+  for (let k = 0; !pk; k++) {
+    const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[28] P candidate ${k}`}, ${{ kind: "race2256" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
+    if (c.b === x2bucket) pk = c.id;
+  }
+  await db`UPDATE thoughts SET metadata = metadata || '{"issue": "D-1", "status_type": "started", "linear_updated_at": "2026-08-01"}' WHERE id = ${pk}::uuid`;
+  await db.unsafe(`CREATE OR REPLACE FUNCTION ob1_test_pause_2256() RETURNS trigger LANGUAGE plpgsql AS $$
+                   BEGIN IF current_setting('ob1.test_pause_2256', true) = 'on' THEN PERFORM pg_sleep(2); END IF; RETURN NULL; END $$;
+                   CREATE TRIGGER thoughts_node_projection_a_pause_2256 AFTER UPDATE ON thoughts FOR EACH STATEMENT EXECUTE FUNCTION ob1_test_pause_2256()`);
+  {
+    const connA = racer(), connB = racer();
+    let aPid = -1, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`SELECT set_config('ob1.test_pause_2256', 'on', true)`;
+      aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`DELETE FROM thoughts WHERE id = ANY(${`{${xk1},${xp2}}`}::uuid[])`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    const pausing = async () => aPid > 0 && Number((await db`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${aPid} AND wait_event = 'PgSleep'`)[0].n) === 1;
+    await waitFor(pausing);
+    const aPaused = await pausing();
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}' WHERE id = ${pk}::uuid`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22562)) === 1);
+    const bWaited = bPid > 0 && (await waitingOn(bPid, 22562)) === 1;
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    await db.unsafe(`DROP TRIGGER thoughts_node_projection_a_pause_2256 ON thoughts; DROP FUNCTION ob1_test_pause_2256()`);
+    assert(aPaused && bWaited && errors === "" && (await drift()) === 0,
+      `a DELETE of a keyed row and a plain superseded one, paused between its firing and its cascade's, holds the plain row's pointer bucket already: a status write of a row sharing that bucket waits on it (class 22562) and both commit, no deadlock, no drift (${errors || "clean"})`);
+  }
+
   // A ticket write on a brain of twenty thousand thoughts, five thousand of
   // them superseding another, reads a handful of rows: its keys are index
   // probes. A NULL passed for "no keys" would reconcile every key — correct,
   // and every pointer read through 025's index per write, which counts no
   // sequential scan (mutation testing: a scan count alone let it pass), so the
-  // rows read are counted too.
+  // rows read are counted too — of the projection's tables as well, which a
+  // hash join over every superseded thought scanned per write (third review
+  // pass).
   await db`INSERT INTO thoughts (content, metadata) SELECT '[28] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
   await db`UPDATE thoughts t SET supersedes = s.id FROM thoughts s
             WHERE t.metadata->>'kind' = 'race2256' AND s.metadata->>'kind' = 'race2256'
@@ -5801,19 +5851,23 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
   const reads = async () => {
     await db`SELECT pg_stat_force_next_flush()`;
     await db`SELECT pg_stat_clear_snapshot()`;
-    const [r] = await db`SELECT seq_scan::int AS scans, (coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0))::int AS rows FROM pg_stat_user_tables WHERE relname = 'thoughts'`;
-    return r as { scans: number; rows: number };
+    const rs = await db`SELECT relname, seq_scan::int AS scans, (coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0))::int AS rows FROM pg_stat_user_tables
+                         WHERE relname IN ('thoughts', 'ob1_superseded_by', 'ob1_ticket_head')` as { relname: string; scans: number; rows: number }[];
+    return Object.fromEntries(rs.map((r) => [r.relname, r]));
   };
   const before = await reads();
   await db`UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled", "linear_updated_at": "2026-09-09"}' WHERE id = ${x2}::uuid`;
   await db`UPDATE thoughts SET supersedes = ${x1}::uuid WHERE id = ${x2}::uuid`;
   const after = await reads();
-  const scanned = after.scans - before.scans, rowsRead = after.rows - before.rows;
-  assert(scanned === 0 && rowsRead < 100 && (await drift()) === 0,
-    `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers, scan thoughts no times and read ${rowsRead} of its rows (under 100), and no drift`);
+  const delta = (t: string) => ({ scans: after[t].scans - before[t].scans, rows: after[t].rows - before[t].rows });
+  const [th, sb, hd] = [delta("thoughts"), delta("ob1_superseded_by"), delta("ob1_ticket_head")];
+  // The heads table holds a dozen rows here, which the planner rightly scans;
+  // the superseders hold five thousand, which a hash join used to scan whole.
+  assert(th.scans === 0 && th.rows < 100 && sb.scans === 0 && sb.rows < 100 && hd.rows < 100 && (await drift()) === 0,
+    `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers, scan neither thoughts nor the five thousand superseders and read a handful of rows (thoughts ${th.rows}, superseders ${sb.rows}, heads ${hd.rows}; scans ${th.scans}/${sb.scans}/${hd.scans}), and no drift`);
 
   await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2256'`;
-  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'M-1', 'M-2')) AS heads`;
+  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'D-1', 'M-1', 'M-2')) AS heads`;
   assert(suiteDrift === 0 && left.drift === 0 && left.heads === 0,
     `every section before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
   await db.close();

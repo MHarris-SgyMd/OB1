@@ -243,8 +243,8 @@ for (const n of SCALES) {
   // +0.1 ms, a ticket's status update at most +0.5 ms, a bulk stamp of 40% of
   // the rows at most +20%. Off is the three row-change triggers DROPPED, in
   // alternating blocks, and on is them re-created from their own definitions:
-  // a disabled trigger still has its transition tables filled, which is most
-  // of what it costs a bulk statement (second review pass: DISABLE hid it).
+  // a disabled trigger still has its transition tables filled, a cost of its
+  // own on a bulk statement (second review pass: DISABLE hid it).
   const triggerDefs = (await sql`SELECT tgname, pg_get_triggerdef(oid) AS def FROM pg_trigger
                                   WHERE tgrelid = 'thoughts'::regclass AND tgname IN ('thoughts_node_projection_insert', 'thoughts_node_projection_update', 'thoughts_node_projection_delete')`) as { tgname: string; def: string }[];
   if (triggerDefs.length !== 3) throw new Error(`expected 060's three row-change triggers, found ${triggerDefs.length}`);
@@ -269,20 +269,20 @@ for (const n of SCALES) {
     return sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status_type', ${i % 2 ? "completed" : "started"}::text,
                  'linear_updated_at', ${`2026-10-01T00:00:${String(i % 60).padStart(2, "0")}Z`}::text) WHERE id = ${tickets[i % tickets.length]}`;
   });
-  // The bulk stamp, three times each way, alternating. An off run leaves the
-  // projection behind the rows, so an untimed rebuild follows it: every on run
-  // then moves the projection too, not only the rows (first review pass: the
-  // on runs flipped back to what the tables already held, and wrote nothing
-  // there). The last on run is the triggers' own: drift() is read after it,
-  // not after a rebuild (second review pass).
+  // The bulk stamp, three times each way, the arm that goes first alternating
+  // round by round (third review pass: always off first). Every run stamps
+  // values no run used before, so every on run rewrites every head it names,
+  // stale or not, and no rebuild is needed between runs; the last run is on,
+  // so drift() read after it tests the triggers.
   const stampsOn: number[] = [], stampsOff: number[] = [];
-  for (let k = 0; k < 3; k++) {
-    await projectionTriggers(false);
-    stampsOff.push(await timed(() => stampTickets("canceled", "unstarted")));
-    await projectionTriggers(true);
-    await sql`SELECT * FROM ob1_rebuild_node_projection()`;
-    stampsOn.push(await timed(() => stampTickets("completed", "started")));
-  }
+  let stamp = 0;
+  const bulk = async (on: boolean) => {
+    await projectionTriggers(on);
+    const k = ++stamp;
+    (on ? stampsOn : stampsOff).push(await timed(() => stampTickets(`settled-${k}`, `live-${k}`)));
+  };
+  for (const order of [[false, true], [true, false], [false, true]]) for (const on of order) await bulk(on);
+  await projectionTriggers(true);
   const [{ drift }] = await sql`SELECT count(*)::int AS drift FROM ob1_node_projection_drift()`;
   const stampOn = median(stampsOn), tStampOff = median(stampsOff);
   const within = (ok: boolean) => (ok ? "within" : "OVER");

@@ -980,7 +980,7 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
     `a window of 100 is already capped, so the note says so rather than to raise the limit (the window's size decides, not the limit as sent: second review pass); a window with no current row says so (first review pass) (${capped})`);
   assert(/migration 059 .* is not applied, or PostgREST has not reloaded/.test(currentSearchHint('function search_thoughts_current(vector, unknown) does not exist'))
       && /migration 059 .* is not applied/.test(currentSearchHint("Could not find the function public.search_thoughts_current(filter, half_life_days, match_count, match_threshold, query_embedding, query_text, recency_weight) in the schema cache"))
-      && /needs SELECT on thought_sources before migration 060 \(and after it wherever PostgreSQL checks a removed join's tables\) .* the server group/.test(currentSearchHint("permission denied for table thought_sources"))
+      && /before migration 060, and after it wherever PostgreSQL checks a removed join's tables, the server's role needs SELECT on thought_sources .* the server group/.test(currentSearchHint("permission denied for table thought_sources"))
       && /projection \(migration 060\).* grants on ob1_ticket_head and ob1_superseded_by/.test(currentSearchHint("permission denied for table ob1_superseded_by"))
       && /projection \(migration 060\)/.test(currentSearchHint("permission denied for table ob1_ticket_head")) && currentSearchHint("connection refused") === "",
     "an error on prefer_current's path names 059 (missing, or the schema cache), 060's projection grants, or before 060 the server group's grant; any other error gets no hint");

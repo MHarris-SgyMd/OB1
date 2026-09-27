@@ -507,7 +507,8 @@ where it waited: retry it (the repo's writers are single-row, one statement per
 transaction). Such a statement is refused under REPEATABLE READ (its snapshot
 predates the lock); SERIALIZABLE keeps the tables exact only when every ticket
 writer is serializable. The trigger and the reconcile plan every statement
-afresh: a plan cached while the tables were small went on scanning them. It is fed by the row
+that takes the keys afresh: a plan cached while the tables were small went on
+scanning them. It is fed by the row
 store, not the log: every writer reaches `thoughts`, raw ones included, and the
 log carries no `created_at` move; SMD-1997's fold can later feed the heads'
 status. `node_lifecycle()` and `node_state()` keep their signatures and rows and
@@ -518,12 +519,14 @@ reads — `blockers`, `unknown_blockers`, `in_dependencies`, and
 up by primary key. `search_thoughts_hybrid` is estimated at 100 rows, its
 window's bound, so a ten-thousand-thought brain does not hash-join the whole
 table to it. Measured on `bench-hybrid.ts`'s arm:
-`prefer_current` adds +0.84 to +1.06 ms at 10,000 thoughts (the
-difference of medians, alternating order; inside the budget 059 missed — as
-sql, re-planned per call, the wrapper was +1.11 against 1.10), +0.6 to +1.0
-of it the hybrid asked for its wider window, and +1.7 to +2.9 ms at 100,000,
-most of it the window. A narrow read is what got cheaper: a whole-brain read of
-every thought's lifecycle still reads every row (86 to 93 ms at 100,000). A
+`prefer_current` adds, in the bench's run of this code, +0.50 ms at 10,000
+thoughts with no needle and +0.66 with one (the difference of medians,
+alternating order; the budget 059 missed is the hybrid's own median, 0.88 and
+1.14 — as sql, re-planned per call, the wrapper was once +1.11 against 1.10),
+and +1.11 and +1.34 at 100,000. The hybrid asked for its window of 40 costs
++0.44 and +0.99 on its own, about all of that: the two differences of medians
+do not subtract. A narrow read is what got cheaper: a whole-brain read of every
+thought's lifecycle still reads every row (6.3 ms at 10,000, 78 at 100,000). A
 writer's cost is measured against the triggers dropped — disabling them still fills their transition tables — and
 is in `changes/smd-2256.md`.
 `ob1_node_projection_drift()` compares the tables with 058's formulas (zero
@@ -2483,7 +2486,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1863 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 772 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or [26]'s four sweep cases are, on a machine with a recipes/lint-sweep/.env or .env.local)
+./with-postgres.sh bun test-live.ts         # 773 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or [26]'s four sweep cases are, on a machine with a recipes/lint-sweep/.env or .env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

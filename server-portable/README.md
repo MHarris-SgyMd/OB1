@@ -250,8 +250,8 @@ on `thought_sources` (a brain before 060 reads it; since 060 PostgreSQL 16 and
 17 skip it, which is observed, not documented — `db/README.md`); without them,
 or without 059, that search is refused naming the fix and every other search
 runs.
-The query log records such a search as arm `current`. It costs about a
-millisecond over an ordinary search at 10,000 thoughts and two or three at
+The query log records such a search as arm `current`. It costs about half a
+millisecond over an ordinary search at 10,000 thoughts and about one at
 100,000, most of that the wider window it reads (`db/bench-hybrid.ts`; at 059
 it read the whole brain per call, about 130 ms at 100,000). The ChatGPT `search` tool cannot take the parameter and never
 demotes; `evals/eval-supersession.ts` records what the demotion finds higher

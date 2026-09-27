@@ -1339,11 +1339,12 @@ else {
          "a brain at 036 does not start: every delete the server sends would fail, and the check says so before a user finds out");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
   // The isolation level every lock-order argument assumes, read from the
-  // connection's default: ok at read committed, a warning naming the guarantees
-  // at any other, with the ALTER ROLE that puts it back. Set on the database,
-  // so a fresh session (preflight's) inherits it; reset after. Not on the role,
-  // which test-upgrade.ts shares beside this suite (the header), nor on the
-  // role in this database, which would outrank the ALTER ROLE the warning names.
+  // connection's default: ok at read committed; since 060 a fail at repeatable
+  // read and a warning at serializable, each with the statement that puts it
+  // back where pg_settings says it was set (third review pass). Set on the
+  // database, so a fresh session (preflight's) inherits it — the fix line then
+  // names ALTER DATABASE; reset after. Not on the role, which test-upgrade.ts
+  // shares beside this suite (the header).
   assert(/transaction isolation\s+default_transaction_isolation is read committed/.test((await run(SQL_ENV)).out), "the connection's default isolation is read committed, and the check says which guarantees rest on it");
   const onThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER DATABASE %I ${setting}', current_database()); END $i$`);
   await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
@@ -1352,8 +1353,8 @@ else {
     // Since 060 a fail: the projection's triggers refuse every ticket or
     // pointer write under repeatable read (SMD-2256, second review pass).
     assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 060's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
-             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a connection defaulting to repeatable read is refused, naming 060's refused writes and the guarantees that rest on read committed, with the ALTER ROLE that restores it (exit ${rr.code})`);
+             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
+           `a connection defaulting to repeatable read is refused, naming 060's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''serializable''");
     const ser = await run(SQL_ENV);
     assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /060's node_state projection stays exact only if every writer of ticket rows is serializable/.test(ser.out),

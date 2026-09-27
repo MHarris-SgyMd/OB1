@@ -2254,29 +2254,41 @@ if (configFailed) {
          * default is REPEATABLE READ or SERIALIZABLE (a role or database
          * setting, a pooler) reads its transaction's snapshot instead, and
          * 042's guard then cannot see a citation committed after that
-         * snapshot — its source goes from under it. A warning, not a refusal:
-         * the server still works, the guarantees named do not (third review
-         * pass, SMD-1712).
+         * snapshot — its source goes from under it. Before 060 a warning, not a
+         * refusal: the server still worked, the guarantees named did not (third
+         * review pass, SMD-1712).
          */
         // Since 060 REPEATABLE READ is more than a lost guarantee: the node_state
         // projection's triggers refuse, under it, every write that moves a
         // ticket's key, status or watermark or a supersedes pointer — captures
-        // naming supersedes and deletes of such rows among them — so it fails;
+        // naming supersedes, and deletes of ticket rows or of any superseded
+        // thought (the cascade nulling pointers to it), among them — so it
+        // fails, and the image's entrypoint does not start the server;
         // SERIALIZABLE keeps the projection exact only if every ticket writer
-        // is serializable (SMD-2256, second review pass).
+        // is serializable (SMD-2256, second review pass). The fix names where
+        // the setting comes from (third review pass: a role-in-database or a
+        // connection-string setting outranks the ALTER ROLE it used to name).
         try {
-          const [{ level, projection }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level,
-                                                            to_regprocedure('ob1_node_projection_sync()') IS NOT NULL AS projection`) as { level: string; projection: boolean }[];
+          const [{ level, projection, source, db }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level,
+                                                            to_regprocedure('public.ob1_node_projection_sync()') IS NOT NULL AS projection,
+                                                            (SELECT source FROM pg_settings WHERE name = 'default_transaction_isolation') AS source,
+                                                            quote_ident(current_database()) AS db`) as { level: string; projection: boolean; source: string; db: string }[];
+          const fixIsolation = source === "database" ? `Set it back where it was changed, on the database: ALTER DATABASE ${db} SET default_transaction_isolation = 'read committed';`
+            : source === "database user" ? `Set it back where it was changed, on this role in this database: ALTER ROLE ${ident} IN DATABASE ${db} SET default_transaction_isolation = 'read committed';`
+            : source === "user" ? `Set it back where it was changed, on the role: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed';`
+            : source === "client" ? "It comes from the connection: remove default_transaction_isolation from the connection string's options (or the pooler's startup parameters)."
+            : source === "configuration file" ? "It comes from the server's configuration: set default_transaction_isolation = 'read committed' in postgresql.conf (or ALTER SYSTEM) and reload."
+            : `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed — pg_settings says the source is ${source}).`;
           if (/^read (committed|uncommitted)$/i.test(level)) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
           } else if (projection && /^repeatable read$/i.test(level)) {
             add("transaction isolation", "fail",
-                `default_transaction_isolation is ${level}: migration 060's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes and deletes of such rows included) — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
-                `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed).`);
+                `default_transaction_isolation is ${level}: migration 060's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included) — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                fixIsolation);
           } else {
             add("transaction isolation", "warn",
                 `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? "; and 060's node_state projection stays exact only if every writer of ticket rows is serializable" : ""}`,
-                `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed).`);
+                fixIsolation);
           }
         } catch (e) {
           add("transaction isolation", "warn", `could not verify: ${(e as Error).message}`);
