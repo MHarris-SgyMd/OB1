@@ -591,7 +591,8 @@ export type CaptureResult = {
  */
 export type SupersessionProposal = {
   id: string;
-  status: "pending" | "accepted" | "rejected";
+  /** `stale` since migration 063: rebuild_derived found a text moved under a pending verdict; the next consolidation pass re-judges the pair in place (SMD-1732). */
+  status: "pending" | "accepted" | "rejected" | "stale";
   verdict: "newer_supersedes_older" | "older_supersedes_newer" | "conflict_undirected";
   confidence: number;
   reason: string | null;
@@ -1309,7 +1310,7 @@ export interface ThoughtStore {
    * write to thoughts.supersedes has one path. Throws on a schema before 029;
    * the tool names the migration.
    */
-  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]>;
+  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number }): Promise<SupersessionProposal[]>;
 
   /**
    * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest

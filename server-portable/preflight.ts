@@ -1926,7 +1926,12 @@ if (configFailed) {
          * counted as coverage, not failed: nothing on a
          * row from before 061 says the extractor tagged it, and the file
          * backfilled none. Stale rows (the input's text moved since) are what
-         * SMD-1732's rebuild will re-derive; counted, not failed.
+         * rebuild_derived (063, SMD-1732) re-derives or hands to the workers;
+         * counted, not failed — as are the rows it has marked for a re-run. A
+         * lineage row whose ARTIFACT is gone while its thought stands (a raw
+         * delete of windows or mentions, a vector cleared under a replay) is
+         * the other direction, which 061 did not read and 063's rebuild
+         * deletes: a WARN naming `db/rebuild.ts --orphans` (SMD-1732).
          */
         try {
           const [tab] = (await sql`SELECT to_regclass('public.derivations') IS NOT NULL AS present`) as { present: boolean }[];
@@ -1956,7 +1961,7 @@ if (configFailed) {
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
                       OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
             const [c] = (await sql`
               WITH ch_s AS (SELECT thought_id FROM public.thought_chunks LIMIT ${BOUND}),
                    ch AS (SELECT DISTINCT c.thought_id AS id FROM ch_s c
@@ -1976,16 +1981,24 @@ if (configFailed) {
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = s.id)),
-                   al AS (SELECT id, artifact_kind, input_ids, input_fingerprints, recipe FROM public.derivations LIMIT ${BOUND}),
+                   al AS (SELECT id, artifact_kind, artifact_id, produced_by, input_ids, input_fingerprints, recipe, stale_since FROM public.derivations LIMIT ${BOUND}),
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
                            WHERE d.artifact_kind <> 'proposal'
-                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content)))
+                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
+                   orph AS (SELECT d.id, d.artifact_kind FROM al d
+                             WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
+                                OR (d.artifact_kind = 'entities' AND NOT EXISTS (SELECT 1 FROM public.thought_entities m WHERE m.thought_id = d.artifact_id AND m.extraction_key = d.produced_by)
+                                                                 AND NOT EXISTS (SELECT 1 FROM public.ob1_entity_edges g WHERE g.thought_id = d.artifact_id AND g.extraction_key = d.produced_by))
+                                OR (d.artifact_kind = 'vector'   AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = d.artifact_id AND t.embedding IS NOT NULL))
+                                OR (d.artifact_kind = 'metadata' AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = d.artifact_id AND (t.metadata ? 'type' OR t.metadata ? 'topics'))))
               SELECT (SELECT count(*)::int FROM ch) AS chunks,    (SELECT array_agg(id::text) FROM (SELECT id FROM ch LIMIT 3) s) AS chunk_ids,
                      (SELECT count(*)::int FROM vc) AS vectors,   (SELECT array_agg(id::text) FROM (SELECT id FROM vc LIMIT 3) s) AS vector_ids,
                      (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
                      (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
                      (SELECT count(*)::int FROM st) AS stale,
+                     (SELECT count(*)::int FROM al WHERE stale_since IS NOT NULL) AS marked,
+                     (SELECT count(*)::int FROM orph) AS orphans, (SELECT array_agg(artifact_kind || ' ' || id::text) FROM (SELECT id, artifact_kind FROM orph LIMIT 3) s) AS orphan_ids,
                      (SELECT count(*)::int FROM al) AS rows,
                      (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
                      (SELECT count(*)::int FROM al WHERE recipe->>'declared' = 'false') AS undeclared,
@@ -2006,7 +2019,7 @@ if (configFailed) {
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -2022,6 +2035,13 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : bodies.records !== true ? "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand), or lost its record line" : "the vector trigger thoughts_record_vector_lineage is dropped or disabled, so a vector written now leaves no row"}: its next write records no lineage (SMD-1731). ${coverage}`,
                   ledgerRemedy("061", APPLY_061));
+            } else if (Number(c.orphans)) {
+              // The other direction (063): a row whose artifact is gone while
+              // its thought stands — nothing it describes exists, and the
+              // census above cannot see it (it starts from the artifacts).
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${n(c.orphans)} lineage row(s) name an artifact that is gone (${(c.orphan_ids ?? []).join(", ")}) — a raw delete of windows or mentions, or a vector cleared under a replay, left the row behind (SMD-1732). ${coverage}`,
+                  "Run bun db/rebuild.ts --url <url> --orphans: it deletes each such row through rebuild_derived, which touches no row whose artifact stands.");
             } else {
               // A capped read says so in the headline, before the count that
               // a reader stops at (run-it, second review pass: a missing row

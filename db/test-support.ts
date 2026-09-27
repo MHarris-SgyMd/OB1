@@ -216,6 +216,11 @@ const FUNCTIONS = [
   "ob1_record_vector_lineage()",
   "ob1_drop_thought_derivations()",
   "ob1_drop_proposal_derivation()",
+  // 063 (SMD-1732): the forward walk and the rebuild primitive; the three
+  // bodies it redefines (the writer, consolidation_candidates,
+  // record_supersession_proposal) keep their signatures and are named above.
+  "derivation_descendants(uuid, int, int)",
+  "rebuild_derived(uuid, text, boolean, text[], boolean)",
 ];
 
 /**

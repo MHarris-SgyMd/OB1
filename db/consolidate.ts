@@ -169,8 +169,8 @@ const STALE_DAYS = has("stale") ? numberFlag("stale", 90, 1, { optional: true })
 const DIRECTION = flag("direction");
 const FORCE = has("force");
 const NOTE = flag("note");
-if (LIST !== undefined && !["pending", "accepted", "rejected", "all"].includes(LIST)) {
-  console.error(`--list takes pending, accepted, rejected or all, got "${LIST}"`);
+if (LIST !== undefined && !["pending", "accepted", "rejected", "stale", "all"].includes(LIST)) {
+  console.error(`--list takes pending, accepted, rejected, stale or all, got "${LIST}"`);
   process.exit(2);
 }
 for (const [name, v] of [["accept", ACCEPT], ["reject", REJECT]] as const) {
@@ -432,9 +432,13 @@ async function printQueue(): Promise<void> {
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending,
            count(*) FILTER (WHERE status = 'accepted')::int AS accepted,
            count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+           count(*) FILTER (WHERE status = 'stale')::int AS stale,
            count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected
     FROM supersession_proposals`;
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected — --list shows them; --accept / --reject decides one`);
+  // 063 (SMD-1732): a stale row is a pending verdict whose texts moved under
+  // it; the next pass re-judges the pair in place, so it is the pass's to
+  // clear, not the reviewer's.
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.stale ? `, ${q.stale} stale (a text moved — the next pass re-judges them)` : ""} — --list shows them; --accept / --reject decides one`);
 }
 
 async function printFailures(limit = 10): Promise<void> {

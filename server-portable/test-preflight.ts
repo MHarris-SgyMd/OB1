@@ -1005,6 +1005,32 @@ else {
          `a chunk set without its lineage row does not start, the kind and the thought named, the raw writer blamed (every producer is current) and the re-apply's backfill the remedy (exit ${noLineage.code}: ${noLineage.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
   await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`);
   assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and with the row back the check is ok again, counting the one row");
+  // 063 (SMD-1732): the rows rebuild_derived marked for a re-run are counted
+  // in the coverage; a lineage row whose ARTIFACT is gone while its thought
+  // stands — the direction 061 did not read — is a WARN naming
+  // db/rebuild.ts --orphans, which deletes it; ok again after the sweep.
+  await ctx.unsafe(`SELECT rebuild_derived('${tid}'::uuid, 'pf: force', false, NULL, true)`);
+  const markedRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(markedRun.code === 0 && /✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled by 061 .*, 1 marked for a re-run by rebuild_derived/.test(markedRun.out),
+         `a row the rebuild marked is counted in the coverage, not failed (${markedRun.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 240)})`);
+  await ctx.unsafe(`UPDATE derivations SET stale_since = NULL, stale_reason = NULL WHERE artifact_id = '${tid}'::uuid`);
+  await ctx.unsafe(`DELETE FROM thought_chunks WHERE thought_id = '${tid}'::uuid`);
+  const orphanRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(orphanRun.code === 0 && /!  lineage\s+every derived row has its lineage row, but 1 lineage row\(s\) name an artifact that is gone \(chunks [0-9a-f-]{36}\) — a raw delete of windows or mentions, or a vector cleared under a replay, left the row behind \(SMD-1732\)/.test(orphanRun.out)
+      && /→ Run bun db\/rebuild\.ts --url <url> --orphans: it deletes each such row through rebuild_derived/.test(fix(orphanRun.out, "lineage")),
+         // (`row` here is the capture above, not the top-level helper — this section's shadow.)
+         `a lineage row whose windows are gone is a WARN naming the kind and the row, with the sweep as the fix line (exit ${orphanRun.code}: ${(orphanRun.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)} / ${fix(orphanRun.out, "lineage").trim().slice(0, 120)})`);
+  const sweep = await runScript(["bun", join(HERE, "..", "db", "rebuild.ts"), "--url", LIVE!, "--orphans"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: join(HERE, "..", "db") });
+  assert(sweep.code === 0 && /orphans:\s+1 thought\(s\) carried a lineage row whose artifact is gone/.test(sweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\)/.test(sweep.out),
+         `db/rebuild.ts --orphans deletes the row and says so (exit ${sweep.code}: ${sweep.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 240)})`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 0 lineage row\(s\)/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and the check is ok again with the orphan gone");
+  // The windows and their row back, as planted, for the teeth below.
+  await ctx.unsafe(
+    `INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding, context)
+     VALUES ('${tid}'::uuid, 0, 'first window',  ${vec}, 'Situating blurb.'),
+            ('${tid}'::uuid, 1, 'second window', ${vec}, NULL)`
+  );
+  await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`);
   // The two bounds (cold read, third review pass: one flag said "the rest not
   // read" of artifact tables read whole). 10,001 lineage rows and every
   // artifact table under its bound: the verdict is exact, the headline plain,
@@ -1012,8 +1038,11 @@ else {
   // tagged thoughts — an ARTIFACT source at its bound: the headline says READ
   // and that the rest were not, once; the untagged count is "more than
   // 10,000", not a number a reader takes as exact.
+  // Rows of the CHUNKS kind, whose artifact (the windows above) stands: an
+  // entities row under a key with no mention is an orphan since 063, and
+  // 10,001 of them would be that WARN, not this bound (run-it, 063's build).
   await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
-                      SELECT 'entities', '${tid}'::uuid, ARRAY['${tid}'::uuid], ARRAY[(SELECT content_fingerprint FROM thoughts WHERE id = '${tid}'::uuid)], 'pf-bound:' || i, '{"deterministic": true, "legacy": true}'::jsonb FROM generate_series(1, 10001) i`);
+                      SELECT 'chunks', '${tid}'::uuid, ARRAY['${tid}'::uuid], ARRAY[(SELECT content_fingerprint FROM thoughts WHERE id = '${tid}'::uuid)], 'pf-bound:' || i, '{"deterministic": true, "legacy": true}'::jsonb FROM generate_series(1, 10001) i`);
   const boundRows = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
   assert(boundRows.code === 0 && /✓  lineage\s+every derived row has its lineage row — more than 10,000 lineage rows; of the 10,001 read: 1000[01] backfilled by 061/.test(boundRows.out) && !/READ has its lineage row/.test(boundRows.out) && !/the rest not read/.test(boundRows.out),
          `the lineage table past its bound qualifies the counts and nothing else: every artifact table was read whole, so the headline is plain (${boundRows.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
@@ -1543,9 +1572,17 @@ else {
   assert(/!  lineage\s+every derived row has its lineage row, but a producer's body is from before 061 \(013, 029, 056 or 060 re-applied by hand\), or lost its record line: its next write records no lineage/.test(tenAlone.out),
          "…and the lineage row names the older bodies — six bodies, 060's two among them — not a missing producer");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") });
+  // The older bodies this ladder ran by hand (056's and 060's extraction
+  // writer) replaced mention rows without sweeping their lineage rows, and
+  // 061's backfill recorded pairs that later passes replaced — lineage rows
+  // whose artifact is gone, the direction 063's check warns on. The sweep
+  // clears them, and the census below is the clean one (run-it, 063's build:
+  // this tooth read the orphan WARN as an unclean census).
+  const sweepLadder = await runScript(["bun", join(HERE, "..", "db", "rebuild.ts"), "--url", LIVE!, "--orphans"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: join(HERE, "..", "db") });
+  assert(sweepLadder.code === 0 && /deleted:\s+[1-9]\d* lineage row\(s\)/.test(sweepLadder.out), `the older bodies' passes left lineage rows whose mentions are gone; the sweep deletes them (exit ${sweepLadder.code}: ${sweepLadder.out.trim().split("\n").slice(0, 2).join(" / ").slice(0, 200)})`);
   const shipped061 = await run(SQL_ENV);
   assert(shipped061.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(shipped061.out) && /✓  edit signature\s+[^\n]*with 061's body/.test(shipped061.out) && /✓  lineage\s+every derived row has its lineage row/.test(shipped061.out),
-         "…and 061 after it is the shipped pair, the one update_thought and a clean lineage census again");
+         `…and 061 after it is the shipped pair, the one update_thought and a clean lineage census again (exit ${shipped061.code}: ${shipped061.out.split("\n").filter((l) => /^\s*[✗!]\s/.test(l)).map((l) => l.trim().slice(0, 260)).join(" | ")})`);
   // 033 re-applied by hand over 035 (SMD-1453): 033's lock and sentinel are
   // back, and with them 025's fill of a NULL pointer on a re-capture and the
   // supersession lock on every capture naming one — 035's sentinel is what
