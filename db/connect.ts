@@ -70,63 +70,24 @@ function parsedDatabaseUrl(url: string): URL | null {
 
 /**
  * A client on `url`. One connection unless the script asks for more (a claim
- * worker takes one per worker and a spare for its heartbeat). The database is
- * the URL's, when it names one: Bun 1.4.0 lets an exported PGDATABASE override
- * the URL's path — `--url …/canary` with PGDATABASE=stable reached stable —
- * where libpq, and the operator, read the URL (review pass 2). A URL that does
+ * worker takes one per worker and a spare for its heartbeat). A URL that does
  * not parse throws UNPARSEABLE_DATABASE_URL, never the client's own error,
  * which carries the URL.
+ *
+ * What the client makes of the URL is the client's, as before SMD-2302: Bun
+ * 1.4.0 lets an exported PGDATABASE beat the URL's database, and sends a
+ * query's `database=`/`user=` to the server over it, where libpq tools read
+ * the same URL differently again. Reconciling the two by parsing the URL
+ * leaked twice in review (passes 1 and 2 — the second wrote a refresh into its
+ * source); deciding from the live connection instead is a follow-up of its own.
  */
 export function openSql(url: string, opts: { max?: number } = {}): SQL {
-  const u = parsedDatabaseUrl(url);
-  if (u === null) throw new Error(UNPARSEABLE_DATABASE_URL);
-  const database = u.pathname.length > 1 ? decodeURIComponent(u.pathname.slice(1)) : undefined;
+  if (parsedDatabaseUrl(url) === null) throw new Error(UNPARSEABLE_DATABASE_URL);
   try {
-    return new SQL({ url, max: opts.max ?? 1, ...(database !== undefined ? { database } : {}) });
+    return new SQL({ url, max: opts.max ?? 1 });
   } catch {
     throw new Error("The database client refused the URL. (Nothing of it is printed.)");
   }
-}
-
-/**
- * The query parameters a libpq tool is handed with its target: transport and
- * labels, none of which choose a server or a database.
- */
-export const LIBPQ_KEPT_PARAMS = ["sslmode", "sslrootcert", "sslcert", "sslkey", "sslcrl", "connect_timeout", "application_name"] as const;
-
-/** The PG* variables a libpq tool keeps: the same kinds, plus the password file. */
-const LIBPQ_KEPT_ENV = /^PG(SSL\w*|GSSENCMODE|CONNECT_TIMEOUT|APPNAME|PASSFILE|REQUIRESSL)$/;
-
-/**
- * What a libpq tool (pg_dump, pg_restore) is given to reach the database `sql`
- * reached: a URL rebuilt from the host, port, database and user Bun's client
- * resolved, and an environment with every other PG* variable taken out — the
- * password passed as PGPASSWORD, not on the command line.
- *
- * Handing a libpq tool the operator's URL let it go elsewhere than the client
- * the guards had asked (review pass 2): libpq has no fragment, so
- * `…/db#?host=prod` is a query to it and nothing to Bun; it splits the
- * userinfo at the first `@`, Bun at the last, so `u@prod:5432,x@localhost/db`
- * is prod to one and localhost to the other; it follows `?host=`, `?hostaddr=`,
- * `?port=`, `?dbname=`, `?service=`, PGHOSTADDR and PGSERVICE, which Bun
- * ignores when the URL names a host. Pass 1 refused a list of those shapes,
- * and pass 2 found two more; rebuilding from what the client resolved leaves
- * nothing to list.
- */
-export function libpqTarget(sql: SQL, url: string, env: Record<string, string | undefined> = process.env): { url: string; env: Record<string, string> } {
-  const o = sql.options as { hostname?: string; port?: number | string; database?: string; username?: string; password?: string };
-  const host = String(o.hostname ?? "localhost");
-  const bracketed = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  const kept = new URLSearchParams();
-  const given = parsedDatabaseUrl(url)?.searchParams;
-  for (const p of LIBPQ_KEPT_PARAMS) { const v = given?.get(p); if (v !== null && v !== undefined) kept.set(p, v); }
-  const query = kept.size > 0 ? `?${kept.toString()}` : "";
-  const user = o.username ? `${encodeURIComponent(o.username)}@` : "";
-  const target = `postgres://${user}${bracketed}:${o.port ?? 5432}/${encodeURIComponent(o.database ?? "")}${query}`;
-  const childEnv: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) if (v !== undefined && (!k.startsWith("PG") || LIBPQ_KEPT_ENV.test(k))) childEnv[k] = v;
-  if (o.password) childEnv.PGPASSWORD = o.password;
-  return { url: target, env: childEnv };
 }
 
 // ---------------------------------------------------------------------------
@@ -166,14 +127,16 @@ export function hostOf(url: string): string | null {
 }
 
 /**
- * Why `url`'s host is not plainly this machine, or null when it is — the host
- * Bun's client reaches, which is the one the rule is about: a libpq tool gets
- * the same host from libpqTarget, not the operator's URL. An EMPTY host is
- * not: Bun's client resolves `postgres:///db` through PGHOST, as libpq does,
- * so it is whatever the shell says. A URL that does not parse is not either (a
- * libpq socket URL, `postgres://u@/db?host=/var/run/…`, is one; the client
- * does not honour that form, and the override is the way through for it). The
+ * Why `url`'s host is not plainly this machine, or null when it is. An EMPTY
+ * host is not: Bun's client resolves `postgres:///db` through PGHOST, as libpq
+ * does, so it is whatever the shell says. A URL that does not parse is not
+ * either (a libpq socket URL, `postgres://u@/db?host=/var/run/…`, is one). The
  * reason names the hostname at most, never the rest of the URL.
+ *
+ * It reads the URL's hostname, as both rules before SMD-2302 did. Where a
+ * client actually goes can differ — Bun connects through a unix socket for
+ * `?path=`, libpq follows `?host=` and has no fragment — and closing that is
+ * deciding from the live connection, a follow-up of its own (review pass 3).
  */
 export function notThrowaway(url: string): string | null {
   const host = hostOf(url);

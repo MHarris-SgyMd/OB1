@@ -18,7 +18,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  LIBPQ_KEPT_PARAMS, LOOPBACK_HOSTS, NO_DATABASE_URL, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, UNPARSEABLE_DATABASE_URL,
+  LOOPBACK_HOSTS, NO_DATABASE_URL, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, UNPARSEABLE_DATABASE_URL,
   databaseUrl, hostOf, isThrowawayHost, mayReset, notThrowaway, openSql, remoteDbAllowed, resetRefusal,
 } from "./connect.ts";
 
@@ -62,10 +62,6 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
     ["postgres:///db", false, "an empty host (resolves through PGHOST; tier.ts's rule trusted it)"],
     ["postgres://u@/db?host=/var/run/postgresql", false, "a libpq socket URL, which does not parse"],
     ["not a url", false, "a string that does not parse"],
-    // The host Bun's client reaches is the rule's: these reach localhost, and a
-    // libpq tool is handed that host by libpqTarget, not these URLs (below).
-    [`postgres://u:${MARK}@localhost/db?host=db.example.com`, true, "localhost with host= in its query (Bun ignores it; libpqTarget drops it)"],
-    [`postgres://u:${MARK}@localhost/db#?host=db.example.com`, true, "localhost with a fragment libpq would read as a query"],
     ["postgres://localhost:5432@evil.com/db", false, "localhost:5432 as userinfo before a remote host"],
     [`postgres://u:${MARK}@postgres:5432/db`, false, "a compose service name"],
     [`postgres://u:${MARK}@192.168.1.5:5432/db`, false, "an RFC1918 address (config.mjs's isLocalHostname would say local)"],
@@ -93,8 +89,8 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
     ["not a url", /does not parse/],
   ];
   for (const [url, re] of reasons) ok(re.test(notThrowaway(url) ?? ""), `notThrowaway(${url}) says ${re} (${notThrowaway(url)})`);
-  // The rule is the host's alone: the PG* variables libpq reads are libpqTarget's
-  // to take out, and a developer's PGSERVICE does not refuse a suite (Bun ignores it).
+  // The rule reads the URL's host alone: a developer's PGSERVICE does not refuse
+  // a suite, whose drop goes through Bun, which ignores it when the URL names a host.
   const LOCAL = "postgres://u@localhost/db";
   for (const v of ["PGHOSTADDR", "PGSERVICE", "PGHOST", "PGDATABASE"]) ok(mayReset(LOCAL, { [v]: "db.example.com" }), `${v} set: localhost stands`);
 
@@ -115,83 +111,6 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   ok(/OB1_\*\|/.test(tierSh), "…while it passes every other OB1_* variable on — why a second override name would pass it");
   ok([...LOOPBACK_HOSTS].sort().join() === ["0.0.0.0", "127.0.0.1", "[::1]", "localhost"].join(), "the loopback set is the four named hosts, nothing more");
   ok(hostOf("postgres:///db") === "" && hostOf("not a url") === null && hostOf("postgres://Db.Example.COM/x") === "db.example.com", "hostOf: empty host \"\", unparseable null, lowercased");
-}
-
-// ---------------------------------------------------------------------------
-// What a libpq tool is handed: the database Bun's client reached, and nothing
-// libpq could read another way (review pass 2).
-// ---------------------------------------------------------------------------
-/**
- * A libpq URI read as libpq reads it (fe-connect.c's conninfo_uri_parse): no
- * fragment, the userinfo up to the first `@` before any `/`, a comma list of
- * hosts, the database up to the first `?`, and `&`-split, percent-decoded
- * parameters. Enough to see where a URI sends pg_restore.
- */
-function libpqParse(uri: string): { user: string; hosts: { host: string; port: string }[]; dbname: string; params: Record<string, string> } | null {
-  const m = uri.match(/^postgres(?:ql)?:\/\/(.*)$/);
-  if (!m) return null;
-  let rest = m[1];
-  let user = "";
-  const at = rest.search(/[@/]/);
-  if (at !== -1 && rest[at] === "@") { user = decodeURIComponent(rest.slice(0, at).split(":")[0]); rest = rest.slice(at + 1); }
-  const hostEnd = rest.search(/[/?]/);
-  const hostList = hostEnd === -1 ? rest : rest.slice(0, hostEnd);
-  rest = hostEnd === -1 ? "" : rest.slice(hostEnd);
-  const hosts = hostList.split(",").map((h) => { const hm = h.match(/^(\[[^\]]*\]|[^:]*)(?::(.*))?$/)!; return { host: decodeURIComponent(hm[1]), port: hm[2] ?? "" }; });
-  let dbname = "";
-  if (rest.startsWith("/")) { const q = rest.indexOf("?"); dbname = decodeURIComponent(q === -1 ? rest.slice(1) : rest.slice(1, q)); rest = q === -1 ? "" : rest.slice(q); }
-  const params: Record<string, string> = {};
-  if (rest.startsWith("?")) for (const kv of rest.slice(1).split("&")) { const eq = kv.indexOf("="); params[decodeURIComponent(eq === -1 ? kv : kv.slice(0, eq))] = decodeURIComponent(eq === -1 ? "" : kv.slice(eq + 1)); }
-  return { user, hosts, dbname, params };
-}
-{
-  // The parser has teeth: it reads the reviewers' shapes as libpq did in a real pg_restore.
-  ok(libpqParse("postgres://u@localhost:1/db#?host=10.9.9.9")?.params.host === "10.9.9.9", "libpqParse reads a fragment's ?host= as libpq does");
-  ok(libpqParse("postgres://u@10.9.9.9:5432,x@localhost:1/db")?.hosts[0].host === "10.9.9.9", "libpqParse splits the userinfo at the first @, as libpq does");
-
-  const SHAPES = [
-    `postgres://u:${MARK}@localhost:5433/canary#?host=prod.example.com&dbname=stable`,
-    `postgres://u@prod.example.com:5432,x:${MARK}@localhost:5433/canary`,
-    `postgres://u:${MARK}@127.0.0.1:5433/canary?host=prod&hostaddr=10.9.9.9&port=5432&dbname=stable&service=s&user=admin&sslmode=require&application_name=ob1`,
-    `postgres://u:${MARK}@[::1]:5433/url%20db`,
-    `postgres://u%40x:${MARK}@localhost/canary`,
-    "postgres://localhost/canary",
-    // No host: Bun resolves PGHOST, and the tool must get that host, not "localhost".
-    "postgres:///canary",
-  ];
-  const REDIRECTS = { PGHOSTADDR: "10.9.9.9", PGSERVICE: "prod", PGSERVICEFILE: "/tmp/none", PGDATABASE: "stable", PGHOST: "prod.example.com", PGPORT: "6543", PGUSER: "envuser", PGPASSWORD: "envpw-2302", PGOPTIONS: "-c search_path=x", PGSSLMODE: "prefer" };
-  const r = child(`import { libpqTarget, openSql } from "./connect.ts";
-    const out = [];
-    for (const u of ${JSON.stringify(SHAPES)}) { const s = openSql(u); const o = s.options; const t = libpqTarget(s, u); out.push({ given: u, bun: { host: String(o.hostname), port: String(o.port), db: o.database, user: o.username, pw: o.password }, target: t.url, env: t.env }); await s.close(); }
-    console.log(JSON.stringify(out));`, REDIRECTS);
-  const results = r.code === 0 ? JSON.parse(r.out) as { given: string; bun: { host: string; port: string; db: string; user: string; pw: string }; target: string; env: Record<string, string> }[] : [];
-  ok(results.length === SHAPES.length, `libpqTarget ran on every shape (exit ${r.code}${r.code ? `: ${r.err.trim().split("\n")[0]}` : ""})`);
-  for (const x of results) {
-    const lib = libpqParse(x.target);
-    const what = x.given.replace(MARK, "…");
-    const bunHost = x.bun.host.startsWith("[") ? x.bun.host : x.bun.host.includes(":") ? `[${x.bun.host}]` : x.bun.host;
-    ok(lib !== null && lib.hosts.length === 1 && lib.hosts[0].host === bunHost && lib.hosts[0].port === x.bun.port, `${what}: libpq reads the target's host as Bun's, ${bunHost}:${x.bun.port} (${JSON.stringify(lib?.hosts)})`);
-    ok(lib !== null && lib.dbname === x.bun.db && lib.user === x.bun.user, `${what}: …and its database and user as Bun's, ${x.bun.db} / ${x.bun.user}`);
-    ok(lib !== null && Object.keys(lib.params).every((k) => (LIBPQ_KEPT_PARAMS as readonly string[]).includes(k)), `${what}: …and nothing in its query but TLS, timeout and label (${JSON.stringify(lib?.params)})`);
-    const w = new URL(x.target);
-    ok(w.hostname === bunHost && w.port === x.bun.port && !x.target.includes("#") && !x.target.includes(","), `${what}: WHATWG reads the same target — no fragment, no host list`);
-    ok(!x.target.includes(MARK) && !x.target.includes(REDIRECTS.PGPASSWORD) && x.env.PGPASSWORD === x.bun.pw, `${what}: the password travels as PGPASSWORD, not on the command line`);
-    const leftIn = Object.keys(x.env).filter((k) => /^PG(HOST|HOSTADDR|PORT|DATABASE|USER|SERVICE|SERVICEFILE|OPTIONS)$/.test(k));
-    ok(leftIn.length === 0 && x.env.PGSSLMODE === "prefer" && typeof x.env.PATH === "string", `${what}: the tool's environment has no PG* that chooses a server, database or user (left: ${leftIn.join(", ") || "none"}), and keeps PGSSLMODE and PATH`);
-  }
-  // The database is the URL's, whatever PGDATABASE says (Bun 1.4.0 let it win).
-  ok(results.every((x) => x.bun.db === (x.given.includes("url%20db") ? "url db" : "canary")), `openSql pins the URL's database over PGDATABASE=stable (${results.map((x) => x.bun.db).join(", ")})`);
-  const q = results[2] ? new URL(results[2].target).searchParams : new URLSearchParams();
-  ok(q.get("sslmode") === "require" && q.get("application_name") === "ob1" && !q.has("host") && !q.has("dbname"), `the kept parameters travel: sslmode, application_name (${results[2]?.target})`);
-  const noPath = child(`import { openSql } from "./connect.ts"; const s = openSql("postgres://u@localhost"); console.log(s.options.database); await s.close();`, { PGDATABASE: "envdb" });
-  ok(noPath.out.trim() === "envdb", `a URL that names no database keeps the client's default, PGDATABASE (${noPath.out.trim()})`);
-
-  // tier.ts hands both tools libpqTarget's URL and environment, never the operator's URL.
-  const tier = readFileSync(join(HERE, "tier.ts"), "utf8");
-  const calls = [...tier.matchAll(/run\(\["pg_(dump|restore)"[^;]*;/g)].map((m) => m[0]);
-  ok(calls.length === 2, `tier.ts runs pg_dump and pg_restore once each (${calls.length})`);
-  for (const c of calls) ok(!/\b(fromUrl|toUrl)\b/.test(c) && /\.url\b/.test(c) && /\{ env: \w+\.env \}/.test(c), `tier.ts: ${c.slice(5, 16)} gets libpqTarget's url and env (${c.slice(0, 90)}…)`);
-  ok(/const dumpFrom = libpqTarget\(src, fromUrl\)/.test(tier) && /const restoreTo = libpqTarget\(target, toUrl\)/.test(tier), "tier.ts: the targets are the clients the guards asked");
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +174,8 @@ function libpqParse(uri: string): { user: string; hosts: { host: string; port: s
     [`postgres://u:${MARK}#x@127.0.0.1:1/x`, "an unencoded # in the password"],
     [`postgres://u:${MARK}@127.0.0.1:99999/x`, "a port past 65535"],
     [`postgres://u:50%zz${MARK}@127.0.0.1:1/x`, "a bad percent-escape in the password"],
+    [`postgres://u%zz:${MARK}@127.0.0.1:1/x`, "a bad percent-escape in the user"],
+    [`postgres://u:${MARK}@127.0.0.1:1/x%zz`, "a bad percent-escape in the database"],
     [`mysql://u:${MARK}@127.0.0.1:1/x`, "a mysql: URL"],
     [`file:///tmp/${MARK}.db`, "a file: URL"],
   ] as const) {
