@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
+import { searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -289,6 +290,42 @@ console.log("\n[4] Unreachable database fails rather than hanging");
   assert(listed.every((n) => r.out.includes(n)), `…and an unreachable database names every one of them (${listed.filter((n) => !r.out.includes(n)).join(", ") || "all named"})`);
   assert(/vector extension\s+.*could not verify/.test(r.out) && /atomic capture\s+.*not checked — the direct connection failed before it/.test(r.out),
          "…the first carrying the error and the later ones saying they were not reached");
+}
+
+console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242)");
+{
+  // Each as Postgres's SplitIdentifierString resolves it. A connection
+  // string, set_config and FROM CURRENT store the text raw, so every one of
+  // these can reach the schema row's probe.
+  const PG16 = 160000, PG17 = 170000;
+  const cases: [string, number, string[]][] = [
+    ['"$user", public', PG16, ["$user", "public"]],
+    ['""', PG16, []],
+    ["", PG16, []],
+    ["NoWhere", PG16, ["nowhere"]],
+    ["PUBLIC", PG16, ["public"]],
+    ['"Public"', PG16, ["Public"]],
+    ['"a""b" , x', PG16, ['a"b', "x"]],
+    ['"a, public"', PG16, ["a, public"]],
+    ["a,\tpublic", PG16, ["a", "public"]],
+    ["a,\n\r\f public", PG16, ["a", "public"]],
+    ["a,\u00a0public", PG17, ["a", "\u00a0public"]], // NBSP is no whitespace to Postgres
+    ["a,\u000bpublic", PG16, ["a", "\u000bpublic"]], // \v is none to 16…
+    ["a,\u000bpublic", PG17, ["a", "public"]],        // …and is to 17 (scanner_isspace)
+    ["P4A_\u00dc", PG16, ["p4a_\u00dc"]],              // A–Z fold, not Ü
+    ["x;drop/**/table/**/t;--", PG16, ["x;drop/**/table/**/t;--"]],
+  ];
+  /** JSON with every character outside printable ASCII escaped, so an NBSP does not read as a space. */
+  const shown = (v: unknown) => JSON.stringify(v).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  for (const [setting, version, want] of cases) {
+    const got = searchPathSchemas(setting, version);
+    assert(JSON.stringify(got) === JSON.stringify(want), `search_path ${shown(setting)} on ${version / 10000} reads as ${shown(want)} (got ${shown(got)})`);
+  }
+  assert(withPublic([]) === "public" && withPublic(["$user", "public"]) === '"$user", public' && withPublic(['a"b', "x;y"]) === '"a""b", "x;y", public',
+         "…and the path with public put on it keeps the rest in order, each quoted, public once and last");
+  assert(withPublicInOptions(["nowhere"]) === "-csearch_path%3D%22nowhere%22%2Cpublic" && decodeURIComponent(withPublicInOptions(["a b,c", "x\\y"])) === '-csearch_path="a\\ b,c","x\\\\y",public'
+           && withPublicInOptions(["it's!(x)"]) === "-csearch_path%3D%22it%27s%21%28x%29%22%2Cpublic",
+         "…and as a connection string's options it has no space between names, escapes a space or backslash inside one, and is percent-encoded, a shell's characters included");
 }
 
 console.log("\n[5] Against a real database");
@@ -2027,9 +2064,186 @@ else {
                && /migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(wide.out)
                && /schema version\s+could not verify: ob1_config exists \(schema public\) but does not resolve for this role/.test(wide.out),
              `…and every later direct row runs, the ledger and version rows in their own words (${row(wide.out, "chunk context")} | ${row(wide.out, "schema version")})`);
-      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path\)\n\s+→ Put public on the role's search_path: ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = <the schemas it has>, public;/.test(wide.out)
+      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(wide.out)
                && !/Apply the migrations: cd db/.test(wide.out),
              `…and the schema row names the path, not the migrate command (${row(wide.out, "schema")})`);
+
+      // The path's statement is rebuilt from the parsed setting, never
+      // echoed (SMD-2242). An empty path reads back as "" — a zero-length
+      // name, invalid SQL if echoed.
+      const readerUrl = LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@");
+      /** pf_reader's own setting in this database — a statement the row prints sets one; each leg resets it. */
+      const readerOnThisDatabase = (setting: string) => claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I ${setting}', current_database()); END $r$`);
+      await claims.unsafe("ALTER ROLE pf_reader SET search_path = ''");
+      const empty = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+      assert(/public is not on its search_path, which is empty\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = public;/.test(empty.out),
+             `an empty path is named empty, and the statement sets public alone (${row(empty.out, "schema")})`);
+      {
+        const printed = /→ (ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = public;)/.exec(empty.out)?.[1];
+        let resolves = false;
+        let refused = "";
+        if (printed) {
+          try {
+            await claims.unsafe(printed);
+            const reader = new SQL({ url: readerUrl, max: 1 });
+            try {
+              resolves = ((await reader`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+            } finally {
+              await reader.close();
+            }
+          } catch (e) {
+            refused = (e as Error).message;
+          } finally {
+            await readerOnThisDatabase("RESET search_path");
+          }
+        }
+        assert(resolves, `…and run as printed it makes thoughts resolve for the role (${refused ? `refused: ${refused}` : printed ?? "nothing printed"})`);
+      }
+      // A path stored raw (set_config, then FROM CURRENT): a quoted name with
+      // a doubled quote, $user, an unquoted name to fold, an NBSP that is no
+      // whitespace to Postgres, and a name that is a statement if pasted bare.
+      // The printed statement, run as a superuser, leaves the sentinel standing
+      // and makes thoughts resolve for the role.
+      try {
+        await claims.unsafe("CREATE TABLE IF NOT EXISTS public.pf_sentinel (id int)");
+        const setter = new SQL({ url: LIVE!, max: 1 });
+        try {
+          await setter`SELECT set_config('search_path', ${'"$user", "Odd ""x", NoWhere,\u00a0public, x;drop/**/table/**/pf_sentinel;--'}, false)`;
+          await setter.unsafe("ALTER ROLE pf_reader SET search_path FROM CURRENT");
+        } finally {
+          await setter.close();
+        }
+        const raw = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        const printed = /→ (ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = .*, public;)/.exec(raw.out)?.[1];
+        assert(printed !== undefined && printed.endsWith(' SET search_path = "$user", "Odd ""x", "nowhere", "\u00a0public", "x;drop/**/table/**/pf_sentinel;--", public;'),
+               `a raw stored path is parsed, every name quoted, public added (${printed ?? row(raw.out, "schema")})`);
+        let resolves = false;
+        let refused = "";
+        if (printed) {
+          try {
+            await claims.unsafe(printed);
+            const reader = new SQL({ url: readerUrl, max: 1 });
+            try {
+              resolves = ((await reader`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+            } finally {
+              await reader.close();
+            }
+          } catch (e) {
+            refused = (e as Error).message;
+          }
+        }
+        const [{ standing }] = (await claims`SELECT to_regclass('public.pf_sentinel') IS NOT NULL AS standing`) as { standing: boolean }[];
+        assert(resolves && standing, `…and run as printed it makes thoughts resolve for the role (${refused ? `refused: ${refused}` : resolves}) and runs nothing else — the sentinel stands (${standing})`);
+      } finally {
+        try {
+          await readerOnThisDatabase("RESET search_path");
+        } finally {
+          await claims.unsafe("DROP TABLE IF EXISTS public.pf_sentinel");
+          await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
+        }
+      }
+      // A path the connection string sets — in options, or as Bun's own
+      // search_path= parameter — outranks every ALTER ROLE, so the row says to
+      // replace it there. Followed as printed (the setting replaced, not a
+      // second one appended, which Bun joins with a comma and libpq drops),
+      // thoughts resolves.
+      const q = readerUrl.includes("?") ? "&" : "?";
+      const viaUrl = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${q}options=-csearch_path%3Dnowhere` });
+      const viaParam = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${q}search_path=nowhere` });
+      const advice = /→ The connection string sets search_path \(a search_path= parameter, or -c search_path= in options=\), which outranks any ALTER ROLE: remove that and put this in options=, beside any other -c setting there \(separated by %20\): (-csearch_path%3D%22nowhere%22%2Cpublic) /;
+      const token = advice.exec(viaUrl.out)?.[1];
+      assert(token !== undefined && advice.test(viaParam.out),
+             `a path from the connection string, in options or as search_path=, is replaced there, not overridden by ALTER ROLE (${row(viaUrl.out, "schema")} | ${row(viaParam.out, "schema")})`);
+      {
+        // Beside another -c setting, separated by %20, as the row says.
+        let resolves = false;
+        let timeout = "";
+        if (token) {
+          const followed = new SQL({ url: `${readerUrl}${q}options=-cstatement_timeout%3D5s%20${token}`, max: 1 });
+          try {
+            const [f] = (await followed`SELECT to_regclass('thoughts') IS NOT NULL AS ok, current_setting('statement_timeout') AS timeout`) as { ok: boolean; timeout: string }[];
+            resolves = f.ok;
+            timeout = f.timeout;
+          } finally {
+            await followed.close();
+          }
+        }
+        assert(resolves && timeout === "5s", `…and with the connection string's setting replaced as printed, beside another -c setting, thoughts resolves and the other setting holds (${token ?? "nothing printed"}; statement_timeout ${timeout})`);
+      }
+      // A login role whose settings SET ROLE: the count runs as the role it
+      // becomes, but the settings that load are the login role's, so the
+      // ALTER ROLE names the login role — after SET ROLE NONE, since the role
+      // it becomes may not alter it. Run as printed, over the login role's own
+      // connection, it takes, and thoughts resolves on the next.
+      await claims.unsafe("DROP ROLE IF EXISTS pf_acting");
+      await claims.unsafe("CREATE ROLE pf_acting NOLOGIN");
+      try {
+        await claims.unsafe("GRANT pf_acting TO pf_reader");
+        await claims.unsafe("ALTER ROLE pf_reader SET role = pf_acting");
+        const acting = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        const printed = /→ (SET ROLE NONE; ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;)  \(as pf_reader, or a superuser\)/.exec(acting.out)?.[1];
+        assert(printed !== undefined, `a login role that SETs ROLE is the one the ALTER ROLE names, after SET ROLE NONE (${row(acting.out, "schema")})`);
+        let resolves = false;
+        let refused = "";
+        if (printed) {
+          const asLogin = new SQL({ url: readerUrl, max: 1 });
+          try {
+            await asLogin.unsafe(printed);
+          } catch (e) {
+            refused = (e as Error).message;
+          } finally {
+            await asLogin.close();
+          }
+          const next = new SQL({ url: readerUrl, max: 1 });
+          try {
+            resolves = ((await next`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+          } finally {
+            await next.close();
+          }
+        }
+        assert(resolves, `…and run as printed by the login role itself it takes (${refused ? `refused: ${refused}` : resolves})`);
+      } finally {
+        try {
+          await readerOnThisDatabase("RESET search_path");
+        } finally {
+          await claims.unsafe("ALTER ROLE pf_reader RESET role");
+          await claims.unsafe("DROP ROLE pf_acting");
+        }
+      }
+      // A role barred from pg_settings (a view in this database) cannot read
+      // where its path came from, and still gets the statement, not migrate.
+      const [{ settingsReadable }] = await claims`SELECT has_table_privilege('public', 'pg_catalog.pg_settings', 'SELECT') AS "settingsReadable"`;
+      await claims.unsafe("REVOKE SELECT ON pg_catalog.pg_settings FROM PUBLIC");
+      try {
+        const barred = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;  \(unless the connection string sets search_path, which outranks it\)/.test(barred.out),
+               `a role that cannot read pg_settings still gets the path's statement, with the connection string's caveat (${row(barred.out, "schema")})`);
+      } finally {
+        if (settingsReadable) await claims.unsafe("GRANT SELECT ON pg_catalog.pg_settings TO PUBLIC");
+      }
+      // Another relation's "does not exist" on the same count — an RLS policy
+      // for this role calling a function that reads a missing table — is the
+      // same undefined-table error (42P01) with thoughts resolving: public is
+      // on the path, and the row must not say otherwise.
+      const [{ rowSecurity }] = (await claims`SELECT relrowsecurity AS "rowSecurity" FROM pg_class WHERE oid = 'public.thoughts'::regclass`) as { rowSecurity: boolean }[];
+      try {
+        await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
+        await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts; DROP FUNCTION IF EXISTS public.pf_rls_missing()");
+        await claims.unsafe("CREATE FUNCTION public.pf_rls_missing() RETURNS boolean LANGUAGE plpgsql AS $f$ BEGIN PERFORM 1 FROM pf_no_such_table; RETURN true; END $f$");
+        await claims.unsafe("CREATE POLICY pf_rls ON public.thoughts FOR SELECT TO pf_reader USING (public.pf_rls_missing())");
+        await claims.unsafe("ALTER TABLE public.thoughts ENABLE ROW LEVEL SECURITY");
+        const rls = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/✗\s+schema\s+relation "pf_no_such_table" does not exist/.test(rls.out) && !/public is not on its search_path/.test(rls.out),
+               `another relation's "does not exist" is not read as thoughts off the path (${row(rls.out, "schema")})`);
+      } finally {
+        try {
+          if (!rowSecurity) await claims.unsafe("ALTER TABLE public.thoughts DISABLE ROW LEVEL SECURITY");
+        } finally {
+          await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts");
+          await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_missing()");
+          await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
+        }
+      }
 
       // With no USAGE on public — PUBLIC's taken too, which a fresh database
       // grants — to_regclass('public.…') itself raises. The rows whose reads
@@ -2037,15 +2251,20 @@ else {
       const [{ publicUsage }] = await claims`SELECT has_schema_privilege('public', 'public', 'USAGE') AS "publicUsage"`;
       await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader, PUBLIC");
       try {
-        const bare = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        const bare = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
         assert(/!\s+write privileges\s+could not verify: permission denied for schema public/.test(bare.out)
                  && /!\s+chunk context\s+could not verify: permission denied for schema public/.test(bare.out)
                  && !/not checked — the direct connection failed before it/.test(bare.out),
                `a role with no USAGE on public: the qualified reads' rows warn, each alone, and every later row runs (${row(bare.out, "write privileges")} | ${row(bare.out, "tier")})`);
-        // Without USAGE the path cannot be read, so the GRANT comes first
-        // and the path second, conditionally.
-        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  then, if public is not on the role's search_path, ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = <the schemas it has>, public;/.test(bare.out),
-               `…and the schema row names the missing USAGE, then the path (${row(bare.out, "schema")})`);
+        // The role's path is `nowhere`, so both causes hold, each with its
+        // statement (SMD-2242).
+        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public; public is not on its search_path, which is "nowhere"\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  then ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(bare.out),
+               `…and the schema row names the missing USAGE and the path, each with its statement (${row(bare.out, "schema")})`);
+        // An unquoted PUBLIC from the connection string is public: USAGE is
+        // the one cause.
+        const upper = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${readerUrl.includes("?") ? "&" : "?"}options=-csearch_path%3DPUBLIC` });
+        assert(/does not resolve for this role \(no USAGE on schema public\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  The table is there/.test(upper.out),
+               `an unquoted PUBLIC on the path is public: the row names the USAGE alone (${row(upper.out, "schema")})`);
       } finally {
         if (publicUsage) await claims.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC");
       }
