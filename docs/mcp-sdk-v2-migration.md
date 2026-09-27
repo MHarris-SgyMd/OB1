@@ -195,10 +195,11 @@ ticket's, not this one's.
 
 ## Follow-ups
 
-- **Stage 1 — server-portable → v2** (the real migration PR).
-- **Stage 2 — vendored servers → v2 or retire** (tied to SMD-1931).
-- **Stage 3–4 — outliers + SDK client + e2e fixtures → v2.**
-(Filed as SMD tickets from this ADR; the spike sizes each stage.)
+- **SMD-2278 — server-portable → v2** (stage 1; the real migration PR; blocks
+  SMD-2273's path-A prerequisite).
+- **SMD-2279 — vendored servers → v2 or retire** (stage 2; tied to SMD-1931).
+- **SMD-2281 — self-pinned outliers + the SDK client → v2** (stage 3; completes
+  the v1 retirement).
 
 ## Related
 
