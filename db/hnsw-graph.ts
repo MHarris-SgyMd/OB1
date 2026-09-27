@@ -29,6 +29,7 @@
  * than misread.
  */
 import { SQL } from "bun";
+import { commandLine } from "./cli.ts";
 
 /** A `(blkno,offno)` index TID as text — the key every map here uses. */
 export type Tid = string;
@@ -328,18 +329,17 @@ export const SHIPPED_INDEXES: { index: string; table: string }[] = [
 ];
 
 if (import.meta.main) {
-  const args = process.argv.slice(2);
-  const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
-  const url = flag("--url") ?? process.env.DATABASE_URL;
+  const cli = commandLine("hnsw-graph.ts", { url: "one", index: "one", table: "one", json: "none" }, { hints: { url: "<postgres://…>", index: "<name>", table: "<name>" } });
+  const url = cli.value("url") ?? process.env.DATABASE_URL;
   if (!url) { console.error("usage: bun hnsw-graph.ts --url postgres://… [--index name --table name] [--json]"); process.exit(2); }
-  const only = flag("--index");
-  const targets = only ? [{ index: only, table: flag("--table") ?? (SHIPPED_INDEXES.find((s) => s.index === only)?.table ?? "thoughts") }] : SHIPPED_INDEXES;
+  const only = cli.value("index");
+  const targets = only ? [{ index: only, table: cli.value("table") ?? (SHIPPED_INDEXES.find((s) => s.index === only)?.table ?? "thoughts") }] : SHIPPED_INDEXES;
   const sql = new SQL({ url, max: 1 });
   try {
     await sql`CREATE EXTENSION IF NOT EXISTS pageinspect`;
     const reports: ReachabilityReport[] = [];
     for (const t of targets) reports.push(await reachabilityReport(sql, t.index, t.table));
-    if (args.includes("--json")) console.log(JSON.stringify(reports, null, 2));
+    if (cli.has("json")) console.log(JSON.stringify(reports, null, 2));
     else {
       for (const r of reports) {
         const hole = r.unreachableVisible.length;

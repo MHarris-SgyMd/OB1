@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2043 assertions: 2043 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2044 assertions: 2044 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-two (62) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -2584,11 +2584,23 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2043 assertions, PGlite, no container
+bun test-schema.ts                          # 2044 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 832 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
+bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
+
+Every script here reads its arguments through `cli.ts` (SMD-2134), one table
+per script of what each flag takes, scanned before anything else runs. A flag
+the script does not have, one given twice, one that takes a value followed by
+nothing, another flag or an empty string, a value joined with `=`, or a value
+where no flag takes one exits 2 with the script's flag list; `--help` prints the
+list and exits 0; a number is decimal digits only. Before it, `consolidate.ts`
+and `extract-entities.ts` ignored a flag they did not know, so `--K 10` ran the
+default `--k` and exited 0 (SMD-2015). `test-cli.ts` holds the scanner's rules,
+that every entry point imports `cli.ts` and nothing else reads `process.argv`,
+and runs each entry point with a flag it does not have and with `--help`.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`

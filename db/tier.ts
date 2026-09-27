@@ -79,6 +79,7 @@ import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
+import { commandLine, scriptArgv } from "./cli.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -710,6 +711,12 @@ function printSummary(s: ReplaySummary, gate: boolean, window: { words: string; 
 // CLI
 // ---------------------------------------------------------------------------
 
+const COMPARE_USAGE =
+  "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--from-log <brain> [--since <iso>]] [--json]\n" +
+  "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, OB1_COMPARE_KEY, or ?key=) or a connector name (open-brain, open-brain-canary)";
+const VERB_USAGE =
+  "  db/tier.ts --refresh | --replay | --diff | --promote (one verb) --from <postgres://…> --to <postgres://…> [--since <iso-ts>] [--tier <canary|working>]";
+
 /**
  * Parse the --compare arguments: `--compare <a> <b>` names the two brains (a URL
  * or a connector name each), then --a-key/--b-key, a repeatable --query and a
@@ -719,50 +726,34 @@ function printSummary(s: ReplaySummary, gate: boolean, window: { words: string; 
  * but --a-key/--b-key are accepted for a URL that has none.
  */
 export function parseCompareArgs(args: string[]): CompareArgs {
-  const USAGE =
-    "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--from-log <brain> [--since <iso>]] [--json]\n" +
-    "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, OB1_COMPARE_KEY, or ?key=) or a connector name (open-brain, open-brain-canary)";
-  const TAKES_ONE = new Set(["a-key", "b-key", "queries-file", "from-log", "since"]);
-  const TAKES_MANY = new Set(["query"]);
-  const TAKES_NONE = new Set(["compare", "replay", "hybrid", "json"]);
-  const out: CompareArgs = { a: "", b: "", replay: false, hybrid: false, queries: [], json: false };
-  const refs: string[] = [];
-  const seenOne = new Set<string>(); // single-value flags refuse a repeat, as the SQL-verb parser does
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    const name = a.startsWith("--") ? a.slice(2) : null;
-    if (name === "compare") {
-      // The two tokens after --compare are the brain references.
-      for (let k = 0; k < 2; k++) {
-        const t = args[i + 1];
-        if (t === undefined || t.startsWith("--")) { console.error(`--compare needs two brains: <a> and <b>.\n${USAGE}`); process.exit(2); }
-        refs.push(t);
-        i++;
-      }
-      continue;
-    }
-    if (name !== null && (TAKES_ONE.has(name) || TAKES_MANY.has(name))) {
-      const v = args[i + 1];
-      if (v === undefined || v.startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
-      if (TAKES_ONE.has(name)) { if (seenOne.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); } seenOne.add(name); }
-      if (name === "a-key") out.aKey = v;
-      else if (name === "b-key") out.bKey = v;
-      else if (name === "queries-file") out.queries.push(...readQueriesFile(v));
-      else if (name === "from-log") { if (v.trim().length === 0) { console.error(`--from-log is empty.\n${USAGE}`); process.exit(2); } out.fromLog = v; }
-      else if (name === "since") { if (Number.isNaN(Date.parse(v))) { console.error(`--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).\n${USAGE}`); process.exit(2); } out.since = v; }
-      else if (name === "query") { if (v.trim().length === 0) { console.error(`--query is empty.\n${USAGE}`); process.exit(2); } out.queries.push(v); }
-      i++;
-      continue;
-    }
-    if (name === "replay") { out.replay = true; continue; }
-    if (name === "hybrid") { out.hybrid = true; continue; }
-    if (name === "json") { out.json = true; continue; }
-    if (name !== null && TAKES_NONE.has(name)) continue;
-    console.error(`unknown argument: ${name !== null ? a : "<a value where no flag takes one>"}\n${USAGE}`);
-    process.exit(2);
+  const USAGE = COMPARE_USAGE;
+  // Every argument accounted for (db/cli.ts); the two values after --compare are the brain references.
+  const cli = commandLine("tier.ts", {
+    compare: "two", "a-key": "one", "b-key": "one", "queries-file": "one", "from-log": "one", since: "one", query: "repeated",
+    replay: "none", hybrid: "none", json: "none",
+  }, { hints: { compare: "<a> <b>", "a-key": "<key>", "b-key": "<key>", "queries-file": "<path>", "from-log": "<brain>", since: "<iso>", query: "<q>" } }, args);
+  const refuse = (why: string): never => { console.error(`${why}\n${USAGE}`); process.exit(2); };
+  if (!cli.has("compare")) refuse("--compare needs two brains.");
+  const [a, b] = cli.values("compare");
+  const out: CompareArgs = { a, b, replay: cli.has("replay"), hybrid: cli.has("hybrid"), queries: [], json: cli.has("json") };
+  if (cli.has("a-key")) out.aKey = cli.value("a-key");
+  if (cli.has("b-key")) out.bKey = cli.value("b-key");
+  for (const q of cli.values("query")) {
+    if (q.trim().length === 0) refuse("--query is empty.");
+    out.queries.push(q);
   }
-  if (refs.length !== 2) { console.error(`--compare needs two brains.\n${USAGE}`); process.exit(2); }
-  [out.a, out.b] = refs;
+  const file = cli.value("queries-file");
+  if (file !== undefined) out.queries.push(...readQueriesFile(file));
+  const fromLog = cli.value("from-log");
+  if (fromLog !== undefined) {
+    if (fromLog.trim().length === 0) refuse("--from-log is empty.");
+    out.fromLog = fromLog;
+  }
+  const since = cli.value("since");
+  if (since !== undefined) {
+    if (Number.isNaN(Date.parse(since))) refuse("--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).");
+    out.since = since;
+  }
   if (out.hybrid && !out.replay) { console.error(`--hybrid only applies with --replay.\n${USAGE}`); process.exit(2); }
   if (out.fromLog && out.queries.length > 0) { console.error(`--from-log and --query/--queries-file are two query sources; pass one.\n${USAGE}`); process.exit(2); }
   if (out.fromLog && out.hybrid) { console.error(`--hybrid does not apply to --from-log: each logged search replays on the arm that ran it.\n${USAGE}`); process.exit(2); }
@@ -786,52 +777,27 @@ function readQueriesFile(path: string): string[] {
 }
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const flag = (name: string): string | undefined => {
-    const i = args.indexOf(`--${name}`);
-    return i >= 0 ? args[i + 1] : undefined;
-  };
-  const has = (name: string) => args.includes(`--${name}`);
+  const args = scriptArgv(`usage:\n${VERB_USAGE}\n${COMPARE_USAGE}\n  The header of db/tier.ts says what each does.`);
 
   // --compare is a different animal from the SQL verbs: it reaches two brains over
   // HTTP as a read client (brain_info + the read tools), never Postgres, so it
   // takes brain references and its own flags rather than --from/--to. Handled and
   // returned before the SQL-verb parser ever sees these arguments (SMD-2109).
-  if (has("compare")) {
-    for (const v of ["refresh", "replay", "diff", "promote"]) {
-      if (v !== "replay" && has(v)) { console.error(`--compare does not combine with --${v}.`); process.exit(2); }
+  if (args.includes("--compare")) {
+    for (const v of ["refresh", "diff", "promote"]) {
+      if (args.includes(`--${v}`)) { console.error(`--compare does not combine with --${v}.`); process.exit(2); }
     }
     process.exit(await runCompare(parseCompareArgs(args)));
   }
 
-  // Every argument accounted for, the way migrate.ts and ingest-records.ts do it.
-  {
-    const TAKES_ONE = new Set(["from", "to", "since", "tier"]);
-    const TAKES_NONE = new Set(["refresh", "replay", "diff", "promote"]);
-    const USAGE =
-      "  one verb: --refresh | --replay | --diff | --promote\n" +
-      "  flags: --from <postgres://…>, --to <postgres://…>, --since <iso-ts>, --tier <canary|working>";
-    const seen = new Set<string>();
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      const name = a.startsWith("--") ? a.slice(2) : null;
-      if (name !== null && (TAKES_ONE.has(name) || TAKES_NONE.has(name))) {
-        if (seen.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); }
-        seen.add(name);
-      }
-      if (name !== null && TAKES_ONE.has(name)) {
-        if (i + 1 >= args.length || args[i + 1].startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
-        i++;
-        continue;
-      }
-      if (name !== null && TAKES_NONE.has(name)) continue;
-      const shown = name !== null ? a : /:\/\//.test(a) ? "<a URL>" : a;
-      console.error(`unknown argument: ${shown}${name === null ? " (a value where no flag takes one)" : ""}\n${USAGE}`);
-      process.exit(2);
-    }
-  }
+  // Every argument accounted for (db/cli.ts), as the other db/ scripts do it.
+  const cli = commandLine("tier.ts", {
+    from: "one", to: "one", since: "one", tier: "one", refresh: "none", replay: "none", diff: "none", promote: "none",
+  }, { hints: { from: "<postgres://…>", to: "<postgres://…>", since: "<iso-ts>", tier: "<canary|working>" } }, args);
+  const flag = cli.value;
+  const has = cli.has;
 
-  const verbs = ["refresh", "replay", "diff", "promote"].filter((v) => has(v));
+  const verbs = (["refresh", "replay", "diff", "promote"] as const).filter((v) => has(v));
   if (verbs.length !== 1) {
     console.error(`Give exactly one verb (--refresh, --replay, --diff, --promote), not ${verbs.length}.`);
     process.exit(2);

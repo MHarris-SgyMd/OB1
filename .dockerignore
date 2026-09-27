@@ -42,11 +42,13 @@ supabase
 **/*.log
 
 # db/: the server image copies config.mjs, version.mjs and their types; the
-# migrate image (db/Dockerfile, SMD-1860) copies migrate.ts and migrations/. Both
-# are built from this root, so both stay in the context; the tests, benches,
-# workers and the tests' package do not.
+# migrate image (db/Dockerfile, SMD-1860) copies migrate.ts, the flag scanner it
+# imports (cli.ts, SMD-2134) and migrations/. Both are built from this root, so
+# both stay in the context; the tests, benches, workers and the tests' package do
+# not.
 db/*.ts
 !db/migrate.ts
+!db/cli.ts
 db/*.sh
 db/package.json
 db/bun.lock

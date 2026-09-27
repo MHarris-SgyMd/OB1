@@ -92,6 +92,7 @@ import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY 
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { ItemsRefusal, parseItems, PIPELINE_META_KEYS, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
 import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
+import { commandLine } from "./cli.ts";
 
 // The structure writer lives in ingest-structure.ts so db/sync-linear.ts can
 // import it without this file's evals/ and scripts/ imports (its container
@@ -730,40 +731,17 @@ function selfCheck(): number {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const flag = (name: string): string | undefined => {
-    const i = args.indexOf(`--${name}`);
-    return i >= 0 ? args[i + 1] : undefined;
-  };
-  const has = (name: string) => args.includes(`--${name}`);
-
-  // Every argument accounted for, the way migrate.ts does it: a flag the runner
-  // does not have, a value where none is expected, a one-value flag with nothing
-  // after it, or a flag given twice, is refused rather than silently dropped.
-  {
-    const TAKES_ONE = new Set(["url", "source", "linear", "memory-dir", "markdown", "items", "allow", "tier", "since"]);
-    const TAKES_NONE = new Set(["dry-run", "self-check"]);
-    const USAGE = "  flags: --url <postgres://…>, --source <all|fork|commit|linear|memory|markdown|items>, --linear <dump.json>, --memory-dir <path>, --markdown <vault root>, --items <file.jsonl | ->, --allow <scope,scope> (or OB1_INGEST_ALLOW), --tier <stable|canary|working>, --since <ref>, --dry-run, --self-check";
-    const seen = new Set<string>();
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      const name = a.startsWith("--") ? a.slice(2) : null;
-      if (name !== null && (TAKES_ONE.has(name) || TAKES_NONE.has(name))) {
-        if (seen.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); }
-        seen.add(name);
-      }
-      if (name !== null && TAKES_ONE.has(name)) {
-        // An empty value is no value: `--items "$OUT"` with the variable unset would otherwise read as the flag absent and the run would write nothing, exit 0 (third review pass, cold read).
-        if (i + 1 >= args.length || args[i + 1].startsWith("--") || args[i + 1] === "") { console.error(`--${name} takes a value${i + 1 < args.length && args[i + 1] === "" ? " (an empty one was given)" : ""}.\n${USAGE}`); process.exit(2); }
-        i++;
-        continue;
-      }
-      if (name !== null && TAKES_NONE.has(name)) continue;
-      const shown = name !== null ? a : /:\/\//.test(a) ? "<a URL>" : a;
-      console.error(`unknown argument: ${shown}${name === null ? " (a value where no flag takes one)" : ""}\n${USAGE}`);
-      process.exit(2);
-    }
-  }
+  // Every argument accounted for (db/cli.ts): a flag the runner does not have,
+  // a value where none is expected, a one-value flag with nothing after it or
+  // an empty value (`--items "$OUT"` with the variable unset would read as the
+  // flag absent and write nothing, exit 0), or a flag given twice, is refused
+  // rather than silently dropped.
+  const cli = commandLine("ingest-records.ts", {
+    url: "one", source: "one", linear: "one", "memory-dir": "one", markdown: "one", items: "one", allow: "one", tier: "one", since: "one",
+    "dry-run": "none", "self-check": "none",
+  }, { hints: { url: "<postgres://…>", source: "<all|fork|commit|linear|memory|markdown|items>", linear: "<dump.json>", "memory-dir": "<path>", markdown: "<vault root>", items: "<file.jsonl | ->", allow: "<scope,scope> (or OB1_INGEST_ALLOW)", tier: "<stable|canary|working>", since: "<ref>" } });
+  const flag = cli.value;
+  const has = cli.has;
 
   if (has("self-check")) process.exit(selfCheck());
 
