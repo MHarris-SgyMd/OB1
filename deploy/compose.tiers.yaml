@@ -63,6 +63,7 @@ x-server-env: &server-env
   OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
   OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
   OB1_PG_POOL: ${OB1_PG_POOL:-}
+  OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
   PORT: "8000"
 
 # The migrate one-shot's environment, minus its per-tier DATABASE_URL — the schema
@@ -136,6 +137,7 @@ services:
       stable-migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
 
   # ── canary ───────────────────────────────────────────────────────────────
   canary-postgres:
@@ -170,6 +172,7 @@ services:
       canary-migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
 
   # ── working ──────────────────────────────────────────────────────────────
   working-postgres:
@@ -204,6 +207,7 @@ services:
       working-migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
 
   # ── the shared model provider ────────────────────────────────────────────
   # One Ollama for all three tiers (the cost SMD-1806 contains — one model server,

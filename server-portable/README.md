@@ -299,7 +299,7 @@ slip — `OB1_STORE=postgrest` kept beside a `SUPABASE_URL` that holds a
 `postgres://` string — is refused by name too, the string masked, rather than
 handed to supabase-js as a base URL.
 
-Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`.
+Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats).
 
 On a container these are ordinary environment variables. On Workers use
 `wrangler secret put NAME` — **never** put them in `wrangler.toml`, which is
@@ -432,10 +432,34 @@ its schema) is `invisible`, never "no table". The tool's statements are capped a
 database's half is not read — PostgREST exposes no catalog reads — and the table
 says so; see Caveats.
 
+## Other read surfaces
+
+Beside `brain_info`, the read scope carries a few keyed, read-only tools a client
+discovers through `tools/list` (a capture-only key sees none of them):
+
+- **`list_thought_ids`** (SMD-2244) — the corpus's thought ids, id-only, keyset-paged,
+  with a first-page md5 digest, for a cheap cross-brain id-set diff.
+- **`list_logged_searches`** (SMD-2245) — the `query_log` search rows (query, arm,
+  arguments), most recent first and `since`-windowed, for a log-sourced replay.
+- **`worker_status`** (SMD-2131) — the background-work queues over
+  `thought_work_claims`, one row per `work_type`: pending / claimed (in flight,
+  INCLUDING stale) / succeeded / failed, how many thoughts are unpooled, the corpus
+  total, the stale-lease count with its oldest lease's time and holder, and whether the
+  pool is the active one (`ob1_config.entity_extraction_key` or `reembed:<model>@<dim>`;
+  `null` for consolidate). Read-only; SQL backend only — `thought_work_claims` is not
+  published to PostgREST (migration 015), so the shim answers that it needs the SQL store.
+
+`worker_status` also has a keyed **`GET /worker-status`** — the same authentication as
+`/health` (a read or write key gets the JSON array, a capture/wrong/no/revoked key or a
+`HEAD` gets the bodiless `ok`), so an operator can read the queues with a `curl` the way
+they read `/health`. It is a parallel route, deliberately kept out of the `/health`
+BrainInfo body: the queue read is SQL-only and stays off the health path's identity
+budget and its both-backend contract.
+
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 213 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default and the tool-call keepalive
+bun test-server.ts        # 338 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 97 — scoped, hashed, named keys
 bun run test:local        # 52 — fully local provider, no credential
 bun run test:sql          # 123 — store conformance, real Postgres in a container
@@ -527,6 +551,42 @@ stored in the same write").
   stuck call produces, long before the ceiling. The call runs to its end on the
   server, and a retry of the same text is `upsert_thought`'s fingerprint no-op
   rather than a second row. The rest of per-request logging is SMD-1849.
+- **A stop finishes what is in flight, for the grace period less 2 s**
+  (SMD-2250). On SIGTERM or SIGINT the server stops accepting, waits for the
+  requests in flight (a tool call's stream included) and for the tool calls
+  still running (one whose client has gone runs on, and a capture may still
+  land), closes the database pool and exits 0: `docker compose stop server`
+  returns in about 0.1 s idle, or when the last call ends. The wait is
+  `OB1_STOP_GRACE` less 2 s (at least 0.5 s): the platform's grace period in
+  whole seconds from 1 to 3600, no unit, 10 unless set (Docker's, so 8 s of
+  drain). Compose appends `s` to the same variable for the server's
+  `stop_grace_period`, so preflight refuses anything else (`30s` would fail
+  compose itself, `1m` would be a 1 ms kill); set it to the platform's
+  elsewhere (Kubernetes' and ECS's 30, Fly's `kill_timeout`). A call still
+  running at the bound is cut off, the line says how many, an MCP call's own
+  line says the stop cut it, and the exit is 1; a second signal cuts the wait
+  short. The bounds count from the handler, so the stop inside Docker's 10 s
+  grace period is measured (8.4–8.5 s for a cut at the bound), not guaranteed.
+  Before, the image ignored SIGTERM — the server is the container's PID 1,
+  which has no default action for it — so every stop waited out the grace
+  period and was killed (exit 137), cutting off any call in flight. Run with
+  an init as PID 1 (`docker run --init`, compose's `init: true`, Fly), under
+  systemd or in a terminal, Bun died at the signal at once; it now drains the
+  same way, and Ctrl-C exits 0. Only when `index.ts` is Bun's entry: Workers
+  has no signals, and a suite that imports the module keeps its own. What the
+  container's exit code says:
+
+  | Exit | Meaning |
+  | --- | --- |
+  | 0 | Stopped once everything in flight had ended (or nothing was) |
+  | 1 | The stop cut calls off at the bound or on a second signal — or preflight refused the configuration, or the server failed; the last `SIGTERM: stopped` line tells which |
+  | 143 / 130 | Stopped by SIGTERM / SIGINT during preflight, before it served (the Dockerfile's traps) |
+  | 137 | Killed: the stop outlasted the grace period, or the signal landed while `index.ts` was still loading |
+
+  Under podman, `podman restart` and `docker compose restart` without `-t`
+  kill the server at once (exit 137, measured on podman 6.0.2) rather than
+  signal it; `compose stop server` then `compose start server`, or
+  `podman restart -t 10`, drains.
 
 ## Related
 

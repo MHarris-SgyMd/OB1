@@ -14,6 +14,7 @@ import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Princi
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
 import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
+import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 
 /**
  * Runtime-portable env access.
@@ -41,6 +42,13 @@ type Env = {
   DATABASE_URL?: string;
   /** The SQL store's connection pool size (store-sql.ts); default 10. */
   OB1_PG_POOL?: string;
+  /**
+   * The platform's grace period for a stop, in seconds; the server drains for
+   * 2 s less (shutdown.ts). Default 10, Docker's. Read once, at start-up, from
+   * the process's environment: the handlers go in before the first request
+   * seeds the rest.
+   */
+  OB1_STOP_GRACE?: string;
   /**
    * The opt-in trigram index. The migrator builds it; in the server's process
    * db/config.mjs reads it (TRGM_INDEX), which preflight.ts imports to tell the
@@ -779,6 +787,15 @@ export function currentSearchHint(msg: string): string {
     : "";
 }
 
+/**
+ * The tool calls running, counted for the stop (SMD-2250, review pass 3): a
+ * call runs on after its client has gone, and a stop that waited only on the
+ * requests Bun counts exited under it.
+ */
+const toolCalls = createCallCount();
+/** How many tool calls are running now, for test-server [13d]. */
+export const toolCallsRunning = (): number => toolCalls.running;
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
@@ -786,6 +803,13 @@ function buildServer(principal: Principal): McpServer {
     // here said 1.0.0 from before the fork had a version scheme until 1.1.0.
     version: FORK_VERSION,
   });
+  // Every tool registered below runs inside toolCalls.track: registerTool's
+  // last argument is the handler, whatever its overload.
+  const registerTool = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
+  (server as unknown as { registerTool: (...args: unknown[]) => unknown }).registerTool = (...args: unknown[]) => {
+    const handler = args[args.length - 1] as (...call: unknown[]) => unknown;
+    return registerTool(...args.slice(0, -1), (...call: unknown[]) => toolCalls.track(() => handler(...call)));
+  };
 
   // The opt-in query log (migration 034, SMD-1295). Off unless OB1_QUERY_LOG=on,
   // and best-effort either way: a log write is never allowed to fail a search, a
@@ -1719,6 +1743,33 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 3b-iv: the background-work queues (SMD-2131) — per work_type, what is
+  // pending / in flight / done / failed / stalled over thought_work_claims, so an
+  // operator or agent can ask a running brain about its queues without shelling into
+  // Postgres (SMD-1844 closed the host port). Read-only, aggregated in SQL; SQL
+  // backend only (the table is not on PostgREST). Gated like the other read tools.
+  if (canRead(principal)) server.registerTool(
+    "worker_status",
+    {
+      title: "Worker Queue Status",
+      description:
+        "Report the background-work pools (entity extraction, consolidation, re-embed) — one row per work_type that has any claim rows, with pending / claimed (in flight, INCLUDING stale) / succeeded / failed counts, how many thoughts are unpooled (not yet queued), the corpus total, how many claimed leases are STALE (a dead worker's lease past its ttl — healthy in-flight is claimed − stale), and whether the pool is the brain's active one. " +
+        "Read-only. Returns a JSON array; empty when nothing has been queued (a pool appears once it has a claim row).",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const rows = await (await db()).workerStatus();
+        return { content: [{ type: "text" as const, text: JSON.stringify(rows) }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
   // database's versions, ledger, counts, size and HNSW parameters, one short
   // table. Gated like the other read tools. The same record is the keyed
@@ -2614,6 +2665,36 @@ app.get("*", async (c, next) => {
   return c.json(await info, 200, corsHeaders);
 });
 
+// The worker-queue status as a keyed GET (SMD-2131) — the REST mirror of the
+// worker_status tool, the same authentication as /health (keyed reader → the JSON,
+// capture/wrong/no/revoked key → plain "ok", HEAD → "ok"). Kept off the /health
+// BrainInfo body deliberately: this read is SQL-backend only and would otherwise
+// couple a work-queue read into the health path's identity budget.
+const WORKER_STATUS_PATH = /(^|\/)worker-status\/?$/;
+app.get("*", async (c, next) => {
+  if (!WORKER_STATUS_PATH.test(c.req.path)) return next();
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
+  }, { admit: SCOPES });
+  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+  // The same identity gate as /health: a revoked or unresolved key is shown nothing.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const identity = await Promise.race([
+    agents().resolve(db(), principal),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
+  ]);
+  clearTimeout(timer);
+  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  try {
+    return c.json(await (await db()).workerStatus(), 200, corsHeaders);
+  } catch (e) {
+    // SQL-only: a PostgREST (Workers) deployment cannot serve this — a reason, not a bare 500.
+    return c.json({ error: (e as Error).message }, 200, corsHeaders);
+  }
+});
+
 // ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────
 //
 // The transport answers a POST with an SSE stream at once and writes the tool's
@@ -2750,6 +2831,17 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
   return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
 }
 
+/**
+ * The same close when the server's own stop made it: the request was still
+ * running when the stop closed it — at the drain bound, or on a second
+ * signal (shutdown.ts) — and the process exits next, so the call does not run
+ * to its end (review pass 1 of SMD-2250 — before, this was logged as the
+ * client leaving).
+ */
+export function cutByStopLine(label: string, elapsedMs: number): string {
+  return `request cut off by the server's stop after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — still running when the stop closed it, and the process exits now; a capture may or may not have landed (SMD-2250)`;
+}
+
 // The MCP endpoint, registered for MCP_METHODS only. The transport is built per
 // request and is sessionless, so a GET has no server stream to open: before
 // change 75 an authenticated GET cost an agent-registry resolve and a server
@@ -2775,7 +2867,7 @@ app.on(MCP_METHODS, "*", async (c) => {
   let label = "?";
   let settled = false;
   const abandoned = () => {
-    if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
+    if (!settled) console.warn((cutByStop ? cutByStopLine : abandonedRequestLine)(label, performance.now() - started));
   };
   signal.addEventListener("abort", abandoned, { once: true });
   if (signal.aborted) {
@@ -2881,11 +2973,38 @@ app.notFound((c) =>
   c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS),
 );
 
+// Stopping on SIGTERM, what is in flight finished (SMD-2250; shutdown.ts says
+// why the image needs it). Bun serves the default export below itself and
+// hands the server to no one but the fetch handler, as its second argument, so
+// the first request passes it on; before that nothing can be in flight. Only
+// when this module is Bun's entry: never on Workers, whose second argument is
+// its bindings, nor in a suite that imports the module.
+const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
+let bunServer: Stoppable | undefined;
+/** Set once the stop closes what is still in flight at its bound, so the route's close line names the stop, not the client. */
+let cutByStop = false;
+if (SERVES_ON_BUN) {
+  const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
+  if (grace.problem) console.warn(grace.problem);
+  drainOnSignal({
+    drainBoundMs: grace.drainBoundMs,
+    server: () => bunServer,
+    calls: toolCalls,
+    // The pool only if a request opened one: a store that failed to build has
+    // none, and the PostgREST store holds no pooled connection to close.
+    close: async () => (_store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : false),
+    onCut: () => { cutByStop = true; },
+  });
+}
+
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
   // No `idleTimeout`: a tool call outlives the default by the keepalive above,
   // and the default is the right reaper for a dead socket (SMD-1864).
   // An empty PORT is unset, not port 0 (a random port, silently) — `||`, the rule the vendored servers' tails share (SMD-1799).
   port: Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.PORT || 8000),
-  fetch: app.fetch,
+  fetch: (...args: Parameters<typeof app.fetch>) => {
+    if (SERVES_ON_BUN && !bunServer && isStoppable(args[1])) bunServer = args[1];
+    return app.fetch(...args);
+  },
 };
