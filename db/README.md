@@ -167,7 +167,7 @@ back and corrects the own-key labels an earlier paste of the body left
 ## Expected outcome
 
 `bun test-schema.ts` prints `2276 assertions: 2276 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty-nine (69) migrations applied, and
+Against a real database, `bun migrate.ts` reports seventy (70) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -208,7 +208,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2313).
+068 SMD-2256, 070 SMD-2313).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -722,10 +722,10 @@ earlier, by the producer-count arm; the remedies run 061, 063, 066 in turn).
 One body redefined on its own text with no arity change; nothing runs at
 apply time but the DDL; a pair proposed before the file stands for its
 reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
-pair — the listing read nothing of `derived_from` until 069, the pass never replaces
+pair — the listing read nothing of `derived_from` until 070, the pass never replaces
 it (a text move, once `rebuild_derived` runs — `db/rebuild.ts` — leaves it
 `stale` for a reviewer, and the pass settles it on its next run — 067), and
-the recorder has no lineage guard; 069 flags such a row `LINEAGE PAIR`, and
+the recorder has no lineage guard; 070 flags such a row `LINEAGE PAIR`, and
 `consolidate.ts --list lineage` lists the unreviewed ones for the reject.
 test-schema [60], test-upgrade [20r] (a proposal planted on the pair before
 the file is pending and unmoved after it); `server-portable/test-preflight.ts`
@@ -832,7 +832,7 @@ longer read `thought_sources` (a removed join's tables are not
 permission-checked — observed, not documented), so the server group keeps that
 grant.
 
-Migration 069 makes a proposal standing on a lineage pair visible as such
+Migration 070 makes a proposal standing on a lineage pair visible as such
 (SMD-2313). 066 stopped the pass proposing a thought against a member of its
 `derived_from`, and changed nothing about a proposal already standing on such a
 pair — judged before 066, or recorded raw (the recorder has no lineage guard):
@@ -856,16 +856,16 @@ stale), `--status` counts them, `--accept` refuses such a row unless `--force`
 (029's edited-since rule, CLI-side); the MCP tool prints the tag and takes
 `lineage: true`; preflight's `lineage` check counts unreviewed proposals on a
 lineage pair (bounded, as its census is) and warns with the ids and the remedy
-— on a brain at 068 the remedy applies 069 first, since `--list` needs it while
+— on a brain at 068 the remedy applies 070 first, since `--list` needs it while
 the census and `--status` read the tables — and, with no such row standing,
-warns when the listing is from before 069 (every listing fails there: the
+warns when the listing is from before 070 (every listing fails there: the
 callers pass the third argument) or 029's two-argument form stands beside it
 (029 re-applied by hand lands it beside, and a call short of three arguments
 is then ambiguous and fails; the fork's callers pass three, which resolve). No
 verdict is written at apply time — a rejection is a reviewer's, with a name on
 it — and a `--reject-lineage` sweep is not taken until the flag has been used.
 DDL alone; no row moves; no grant is carried (EXECUTE is PUBLIC, as on 029's).
-test-schema [63], test-upgrade [20u], test-live [16];
+test-schema [64], test-upgrade [20v], test-live [16];
 `server-portable/test-preflight.ts` drives the census, the leftover-form and
 the older-body arms; the store and e2e suites read the column.
 
@@ -1931,13 +1931,13 @@ bun consolidate.ts --url … --limit 25              # a trial: this many though
 bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
-bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (069)
+bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
 #   --k N (3)  --min-sim F (0.6)  --min-confidence F (0.5)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
-bun consolidate.ts --url … --accept <id> --force            # a thought edited since judged, a stale row, or a lineage pair (069)
+bun consolidate.ts --url … --accept <id> --force            # a thought edited since judged, a stale row, or a lineage pair (070)
 ```
 
 **The cost, stated up front.** Up to `--k` calls to the metadata model per
@@ -1958,7 +1958,7 @@ prints the same queue to a client. A row standing on a lineage pair — one
 side's `derived_from` names the other, a page and its evidence — is tagged
 `LINEAGE PAIR` with the reject to run (`--reject <id> --note "lineage pair
 (066)"`); `--list lineage` lists the unreviewed ones, pending then stale, and
-`--status` counts them (069, SMD-2313); `--accept` on such a row is refused
+`--status` counts them (070, SMD-2313); `--accept` on such a row is refused
 naming the reject unless `--force` says the pointer is meant — a guard on the
 one accept door, not a verdict — and a row accepted before the pair became one
 is tagged under `--list accepted` with `--reject <id>`, which clears the pointer

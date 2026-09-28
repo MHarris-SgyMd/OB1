@@ -1468,14 +1468,14 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "List Supersession Proposals",
       description:
-        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 069).",
+        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070).",
       annotations: {
         readOnlyHint: true,
       },
       inputSchema: {
         status: z.enum(["pending", "accepted", "rejected", "stale", "all"]).optional().default("pending"),
         limit: z.number().int().min(1).max(200).optional().default(10),
-        lineage: z.boolean().optional().describe("true: only proposals standing on a lineage pair (one side's derived_from names the other); false: only the rest; absent: every pair (migration 069)"),
+        lineage: z.boolean().optional().describe("true: only proposals standing on a lineage pair (one side's derived_from names the other); false: only the rest; absent: every pair (migration 070)"),
       },
     },
     async ({ status, limit, lineage }) => {
@@ -1502,12 +1502,12 @@ function buildServer(principal: Principal): McpServer {
         const results = data.map((p, i) => {
           const edited = p.older.edited || p.newer.edited;
           const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
-          // 069: the CLI refuses an accept on a lineage pair without --force.
+          // 070: the CLI refuses an accept on a lineage pair without --force.
           const review = p.status === "pending"
             ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited || p.lineage ? " --force" : ""}   reject: … --reject ${p.id}` +
               (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
             : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${p.reviewNote ? `: ${cleanForDisplay(p.reviewNote)}` : ""}`;
-          // 069 (SMD-2313): a lineage pair — one side derived from the other
+          // 070 (SMD-2313): a lineage pair — one side derived from the other
           // — is never proposed since 066; a row standing on one is the
           // reviewer's to reject, said with the command while it is theirs.
           const lineageLine = p.lineage
@@ -1526,13 +1526,13 @@ function buildServer(principal: Principal): McpServer {
         };
       } catch (err: unknown) {
         const msg = (err as Error).message;
-        // 069 (SMD-2313): both stores call the three-argument form, so a brain
-        // short of 069 — or of 029, whose queue the listing reads — fails
+        // 070 (SMD-2313): both stores call the three-argument form, so a brain
+        // short of 070 — or of 029, whose queue the listing reads — fails
         // naming that form (PostgREST names p_lineage); the driver's message
         // is the same either way, so one hint names both files (cold read,
         // first and fourth review passes).
         const hint = /list_supersession_proposals|supersession_proposals|p_lineage/.test(msg)
-          ? " — the migrations through 069 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 069, db/migrations/069_listing_flags_lineage_pair.sql, its current listing), or PostgREST has not reloaded its schema cache"
+          ? " — the migrations through 070 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 070, db/migrations/070_listing_flags_lineage_pair.sql, its current listing), or PostgREST has not reloaded its schema cache"
           : "";
         return {
           content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],

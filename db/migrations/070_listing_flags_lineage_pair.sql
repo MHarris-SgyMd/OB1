@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 069: a proposal standing on a lineage pair is visible as such —
+-- Migration 070: a proposal standing on a lineage pair is visible as such —
 --                list_supersession_proposals redefined on 029's body with a
 --                `lineage` column and a selector for it (SMD-2313)
 -- =============================================================================
@@ -115,7 +115,7 @@
 --   store's mapper, the CLI's row type, PostgREST's JSON, the eval's
 --   SELECT *), so none moves. 029's file is not edited: it is frozen by
 --   release 1.0.0.
---   test-schema [63], test-upgrade [20u] (proposals planted before the file
+--   test-schema [64], test-upgrade [20v] (proposals planted before the file
 --   read the flag after it, the table whole and unmoved),
 --   server-portable/test-preflight.ts (the census arm and the older-body
 --   arm), test-live [16] (--list lineage), the store and e2e suites.
@@ -134,7 +134,7 @@ DO $qc$
 BEGIN
   IF to_regprocedure('content_fingerprint_of(text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 069 needs 016 (content_fingerprint_of); this schema lacks it',
+      MESSAGE = 'migration 070 needs 016 (content_fingerprint_of); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -142,7 +142,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                   WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'derived_from') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 069 needs 025 (thoughts.derived_from); this schema lacks it',
+      MESSAGE = 'migration 070 needs 025 (thoughts.derived_from); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -151,7 +151,7 @@ BEGIN
   -- repaired by applying this file.
   IF to_regclass('supersession_proposals') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 069 needs 029 (supersession_proposals); this schema lacks it',
+      MESSAGE = 'migration 070 needs 029 (supersession_proposals); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -202,7 +202,7 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 AS $$
-  -- 069 (ob1:listing-flags-the-lineage-pair): the pair is a lineage pair when
+  -- 070 (ob1:listing-flags-the-lineage-pair): the pair is a lineage pair when
   -- either side's derived_from names the other — 066's predicate, which the
   -- candidate filter applies, read here on a proposal already standing.
   -- COALESCE: a NULL derived_from is "names nothing", not unknown.
@@ -226,4 +226,4 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION list_supersession_proposals(text, int, boolean) IS
-  'The proposals in one status (NULL for all), most confident first, each with both thoughts'' content and capture time as they are NOW, whether either text has changed since the pair was judged, and — since 069 — whether the pair is a lineage pair: one side''s derived_from names the other (direct members, either direction, as 066''s candidate filter reads it), so the pair would never be proposed today and a reviewer rejects it (a derivation and its input; re-deriving is rebuild_derived''s door). p_lineage NULL lists every pair, true the lineage pairs alone, false the rest. At most 200. Migrations 029, 069.';
+  'The proposals in one status (NULL for all), most confident first, each with both thoughts'' content and capture time as they are NOW, whether either text has changed since the pair was judged, and — since 070 — whether the pair is a lineage pair: one side''s derived_from names the other (direct members, either direction, as 066''s candidate filter reads it), so the pair would never be proposed today and a reviewer rejects it (a derivation and its input; re-deriving is rebuild_derived''s door). p_lineage NULL lists every pair, true the lineage pairs alone, false the rest. At most 200. Migrations 029, 070.';

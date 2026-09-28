@@ -635,10 +635,10 @@ export class SqlStore implements ThoughtStore {
   }
 
   async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean }): Promise<SupersessionProposal[]> {
-    // Migration 029, under 069's three-argument form. NULL status lists every
+    // Migration 029, under 070's three-argument form. NULL status lists every
     // state, NULL lineage every pair; the function caps the limit. Three
     // arguments, always: 029 re-applied by hand lands its two-argument form
-    // beside 069's, and a call short of three is then ambiguous (not unique)
+    // beside 070's, and a call short of three is then ambiguous (not unique)
     // and fails; three resolve (preflight's lineage check names the leftover).
     const rows = await this.sql`
       SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean)`;

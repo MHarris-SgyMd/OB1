@@ -4159,7 +4159,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const proposed = await consolidate();
     const atlas = (await proposals()).find((p) => p.older_id === atlasOld && p.newer_id === atlasNew);
     assert(proposed.code === 0 && atlas !== undefined && atlas.status === "pending" && (await proposals()).length === proposalsBefore + 1, `the atlas pair is proposed pending (exit ${proposed.code})`);
-    // 069 (SMD-2313): the PENDING row on a lineage pair — the ticket's own
+    // 070 (SMD-2313): the PENDING row on a lineage pair — the ticket's own
     // case, a page over its evidence judged before 066 — under --list
     // lineage, with no stale standing on it; the array set raw and cleared
     // (run-it, first review pass: the one --list lineage tooth was a stale
@@ -4171,24 +4171,24 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     // …and the accept is refused without --force — a guard on the one accept
     // door, not a verdict: the row stays pending, nothing is written
     // (definitions probe, second review pass: the accept went through under
-    // the reject's own advice). A brain without 069's listing gets the file
+    // the reject's own advice). A brain without 070's listing gets the file
     // named on --list, not a driver stack: the form dropped and put back.
     const acceptLineage = await consolidate("--accept", atlas!.id);
     assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`)
            && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
            `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
-    // R3 tooth (mutant 2): the catch names 069 for the one error it is for — an unrelated failure inside the listing is shown as itself.
+    // R3 tooth (mutant 2): the catch names 070 for the one error it is for — an unrelated failure inside the listing is shown as itself.
     await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
     const listBoom = await consolidate("--list", "lineage");
-    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 069/.test(listBoom.out),
-           `an unrelated error inside --list is shown as itself, not as a missing 069 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
+    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 070/.test(listBoom.out),
+           `an unrelated error inside --list is shown as itself, not as a missing 070 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
     await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
-    assert(/1 unreviewed standing on a lineage pair \(apply migration 069 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
-           "--status still counts the row on a brain without 069 and says the listing needs the file before pointing at it");
-    const listPre069 = await consolidate("--list", "lineage");
-    assert(listPre069.code === 1 && /--list needs migration 069 \(db\/migrations\/069_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre069.out) && !/PostgresError/.test(listPre069.out),
-           `on a brain without 069 --list names the file, not a driver error (exit ${listPre069.code}: ${listPre069.out.trim().slice(0, 160)})`);
-    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("069_") });
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 070 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 070 and says the listing needs the file before pointing at it");
+    const listPre070 = await consolidate("--list", "lineage");
+    assert(listPre070.code === 1 && /--list needs migration 070 \(db\/migrations\/070_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre070.out) && !/PostgresError/.test(listPre070.out),
+           `on a brain without 070 --list names the file, not a driver error (exit ${listPre070.code}: ${listPre070.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
     await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
@@ -4198,7 +4198,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it finds in conflict again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
     const staleList = await consolidate("--list", "stale");
     assert(staleList.code === 0 && /1 stale proposal\(s\)/.test(staleList.out) && /\(stale — in this pass's pool\)/.test(staleList.out) && staleList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`), `--list stale tags the row's standing and still offers the reviewer's decision (${staleList.out.split("\n").find((l) => /stale —/.test(l))?.trim().slice(0, 200)})`);
-    // 069 (SMD-2313): the same stale row standing on a lineage pair — the
+    // 070 (SMD-2313): the same stale row standing on a lineage pair — the
     // newer thought's derived_from set raw to name the older, the shape 066
     // left behind — is tagged under --list stale, listed under --list lineage
     // with the reject to run, and counted by --status; the array is cleared

@@ -730,7 +730,7 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
          "…both ids, and the accept command with the direction placeholder the shell cannot parse, and no --force on a row neither edited nor on a lineage pair");
   assert(!listed.includes("\x1b") && /forged line/.test(listed) && /A then B/.test(listed), "…with the escape sequences stripped from the thought and the reason, the words kept");
   assert(!/edited since judged/.test(listed), "…and nothing marked edited yet");
-  // 069 (SMD-2313): the newer thought's derived_from naming the older — set
+  // 070 (SMD-2313): the newer thought's derived_from naming the older — set
   // raw, the shape a page and its evidence take — tags the row LINEAGE PAIR
   // with the reject to run; `lineage: false` leaves it out and `true` selects
   // it, each said in the headline; the array cleared, the rest of this
@@ -745,21 +745,21 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${newer}::uuid`;
   assert(!/LINEAGE PAIR/.test(await call("list_supersession_proposals", {})), "…and cleared, no tag");
   // A brain at 068 under this server: the three-argument form is missing and
-  // the hint names 069, not 029 (cold read, first review pass: it named 029
+  // the hint names 070, not 029 (cold read, first review pass: it named 029
   // for every error on the name). The form dropped by hand here; the file
   // puts it back.
   await sql`DROP FUNCTION list_supersession_proposals(text, int, boolean)`;
-  const pre069 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
-  assert(/list_supersession_proposals\(text, integer, boolean\) does not exist/.test(pre069) && /the migrations through 069 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 069, db\/migrations\/069_listing_flags_lineage_pair\.sql, its current listing\)/.test(pre069),
-         `on a brain without 069 the tool's error names the migrations through 069, 029's queue and 069's listing both (${pre069.replace(/\n/g, " ").slice(0, 200)})`);
-  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("069_") });
-  assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 069 applied, the queue lists again");
+  const pre070 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
+  assert(/list_supersession_proposals\(text, integer, boolean\) does not exist/.test(pre070) && /the migrations through 070 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 070, db\/migrations\/070_listing_flags_lineage_pair\.sql, its current listing\)/.test(pre070),
+         `on a brain without 070 the tool's error names the migrations through 070, 029's queue and 070's listing both (${pre070.replace(/\n/g, " ").slice(0, 200)})`);
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+  assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 070 applied, the queue lists again");
   await sql`SELECT update_thought(${newer}::uuid, ${"queue newer: the plan is B, revised"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
   const edited = await call("list_supersession_proposals", { status: "pending", limit: 5 });
   assert(/newer \[[^\]]+\] \(edited since judged\)/.test(edited) && edited.includes(`--accept ${pid} --direction <newer|older> --force`) && /verdict is about an earlier text/.test(edited),
          "after an edit the tool marks the side, adds --force to the accept command and says why");
   assert(/No accepted supersession proposals/.test(await call("list_supersession_proposals", { status: "accepted" })), "an empty status says so and names the pass that fills it");
-  // 069: a lineage pair accepted before it was one (the pointer standing) is
+  // 070: a lineage pair accepted before it was one (the pointer standing) is
   // the harm realised; the tool tags the accepted row and names the reject
   // that clears the pointer as the repair (adversarial re-run, third pass).
   await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, 'newer', NULL, true)`;

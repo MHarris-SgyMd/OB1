@@ -10657,7 +10657,7 @@ console.log("\n[62] Migration 068: node_state reads a stored projection kept cur
   await db.exec(`SELECT prune_orphan_entities()`);
 }
 
-console.log("\n[63] Migration 069: a proposal standing on a lineage pair is visible as such — list_supersession_proposals redefined on 029's body with a lineage column (066's predicate: one side's derived_from names the other, either direction, NULL-safe) and a selector for it, the two-argument form gone; the flag reads in every status, a standing row is nobody's but the reviewer's, and the reject is one call (SMD-2313)");
+console.log("\n[64] Migration 070: a proposal standing on a lineage pair is visible as such — list_supersession_proposals redefined on 029's body with a lineage column (066's predicate: one side's derived_from names the other, either direction, NULL-safe) and a selector for it, the two-argument form gone; the flag reads in every status, a standing row is nobody's but the reviewer's, and the reject is one call (SMD-2313)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -10688,21 +10688,21 @@ console.log("\n[63] Migration 069: a proposal standing on a lineage pair is visi
   await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
   await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
 
-  // The shape: one form, 069's — 029's nineteen columns then lineage, the
+  // The shape: one form, 070's — 029's nineteen columns then lineage, the
   // sentinel, both directions in 066's spelling (the regex pins the array
   // form: `'["a"]'::jsonb @> '"a"'` is TRUE, so to_jsonb(id::text) would pass
   // every behavioural assertion below), the two-argument form gone, the
   // comment.
   const body = await src(SIG);
   const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
-  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("069") && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)')`)).length === 0 && /ob1:listing-flags-the-lineage-pair/.test(body),
-    `one list_supersession_proposals, 069 its last definer, the two-argument form gone, the sentinel in the body (${lastDefinerOf("list_supersession_proposals")})`);
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("070") && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)')`)).length === 0 && /ob1:listing-flags-the-lineage-pair/.test(body),
+    `one list_supersession_proposals, 070 its last definer, the two-argument form gone, the sentinel in the body (${lastDefinerOf("list_supersession_proposals")})`);
   assert(cols === "id,status,verdict,confidence,reason,similarity,judge_key,judged_at,reviewed_at,review_note,superseding_id,older_id,older_content,older_created_at,newer_id,newer_content,newer_created_at,older_edited,newer_edited,lineage",
     `029's nineteen columns in their order, then lineage (${cols})`);
   assert(/COALESCE\(n\.derived_from @> jsonb_build_array\(o\.id::text\), false\)/.test(body) && /COALESCE\(o\.derived_from @> jsonb_build_array\(n\.id::text\), false\)/.test(body) && /p_lineage IS NULL/.test(body),
     "both directions read, NULL-safe, in 066's spelling, and p_lineage NULL selects on nothing");
   const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
-  assert(/029/.test(comment) && /069/.test(comment) && /066/.test(comment) && /derived_from/.test(comment) && /p_lineage/.test(comment), "the comment names 029, 066 and 069, the rule and the selector");
+  assert(/029/.test(comment) && /070/.test(comment) && /066/.test(comment) && /derived_from/.test(comment) && /p_lineage/.test(comment), "the comment names 029, 066 and 070, the rule and the selector");
 
   // The corpus, ten days old: E, the evidence; D, an unrelated note near E;
   // X, a second source; R, an older note that names a newer one. Today's:
@@ -10740,7 +10740,7 @@ console.log("\n[63] Migration 069: a proposal standing on a lineage pair is visi
   assert(idsOf(await list("pending", true)) === [pE, pX, pN].sort().join() && idsOf(await list("pending", false)) === pD && idsOf(await list(null, null)) === [pE, pD, pX, pN].sort().join(),
     "p_lineage true selects the lineage pairs, false the rest, NULL every row");
   assert((await q<{ lineage: boolean }>(`SELECT lineage FROM list_supersession_proposals('pending', 50) WHERE id = $1::uuid`, [pE]))[0].lineage === true,
-    "a two-argument call — the callers' form before 069 — resolves to this body through the default and reads the flag");
+    "a two-argument call — the callers' form before 070 — resolves to this body through the default and reads the flag");
   // The stale shape: the digest's text moves, rebuild_derived sets its
   // proposal stale, and the flag reads there too — the row 067's pass
   // settles on its next run (not run here); until then --list stale and
@@ -10776,7 +10776,7 @@ console.log("\n[63] Migration 069: a proposal standing on a lineage pair is visi
   assert(spelled("consolidate.ts") === 2 && spelled("../server-portable/preflight.ts") === 1 && (await src(SIG)).split("COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false)").length - 1 === 2,
     `the TypeScript readers spell 066's predicate as the body does — twice in consolidate.ts (the guard, --status), once in preflight.ts (the census) (${spelled("consolidate.ts")}, ${spelled("../server-portable/preflight.ts")})`);
   // A re-apply is a no-op: one form, the flag reading the same.
-  await reapply("069");
+  await reapply("070");
   assert((await functionsNamed("list_supersession_proposals")) === 1 && /ob1:listing-flags-the-lineage-pair/.test(await src(SIG)) && idsOf(await list(null, true)) === [pX, pN].sort().join(), "a re-apply leaves one form carrying the flag");
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts`);
