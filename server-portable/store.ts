@@ -513,13 +513,13 @@ export type DryRunClaimResult = {
   failed: number;
   /** Of `claimed`, how many are past `ttl_expires_at` (a dead worker's lease). */
   stale: number;
-  /** Thoughts with no claim row for this work_type — what a pass would enqueue first. Same generic definition as `workerStatus` (exact for extraction; reembed/consolidate pool by model-aware rules). */
+  /** Thoughts with no claim row for this work_type — what a pass would enqueue first. Same generic definition as `workerStatus` (exact for extraction; reembed/consolidate pool by model-aware rules, so this is an upper bound for them). */
   unpooled: number;
   /** The whole corpus's thought count. */
   thoughts: number;
-  /** What a full pass would process now = `pending + unpooled` (the drainable backlog, before any `limit`). */
+  /** What a full pass would process now = `pending + unpooled` (the drainable backlog, before any `limit`). Exact for extraction; an UPPER BOUND for reembed/consolidate, whose eligibility is model-aware — `unpooled` counts every un-pooled thought, not only the ones those pools would actually enqueue. */
   backlog: number;
-  /** The backlog bounded by `limit` — the count a drain of this pool would actually claim. Equals `backlog` when no `limit` is given. */
+  /** The backlog bounded by `limit`. Equals `backlog` when no `limit` is given — so it carries the same extraction-exact / model-aware-upper-bound caveat as `backlog`. */
   wouldClaim: number;
   /** The `limit` the caller passed, echoed back, or null. */
   limit: number | null;

@@ -2507,7 +2507,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Run Worker (drain a pool)",
       description:
-        "Drain a background-work pool for a `work_type` — the operator form of a `bun db/<worker>.ts` pass over MCP/REST. Currently the PREVIEW half only: call with `dry_run: true` to report, without claiming anything, what a pass would process now — the same pool `worker_status` shows (pending / claimed / stale / unpooled) plus `backlog` and, if you pass `limit`, `wouldClaim`. The executing drain is not yet available (a call without `dry_run: true` is refused): the server does not run the bulk LLM passes, so it will land on a callable worker core. Read `worker_status` first for the exact `workType`. Requires a write key.",
+        "Drain a background-work pool for a `work_type` — the operator form of a `bun db/<worker>.ts` pass over MCP/REST. Currently the PREVIEW half only: call with `dry_run: true` to report, without claiming anything, what a pass would process now — the same pool `worker_status` shows (pending / claimed / stale / unpooled) plus `backlog` and, if you pass `limit`, `wouldClaim`. `backlog`/`wouldClaim` are exact for an extraction pool but an UPPER BOUND for reembed/consolidate, whose eligibility is model-aware (they count every un-pooled thought, not only the ones those pools would enqueue). The executing drain is not yet available (a call without `dry_run: true` is refused): the server does not run the bulk LLM passes, so it will land on a callable worker core. Read `worker_status` first for the exact `workType`. Requires a write key.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
