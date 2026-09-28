@@ -48,6 +48,7 @@ import type {
   RetryFailedResult,
   ReleaseLeasesOpts,
   ReleaseLeasesResult,
+  DryRunClaimResult,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -413,6 +414,51 @@ export class SqlStore implements ThoughtStore {
       claimed.map((r) => r.worker_id).filter((w): w is string => typeof w === "string"),
     ));
     return { released: ids.length, ids, workers };
+  }
+
+  async dryRunClaim(workType: string, limit?: number): Promise<DryRunClaimResult> {
+    // The dry_run half of run_worker (SMD-2272): a pure SELECT preview, claiming
+    // nothing. The census is workerStatus's per-work_type row, scoped to one pool
+    // — the SAME four status counts and stale subset, and `unpooled` = corpus −
+    // pooled — so a dry run and worker_status agree by construction (the guard's
+    // "reports the same pool worker_status shows"). No GROUP BY: the aggregate over
+    // a single work_type always returns exactly one row (all-zero when the pool has
+    // no claim rows yet), so an un-enqueued pool reads unpooled = the whole corpus.
+    // `thoughts` rides the same statement as the per-pool counts (one snapshot, so
+    // unpooled can never read negative under a concurrent delete — workerStatus's
+    // review-pass-2 reasoning). NO claim_thoughts, enqueue_thoughts or lease — the
+    // executing drain is deferred to SMD-2304's callable core. SQL-backend only.
+    const rows = await this.sql`
+      SELECT count(*) FILTER (WHERE status = 'pending')::int   AS pending,
+             count(*) FILTER (WHERE status = 'claimed')::int   AS claimed,
+             count(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+             count(*) FILTER (WHERE status = 'failed')::int    AS failed,
+             count(*) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now())::int AS stale,
+             (SELECT count(*)::int FROM thoughts) AS thoughts
+        FROM thought_work_claims
+       WHERE work_type = ${workType}`;
+    const r = (rows[0] ?? {}) as Record<string, unknown>;
+    const pending = Number(r.pending ?? 0);
+    const claimed = Number(r.claimed ?? 0);
+    const succeeded = Number(r.succeeded ?? 0);
+    const failed = Number(r.failed ?? 0);
+    const total = Number(r.thoughts ?? 0);
+    const unpooled = total - (pending + claimed + succeeded + failed);
+    const backlog = pending + unpooled;
+    const wouldClaim = limit !== undefined ? Math.min(backlog, limit) : backlog;
+    return {
+      workType,
+      pending,
+      claimed,
+      succeeded,
+      failed,
+      stale: Number(r.stale ?? 0),
+      unpooled,
+      thoughts: total,
+      backlog,
+      wouldClaim,
+      limit: limit ?? null,
+    };
   }
 
   async databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts> {

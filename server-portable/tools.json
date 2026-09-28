@@ -76,6 +76,10 @@
     {
       "name": "release_stale_leases",
       "scope": "write"
+    },
+    {
+      "name": "run_worker",
+      "scope": "write"
     }
   ]
 }

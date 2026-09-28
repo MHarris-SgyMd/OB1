@@ -546,6 +546,9 @@ console.log("\n[8f] retryFailed and releaseStaleLeases are SQL-backend only over
   let rl = "";
   try { await store.releaseStaleLeases({}); } catch (e) { rl = (e as Error).message; }
   assert(/requires the SQL backend/.test(rl) && /thought_work_claims/.test(rl), `the shim says release_stale_leases needs the SQL backend (${rl.slice(0, 80)})`);
+  let dr = "";
+  try { await store.dryRunClaim("extract:whatever@p2"); } catch (e) { dr = (e as Error).message; }
+  assert(/requires the SQL backend/.test(dr) && /thought_work_claims/.test(dr), `the shim says run_worker (dry_run) needs the SQL backend (${dr.slice(0, 80)})`);
 }
 
 console.log("\n[9] Provenance rides the envelope and reads back over PostgREST too (migration 025)");

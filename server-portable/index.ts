@@ -414,6 +414,7 @@ type ToolErrorCode =
   | "SUPERSEDES_UNJUDGED"          // the server could not check/attribute the supersedes; retry
   | "REFUSED_EMPTY_WORK_TYPE"      // retry_failed / release_stale_leases given a blank work_type
   | "REFUSED_LIVE_LEASE_NEEDS_WORKER" // release_stale_leases include_live without a worker_id
+  | "RUN_WORKER_DRAIN_NOT_AVAILABLE"  // run_worker called without dry_run:true; the executing drain is deferred (SMD-2272/2304)
   | "STORE_UNAVAILABLE";           // the store did not answer; retry
 type ToolErrorInfo = { code: ToolErrorCode; retryable: boolean; positions?: number[] };
 
@@ -2489,6 +2490,54 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 14: run_worker — the drain SMD-2132 carved out (SMD-2272). The third
+  // worker action, write-scoped like its two siblings. Only its dry_run half is
+  // built: a pure-SQL preview of what a pass over `work_type` would claim,
+  // matching worker_status, claiming nothing. The EXECUTING drain is deferred —
+  // the server deliberately never runs the bulk LLM passes (entities.ts,
+  // consolidate.ts), and the claim loop has no importable core yet (it is inline
+  // in each db/*.ts main(), SMD-2304). So dry_run must be EXPLICITLY true; any
+  // other call is refused as a value (RUN_WORKER_DRAIN_NOT_AVAILABLE), so an
+  // operator never mistakes a silent no-op for a real drain. dry_run mutates
+  // nothing, so — unlike retry_failed/release_stale_leases — it writes no action
+  // log row; the write gate still refuses a read/capture key, and the scope will
+  // not change when the drain lands.
+  if (canWrite(principal)) server.registerTool(
+    "run_worker",
+    {
+      title: "Run Worker (drain a pool)",
+      description:
+        "Drain a background-work pool for a `work_type` — the operator form of a `bun db/<worker>.ts` pass over MCP/REST. Currently the PREVIEW half only: call with `dry_run: true` to report, without claiming anything, what a pass would process now — the same pool `worker_status` shows (pending / claimed / stale / unpooled) plus `backlog` and, if you pass `limit`, `wouldClaim`. The executing drain is not yet available (a call without `dry_run: true` is refused): the server does not run the bulk LLM passes, so it will land on a callable worker core. Read `worker_status` first for the exact `workType`. Requires a write key.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
+      inputSchema: {
+        work_type: z.string().describe("The exact work_type to preview — a `workType` from worker_status (e.g. \"extract:qwen2.5:7b@p2\" or \"reembed:<model>@<dim>\")."),
+        dry_run: z.boolean().optional().describe("Must be true — report what a pass would claim without claiming it. The executing drain is not yet available; any other value is refused."),
+        limit: z.number().int().positive().optional().describe("Bound the previewed backlog — `wouldClaim` is the drainable backlog capped at this. Omit to preview the whole backlog."),
+      },
+    },
+    async ({ work_type, dry_run, limit }) => {
+      try {
+        if (work_type.trim() === "") return toolError("Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain.", { code: "REFUSED_EMPTY_WORK_TYPE", retryable: false });
+        if (dry_run !== true) {
+          return toolError("Refused: the executing drain is not yet available — the server does not run the bulk LLM passes, and the drain will land on a callable worker core (SMD-2304). Call with dry_run: true to preview what a pass would claim.", { code: "RUN_WORKER_DRAIN_NOT_AVAILABLE", retryable: false });
+        }
+        const result = await (await db()).dryRunClaim(work_type, limit);
+        // No audit row: a dry run claims and mutates nothing (unlike the two
+        // sibling write actions), so there is no thought to record an action against.
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      } catch (e) {
+        // Codeless, as retry_failed/release_stale_leases are: on a PostgREST
+        // (Workers) deploy the store throws the permanent SQL-only reason.
+        return toolError(`run_worker failed: ${(e as Error).message}`);
+      }
+    }
+  );
+
   // Tool 3b-v: poll an async job by its handle (SMD-2273). GET /jobs/<id> is the
   // curl mirror; an MCP client cannot reach a REST route, so this tool is how a
   // Claude Desktop / claude.ai client fetches the result of a job it started.
@@ -2887,8 +2936,8 @@ app.get("*", async (c, next) => {
   }
 });
 
-// The worker-queue ACTIONS as keyed POSTs (SMD-2132) — the REST mirror of the
-// retry_failed and release_stale_leases tools. POST at every path is the MCP
+// The worker-queue ACTIONS as keyed POSTs (SMD-2132, SMD-2272) — the REST mirror
+// of the retry_failed, release_stale_leases and run_worker tools. POST at every path is the MCP
 // endpoint (app.on(MCP_METHODS, "*") below), so this guard is registered BEFORE
 // it and falls through with next() for any path it does not own; the two action
 // paths it handles never reach the transport, and no MCP client posts JSON-RPC
@@ -2899,10 +2948,12 @@ app.get("*", async (c, next) => {
 // SQL-only reason (the PostgREST shim throws) is a 200 body as the read mirror's.
 const WORKER_RETRY_PATH = /(^|\/)worker-retry-failed\/?$/;
 const WORKER_RELEASE_PATH = /(^|\/)worker-release-leases\/?$/;
+const WORKER_RUN_PATH = /(^|\/)worker-run\/?$/;
 app.post("*", async (c, next) => {
   const isRetry = WORKER_RETRY_PATH.test(c.req.path);
   const isRelease = WORKER_RELEASE_PATH.test(c.req.path);
-  if (!isRetry && !isRelease) return next();
+  const isRun = WORKER_RUN_PATH.test(c.req.path);
+  if (!isRetry && !isRelease && !isRun) return next();
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
@@ -2933,6 +2984,19 @@ app.post("*", async (c, next) => {
       const result = await (await db()).retryFailed(workType);
       await audit("retry_failed", result.ids);
       return c.json(result, 200, corsHeaders);
+    }
+    if (isRun) {
+      // run_worker's dry_run preview (SMD-2272): the same refusals as the tool —
+      // a missing work_type, and the executing drain being unavailable — as 400s
+      // carrying the same codes. A dry run mutates nothing, so no audit row (the
+      // sibling actions above audit because they requeue/release). limit is
+      // accepted from the body when it is a positive integer, else omitted.
+      const runWorkType = typeof args.work_type === "string" ? args.work_type : "";
+      if (runWorkType.trim() === "") return c.json({ error: "work_type is required — pass the exact workType worker_status reports for the pool to drain.", code: "REFUSED_EMPTY_WORK_TYPE" }, 400, corsHeaders);
+      if (args.dry_run !== true) return c.json({ error: "the executing drain is not yet available — the server does not run the bulk LLM passes; the drain will land on a callable worker core (SMD-2304). Send dry_run: true to preview what a pass would claim.", code: "RUN_WORKER_DRAIN_NOT_AVAILABLE" }, 400, corsHeaders);
+      const runLimit = typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit > 0 ? args.limit : undefined;
+      const runResult = await (await db()).dryRunClaim(runWorkType, runLimit);
+      return c.json(runResult, 200, corsHeaders);
     }
     const workType = args.work_type === undefined ? undefined : String(args.work_type);
     const workerId = args.worker_id === undefined ? undefined : String(args.worker_id);
