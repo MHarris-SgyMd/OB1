@@ -15,7 +15,7 @@ import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
 import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
-import { startJob, readJob, subscribe as subscribeJob, markRunningLost, setJobSink, reconcileDurableJobsLost } from "./jobs.ts";
+import { startJob, readJob, subscribe as subscribeJob, markRunningLost, setJobSink } from "./jobs.ts";
 
 /**
  * Runtime-portable env access.
@@ -245,8 +245,13 @@ function db(): Promise<ThoughtStore> {
       void _store.then(async (store) => {
         const s = store.jobSink();
         if (!s) return;
+        // Reconcile BEFORE wiring the sink: only after setJobSink does a job of
+        // this process get persisted as running, so running the reconcile first
+        // means it can only touch a prior process's rows — never a job this
+        // process just started (which would race the reconcile's UPDATE and be
+        // wrongly cut to lost).
+        const lost = await s.reconcileRunningLost();
         setJobSink(s);
-        const lost = await reconcileDurableJobsLost();
         if (lost > 0) console.warn(`startup reconciled ${lost} job${lost === 1 ? "" : "s"} left running by a prior process: marked lost (SMD-2318)`);
       }).catch(() => { /* no durable store: the registry stays in-memory */ });
     }
