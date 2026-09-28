@@ -30,6 +30,7 @@
 import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
+import type { JobSink } from "./jobs.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -187,6 +188,31 @@ export function isoTimestamp(v: unknown): string {
  */
 export function isoTimestampOrNull(v: unknown): string | null {
   return v === null ? null : isoTimestamp(v);
+}
+
+/**
+ * The day of a timestamp, `YYYY-MM-DD`, for a tool that prints a date from a
+ * raw driver row — Bun's `Date`, PostgREST's string, the number `Infinity` —
+ * where `String(d).slice(0, 10)` gave `"Wed Sep 09"` (SMD-1842). Through
+ * `isoTimestampOrNull`'s rule: NULL is null (the caller picks its word). Only
+ * `toISOString`'s own form is cut to its date, an extended year's
+ * (`+275760-09-13`) included; any other text `isoTimestamp` keeps — a sentinel
+ * ("infinity"), PostgREST's `0044-03-15T00:00:00+00:00 BC`, a PostgREST year
+ * past 9999 JS cannot parse — comes out whole, not sliced to a stub or a BC
+ * date read as AD. What Bun hands over for a BC timestamp depends on the
+ * query: `Date(NaN)` (so `Invalid Date`) on an unparameterised one, and on a
+ * parameterised one a Date in ISO's astronomical year (44 BC is
+ * `-000043-03-15`, 1 BC `0000-01-01`), printed as such with no BC mark.
+ * The day is UTC's. `db/consolidate.ts`'s `day` (SMD-1803)
+ * and the grading report in `evals/eval-consolidate.ts` print through it; the
+ * judge prompt's `dateOf` (`consolidate.ts`) does not, because its text is
+ * pinned by `CONSOLIDATE_PROMPT_VERSION`.
+ */
+export function isoDay(v: unknown): string | null {
+  const iso = isoTimestampOrNull(v);
+  if (iso == null) return null;
+  const day = /^(?:[+-]\d{6}|\d{4})-\d{2}-\d{2}(?=T\d{2}:\d{2}:\d{2}\.\d{3}Z$)/.exec(iso);
+  return day ? day[0] : iso;
 }
 
 /**
@@ -1343,6 +1369,16 @@ export interface ThoughtStore {
    * to keep right; an empty list writes nothing.
    */
   logActions(rows: QueryActionLog[]): Promise<void>;
+
+  /**
+   * The durable backing store for the async job registry (SMD-2318, migration
+   * 069's `jobs` table), or null when this store cannot hold one. The SQL store
+   * returns a sink; the PostgREST store returns null, so the Workers/PostgREST
+   * path stays pure in-memory (no long-lived process to persist or resume a
+   * detached run). index.ts injects the result into jobs.ts (`setJobSink`) at
+   * startup and runs the reconcile once.
+   */
+  jobSink(): JobSink | null;
 
   close(): Promise<void>;
 }

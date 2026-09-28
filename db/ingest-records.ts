@@ -93,6 +93,7 @@ import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY 
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { ItemsRefusal, parseItems, PIPELINE_META_KEYS, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
 import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
+import { commandLine } from "./cli.ts";
 
 // The structure writer lives in ingest-structure.ts so db/sync-linear.ts can
 // import it without this file's evals/ and scripts/ imports (its container
@@ -458,7 +459,7 @@ export const ACTOR_NAME_RE = /^[a-z][a-z0-9._:-]{0,62}$/;
 export type IngestActor = { readonly name: string; readonly via: string };
 export function ingestActor(name?: string): IngestActor {
   if (name === undefined) return INGEST_ACTOR;
-  if (!ACTOR_NAME_RE.test(name)) throw new Error(`--actor must be a lower-case label of up to 63 characters (${ACTOR_NAME_RE.source}), got ${JSON.stringify(name.slice(0, 80))}`);
+  if (!ACTOR_NAME_RE.test(name)) throw new Error(`--actor must be a lower-case label of up to 63 characters (${ACTOR_NAME_RE.source})`);
   return { name, via: INGEST_ACTOR.via };
 }
 
@@ -752,67 +753,42 @@ function selfCheck(): number {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const flag = (name: string): string | undefined => {
-    const i = args.indexOf(`--${name}`);
-    return i >= 0 ? args[i + 1] : undefined;
-  };
-  const has = (name: string) => args.includes(`--${name}`);
+  // Every argument accounted for (db/cli.ts): a flag the runner does not have,
+  // a value where none is expected, a one-value flag with nothing after it or
+  // an empty value (`--items "$OUT"` with the variable unset would read as the
+  // flag absent and write nothing, exit 0), or a flag given twice, is refused
+  // rather than silently dropped.
+  const cli = commandLine("ingest-records.ts", {
+    url: "one", source: "one", linear: "one", "memory-dir": "one", markdown: "one", items: "one", allow: "one", actor: "one", tier: "one", since: "one",
+    "dry-run": "none", "self-check": "none",
+  }, { hints: { url: "<postgres://…>", source: "<all|fork|commit|linear|memory|markdown|items>", linear: "<dump.json>", "memory-dir": "<path>", markdown: "<vault root>", items: "<file.jsonl | ->", allow: "<scope,scope> (or OB1_INGEST_ALLOW)", actor: "<name>", tier: "<stable|canary|working>", since: "<ref>" } });
 
-  // Every argument accounted for, the way migrate.ts does it: a flag the runner
-  // does not have, a value where none is expected, a one-value flag with nothing
-  // after it, or a flag given twice, is refused rather than silently dropped.
-  {
-    const TAKES_ONE = new Set(["url", "source", "linear", "memory-dir", "markdown", "items", "allow", "tier", "since", "actor"]);
-    const TAKES_NONE = new Set(["dry-run", "self-check"]);
-    const USAGE = "  flags: --url <postgres://…>, --source <all|fork|commit|linear|memory|markdown|items>, --linear <dump.json>, --memory-dir <path>, --markdown <vault root>, --items <file.jsonl | ->, --allow <scope,scope> (or OB1_INGEST_ALLOW), --actor <name>, --tier <stable|canary|working>, --since <ref>, --dry-run, --self-check";
-    const seen = new Set<string>();
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      const name = a.startsWith("--") ? a.slice(2) : null;
-      if (name !== null && (TAKES_ONE.has(name) || TAKES_NONE.has(name))) {
-        if (seen.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); }
-        seen.add(name);
-      }
-      if (name !== null && TAKES_ONE.has(name)) {
-        // An empty value is no value: `--items "$OUT"` with the variable unset would otherwise read as the flag absent and the run would write nothing, exit 0 (third review pass, cold read).
-        if (i + 1 >= args.length || args[i + 1].startsWith("--") || args[i + 1] === "") { console.error(`--${name} takes a value${i + 1 < args.length && args[i + 1] === "" ? " (an empty one was given)" : ""}.\n${USAGE}`); process.exit(2); }
-        i++;
-        continue;
-      }
-      if (name !== null && TAKES_NONE.has(name)) continue;
-      const shown = name !== null ? a : /:\/\//.test(a) ? "<a URL>" : a;
-      console.error(`unknown argument: ${shown}${name === null ? " (a value where no flag takes one)" : ""}\n${USAGE}`);
-      process.exit(2);
-    }
-  }
+  if (cli.has("self-check")) process.exit(selfCheck());
 
-  if (has("self-check")) process.exit(selfCheck());
-
-  const dryRun = has("dry-run");
-  const sourceArg = flag("source") ?? "all";
+  const dryRun = cli.has("dry-run");
+  const sourceArg = cli.value("source") ?? "all";
   if (sourceArg !== "all" && !SOURCES.includes(sourceArg as Source)) {
     console.error(`--source must be all or one of ${SOURCES.join(", ")}.`);
     process.exit(2);
   }
   const wanted = sourceArg === "all" ? new Set<Source>(SOURCES) : new Set<Source>([sourceArg as Source]);
 
-  // Whitespace is unset (the fork's string-knob rule), defaulting to stable; an empty value is refused above, as every one-value flag's is.
-  const tier = ((flag("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
+  // A blank OB1_TIER is unset (the fork's string-knob rule), defaulting to stable; a blank --tier is refused by the scanner, as every flag's blank value is.
+  const tier = ((cli.value("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
   if (!TIERS.includes(tier)) {
     console.error(`--tier / OB1_TIER must be one of ${TIERS.join(", ")}.`);
     process.exit(2);
   }
 
-  const since = flag("since") ?? "upstream-pin-9543c29";
-  const linearPath = flag("linear");
-  const memoryDir = flag("memory-dir") ?? process.env.OB1_MEMORY_DIR;
-  const markdownDir = flag("markdown") ?? process.env.OB1_MARKDOWN_DIR;
-  const itemsPath = flag("items");
+  const since = cli.value("since") ?? "upstream-pin-9543c29";
+  const linearPath = cli.value("linear");
+  const memoryDir = cli.value("memory-dir") ?? process.env.OB1_MEMORY_DIR;
+  const markdownDir = cli.value("markdown") ?? process.env.OB1_MARKDOWN_DIR;
+  const itemsPath = cli.value("items");
   // SMD-1813's allowlist: the flag, else the environment; empty clears nothing.
-  const allow = allowlistOf(flag("allow") ?? process.env.OB1_INGEST_ALLOW);
+  const allow = allowlistOf(cli.value("allow") ?? process.env.OB1_INGEST_ALLOW);
   let actor: IngestActor;
-  try { actor = ingestActor(flag("actor")); }
+  try { actor = ingestActor(cli.value("actor")); }
   catch (e) { console.error((e as Error).message); process.exit(2); }
 
   // Gather. A source in the wanted set with no input to read is skipped with a
@@ -934,7 +910,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const url = flag("url") ?? process.env.DATABASE_URL;
+  const url = cli.value("url") ?? process.env.DATABASE_URL;
   if (!url) { console.error("No database URL. Pass --url or set DATABASE_URL."); process.exit(2); }
 
   const sql = new SQL({ url, max: 1 });

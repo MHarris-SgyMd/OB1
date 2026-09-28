@@ -47,7 +47,9 @@
 
 import { SQL } from "bun";
 import { requireDatabaseUrl, resetSchema } from "./test-support.ts";
+import { commandLine } from "./cli.ts";
 
+commandLine("bench-keyword.ts", {}, { note: "its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-keyword.ts");
 
 /** Small vectors: HNSW build time would otherwise dominate the load step. */

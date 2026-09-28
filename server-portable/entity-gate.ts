@@ -12,18 +12,20 @@
  *      migration number, a port, an address, a CIDR (`10/8` folds to `10 8`).
  *   2. A name that is the type vocabulary itself (`person`, `places`, `entity`)
  *      is refused.
- *   3. A `person` or `place` with an identifier's shape is RETYPED, not
- *      refused. A ticket id becomes a `project`; a URL, a package or path, or a
- *      host:port a `tool`, whichever of the two types it was given; a host,
- *      domain or file, or a snake_case name or glob, becomes a `tool` from a
- *      `place` only, since a person's handle takes those shapes (`john.smith`,
- *      `@john_doe`; second review pass). SMD-1937 measured refusing instead on
- *      201 graded mentions: it dropped seven real entities — five code
- *      artifacts the extractor typed `place` (the maintainer's decision is that
- *      code artifacts are entities), `hono/mcp` and `openrouter.ai` — for one
- *      junk mention. The URL shape is one step
- *      past what SMD-1937 measured, for `http://127.0.0.1:65536/v1` typed
- *      `place` on the dogfood brain.
+ *   3. A name with an identifier's shape is RETYPED, not refused. A
+ *      high-precision shape a real-world proper noun does not take — a
+ *      three-or-more-digit ticket id (`project`), a package or path, or a
+ *      host:port (`tool`) — overrides whatever type the model gave, and
+ *      snake_case overrides it for every type but a person (SMD-2300, measured
+ *      on the live graph: the extractor typed `SMD-1549`/`worker_status` a
+ *      `topic`, not a person or place, so the SMD-1935 person/place scope never
+ *      reached them). The looser ticket id and the URL still retype a `person`
+ *      or `place` only; a host, domain or file (`john.smith`, `Nature.com`)
+ *      retypes a `place` only, since a person's handle and a real organization
+ *      take that shape. SMD-1937 measured refusing instead on 201 graded
+ *      mentions: it dropped seven real entities — five code artifacts the
+ *      extractor typed `place`, `hono/mcp` and `openrouter.ai` — for one junk
+ *      mention.
  *   4. Anything else keeps the extractor's type.
  *
  * In the `people` facet a retype has nowhere to go, so a name the gate does
@@ -32,12 +34,12 @@
  * The rule reads the MODEL's guesses. A `source:` pass states its names on
  * the source's authority (a Linear label `2024` is a label) and is not gated.
  *
- * The DATABASE is the one definition: migration 056's `entity_type_gate()`,
- * applied by record_thought_entities to every extraction and by
- * apply_entity_type_gate() to the rows written before it. This module is its
- * twin for the writers that never reach that function — the `people` facet in
- * metadata.ts — and test-schema asserts the two answer alike over a probe
- * list. The patterns spell their classes out — `[A-Za-z0-9]`, never `\w`;
+ * The DATABASE is the one definition: migration 065's `entity_type_gate()`
+ * (SMD-1935's rule widened by SMD-2300), applied by record_thought_entities to
+ * every extraction and by apply_identifier_allowlist() to the rows written
+ * before it. This module is its twin for the writers that never reach that
+ * function — the `people` facet in metadata.ts — and test-schema asserts the
+ * two answer alike over a probe list. The patterns spell their classes out — `[A-Za-z0-9]`, never `\w`;
  * whitespace as ASCII_SPACE, never `\s` or `\S`, which Postgres reads by
  * locale and JavaScript by Unicode — and the trim is one pattern both
  * engines run, so the shapes mean one thing in both (first review pass: a
@@ -73,22 +75,42 @@ const ASCII_SPACE = " \\t\\n\\r\\f\\v";
 export const TRIM_RE = `^[${ASCII_SPACE}]+|[${ASCII_SPACE}]+$`;
 
 /**
- * An identifier's shape, read on the name as written (trimmed): the type a
- * `person` or `place` of that shape becomes, the first that applies. A
- * ticket id is a named piece of work (the graph types 376 of them `project`),
- * the rest are code artifacts or addresses, `tool` under the maintainer's
- * decision. `person`: whether a `person` of the shape is retyped too — the
- * shapes SMD-1935 names for people (a ticket id, a package, an IP or port),
- * and the URL; not the dotted or underscored ones a handle takes.
+ * An identifier's shape, read on the name as written (trimmed): the type a name
+ * of that shape becomes, the first that applies. A ticket id is a named piece of
+ * work (the graph types 376 of them `project`), the rest are code artifacts or
+ * addresses, `tool` under the maintainer's decision. `scope` is which of the
+ * model's types the shape overrides — SMD-2300 widened this from person/place
+ * to any, for the shapes a real-world proper noun does not take:
+ *   - "any": overrides whatever type the model gave. A three-or-more-digit
+ *     ticket id (`SMD-1549`; `GPT-4`, one digit, is a model, left alone), a
+ *     package or path (`db/x.ts`, `origin/main`), a host:port — none of which a
+ *     person, organization, place or topic is named.
+ *   - "notPerson": every type but `person`, whose handle takes an underscore or
+ *     a glob (`@john_doe`), so snake_case retypes the others (`thought_audit`)
+ *     and leaves a person alone.
+ *   - "personPlace": a `person` or `place` only — the looser ticket id and the
+ *     URL SMD-1935 named for those two types.
+ *   - "place": a `place` only — a host, domain or file, a shape a person's
+ *     handle also takes (`john.smith`), and one a real organization takes
+ *     (`Nature.com`), so it is left for the model on any other type.
  */
-export const IDENTIFIER_SHAPES: readonly { why: string; pattern: string; type: "project" | "tool"; person: boolean }[] = [
-  { why: "a ticket id", pattern: "^[A-Za-z]+-[0-9]+$", type: "project", person: true },
-  { why: "a URL", pattern: "^[A-Za-z][A-Za-z0-9+.-]*://", type: "tool", person: true },
-  { why: "a package or a path", pattern: "^@?[A-Za-z0-9_.-]+/[A-Za-z0-9_.*/-]*$", type: "tool", person: true },
-  { why: "a host:port", pattern: `^[^${ASCII_SPACE}]+:[0-9]+$`, type: "tool", person: true },
-  { why: "a host, a domain or a file", pattern: "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$", type: "tool", person: false },
-  { why: "snake_case or a glob", pattern: `^[^${ASCII_SPACE}]*[_*][^${ASCII_SPACE}]*$`, type: "tool", person: false },
+export const IDENTIFIER_SHAPES: readonly { why: string; pattern: string; type: "project" | "tool"; scope: "any" | "notPerson" | "personPlace" | "place" }[] = [
+  { why: "a ticket id, three or more digits", pattern: "^[A-Za-z]{2,}-[0-9]{3,}$", type: "project", scope: "any" },
+  { why: "a package or a path", pattern: "^@?[A-Za-z0-9_.-]+/[A-Za-z0-9_.*/-]*$", type: "tool", scope: "any" },
+  { why: "a host:port", pattern: `^[^${ASCII_SPACE}]+:[0-9]+$`, type: "tool", scope: "any" },
+  { why: "snake_case or a glob", pattern: `^[^${ASCII_SPACE}]*[_*][^${ASCII_SPACE}]*$`, type: "tool", scope: "notPerson" },
+  { why: "a ticket id", pattern: "^[A-Za-z]+-[0-9]+$", type: "project", scope: "personPlace" },
+  { why: "a URL", pattern: "^[A-Za-z][A-Za-z0-9+.-]*://", type: "tool", scope: "personPlace" },
+  { why: "a host, a domain or a file", pattern: "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$", type: "tool", scope: "place" },
 ];
+
+/** Which model types a shape's `scope` overrides. */
+const SCOPE_APPLIES: Record<string, (type: string) => boolean> = {
+  any: () => true,
+  notPerson: (t) => t !== "person",
+  personPlace: (t) => t === "person" || t === "place",
+  place: (t) => t === "place",
+};
 
 const NUMERIC = new RegExp(NUMERIC_NAME_RE);
 const SHAPES = IDENTIFIER_SHAPES.map((s) => ({ ...s, re: new RegExp(s.pattern) }));
@@ -129,14 +151,16 @@ export function refusalOf(name: string): string | null {
 
 /**
  * The type the graph stores a name under, or null to refuse it: migration
- * 056's entity_type_gate(), in JavaScript. A type outside person and place is
- * passed through as given — which types exist is the writer's list.
+ * 065's entity_type_gate(), in JavaScript. A high-precision identifier shape
+ * (a 3+-digit ticket id, a path, a host:port, or — for any type but a person —
+ * snake_case) overrides the model's type (SMD-2300); the looser ticket id, the
+ * URL and the dotted host retype a person or place as SMD-1935 named; any other
+ * type the model gave is kept.
  */
 export function entityTypeGate(name: string, type: string): string | null {
   if (refusalOf(name) !== null) return null;
-  if (type !== "person" && type !== "place") return type;
   const raw = name.replace(TRIM, "");
-  return SHAPES.find((s) => (type === "place" || s.person) && s.re.test(raw))?.type ?? type;
+  return SHAPES.find((s) => SCOPE_APPLIES[s.scope](type) && s.re.test(raw))?.type ?? type;
 }
 
 /**

@@ -29,10 +29,12 @@
 
 import { SQL } from "bun";
 import { applyMigrations, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { commandLine } from "./cli.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
+const cli = commandLine("bench-stats.ts", { plans: "none" }, { note: "the rest of its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-stats.ts");
-const PRINT_PLANS = process.argv.includes("--plans");
+const PRINT_PLANS = cli.has("plans");
 const OPTS = { dim: EMBEDDING_DIM, model: "stub-embed" };
 const SCALES = (process.env.OB1_BENCH_SCALES ?? "1000,10000,100000")
   .split(",")

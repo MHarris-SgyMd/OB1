@@ -129,60 +129,48 @@ import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../serv
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
+import { decideEntities } from "../server-portable/hybrid-extract.ts";
+import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
+import { commandLine } from "./cli.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
 
-const args = process.argv.slice(2);
-const flag = (name: string): string | undefined => {
-  const i = args.indexOf(`--${name}`);
-  return i >= 0 ? args[i + 1] : undefined;
-};
-const has = (name: string) => args.includes(`--${name}`);
 /**
- * A numeric flag. A flag that is present with no value is an error, not the
- * default: `--limit` typed alone meant "no limit" once, and sent the whole
- * backlog to the model. `optional` is for --follow, whose value is a poll
- * interval with a sensible default.
+ * Every argument accounted for (db/cli.ts): a flag this worker does not have,
+ * or one given twice, is refused before anything is claimed — a mistyped
+ * `--workers` ran the default and exited 0 (SMD-2015). A numeric flag present
+ * with no value is an error, not the default: `--limit` typed alone meant "no
+ * limit" once, and sent the whole backlog to the model. --follow's value is
+ * optional: a poll interval with a sensible default.
  */
-const numberFlag = (name: string, fallback: number, min: number, optional = false): number => {
-  const raw = flag(name);
-  if (raw === undefined || raw.startsWith("--")) {
-    if (has(name) && !optional) {
-      console.error(`--${name} needs a value (an integer >= ${min}).`);
-      process.exit(2);
-    }
-    return fallback;
-  }
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < min) {
-    console.error(`--${name} must be an integer >= ${min}, got "${raw}"`);
-    process.exit(2);
-  }
-  return n;
-};
+const cli = commandLine("extract-entities.ts", {
+  url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one", limit: "one",
+  follow: "optional", dump: "one", job: "one",
+  status: "none", "dry-run": "none", "switch-key": "none", "retry-failed": "none", "retry-partial": "none", "retry-left-out": "none", decide: "none",
+}, { hints: { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>" } });
 
-const url = flag("url") ?? process.env.DATABASE_URL;
+const url = cli.value("url") ?? process.env.DATABASE_URL;
 if (!url) {
   console.error("No database URL. Pass --url or set DATABASE_URL.");
   process.exit(2);
 }
 
-const WORKERS = numberFlag("workers", 2, 1);
+const WORKERS = cli.int("workers", { absent: 2, min: 1 });
 // One thought per claim. A claim costs half a millisecond against a model call
 // of ten seconds or more, so a bigger batch buys nothing, and a worker that
 // dies holds fewer rows. (Until migration 031 there was a second reason: the
 // lease was stamped per claim and could not be moved, so a batch of four at a
 // 300 s timeout could outlive a 900 s lease and be extracted twice. The
 // heartbeat retires it.)
-const BATCH = numberFlag("batch", 1, 1);
+const BATCH = cli.int("batch", { absent: 1, min: 1 });
 // The lease is renewed on a heartbeat while the worker holds rows, so it has
 // to outlast a missed beat, not the batch — db/lease.ts holds the rule the
 // three consumers share, and the refusal below is its.
-const TTL = numberFlag("ttl", DEFAULT_TTL_S, 1);
-const HEARTBEAT = has("heartbeat") ? numberFlag("heartbeat", DEFAULT_HEARTBEAT_S, 1) : heartbeatFor(TTL);
-const TIMEOUT_S = numberFlag("timeout", 300, 1);
+const TTL = cli.int("ttl", { absent: DEFAULT_TTL_S, min: 1 });
+const HEARTBEAT = cli.has("heartbeat") ? cli.int("heartbeat", { absent: DEFAULT_HEARTBEAT_S, min: 1 }) : heartbeatFor(TTL);
+const TIMEOUT_S = cli.int("timeout", { absent: 300, min: 1 });
 {
-  const refusal = leaseRefusal(TTL, HEARTBEAT, !has("heartbeat"));
+  const refusal = leaseRefusal(TTL, HEARTBEAT, !cli.has("heartbeat"));
   if (refusal) {
     console.error(refusal);
     process.exit(2);
@@ -194,25 +182,29 @@ const TIMEOUT_S = numberFlag("timeout", 300, 1);
  * prefix of the thought (SMD-2240) or some windows' answers were malformed
  * and left out (SMD-2260) — for evals/eval-entities.ts --replay.
  */
-const DUMP = flag("dump");
-if (DUMP !== undefined && DUMP.startsWith("--")) {
-  console.error("--dump needs a file path.");
-  process.exit(2);
-}
-const LIMIT = has("limit") ? numberFlag("limit", 0, 1) : 0;
-const FOLLOW = has("follow") ? numberFlag("follow", 15, 1, true) : 0;
-const STATUS_ONLY = has("status");
-const DRY_RUN = has("dry-run");
-const SWITCH_KEY = has("switch-key");
-const RETRY_FAILED = has("retry-failed");
-const RETRY_PARTIAL = has("retry-partial");
+const DUMP = cli.value("dump");
+const LIMIT = cli.int("limit", { absent: 0, min: 1 });
+const FOLLOW = cli.int("follow", { absent: 0, bare: 15, min: 1 });
+const STATUS_ONLY = cli.has("status");
+const DRY_RUN = cli.has("dry-run");
+const SWITCH_KEY = cli.has("switch-key");
+const RETRY_FAILED = cli.has("retry-failed");
+const RETRY_PARTIAL = cli.has("retry-partial");
 /** --retry-partial's rows with windows left out alone: a change of model re-reads them without re-reading every prefix to the place it already reached (review pass 1). */
-const RETRY_LEFT_OUT = has("retry-left-out");
+const RETRY_LEFT_OUT = cli.has("retry-left-out");
+// SMD-2321: `--decide` re-types the 7B's entities with the Jev decider (validity +
+// type), storing p_true as confidence. Opt-in and only with the tier configured.
+const DECIDE = cli.has("decide");
 
 const cfg = resolveEmbedConfig(process.env as EmbedEnv);
+const jevCfg = DECIDE ? resolveJevConfig(process.env as unknown as JevEnv) : null;
+if (DECIDE && !jevCfg) {
+  console.error("  --decide needs the Jev tier: set OB1_JEV_BASE_URL (and OB1_JEV_LOCAL for a loopback endpoint)");
+  process.exit(2);
+}
 /** The windowing every row is extracted under — its bound is what a partial row's caveat names. */
 const WINDOWING = windowingFor(cfg);
-const JOB = flag("job") ?? extractionKey(cfg.metadataModel);
+const JOB = cli.value("job") ?? extractionKey(cfg.metadataModel);
 
 console.log(`  job:    ${JOB}`);
 console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}`);
@@ -650,6 +642,15 @@ async function processRow(row: Row): Promise<Outcome> {
     // record of which model produced the answer (SMD-2000), the pass key on the
     // row itself staying the first model's.
     appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.escalated ? { escalated: extraction.escalated } : extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.coverage ? { coverage: extraction.coverage } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
+  }
+  // SMD-2321: the hybrid mode re-types the 7B's entities with the decider —
+  // identifier shapes carved by rule, the rest validity-gated and typed, p_true
+  // the confidence. After the dump above, so the dump keeps the raw generative
+  // answer for replay; a decider outage falls back to the 7B's entities inside
+  // decideEntities. The row's metadata is the egress subject, as extraction's.
+  if (jevCfg && extraction.entities.length) {
+    const decided = await decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
+    extraction = { ...extraction, entities: decided.entities };
   }
   // 061: the pass's recipe — the model, the prompt's version and hash, the
   // windows sent and what was cut — recorded in `derivations` with the rows,

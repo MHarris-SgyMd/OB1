@@ -26,6 +26,7 @@
  */
 
 import { AdapterRefusal, IDENTITY_MAX, normaliseLinks, normaliseMentions, stableJson, type Adapter, type Derived, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
+import { commandLine } from "./cli.ts";
 
 export const LINEAR_SYSTEM = "linear";
 export const LINEAR_MEDIA_TYPE = "application/vnd.linear.issue+json";
@@ -410,7 +411,7 @@ export function selfCheck(): number {
 }
 
 if (import.meta.main) {
-  if (process.argv.includes("--self-check")) process.exit(selfCheck());
+  if (commandLine("ingest-linear.ts", { "self-check": "none" }).has("self-check")) process.exit(selfCheck());
   console.error("ingest-linear.ts is a library — the Linear adapter for db/ingest-records.ts and db/sync-linear.ts. `--self-check` runs its pure rules.");
   process.exit(2);
 }

@@ -9,14 +9,16 @@
 # server's preflight compares the brain's schema_version with its own
 # FORK_VERSION, and this is what wrote it.
 #
-# No `bun install`: migrate.ts imports only Bun built-ins, node: modules and
-# db/config.mjs + db/version.mjs (db/package.json's one dependency, PGlite, is the
-# tests'). The benches, tests and workers beside it in db/ stay out.
+# No `bun install`: migrate.ts imports only Bun built-ins, node: modules,
+# db/config.mjs + db/version.mjs and db/cli.ts, the flag scanner every db/ script
+# shares (SMD-2134; db/package.json's one dependency, PGlite, is the tests'). The
+# benches, tests and workers beside it in db/ stay out.
 FROM oven/bun:1.4.0-alpine
 WORKDIR /app
-# The runner, the two contracts it shares with the server, and the migrations —
-# at the paths migrate.ts reads them (./config.mjs, ./version.mjs, ./migrations).
-COPY db/migrate.ts db/config.mjs db/version.mjs ./
+# The runner, the two contracts it shares with the server, its flag scanner and
+# the migrations — at the paths migrate.ts reads them (./config.mjs,
+# ./version.mjs, ./cli.ts, ./migrations).
+COPY db/migrate.ts db/config.mjs db/version.mjs db/cli.ts ./
 COPY db/migrations ./migrations
 # version.mjs resolves releases.json at its parent's parent — / here, as in the
 # server image — so `bun migrate.ts --dry-run` names the release each pending

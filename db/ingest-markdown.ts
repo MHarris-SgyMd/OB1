@@ -29,6 +29,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { AdapterRefusal, decodeUtf8Strict, IDENTITY_MAX, normaliseLinks, normaliseMentions, roundTrips, type Adapter, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
+import { commandLine } from "./cli.ts";
 
 /**
  * What Obsidian embeds that is not a note: images, audio, video, PDFs and
@@ -377,7 +378,7 @@ export function selfCheck(): number {
 }
 
 if (import.meta.main) {
-  if (process.argv.includes("--self-check")) process.exit(selfCheck());
+  if (commandLine("ingest-markdown.ts", { "self-check": "none" }).has("self-check")) process.exit(selfCheck());
   console.error("ingest-markdown.ts is a library — the Markdown/Obsidian adapter for db/ingest-records.ts. `--self-check` runs its pure rules.");
   process.exit(2);
 }

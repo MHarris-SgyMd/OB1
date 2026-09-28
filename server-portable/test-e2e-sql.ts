@@ -564,6 +564,128 @@ console.log("\n[6e] retry_failed and release_stale_leases over HTTP — tools, k
   }
 }
 
+console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll walks it to succeeded, job_status and the SSE stream mirror it, ownership holds (SMD-2273)");
+{
+  // scan_thoughts starts a background job and hands back a handle at once. The
+  // corpus already has the thoughts [2]/[3] wrote, so the scan succeeds with a
+  // real count. e2e-key is the owner (a write key → canRead); op-raw is another
+  // write key (a different keyHash → not the owner); CAPTURE_KEY is capture-only
+  // (not canRead). All three exercise the /jobs auth and ownership gates.
+  const handle = JSON.parse(await call("scan_thoughts", { limit: 5 })) as { jobId: string; status: string; poll: string; stream: string };
+  assert(handle.status === "accepted", `the tool returns an accepted handle, not a blocked result (${handle.status})`);
+  assert(handle.poll === `/jobs/${handle.jobId}` && handle.stream === `/jobs/${handle.jobId}/stream`, `the handle carries the poll and stream routes (${handle.poll}, ${handle.stream})`);
+
+  // Poll the keyed REST route until the job reaches a terminal state.
+  const pollJob = async (id: string, key = "e2e-key"): Promise<{ httpStatus: number; job: Record<string, unknown> }> => {
+    for (let i = 0; i < 100; i++) {
+      const r = await fetch(`${BASE}/jobs/${id}`, { headers: { "x-brain-key": key } });
+      const job = (await r.json()) as Record<string, unknown>;
+      if (["succeeded", "failed", "lost"].includes(String(job.status))) return { httpStatus: r.status, job };
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    throw new Error(`job ${id} did not reach a terminal state`);
+  };
+  const { httpStatus, job } = await pollJob(handle.jobId);
+  assert(httpStatus === 200 && job.status === "succeeded", `GET /jobs/<id> walks the job to succeeded (${httpStatus}, ${job.status})`);
+  const result = job.result as { scanned: number; total: number } | undefined;
+  assert(result !== undefined && result.scanned >= 1 && typeof result.total === "number", `the succeeded job carries a result (${JSON.stringify(result)})`);
+  assert(typeof job.actor === "string" && (job.actor as string).length > 0, `the job records its actor (${job.actor})`);
+
+  // The job_status tool is the MCP-client mirror of the poll (a client cannot
+  // reach a REST route). It sees the same terminal state, ownership-scoped.
+  const mirror = JSON.parse(await call("job_status", { job_id: handle.jobId })) as Record<string, unknown>;
+  assert(mirror.status === "succeeded" && JSON.stringify(mirror.result) === JSON.stringify(job.result), "the job_status tool mirrors the poll for the owner");
+
+  // The SSE stream replays the status and the terminal event, carrying the result.
+  const sse = await fetch(`${BASE}/jobs/${handle.jobId}/stream`, { headers: { "x-brain-key": "e2e-key" }, signal: AbortSignal.timeout(5_000) });
+  assert(/^text\/event-stream\b/.test(sse.headers.get("content-type") ?? ""), `the stream is text/event-stream (${sse.headers.get("content-type")})`);
+  const streamText = await sse.text();
+  assert(/event: done\b/.test(streamText) && /"scanned"/.test(streamText), "the SSE stream ends with a done event carrying the result");
+
+  // Ownership and auth parity on the poll route.
+  const otherOwner = await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "op-raw" } });
+  assert(otherOwner.status === 404 && ((await otherOwner.json()) as { error?: string }).error === "not found", `another key's poll gets 404 not found (${otherOwner.status})`);
+  const noKey = await fetch(`${BASE}/jobs/${handle.jobId}`);
+  assert(noKey.status === 200 && (await noKey.text()) === "ok", "a no-key poll gets plain ok, nothing about the job");
+  const captureKey = await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": CAPTURE_KEY } });
+  assert(captureKey.status === 200 && (await captureKey.text()) === "ok", "a capture-only key (not canRead) gets plain ok");
+  const unknown = await fetch(`${BASE}/jobs/00000000-0000-4000-8000-000000000000`, { headers: { "x-brain-key": "e2e-key" } });
+  assert(unknown.status === 404, `an unknown id gets 404 for the owner (${unknown.status})`);
+
+  // The job_status tool is ownership-scoped too: another key is told there is no such job.
+  let mirrorRefusal = "";
+  try { await call("job_status", { job_id: handle.jobId }, "op-raw"); } catch (e) { mirrorRefusal = (e as Error).message; }
+  assert(/No job/.test(mirrorRefusal), `job_status for another key is a tool error, not another key's job (${mirrorRefusal.slice(0, 60)})`);
+}
+
+console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a restart, reconcile marks orphans lost, prune_jobs retains (real Postgres)");
+{
+  // The suite runs the server in-process (not import.meta.main), so index.ts's
+  // startup wiring does not fire — set the sink here, sharing jobs.ts's module
+  // state with the running server. A separate SqlStore on the same database is
+  // enough: the durable table is shared. resetJobsForTest() clears the in-memory
+  // registry, standing in for a restart.
+  const { setJobSink, resetJobsForTest, reconcileDurableJobsLost } = await import("./jobs.ts");
+  const { SqlStore } = await import("./store-sql.ts");
+  const jobStore = new SqlStore(URL_!);
+  const sink = jobStore.jobSink();
+  assert(sink !== null, "the SQL store returns a durable job sink");
+  setJobSink(sink);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const OWNER_HASH = hashKey("e2e-key");
+
+  // Start a scan and let it finish; its record is written through to jobs.
+  const handle = JSON.parse(await call("scan_thoughts", { limit: 5 })) as { jobId: string };
+  let job: Record<string, unknown> = {};
+  for (let i = 0; i < 100; i++) {
+    job = (await (await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
+    if (["succeeded", "failed", "lost"].includes(String(job.status))) break;
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  assert(job.status === "succeeded", `the job reaches succeeded (${job.status})`);
+
+  // The terminal write is best-effort/async, so poll the DB for the durable row.
+  let dbRow: Record<string, unknown> | undefined;
+  for (let i = 0; i < 100; i++) {
+    const rows = await sql`SELECT status, owner_key_hash FROM jobs WHERE id = ${handle.jobId}::uuid`;
+    if (rows[0]?.status === "succeeded") { dbRow = rows[0]; break; }
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  assert(dbRow?.status === "succeeded" && dbRow?.owner_key_hash === OWNER_HASH, `the terminal row is durable in jobs, owned by the starting key (${dbRow?.status})`);
+
+  // A restart: the in-memory registry is gone, but the poll falls back to the
+  // durable row and still carries the result.
+  resetJobsForTest();
+  const afterRestart = (await (await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
+  const restartResult = afterRestart.result as { scanned?: number } | undefined;
+  assert(afterRestart.status === "succeeded" && (restartResult?.scanned ?? 0) >= 1, `after a restart the poll reads the durable result (${afterRestart.status}, ${JSON.stringify(restartResult)})`);
+  const mirror = JSON.parse(await call("job_status", { job_id: handle.jobId })) as Record<string, unknown>;
+  assert(mirror.status === "succeeded", "the job_status tool reads the durable job after a restart");
+  const sse = await fetch(`${BASE}/jobs/${handle.jobId}/stream`, { headers: { "x-brain-key": "e2e-key" }, signal: AbortSignal.timeout(5_000) });
+  assert(/event: done\b/.test(await sse.text()), "the SSE stream replays the durable snapshot + done after a restart");
+  const other = await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "op-raw" } });
+  assert(other.status === 404, `another key's durable poll gets 404 (${other.status})`);
+
+  // Reconcile: a job left running (its process gone) is marked lost, durably.
+  const orphan = crypto.randomUUID();
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (${orphan}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'running')`;
+  const cut = await reconcileDurableJobsLost();
+  assert(cut >= 1, `reconcile marks the orphaned running job lost (${cut})`);
+  const lost = (await (await fetch(`${BASE}/jobs/${orphan}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
+  assert(lost.status === "lost" && (lost.error as { code?: string })?.code === "SERVER_RESTARTED", `the reconciled job reads back lost over HTTP with SERVER_RESTARTED (${lost.status})`);
+
+  // prune_jobs retains: an aged terminal row goes, the live ones do not.
+  const aged = crypto.randomUUID();
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (${aged}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'failed', now() - interval '2 hours')`;
+  const prunedN = Number((await sql`SELECT prune_jobs(60) AS n`)[0].n);
+  assert(prunedN >= 1 && Number((await sql`SELECT count(*)::int AS c FROM jobs WHERE id = ${aged}::uuid`)[0].c) === 0, `prune_jobs deletes the aged terminal row and keeps the fresh ones (${prunedN})`);
+
+  setJobSink(null);
+  resetJobsForTest();
+  await jobStore.close();
+  await sql.close();
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");
@@ -958,7 +1080,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
 {
   // The raw envelope, not call(): this section reads errors as answers. One
   // helper per key (fifth review pass: three hand-rolled copies).
-  type Envelope = { error?: { message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[]; structuredContent?: { code?: string; retryable?: boolean; positions?: number[] } } };
+  type Envelope = { error?: { code?: number; message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[]; structuredContent?: { code?: string; retryable?: boolean; positions?: number[] } } };
   const sc = (e: Envelope) => e.result?.structuredContent;
   const rpcAs = (key: string) => async (method: string, params: Record<string, unknown>): Promise<Envelope> => {
     const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }) });
@@ -997,11 +1119,14 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   const [key] = await sql`SELECT scope FROM ob1_agent_keys WHERE key_hash = ${hashKey(CAPTURE_KEY)}`;
   assert(key?.scope === "capture", `the registry recorded the scope as presented (${key?.scope})`);
 
-  // Absent, not refused: a read through the capture key is an unknown tool.
+  // Absent, not refused: a read through the capture key is an unknown tool. v2's
+  // McpServer surfaces a call to a tool that was never registered for this principal
+  // as a JSON-RPC error (-32602), where v1 wrapped "tool not found" as an isError
+  // result (SMD-2278). The fork's own refusals-as-values path (SMD-1978) is
+  // unaffected — this is the SDK's built-in not-found, not a fork refusal.
   const read = await rpc("tools/call", { name: "search_thoughts", arguments: { query: "eta", limit: 5, threshold: 0.1 } });
-  // The shape the hook reads: a RESULT with isError whose text opens "MCP error -32602" (thirteenth review pass — the hook's fake had it as a JSON-RPC error).
-  assert(read.error === undefined && read.result?.isError === true && /^MCP error -32602: Tool search_thoughts not found/.test(textOf(read)), `search_thoughts is not a tool the capture key can call — an isError result, not a JSON-RPC error (${textOf(read).slice(0, 60)})`);
-  assert(/not found|unknown tool/i.test(String(read.error?.message ?? textOf(read))), "…told as a missing tool, not a permission error");
+  assert(read.result === undefined && read.error?.code === -32602 && /Tool search_thoughts not found/.test(String(read.error?.message)), `search_thoughts is not a tool the capture key can call — a JSON-RPC -32602 error, not a result (${JSON.stringify(read.error ?? read.result)?.slice(0, 80)})`);
+  assert(/not found|unknown tool/i.test(String(read.error?.message ?? "")), "…told as a missing tool, not a permission error");
   const del = await rpc("tools/call", { name: "delete_thought", arguments: { id } });
   assert(del.error !== undefined || del.result?.isError === true, "delete_thought is not either — the key cannot remove what it added");
 
