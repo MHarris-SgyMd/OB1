@@ -443,8 +443,16 @@ export class SqlStore implements ThoughtStore {
     const succeeded = Number(r.succeeded ?? 0);
     const failed = Number(r.failed ?? 0);
     const total = Number(r.thoughts ?? 0);
+    const stale = Number(r.stale ?? 0);
     const unpooled = total - (pending + claimed + succeeded + failed);
-    const backlog = pending + unpooled;
+    // A full pass reaps expired (stale) leases back to the pool BEFORE it claims —
+    // claim_thoughts() "returns expired leases for the work_type to the pool, then
+    // takes up to p_batch pending rows" (migration 015) — so a stale lease is
+    // drainable now too, not only a `pending` or `unpooled` row. Hence backlog =
+    // pending + stale + unpooled (the three disjoint drainable sets; live `claimed`
+    // rows are held by a live worker and skipped). A stale row already at
+    // p_max_attempts is failed rather than re-claimed, so this stays an upper bound.
+    const backlog = pending + stale + unpooled;
     const wouldClaim = limit !== undefined ? Math.min(backlog, limit) : backlog;
     return {
       workType,
@@ -452,7 +460,7 @@ export class SqlStore implements ThoughtStore {
       claimed,
       succeeded,
       failed,
-      stale: Number(r.stale ?? 0),
+      stale,
       unpooled,
       thoughts: total,
       backlog,

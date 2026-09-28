@@ -549,7 +549,10 @@ console.log("\n[5g] dryRunClaim — run_worker's dry_run preview: the census mat
     const dr = await store.dryRunClaim(WT);
     assert(dr.workType === WT && dr.pending === 1 && dr.claimed === 2 && dr.stale === 1 && dr.succeeded === 1 && dr.failed === 1, `dryRunClaim reports the pool census (${JSON.stringify(dr)})`);
     assert(dr.thoughts === total && dr.unpooled === total - 5, `unpooled = corpus − pooled (${dr.unpooled} = ${total} − 5)`);
-    assert(dr.backlog === dr.pending + dr.unpooled && dr.wouldClaim === dr.backlog && dr.limit === null, `backlog = pending + unpooled, wouldClaim = backlog with no limit (${JSON.stringify(dr)})`);
+    assert(dr.backlog === dr.pending + dr.stale + dr.unpooled && dr.wouldClaim === dr.backlog && dr.limit === null, `backlog = pending + stale + unpooled (stale leases reap and drain too), wouldClaim = backlog with no limit (${JSON.stringify(dr)})`);
+    // Concretely: the 1 pending AND the 1 stale lease both count toward the backlog
+    // (a pass reaps the stale one back to pending before claiming), so it is unpooled+2, not unpooled+1.
+    assert(dr.backlog === dr.unpooled + 2, `the stale lease is in the backlog, not only the pending row (unpooled + 2 = ${dr.unpooled} + 2, got ${dr.backlog})`);
 
     // ── limit bounds wouldClaim, never the backlog; a limit above the backlog does not inflate it.
     const drLim = await store.dryRunClaim(WT, 1);

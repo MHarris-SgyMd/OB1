@@ -517,7 +517,7 @@ export type DryRunClaimResult = {
   unpooled: number;
   /** The whole corpus's thought count. */
   thoughts: number;
-  /** What a full pass would process now = `pending + unpooled` (the drainable backlog, before any `limit`). Exact for extraction; an UPPER BOUND for reembed/consolidate, whose eligibility is model-aware — `unpooled` counts every un-pooled thought, not only the ones those pools would actually enqueue. */
+  /** What a full pass would draw into processing now = `pending + stale + unpooled` (the three disjoint drainable sets, before any `limit`). `stale` is in it because `claim_thoughts` reaps expired leases back to the pool before it claims (migration 015); a live `claimed` lease is held by a live worker and skipped. An UPPER BOUND: exact for an extraction pool, but for reembed/consolidate `unpooled` counts every un-pooled thought (model-aware eligibility), and a stale row at max attempts fails rather than re-claims. */
   backlog: number;
   /** The backlog bounded by `limit`. Equals `backlog` when no `limit` is given — so it carries the same extraction-exact / model-aware-upper-bound caveat as `backlog`. */
   wouldClaim: number;

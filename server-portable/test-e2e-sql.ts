@@ -714,7 +714,7 @@ console.log("\n[6h] run_worker dry_run over HTTP — the preview matches worker_
     const dr = JSON.parse(await call("run_worker", { work_type: WT, dry_run: true }));
     assert(dr.workType === WT && dr.pending === 1 && dr.claimed === 1 && dr.stale === 1, `run_worker dry_run reports the pool census (${JSON.stringify(dr)})`);
     assert(dr.unpooled === total - 2 && dr.thoughts === total, `unpooled = corpus − pooled (${dr.unpooled} = ${total} − 2)`);
-    assert(dr.backlog === dr.pending + dr.unpooled && dr.wouldClaim === dr.backlog && dr.limit === null, `backlog = pending + unpooled, wouldClaim = backlog with no limit (${JSON.stringify(dr)})`);
+    assert(dr.backlog === dr.pending + dr.stale + dr.unpooled && dr.wouldClaim === dr.backlog && dr.limit === null, `backlog = pending + stale + unpooled (stale leases reap and drain too), wouldClaim = backlog with no limit (${JSON.stringify(dr)})`);
     const after = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${WT} ORDER BY thought_id`).map((r: { status: string }) => r.status);
     assert(JSON.stringify(before) === JSON.stringify(after), `dry_run claimed nothing — the pool is unchanged (${JSON.stringify(after)})`);
 
