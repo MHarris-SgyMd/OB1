@@ -1229,14 +1229,14 @@ function selfCheck(): Promise<number> {
     let r = await run(recorder, []);
     ok(r.r.outcome === "captured" && r.calls.join("; ") === 'embed; tags; capture "Backlog" vec=yes type=task', `a new issue: embed, tags, capture with the facets over the tags (${r.calls.join("; ")})`);
     r = await run({ ...recorder, holderOf: async () => row("h1", ` ${text}`, {}, null, null) }, []);
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update h1 patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at)", `no ticket row but a thought holding the text: adopted with a facet patch, no model call (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update h1 patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at,genre)", `no ticket row but a thought holding the text: adopted with a facet patch, no model call (${r.calls.join("; ")})`);
     r = await run({ ...recorder, holderOf: async () => row("h1", ` ${text}`, { ...withFacets, priority: "High" }, null, null) }, []);
     ok(r.r.outcome === "patched" && r.calls.join("; ") === "update h1 patch(priority)", `…and a holder already carrying the facets is patched for what differs alone, so it is not re-patched every pass (${r.calls.join("; ")})`);
     // Sixth review pass: a holder claimed by ANOTHER ticket is not re-keyed under this one, in either branch.
     r = await run({ ...recorder, holderOf: async () => row("h1", ` ${text}`, { ...withFacets, issue: "X-12" }, null, null) }, []);
     ok(r.r.outcome === "refused" && r.calls.length === 0, `no ticket row, the text held under another ticket's claim: refused without a write (${r.calls.join("; ")})`);
     r = await run({ ...recorder, holderOf: async () => row("P", ` ${doneText}`, { source: "mcp" }, "2026-09-25T00:00:00Z", null) }, [row("A", text, withFacets, "2026-09-22T00:00:00Z", null)], done);
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update P patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at); update P supersedes=A",
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update P patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at,genre); update P supersedes=A",
       `a paste the grammar cannot read (a leading space) holding this ticket's text is folded in as the head too, as the no-row branch would adopt it (${r.calls.join("; ")})`);
     // A refused set undoes the clears before it, so a hand-set pointer survives.
     let sets = 0;
@@ -1246,14 +1246,14 @@ function selfCheck(): Promise<number> {
       `a refused set restores the pointer the clear removed — H→x is back, the chain reported as it was (${r.calls.join("; ")})`);
     // Fifth review pass: a hand paste of THIS ticket made after adoption is folded in as the head, not refused as an outside holder.
     r = await run({ ...recorder, holderOf: async () => row("P", doneText, { source: "mcp" }, "2026-09-25T00:00:00Z", null) }, [row("A", text, withFacets, "2026-09-22T00:00:00Z", null)], done);
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update P patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at); update P supersedes=A",
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update P patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at,genre); update P supersedes=A",
       `a later hand paste holding Linear's text becomes the head, gets the facets and supersedes the adopted row — no embed, no refusal (${r.calls.join("; ")})`);
     ok(ticketIdentifier({ content: "x", metadata: { issue: "X-12" } }) === "X-12", "a one-letter team key is an identifier");
     r = await run({ ...recorder, store: { ...recorder.store, captureThought: async (o) => { calls.push("capture"); return { id: "h2", existed: true, supersedes: null }; } } }, []);
     ok(r.r.outcome === "patched" && r.calls.join("; ") === "embed; tags; capture", `upsert_thought's own existed is honoured: reported as an adoption, not a capture (${r.calls.join("; ")})`);
     r = await run(recorder, [row("cur", text, { source: "mcp", type: "task" }, "2026-09-22T00:00:00Z", null)]);
     // No `parent` in the patch: the row has none and Linear says null, and absent and null agree.
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update cur patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at)", `a hand capture with the same text: one facet patch, no model call (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update cur patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at,genre)", `a hand capture with the same text: one facet patch, no model call (${r.calls.join("; ")})`);
     r = await run(recorder, [row("cur", text, withFacets, null, null)]);
     ok(r.r.outcome === "unchanged" && r.calls.length === 0, "same text and facets: nothing written, nothing called");
     r = await run(recorder, [row("cur", `${text}\n`, withFacets, null, null)]);
@@ -1296,7 +1296,7 @@ function selfCheck(): Promise<number> {
     ok(r.r.twinsMarked === 2 && r.calls.join("; ") === "update c supersedes=null; update c supersedes=b; update b supersedes=x", `a hand-set pointer to another thought moves to the tail: clear first, then set (${r.calls.join("; ")})`);
     // The twin that already holds the new text is the head; no model call; the other row chained under it.
     r = await run(recorder, [row("b", text, withFacets, "2026-09-22T00:00:00Z", "a"), row("a", `${doneText} `, {}, "2026-09-21T00:00:00Z", null)], done);
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update a patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at); update b supersedes=null; update a supersedes=b",
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update a patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at,genre); update b supersedes=null; update a supersedes=b",
       `the twin holding Linear's text (up to whitespace) becomes the head: its facets patched first, then b's pointer cleared and a→b set, nothing embedded (${r.calls.join("; ")})`);
     // Held by a thought outside the group: parked, with linear_updated_at, outcome refused.
     const dupStore: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.content !== undefined) { calls.push(`update ${o.id} content → DUPLICATE_CONTENT`); return { ok: false, error: "DUPLICATE_CONTENT" }; } return recorder.store.updateThought(o); } };
@@ -1382,7 +1382,7 @@ function selfCheck(): Promise<number> {
     let looks = 0;
     const lateWriter: Writer = { ...recorder, holderOf: async () => (++looks === 2 ? row("L", ` ${text}`, { type: "task", topics: ["real"] }, null, null) : null) };
     r = await run(lateWriter, []);
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "embed; tags; update L patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at)", `a holder found on the second look takes the facets alone; its tags stand (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "embed; tags; update L patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at,genre)", `a holder found on the second look takes the facets alone; its tags stand (${r.calls.join("; ")})`);
     // A head-window vector is said and counted.
     r = await run({ ...recorder, embed: async () => { calls.push("embed"); return { embedding: [1], model: "m", chunks: [], wholeContentFellBack: true, wholeContentError: "413" }; } }, []);
     ok(r.r.headWindow === true, "a vector the provider refused whole is reported, not passed as a whole-text vector");
@@ -1531,7 +1531,7 @@ function selfCheck(): Promise<number> {
       const behind: Writer = { ...parts, holderOfIdentity: async () => row("d1", part.text, { source: "linear", ticket: "SMD-1936" }, null, null) };
       calls.length = 0;
       r = await syncIssue(behind, sectioned, [headRow]);
-      ok(r.derived?.patched === 1 && calls.join("; ") === "update d1 patch(section,observed_at,type,url,linear_updated_at)", `a section row behind on its facets is patched alone, no model call (${calls.join("; ")})`);
+      ok(r.derived?.patched === 1 && calls.join("; ") === "update d1 patch(section,observed_at,type,url,linear_updated_at,genre)", `a section row behind on its facets is patched alone, no model call (${calls.join("; ")})`);
       const dup: Writer = { ...movedPart, store: { ...recorder.store, updateThought: async (o) => (o.content !== undefined ? { ok: false, error: "DUPLICATE_CONTENT" } : recorder.store.updateThought(o)) } };
       r = await syncIssue(dup, sectioned, [headRow]);
       ok(r.derived?.refused === 1 && r.outcome === "unchanged", "a section whose new text another thought holds is refused and said; the ticket's own outcome stands");
