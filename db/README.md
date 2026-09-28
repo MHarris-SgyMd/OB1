@@ -1937,7 +1937,7 @@ bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
 #   --k N (3)  --min-sim F (0.6)  --min-confidence F (0.5)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
-bun consolidate.ts --url … --accept <id> --force            # a thought was edited since the pair was judged
+bun consolidate.ts --url … --accept <id> --force            # a thought edited since judged, a stale row, or a lineage pair (069)
 ```
 
 **The cost, stated up front.** Up to `--k` calls to the metadata model per

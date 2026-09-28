@@ -229,7 +229,7 @@ export function parseHits(reply: string): Hit[] {
  */
 export function parseProposalIds(reply: string): Set<string> {
   const ids = new Set<string>();
-  if (/^No .*supersession proposals\./.test(reply)) return ids;
+  if (/^No .*supersession proposals\b/.test(reply)) return ids; // 069's selectors add " on/not on a lineage pair" before the period
   for (const m of reply.matchAll(/^\s+ID: ([0-9a-f-]{36})\s*$/gim)) ids.add(m[1].toLowerCase());
   return ids;
 }

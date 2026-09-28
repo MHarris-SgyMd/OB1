@@ -209,7 +209,7 @@ Read against the tree on 2026-09-27.
 - **Which vendored integrations become plugins and which retire** (agent-memory-api, smart-ingest, the capture sources in SMD-2101). SMD-1931 gives the dispositions under decision 9. The GUI's agent-memory and kanban views follow from them.
 - **The importance scale, the restricted-content lock and kanban's status column.** Each is non-core schema today (`schemas/enhanced-thoughts`, `schemas/workflow-status`); adopting one is a migration decision of its own.
 - **Operations that exist only on the command line or not at all**, needed by the GUI's later views, filed when the GUI reaches them:
-  - supersession accept/reject (`db/consolidate.ts --accept/--reject`), where the list tool now also has a `stale` status (migration 063);
+  - supersession accept/reject (`db/consolidate.ts --accept/--reject`), where the list tool now also has a `stale` status (migration 063) and a `lineage` selector (069);
   - `rebuild_derived`, its orphan sweep and its census (migration 063, `db/rebuild.ts`);
   - lineage and provenance reads;
   - an entity-graph read.
