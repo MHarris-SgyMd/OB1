@@ -1480,6 +1480,61 @@ export async function setPathWithoutTemp(tx) {
 }
 
 /**
+ * Put public first on the migrating session's search_path, before the
+ * migrator creates or reads anything unqualified (SMD-2247). Every migration
+ * and the ledger are unqualified, so they land in the first schema on the path
+ * and find the first table of a name: with another schema first — the
+ * default path's "$user" when a schema is named for the role, a connection
+ * string's options=, a role's setting — the build went there, or found
+ * another tool's `thoughts` and failed on it, and with no schema on the path
+ * at all the ledger's CREATE failed with 3F000. The brain lives in public,
+ * where preflight and --baseline look, so public goes first and the rest of
+ * the path follows in its order, read as Postgres reads it: an extension's
+ * schema on it (Supabase's `extensions`) still resolves. A no-op where public
+ * is already the first schema Postgres searches. Session scope
+ * (`set_config(…, false)`), as alignVectorSearchPath's is: it holds for each
+ * migration's transaction on the connection, and is no persistent change.
+ *
+ * Judged first, and nothing is changed where it refuses:
+ *   - `{ refused: "ledger", schema }`: the path reaches a brain's ledger —
+ *     `schema_migrations` beside a `thoughts` — in another schema, and public
+ *     has no ledger. Building in public would start a second brain beside it.
+ *     Another tool's `schema_migrations` (Rails', Ecto's…), with no `thoughts`
+ *     beside it, is not the brain's and does not refuse.
+ *   - `{ refused: "public", missing, role }`: with the path set, public is
+ *     still not first — there is no schema public, or this role has no USAGE
+ *     on it, which Postgres takes as off the path. The session keeps the path
+ *     it was given; the migrator exits on the refusal, before any SQL of its
+ *     own.
+ *
+ * Otherwise `{ refused: null, was }`: `was` is the path it replaced, or null
+ * where public was already first. Bun.sql only (a tagged-template client).
+ */
+export async function pinPublicFirst(sql) {
+  const [state] = await sql`
+    SELECT current_setting('search_path') AS path,
+           current_setting('server_version_num')::int AS version,
+           (current_schemas(false))[1] AS first,
+           (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.oid = to_regclass('schema_migrations')) AS ledger`;
+  // By pg_class, not a qualified to_regclass, which needs USAGE on the schema:
+  // a role without it on public is the refusal below, not an error here.
+  const inSchema = async (schema, rel) =>
+    (await sql`SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                               WHERE n.nspname = ${schema} AND c.relname = ${rel}) AS present`)[0].present;
+  if (state.ledger !== null && state.ledger !== "public" && !(await inSchema("public", "schema_migrations")) && (await inSchema(state.ledger, "thoughts"))) {
+    return { refused: "ledger", schema: state.ledger };
+  }
+  if (state.first === "public") return { refused: null, was: null };
+  const rest = searchPathSchemas(state.path, state.version).filter((s) => s !== "public");
+  await sql`SELECT set_config('search_path', ${["public", ...rest].map(quoteIdent).join(", ")}, false)`;
+  const [after] = await sql`
+    SELECT (current_schemas(false))[1] AS first, to_regnamespace('public') IS NULL AS missing, quote_ident(current_user) AS role`;
+  if (after.first !== "public") return { refused: "public", missing: after.missing, role: after.role };
+  return { refused: null, was: state.path };
+}
+
+/**
  * The bounds as this session sees them: `current_setting` per name, NULL for
  * a placeholder pgvector has not defined yet. One SQL text, with the names
  * inlined as literals (they are this module's constants, not input), so a

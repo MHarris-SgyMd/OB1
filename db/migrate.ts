@@ -57,6 +57,7 @@ import {
   ACCEPTED_CLAIM_SQL,
   LOCK_TIMEOUT_S,
   alignVectorSearchPath,
+  pinPublicFirst,
   migrationNameProblem,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
@@ -331,6 +332,38 @@ if (baseline && !force) {
     await sql.close();
     process.exit(2);
   }
+}
+
+// The brain is built in public, where preflight and --baseline look, whatever
+// the session's search_path puts first (SMD-2247): every migration and the
+// ledger below are unqualified, and land in the path's first schema. Before
+// the ledger, so its CREATE neither fails with 3F000 on a path that names no
+// schema nor lands in another. pinPublicFirst (config.mjs) keeps the rest of
+// the path after public, and refuses, changing nothing, where the path
+// reaches a brain's ledger in another schema or public cannot come first.
+const pinned = await pinPublicFirst(sql);
+if (pinned.refused === "ledger") {
+  console.error(
+    `Refused: this connection's search_path reaches a brain's migration ledger in schema ${quoteIdent(pinned.schema)} (schema_migrations beside thoughts), and public has none.\n` +
+      "  This migrator builds in public, where preflight and --baseline look; run on, it would start a second brain there beside that one.\n" +
+      `  Move that brain's tables into public, or run against the database whose brain is in public. Nothing was changed.`
+  );
+  await sql.close();
+  process.exit(2);
+}
+if (pinned.refused === "public") {
+  console.error(
+    pinned.missing
+      ? "Refused: this database has no schema named public, and this migrator builds the brain there.\n" +
+          "  CREATE SCHEMA public;  as the database's owner, then run again. Nothing was changed."
+      : `Refused: role ${pinned.role} has no USAGE on schema public, so Postgres leaves public off its search_path, and this migrator builds the brain there.\n` +
+          `  GRANT USAGE, CREATE ON SCHEMA public TO ${pinned.role};  as the schema's owner, then run again. Nothing was changed.`
+  );
+  await sql.close();
+  process.exit(2);
+}
+if (pinned.was !== null) {
+  console.log(`  search_path: public put first for this session (it was ${pinned.was === "" ? "empty" : pinned.was}), so the brain is built where preflight reads it`);
 }
 
 await sql`

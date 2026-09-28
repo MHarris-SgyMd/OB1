@@ -890,12 +890,11 @@ if (configFailed) {
               // Another schema's thoughts, first on the path: another tool's
               // table, never one to grant on or to call the brain's (review
               // pass 1: the GRANT printed for it, run, passed this row against
-              // it). The brain's table missing is still a brain to migrate.
-              // The migrator's CREATE TABLE IF NOT EXISTS thoughts is
-              // unqualified too: run with that schema first on the path, it
-              // finds the other table and fails (review pass 2), so the path
-              // comes first either way. A schema named for the role is the
-              // default path's "$user".
+              // it). The brain's table missing is still a brain to migrate:
+              // the migrator builds in public whatever the path puts first
+              // (SMD-2247), but the server reads the first thoughts on it, so
+              // the path is named either way. A schema named for the role is
+              // the default path's "$user".
               const other = quoteIdent(String(r.resolvedSchema));
               const named = r.resolvedSchema === r.roleName && searchPathSchemas(String(r.path ?? ""), Number(r.version)).includes("$user") ? ` (the path's "$user")` : "";
               const putAhead = `put public ahead of ${other}${named} on this connection's search_path — the role's setting, or the connection string's where it sets one — or take ${other} off it`;
@@ -906,7 +905,7 @@ if (configFailed) {
                   }
                 : {
                     detail: `thoughts resolves to ${r.resolved}, another tool's table; the brain's public.thoughts does not exist`,
-                    remedy: `${putAhead.replace(/^./, (c) => c.toUpperCase())}, then apply the migrations: cd db && bun migrate.ts --url ${urlArg}  — the migrator's CREATE TABLE IF NOT EXISTS thoughts would otherwise find ${r.resolved}.`,
+                    remedy: `Apply the migrations, which build in public: cd db && bun migrate.ts --url ${urlArg}  and ${putAhead}: the server reads the first thoughts on the path.`,
                   };
             } else if (r?.resolved && errno === "42501" && r.canSelect === false) {
               // --grant takes the name raw, so it goes to the shell quoted.

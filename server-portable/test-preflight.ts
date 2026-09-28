@@ -405,8 +405,8 @@ else {
   }
   assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(strayRun.out),
          `…from the schema row too, with another schema's thoughts beside an empty public off the path (${strayRun.out.split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
-  assert(/✗\s+schema\s+permission denied for table thoughts — thoughts resolves to pf_stray\.thoughts, another tool's table; the brain's public\.thoughts does not exist\n\s+→ Put public ahead of "pf_stray" on this connection's search_path .*, then apply the migrations: cd db && bun migrate\.ts --url \$DATABASE_URL  — the migrator's CREATE TABLE IF NOT EXISTS thoughts would otherwise find pf_stray\.thoughts\./.test(strayFirst?.out ?? "") && !/GRANT SELECT ON pf_stray/.test(strayFirst?.out ?? ""),
-         `…and with it first on the path of a role that may not read it, public put ahead and then the migrations — the migrator would otherwise find that table — never a GRANT on it (${(strayFirst?.out ?? "").split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
+  assert(/✗\s+schema\s+permission denied for table thoughts — thoughts resolves to pf_stray\.thoughts, another tool's table; the brain's public\.thoughts does not exist\n\s+→ Apply the migrations, which build in public: cd db && bun migrate\.ts --url \$DATABASE_URL  and put public ahead of "pf_stray" on this connection's search_path .*: the server reads the first thoughts on the path\./.test(strayFirst?.out ?? "") && !/GRANT SELECT ON pf_stray/.test(strayFirst?.out ?? ""),
+         `…and with it first on the path of a role that may not read it, the migrations, which build in public, and public put ahead for the server — never a GRANT on it (${(strayFirst?.out ?? "").split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
   // And the migration ledger row reads the SMD-2237 split by public alone: the
   // probe is pg_class-qualified to schema public, so pf_stray.thoughts (another
   // tool's, off the path) is not a schema to adopt — the row says "nothing has
