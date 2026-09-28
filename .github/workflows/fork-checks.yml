@@ -459,6 +459,14 @@ jobs:
         working-directory: db
         run: bun test-connect.ts
 
+      # SMD-2304. The db/ scripts that are engines — migrate.ts first — import
+      # with no side effect (no connection, no output, no process listener),
+      # keep their engine code free of exits, handlers, argv and console calls,
+      # and refuse through run() in the CLI's words before connecting.
+      - name: Engines (importable db/ scripts, no database)
+        working-directory: db
+        run: bun test-engines.ts
+
   db-live:
     name: Schema against real Postgres
     runs-on: ubuntu-24.04

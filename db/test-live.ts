@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
+import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
@@ -69,6 +70,18 @@ function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
   return runMigrator(URL_!, undefined, ...extra);
 }
 
+/**
+ * migrate.ts's run() in this process — the engine the CLI wraps (SMD-2304) —
+ * its lines captured and joined as a child's streams are: stdout's, then
+ * stderr's, a newline after each. The same shell as migrate()'s spawn
+ * (this process's environment), so the two print the same.
+ */
+async function migrateInProcess(opts: Omit<MigrateOptions, "writer"> = {}): Promise<{ code: number; out: string }> {
+  const outs: string[] = [], errs: string[] = [];
+  const code = await runMigrate({ url: URL_!, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+  return { code, out: [...outs, ...errs].map((l) => `${l}\n`).join("") };
+}
+
 const unit = (i: number) => {
   const v = new Array(EMBEDDING_DIM).fill(0);
   v[i] = 1;
@@ -88,6 +101,8 @@ console.log("[1] migrate.ts against a real server");
   const dry = await migrate("--dry-run");
   assert(dry.code === 0, "--dry-run exits 0");
   assert(/would apply \d+, skipped 0/.test(dry.out), "--dry-run reports everything pending");
+  const dryIn = await migrateInProcess({ dryRun: true });
+  assert(dryIn.code === 0 && dryIn.out === dry.out, "run() in-process dry-runs the same, byte for byte (SMD-2304)");
   const none = await sql`SELECT to_regclass('public.thoughts') IS NULL AS absent`;
   assert(none[0].absent === true, "--dry-run created nothing");
 
@@ -107,6 +122,17 @@ console.log("[1] migrate.ts against a real server");
   const again = await migrate();
   assert(again.code === 0, "re-run exits 0");
   assert(/applied 0, skipped \d+/.test(again.out), "re-run is a no-op — the ledger holds");
+  // In-process on a client the caller owns: the same no-op, and the client is
+  // still open after — run() closes only a client it opened (SMD-2304).
+  const caller = new SQL({ url: URL_, max: 1 });
+  try {
+    const againIn = await migrateInProcess({ sql: caller });
+    assert(againIn.code === 0 && againIn.out === again.out, "run() in-process re-runs the same no-op, byte for byte");
+    const [{ one }] = await caller`SELECT 1 AS one`;
+    assert(one === 1, "…and leaves the caller's client open");
+  } finally {
+    await caller.close();
+  }
 
   const ledger = await sql`SELECT count(*)::int AS c FROM schema_migrations`;
   assert(ledger[0].c > 0, `schema_migrations records ${ledger[0].c} migrations`);
@@ -122,6 +148,10 @@ console.log("\n[2] Append-only enforcement");
     assert(drifted.code === 1, "editing an applied migration exits 1");
     assert(/DRIFTED 1/.test(drifted.out), "…and reports which one drifted");
     assert(/append-only/.test(drifted.out), "…and explains the rule");
+    // migrate.ts was imported before the edit: run() reads the files when it
+    // runs, not when the module loaded (SMD-2304).
+    const driftedIn = await migrateInProcess();
+    assert(driftedIn.code === 1 && driftedIn.out === drifted.out, "run() in-process, imported before the edit, sees the drift the same, byte for byte");
   } finally {
     writeFileSync(target, original);
   }

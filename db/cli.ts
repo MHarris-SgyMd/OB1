@@ -103,6 +103,24 @@ export interface CommandLine<K extends string = string> extends Args<K> {
   number(name: K, rule: NumberRule): number;
 }
 
+/**
+ * Where an engine's lines go (SMD-2304): `out` for what the CLI prints to
+ * stdout, `err` for stderr, one line — or block — a call, written at once, so
+ * a caller reading the stream live sees each as it happens. The CLI passes
+ * consoleWriter; a caller that drives an engine in-process passes its own and
+ * captures them.
+ */
+export interface Writer {
+  out(line: string): void;
+  err(line: string): void;
+}
+
+/** The CLI's writer: console.log and console.error, exactly as the scripts wrote them before they took a Writer. */
+export const consoleWriter: Writer = {
+  out: (line) => console.log(line),
+  err: (line) => console.error(line),
+};
+
 /** The flag list a refusal and `--help` print: `  flags: --url <value>, --dry-run, …`. */
 export function flagList<K extends string>(spec: FlagSpec<K>, hints: Partial<Record<K, string>> = {}): string {
   const shape: Record<Takes, string> = { none: "", one: " <value>", two: " <a> <b>", optional: " [value]", many: " <value> …", repeated: " <value> (repeatable)" };

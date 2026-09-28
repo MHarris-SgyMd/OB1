@@ -29,15 +29,24 @@ export const NO_DATABASE_URL = "No database URL. Pass --url or set DATABASE_URL.
  */
 export function databaseUrl(flag: string | undefined, env: Record<string, string | undefined> = process.env): string {
   const url = flag ?? env.DATABASE_URL;
-  if (url === undefined || url.trim() === "") {
-    console.error(NO_DATABASE_URL);
+  const problem = databaseUrlProblem(url);
+  if (problem !== null) {
+    console.error(problem);
     process.exit(2);
   }
-  if (parsedDatabaseUrl(url) === null) {
-    console.error(UNPARSEABLE_DATABASE_URL);
-    process.exit(2);
-  }
-  return url;
+  return url as string;
+}
+
+/**
+ * What is wrong with `url` as a database URL — none, blank, or not one the
+ * client can take — as the refusal to print, or null. databaseUrl's rule
+ * without its exit, for an engine's run() that refuses in the CLI's words and
+ * returns 2 rather than exiting (SMD-2304).
+ */
+export function databaseUrlProblem(url: string | undefined): string | null {
+  if (url === undefined || url.trim() === "") return NO_DATABASE_URL;
+  if (parsedDatabaseUrl(url) === null) return UNPARSEABLE_DATABASE_URL;
+  return null;
 }
 
 /**

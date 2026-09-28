@@ -374,7 +374,7 @@ function callText(text: string, from: number): string {
   ok(LOOPBACK_SPELLING.test(`["localhost", "127.0.0.1"].includes(h)`), "the loopback census sees a regrown two-name rule");
 
   const onDoor = sources.filter((f) => f !== "connect.ts" && /closeThenExit\(/.test(read(f)));
-  for (const must of ["hnsw-graph.ts", "graph-centrality.ts", "tier.ts"]) ok(onDoor.includes(must), `${must} exits through the door`);
+  for (const must of ["hnsw-graph.ts", "graph-centrality.ts", "tier.ts", "migrate.ts"]) ok(onDoor.includes(must), `${must} exits through the door`);
   const EXITS = /\bexit\s*\(|process\s*\[\s*["'`]exit["'`]\s*\]|=\s*process\.exit\b/;
   const CLOSES = /\.\s*(close|end)\s*\(/;
   /**
