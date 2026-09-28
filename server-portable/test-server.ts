@@ -1295,8 +1295,10 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
     `a window of 100 is already capped, so the note says so rather than to raise the limit (the window's size decides, not the limit as sent: second review pass); a window with no current row says so (first review pass) (${capped})`);
   assert(/migration 059 .* is not applied, or PostgREST has not reloaded/.test(currentSearchHint('function search_thoughts_current(vector, unknown) does not exist'))
       && /migration 059 .* is not applied/.test(currentSearchHint("Could not find the function public.search_thoughts_current(filter, half_life_days, match_count, match_threshold, query_embedding, query_text, recency_weight) in the schema cache"))
-      && /needs SELECT on thought_sources .* the server group/.test(currentSearchHint("permission denied for table thought_sources")) && currentSearchHint("connection refused") === "",
-    "an error on prefer_current's path names 059 (missing, or the schema cache) or the server group's grant; any other error gets no hint");
+      && /before migration 068, and after it wherever PostgreSQL checks a removed join's tables, the server's role needs SELECT on thought_sources .* the server group/.test(currentSearchHint("permission denied for table thought_sources"))
+      && /projection \(migration 068\).* grants on ob1_ticket_head and ob1_superseded_by/.test(currentSearchHint("permission denied for table ob1_superseded_by"))
+      && /projection \(migration 068\)/.test(currentSearchHint("permission denied for table ob1_ticket_head")) && currentSearchHint("connection refused") === "",
+    "an error on prefer_current's path names 059 (missing, or the schema cache), 068's projection grants, or before 068 the server group's grant; any other error gets no hint");
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
@@ -1415,6 +1417,34 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   let ended = false;
   const plain = new Response("{}", { headers: { "content-type": "application/json" } });
   assert(withSseKeepalive(plain, { onEnd: () => { ended = true; } }) === plain && ended, "a response that is not an event stream passes through untouched, complete at once");
+}
+
+console.log("\n[18] Async job routes: keyed GETs, no key shown nothing, an id required (SMD-2273)");
+{
+  const ID = "00000000-0000-4000-8000-000000000000";
+  // No key and a wrong key are shown "ok" and nothing else (parity with
+  // /worker-status and /health), before any store read — so this block, like the
+  // rest of test-server, needs no database. The keyed poll/stream, the ownership
+  // gate and the pending→running→succeeded walk are test-e2e-sql's [7] (real DB).
+  const rows: [string, string, RequestInit][] = [
+    ["GET /jobs/<id>, no key", `/jobs/${ID}`, { headers: H }],
+    ["GET /jobs/<id>, wrong key", `/jobs/${ID}`, { headers: { "x-brain-key": "wrong" } }],
+    ["GET /jobs/<id>/stream, no key", `/jobs/${ID}/stream`, { headers: H }],
+    ["HEAD /jobs/<id>/stream, no key", `/jobs/${ID}/stream`, { method: "HEAD", headers: H }],
+  ];
+  for (const [label, path, init] of rows) {
+    const p = await probe(path, init);
+    assert(p.status === 200, `${label} → 200 ok (${p.status})`);
+    assert(p.cors, `${label}: CORS present`);
+    assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
+  }
+  // The routes need an id: /jobs with none, and a bare /jobs/, match neither
+  // regex and land on notFound's 405 (POST at every path is the MCP endpoint) —
+  // so a typo does not silently read "ok".
+  for (const path of ["/jobs", "/jobs/"]) {
+    const p = await probe(path, { headers: H });
+    assert(p.status === 405, `GET ${path} (no id) → 405, not a match (${p.status})`);
+  }
 }
 
 server.stop();

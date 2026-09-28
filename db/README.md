@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2200 assertions: 2200 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty-five (65) migrations applied, and
+`bun test-schema.ts` prints `2261 assertions: 2261 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports sixty-eight (68) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,8 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
+068 SMD-2256).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -427,15 +428,17 @@ INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 `node_lifecycle_types()` and `node_settled_types()` (the six status types this
 schema knows, and the two that settle a node); `node_lifecycle()` (per thought:
 status, status_type, the source watermark `synced_at` and `created_at` — a row
-carrying `ticket` or `issue` reads its ticket's head; it reads `thoughts`
-alone); `node_dependencies()` (one row per `blocks` / `blocked_by` link facet,
-active or closed, with whether its system gates — SMD-2218's rule); and
+carrying `ticket` or `issue` reads its ticket's head; it read `thoughts`
+alone until 068 stored the heads); `node_dependencies()` (one row per
+`blocks` / `blocked_by` link facet, active or closed, with whether its system
+gates — SMD-2218's rule); and
 `node_state(ids)` (every thought, or those named: the lifecycle beside `open`,
 `blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
 `superseded_by`). Coverage and freshness are columns — a node carries a
 lifecycle when `open` is not NULL; its freshness is `synced_at`, never
-`updated_at` — so each consumer counts over what it ranks. The ids narrow the
-rows returned, not the work: the whole brain is computed and filtered last.
+`updated_at` — so each consumer counts over what it ranks. At 058 the ids
+narrowed the rows returned, not the work: the whole brain was computed and
+filtered last (068 stores the heads and superseders, below).
 `graph-centrality.ts` is the first reader, its reports byte for byte what they
 were; search is the second (`search_thoughts`' opt-in `prefer_current`, through
 059). `metadata.status_type` is a
@@ -479,12 +482,13 @@ count, latest source watermark and whether its top N is exact. Priced first in
 MRR +0.052, live-ticket MRR +0.194; costs disclosed — topical −0.127, a note
 under a Done ticket −0.292, a settled key −0.750); the query log records such a
 search as arm `current` (the CHECK widened), and `db/tier.ts` replays it. The
-server group gains SELECT on `thought_sources`, which `node_state` reads; the
-wrapper is dropped before it is created, as 058's three are. It costs what
-`node_state` costs — the whole brain's lifecycle per call: +10.7 ms at 10,000
-thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the budget
-pre-registered for it; shipped opt-in on the maintainer's call, and SMD-2256
-narrows it.
+server group gains SELECT on `thought_sources`, which `node_state` reads for
+its dependency columns (since 068 the search's columns do not); the wrapper
+is dropped before it is created, as 058's three are. At 059 it cost what
+`node_state` cost — the whole brain's lifecycle per call: +10.7 ms
+at 10,000 thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the
+budget pre-registered for it; shipped opt-in on the maintainer's call, and 068
+made it a lookup.
 
 Migration 060 has the write functions append then project (SMD-2116, step 2 of
 `../docs/event-log-as-truth.md`). `upsert_thought` (2- and 3-argument),
@@ -595,8 +599,9 @@ left alone — and its newer thought is requeued under the judge's key (029's
 CHECKs widened; `consolidation_candidates` yields the pair again;
 `record_supersession_proposal` replaces the stale row in place, back to
 pending, when the pass finds the conflict again; a pair the pass no longer
-finds in conflict leaves the row stale for a reviewer — `consolidate.ts
---list stale`, `--reject`; a reviewer may also accept it with `p_force`); the
+finds in conflict is the pass's to settle since 067, below; a reviewer may
+decide a stale row sooner, accepting it with `p_force` or rejecting it —
+`consolidate.ts --list stale`); the
 tags are marked with no pool to feed (no worker re-tags a thought). With
 `p_input_gone` —
 SMD-1723's forget, called BEFORE the row delete, in one transaction — the
@@ -691,6 +696,141 @@ test-schema [59], test-live [32], test-upgrade [20p];
 `server-portable/test-preflight.ts` drives the census, the remedy and the
 repair arms.
 
+Migration 066 (SMD-2292) closes a pairing 064 made routine: a page is a
+thought whose `derived_from` names the evidence its sections were generated
+from, and once the re-embed worker gave the page thought a vector and the
+extractor gave it entities, `consolidation_candidates(page)` returned that
+evidence as the page's first candidate at cosine 1 — the judge asked whether a
+derivation supersedes its input, and a reviewer's accept would have archived
+the evidence while the page still named it. The file redefines the candidate
+filter on 063's body plus two NULL-safe conditions: a candidate the judged
+thought's `derived_from` names is left out, and so is a candidate whose own
+`derived_from` names the judged thought (an older note re-cited through
+`update_thought`'s provenance envelope, an ingester's backdated part row, a
+derivation whose input was captured later, or a `created_at` moved by hand).
+Direct members only, and expect the transitive shape from SMD-2143's writers:
+a page citing an earlier page or a digest on the same entity (064 admits a
+page as evidence) is judged against that page's evidence at cosine near 1 —
+until SMD-2314 lands, a reviewer reads `trace_provenance(newer)` and rejects
+it. Siblings — two pages from one evidence — are still judged (a page
+superseding a page is 064's designed state; the archive takes a page's
+human-owned sections, so weigh them). Both sides stay in the pool: the rule
+filters pairs, not membership. The body carries
+`ob1:lineage-excludes-the-pair`, which preflight's `lineage` check reads: 063
+re-applied by hand over 066 warns naming 066 (029 re-applied is caught
+earlier, by the producer-count arm; the remedies run 061, 063, 066 in turn).
+One body redefined on its own text with no arity change; nothing runs at
+apply time but the DDL; a pair proposed before the file stands for its
+reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
+pair — the listing reads nothing of `derived_from`, the pass never replaces
+it (a text move, once `rebuild_derived` runs — `db/rebuild.ts` — leaves it
+`stale` for a reviewer), and the recorder has no
+lineage guard; reject it by hand, and SMD-2313 counts and flags such rows.
+test-schema [60], test-upgrade [20r] (a proposal planted on the pair before
+the file is pending and unmoved after it); `server-portable/test-preflight.ts`
+drives the re-applied-body arm.
+
+**067 — the consolidation pass settles a stale proposal it no longer finds in
+conflict, and a pass-settled row is the pass's to reopen (SMD-2297).** 063
+left a dead end: `consolidate.ts` writes a proposal only for a conflict at its
+confidence floor, so when the edit that made a row stale had resolved the
+conflict — the likely outcome — the pass judged the pair, found none, wrote
+nothing, and the row stayed `stale` for a reviewer for ever. 067 adds
+`settle_supersession_proposal(id, note, actor, judge_key, older_fingerprint,
+newer_fingerprint, recipe, agent)`: the pass's rejection of a stale row —
+through `review_supersession_proposal`'s reject arm, which checks no status
+and sets `reviewed_at` — with a note beginning **`settled by the pass:`**, the
+one string that says a machine decided the row (one constant in
+`server-portable/consolidate.ts`, one literal in the two SQL bodies; test-schema
+holds them to each other), and the proposal's lineage row rewritten at the
+fingerprints the pass judged under the pass's key — the row `rebuild_derived`
+reads staleness from, so a settled pair reads current until a text moves
+again. It refuses a row that is not stale (a pending row is a reviewer's, a
+decided one is decided) and a note without the marker. `rebuild_derived` is
+redefined on 063's body with one arm changed: a rejected row whose note
+carries the marker is the pass's, so a text move under it sets the row stale
+again (unreviewed, the note cleared — the maintainer's choice over keeping it
+as a person's decision, which would leave a pair the pass once found clear
+unproposable when its texts later conflict, and over a fifth status); a
+person's rejected or accepted row is kept, as before; and 064's `section`
+kind — a generated page section, which 063's body sent to the kept arm — is
+marked with no pool, as the tags are (its generator's next
+`write_page_section` clears the mark). `consolidate.ts` does
+the rest (its section below): every run re-pools each stale row's newer
+thought under its own key, judges a stale pair the top-k left out when it
+still meets the candidate rule, replaces a conflict found again, settles a
+judgement of no conflict or a pair the rule no longer admits, and waits on a
+side without a vector. Preflight's `lineage` check warns when 063 is
+re-applied by hand over 067 (rebuild_derived's reopen sentinel gone where the
+settle function stands). The status column's and the table's comments are
+re-issued. Additive: one function, one body redefined with no arity change,
+no grant moves. test-schema [61], test-live [16], test-upgrade [20s].
+
+Migration 068 stores what `node_state` read per call (SMD-2256):
+`ob1_ticket_head`, every issue key a row carries with its head (058's rule) and
+the head's status, status_type and watermark, and `ob1_superseded_by`, every
+superseded thought with its newest successor. Three statement triggers on
+`thoughts` (AFTER INSERT, UPDATE and DELETE, with transition tables) keep them
+current, and a fourth empties both on TRUNCATE: a statement touching no row with
+an issue key or a `supersedes` pointer returns at once; otherwise the keys it
+moved — both sides of a key's move, a pointer's targets and their issues, a
+successor's `created_at` — are locked and reconciled through
+`ob1_ticket_heads_of()` and `ob1_superseders_of()`, each rule written once. The
+locks are transaction advisory locks on buckets of the keys' hashes (classes
+22560–22562, at most 513 held by a transaction), taken before the recompute:
+statements moving one ticket's key, status, watermark or pointers serialise
+until commit (a content-only edit takes none), a row whose head fields move
+holds its own pointer bucket so a concurrent pointer to it waits and reads its
+issue after, a DELETE holds the buckets of its deleted issue rows and of the
+deleted rows something supersedes so the cascade that nulls pointers to them
+needs none it lacks (not of every deleted row: a prune of plain rows stalls no
+ticket writer), and a transaction whose ticket writes take more than one round
+of locks — two or more statements, or one that fires the trigger twice (a MERGE
+with several actions, a multi-row upsert that both inserts and updates, a
+writable CTE with several kinds of write) — can now deadlock (40P01) where it
+waited: retry it (the repo's writers are single-row, one statement per
+transaction). Such a statement is refused under REPEATABLE READ (its snapshot
+predates the lock); SERIALIZABLE keeps the tables exact only when every ticket
+writer is serializable. The trigger and the reconcile plan every statement that
+takes the keys afresh: a plan cached while the tables were small went on
+scanning them. The reconcile is internal (it takes no lock; call the rebuild).
+On a PostgreSQL release that drops them from the transition table (PGlite's 17.5
+does; 16.15 and 17.8 do not), the rows a MERGE updates when its own DELETE's
+cascade updates them too are not seen: rebuild after such a MERGE there. It is
+fed by the row store, not the log: every writer reaches `thoughts`, raw ones
+included, and the log carries no `created_at` move; SMD-1997's fold can later
+feed the heads' status. `node_lifecycle()` and `node_state()` keep their
+signatures and rows and read the tables; `node_state` lost its top-level WITH,
+so a caller's planner pulls it up, drops the dependency joins it does not read
+(still whole-brain reads — `blockers`, `unknown_blockers`, `in_dependencies`,
+and `node_dependencies()`' gate on the status scalar — SMD-2267) and looks the
+rest up by primary key. `search_thoughts_hybrid` is estimated at 100 rows, its
+window's bound, so a ten-thousand-thought brain does not hash-join the whole
+table to it. Measured on `bench-hybrid.ts`'s arm: `prefer_current` adds, in the
+bench's run of this code, +0.50 ms at 10,000 thoughts with no needle and +0.66
+with one (the difference of medians, alternating order; the budget 059 missed is
+the hybrid's own median, 0.88 and 1.14 — as sql, re-planned per call, the
+wrapper was once +1.11 against 1.10), and +1.11 and +1.34 at 100,000. With no
+needle, the hybrid asked for its window of 40 costs +0.44 at 10,000 and +0.99 at
+100,000 on its own, about all of the no-needle addition: the two differences of
+medians do not subtract. A narrow read is what got cheaper: a whole-brain read
+of every thought's lifecycle still reads every row (6.3 ms at 10,000, 78 at
+100,000). A writer's cost is measured against the triggers dropped — disabling
+them still fills their transition tables — and is in `changes/smd-2256.md`.
+`ob1_node_projection_drift()` compares the tables with 058's formulas (zero rows
+when exact) and `ob1_rebuild_node_projection()` repairs them after a write made
+with the triggers disabled (`DISABLE TRIGGER`, `session_replication_role =
+replica`); it refuses to run outside READ COMMITTED, and `migrate.ts` now runs
+every file under READ COMMITTED, so 068's seed is right on a brain whose default
+is not. Preflight fails a connection whose default is REPEATABLE READ. The
+triggers run as the writer, so the **capture** group gains the writes on both
+tables: a role granted before 068 fails preflight until `migrate.ts --grant`
+runs again, and a reader of `node_lifecycle()` needs SELECT on
+`ob1_ticket_head`. On PostgreSQL 16 and 17 the search's lifecycle columns no
+longer read `thought_sources` (a removed join's tables are not
+permission-checked — observed, not documented), so the server group keeps that
+grant.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -747,10 +887,12 @@ issues every group at once.
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
+| | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
+| | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
-| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which reads 058's node_state, which reads the source rows (SMD-2255); without it that search is refused naming this grant, and every other search runs |
+| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
@@ -1596,8 +1738,9 @@ thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
 thoughts weighed in. The status, and every rule below, is migration 058's
 `node_state` (SMD-2074): `node_lifecycle()` without a dependency flag, which
-reads `thoughts` alone, and `node_state()` with one, which reads
-`thought_sources` too (the `structure` group); when SMD-1997 folds
+reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture group's),
+and `node_state()` with one, which reads `thought_sources` too (the
+`structure` group); when SMD-1997 folds
 `thought_audit`'s transitions, the functions' bodies change and this script
 does not.
 
@@ -1697,8 +1840,13 @@ same rule.
 **Which pairs are judged.** `consolidation_candidates(thought)`: the older
 thoughts that share at least one extracted entity with it, captured at least a
 calendar day (UTC) earlier, nearest by exact cosine over that join, at or above
-a floor, at most k — with pairs already proposed (in any state) and thoughts
-already superseded left out. Older-only means a pair is reached from its newer
+a floor, at most k — with pairs already proposed (in any state but 063's
+`stale`) and thoughts already superseded left out, and, since 066, a pair one
+side of which names the other in `derived_from` (a page and the evidence its
+sections were generated from, a digest and its sources) never judged: a
+derivation says what its input says by construction, and re-deriving is
+`rebuild_derived`'s door, not supersession's (SMD-2292; direct members only,
+the array is one level). Older-only means a pair is reached from its newer
 side once, with no memory needed; the day rule keeps an import's burst from
 being compared with itself (and means a same-day contradiction is not found,
 stated rather than hidden). The shared-entity restriction is the cheap signal
@@ -1707,14 +1855,14 @@ judge cost is per pair. It also means a thought with no extracted entities has
 no candidates, which is why the pool is **thoughts with entities, a vector,
 that nothing supersedes, and no row under the key** (`consolidation_pool()`,
 one definition read by the worker, its `--status` and preflight) — extraction
-first, then consolidation, made
-structural rather than left to a trigger that would judge a capture before
+first, then consolidation, made structural rather than left to a trigger that
+would judge a capture before
 016's worker reached it and leave a terminal claim row behind. The gate cannot
 see the other side of a pair: a newer thought judged while an older neighbour
 is still unextracted is judged without it, and the pair is not revisited, so
-run the pass after extraction has finished rather than beside it. k and the floor were chosen by
-measurement (`evals/eval-consolidate.ts`; `evals/README.md` has the table) and
-are the worker's `--k` and `--min-sim`.
+run the pass after extraction has finished rather than beside it. k and the
+floor were chosen by measurement (`evals/eval-consolidate.ts`;
+`evals/README.md` has the table) and are the worker's `--k` and `--min-sim`.
 
 **The judge.** One call per pair to the judge model — `OB1_JUDGE_MODEL`, else
 the metadata model, so the harder task can run on a stronger model than every
@@ -1745,7 +1893,7 @@ bun consolidate.ts --url … --limit 25              # a trial: this many though
 bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
-bun consolidate.ts --url … --list [pending|accepted|rejected|all]
+bun consolidate.ts --url … --list [pending|accepted|rejected|stale|all]
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
@@ -1786,6 +1934,36 @@ already held the value) it moves the superseding thought's `updated_at` (001's
 trigger fires on any column), which two readers take as an edit: a client's
 `if_unchanged_since` from before the acceptance is refused, and 021's evidence
 rule stops vouching for that thought's vector, as after any edit.
+
+**Stale rows (063, 067).** A pending proposal whose text moved under the
+verdict is set `stale` by `rebuild_derived` (an edit, a supersession, a
+forget) and its newer thought requeued under the key that judged it. A stale
+row is the next pass's work whatever key wrote it: every run re-pools each
+stale row's newer thought under its own key (a pair both sides of which have a
+vector, with no live or failed claim there — a failed claim is
+`--retry-failed`'s), judges the thought's pairs
+again — up to `--k` model calls per re-pooled thought, since its agree and
+unrelated pairs left no record, plus one per stale pair the top-k left out
+that still meets the candidate rule, judged anyway — and either **replaces** the
+row in place (a conflict at
+the floor: `record_supersession_proposal`, back to pending under this key) or
+**settles** it (agree, unrelated, a conflict under the floor, or a pair the
+rule no longer admits — the note names which term: a side superseded, a
+lineage pair (066: one side derived from the other), no shared entity, under
+this run's similarity floor with the cosine; a stricter
+`--min-sim` than the pair was proposed under settles it, the flag being the
+rule): a rejection whose note begins `settled by the pass:`, the
+lineage row rewritten at the texts judged (`settle_supersession_proposal`). A
+text move under a pass-settled row sets it stale again; a person's rejection
+stands for ever. A side without a vector waits for the reembed pool and the
+run after its write; a stale pair whose call timed out, was refused by the
+egress gate or drew a malformed answer leaves the row stale and the thought
+failed, for `--retry-failed`. `--status` places each stale row against this
+pass's pool — in it, waiting for a vector, failed in this pass, waiting for
+the next run (a claim under another judge's key named beside it; `rebuild.ts
+--status` reads the same rows without a key and names the keys) — and counts the pass's
+rejections apart from a person's; `--list stale` tags each row's standing
+and still offers the reviewer's decision (an accept takes `--force`).
 
 **Identity** as `extract-entities.ts`: `OB1_WORKER_KEY` a key whose hash is in
 `MCP_ACCESS_KEYS`; proposals carry the resolved agent id, and an acceptance is
@@ -1848,7 +2026,8 @@ holds the same text. `--orphans` finds the lineage rows whose artifact is
 gone while the thought stands — preflight's `lineage` WARN names this flag —
 and calls the function once per thought. `--status` is the census: rows per
 kind, the stale-by-fingerprint count, the marked count, the orphans, the
-legacy rows, the stale proposals, and the pools with pending rows.
+legacy rows, the stale proposals and where each stands against the judge
+pools (067), and the pools with pending rows.
 `--dry-run` runs the call inside a transaction and rolls it back: the report
 is the function's own and nothing is kept. The tool calls no model and holds
 no lease. Exit 0 ran; 1 the function refused as a value (`NOT_FOUND`,
@@ -2763,8 +2942,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2200 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 857 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2261 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 905 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
