@@ -116,6 +116,8 @@ import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../serv
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
+import { decideEntities } from "../server-portable/hybrid-extract.ts";
+import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
 import { databaseUrl, openSql } from "./connect.ts";
@@ -131,7 +133,7 @@ import { databaseUrl, openSql } from "./connect.ts";
 const cli = commandLine("extract-entities.ts", {
   url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one", limit: "one",
   follow: "optional", dump: "one", job: "one",
-  status: "none", "dry-run": "none", "switch-key": "none", "retry-failed": "none", "retry-partial": "none", "retry-left-out": "none",
+  status: "none", "dry-run": "none", "switch-key": "none", "retry-failed": "none", "retry-partial": "none", "retry-left-out": "none", decide: "none",
 }, { hints: { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>" } });
 
 const url = databaseUrl(cli.value("url"));
@@ -173,8 +175,16 @@ const RETRY_FAILED = cli.has("retry-failed");
 const RETRY_PARTIAL = cli.has("retry-partial");
 /** --retry-partial's rows with windows left out alone: a change of model re-reads them without re-reading every prefix to the place it already reached (review pass 1). */
 const RETRY_LEFT_OUT = cli.has("retry-left-out");
+// SMD-2321: `--decide` re-types the 7B's entities with the Jev decider (validity +
+// type), storing p_true as confidence. Opt-in and only with the tier configured.
+const DECIDE = cli.has("decide");
 
 const cfg = resolveEmbedConfig(process.env as EmbedEnv);
+const jevCfg = DECIDE ? resolveJevConfig(process.env as unknown as JevEnv) : null;
+if (DECIDE && !jevCfg) {
+  console.error("  --decide needs the Jev tier: set OB1_JEV_BASE_URL (and OB1_JEV_LOCAL for a loopback endpoint)");
+  process.exit(2);
+}
 /** The windowing every row is extracted under — its bound is what a partial row's caveat names. */
 const WINDOWING = windowingFor(cfg);
 const JOB = cli.value("job") ?? extractionKey(cfg.metadataModel);
@@ -590,6 +600,15 @@ async function processRow(row: Row): Promise<Outcome> {
     // record of which model produced the answer (SMD-2000), the pass key on the
     // row itself staying the first model's.
     appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.escalated ? { escalated: extraction.escalated } : extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.coverage ? { coverage: extraction.coverage } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
+  }
+  // SMD-2321: the hybrid mode re-types the 7B's entities with the decider —
+  // identifier shapes carved by rule, the rest validity-gated and typed, p_true
+  // the confidence. After the dump above, so the dump keeps the raw generative
+  // answer for replay; a decider outage falls back to the 7B's entities inside
+  // decideEntities. The row's metadata is the egress subject, as extraction's.
+  if (jevCfg && extraction.entities.length) {
+    const decided = await decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
+    extraction = { ...extraction, entities: decided.entities };
   }
   // 061: the pass's recipe — the model, the prompt's version and hash, the
   // windows sent and what was cut — recorded in `derivations` with the rows,
