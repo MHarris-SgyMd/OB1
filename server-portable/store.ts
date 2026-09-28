@@ -195,11 +195,14 @@ export function isoTimestampOrNull(v: unknown): string | null {
  * where `String(d).slice(0, 10)` gave `"Wed Sep 09"` (SMD-1842). Through
  * `isoTimestampOrNull`'s rule: NULL is null (the caller picks its word). Only
  * `toISOString`'s own form is cut to its date, an extended year's
- * (`+275760-09-13`) included; anything else — a sentinel ("infinity"), a
- * no-ISO-form text such as PostgREST's `0044-03-15T00:00:00+00:00 BC` —
- * comes out whole, not sliced to a stub or a BC date read as AD. Bun's own
- * BC Date, when it has one, is ISO's astronomical year (44 BC is
- * `-000043-03-15`). The day is UTC's. `db/consolidate.ts`'s `day` (SMD-1803)
+ * (`+275760-09-13`) included; any other text `isoTimestamp` keeps — a sentinel
+ * ("infinity"), PostgREST's `0044-03-15T00:00:00+00:00 BC`, a PostgREST year
+ * past 9999 JS cannot parse — comes out whole, not sliced to a stub or a BC
+ * date read as AD. What Bun hands over for a BC timestamp depends on the
+ * query: `Date(NaN)` (so `Invalid Date`) on an unparameterised one, and on a
+ * parameterised one a Date in ISO's astronomical year (44 BC is
+ * `-000043-03-15`, 1 BC `0000-01-01`), printed as such with no BC mark.
+ * The day is UTC's. `db/consolidate.ts`'s `day` (SMD-1803)
  * and the grading report in `evals/eval-consolidate.ts` print through it; the
  * judge prompt's `dateOf` (`consolidate.ts`) does not, because its text is
  * pinned by `CONSOLIDATE_PROMPT_VERSION`.

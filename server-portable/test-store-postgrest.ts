@@ -206,6 +206,8 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
          `an extended year is its whole day, not sliced to a year-month stub (${isoDay(new Date("+275760-09-13T00:00:00Z"))})`);
   assert(isoDay(new Date("-000043-03-15T00:00:00Z")) === "-000043-03-15",
          `a negative extended year (44 BC in ISO's astronomical count) is its whole day (${isoDay(new Date("-000043-03-15T00:00:00Z"))})`);
+  assert(isoDay("2026-09-09T12:00:00.000Z BC") === "2026-09-09T12:00:00.000Z BC",
+         "only a whole toISOString form is cut: an ISO-shaped head with a suffix comes out whole");
   assert(isoDay(new Date(NaN)) === "Invalid Date", "Bun's BC Date(NaN) keeps isoTimestamp's text");
   assert(isoDay(null) === null, "SQL NULL is null, for the caller to word, not \"null\" or the epoch");
   assert((() => { try { isoDay(undefined); return false; } catch { return true; } })(), "a missing column still throws");
