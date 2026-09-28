@@ -1,5 +1,5 @@
 /**
- * jobs.ts — in-memory async job handles for long-running operations (SMD-2273).
+ * jobs.ts — async job handles for long-running operations (SMD-2273, SMD-2318).
  *
  * Every call to the server is otherwise synchronous: a POST holds open until
  * the handler returns, kept alive at most SSE_KEEPALIVE_MAX_MS (10 min,
