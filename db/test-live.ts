@@ -3438,18 +3438,18 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // 4 of 8, is under the fewest answers it judges. The garbled note's failure
   // goes first, so each run's exit code is its own.
   await sql`DELETE FROM thoughts WHERE id = ${garbled}::uuid`;
-  const paper = (name: string, bad: number) => seed(Array.from({ length: 24 }, (_, p) => chapter(p >= 24 - bad ? `The ${name} reference-list page.` : `The ${name} chapter.`, "Ada", p)).join("\n\n"));
+  // A paper of `windows` paragraphs, a window each, its last `bad` a reference list the stub answers in prose.
+  const paper = (name: string, windows: number, bad: number) => seed(Array.from({ length: windows }, (_, p) => chapter(p >= windows - bad ? `The ${name} reference-list page.` : `The ${name} chapter.`, "Ada", p)).join("\n\n"));
   proseKeys.add("reference-list page");
-  const papers = [await paper("alpha", 4), await paper("beta", 3), await paper("gamma", 1)];
+  const papers = [await paper("alpha", 24, 4), await paper("beta", 24, 3), await paper("gamma", 24, 1)];
   const refsRun = await extract();
   assert(refsRun.code === 0 && /\n  3 extracted \(3 with 8 window\(s\) left out, [^\n]*\), 0 failed/.test(refsRun.out) && !/answers this run were/.test(refsRun.out),
          `three papers with 8 of their 72 windows left out, as the stable brain's read: written, exit 0, no alarm (exit ${refsRun.code}: ${refsRun.out.split("\n").find((l) => /answers this run/.test(l)) ?? refsRun.out.split("\n").find((l) => /^  \d+ extracted/.test(l))?.trim()})`);
   assert((await Promise.all(papers.map(claimOf))).every((c) => c.status === "succeeded" && c.last_error?.startsWith("partial: ")), "…each paper's claim succeeded, its windows left out named");
-  const book = (name: string) => seed(Array.from({ length: 12 }, (_, p) => chapter(p >= 7 ? `The ${name} reference-list page.` : `The ${name} chapter.`, "Ada", p)).join("\n\n"));
   // The ticket's case: partial rows alone, nothing failed — 20 of 48 answers
   // left out across four papers, which exited 0 and now exit 3, the advice
   // naming the partial rows' retry and not the failed rows' (review pass 3).
-  for (const name of ["eta", "theta", "iota", "kappa"]) await book(name);
+  for (const name of ["eta", "theta", "iota", "kappa"]) await paper(name, 12, 5);
   const partialRun = await extract();
   assert(partialRun.code === 3 && /\n  4 extracted \(4 with 20 window\(s\) left out, [^\n]*\), 0 failed/.test(partialRun.out)
          && partialRun.out.includes("  20 of the 48 answers this run were not JSON of the expected shape")
@@ -3460,7 +3460,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // short notes wholly so, one answer each — 48 answers, 27 malformed, and
   // under the fewest without the notes' answers. The notes fail, and the
   // alarm's exit 3 comes before the failures' 1.
-  const books = [await book("delta"), await book("epsilon"), await book("zeta")];
+  const books = [await paper("delta", 12, 5), await paper("epsilon", 12, 5), await paper("zeta", 12, 5)];
   for (let i = 0; i < 12; i++) await seed(`A short reference-list page, number ${i}.`);
   const brokenRun = await extract();
   assert(brokenRun.code === 3 && /\n  3 extracted \(3 with 15 window\(s\) left out, [^\n]*\), 12 failed/.test(brokenRun.out)

@@ -96,17 +96,16 @@
  * apart from a prefix, whenever at least one other window parsed; a thought
  * none of whose windows parsed is failed as malformed. So a model that
  * answers a large share of windows malformed writes partial rows, not failed
- * ones, and the run watches the share instead (SMD-2266): when more than a
- * fifth of its answers — one a window of each thought that returned, over at
- * least 48 — were malformed, it says the model is likely at fault on stderr
- * and exits 3, before the 1 of rows failed, leased or pending (db/config.mjs,
- * malformedAlarm); a
- * --follow process judges its answers in blocks of 48 or more after each pass
- * drains the pool — so one started on a backlog says nothing until the
- * backlog is done; try a new model with --limit 48 first — says so each time
- * one trips, and still exits 0 when stopped by a signal —
- * 3 when it ends at its --limit with a block tripped. A thought's own
- * share is not judged: a reference list is its text's fault, not the model's. A
+ * ones, and the run watches the share instead (SMD-2266, db/config.mjs's
+ * malformedAlarm): when more than a fifth of at least 48 answers — one per
+ * window of each thought that returned — were malformed, it says on stderr
+ * that the model is likely at fault and exits 3, ahead of the 1 of rows
+ * failed, leased or pending. A --follow process judges blocks of 48 or more
+ * after each pass drains the pool, so one started on a backlog says nothing
+ * until the backlog is done (try a new model with --limit 48 first); stopped
+ * by a signal it exits 0, and at its --limit with a block tripped, 3. A
+ * thought's own share is not judged: a reference list is its text's fault,
+ * not the model's. A
  * rate limit, a server error or a lost connection is neither: the worker
  * pauses and retries, and stops if the provider stays down, leaving its leases
  * to return to the pool rather than marking thoughts failed for it. A content

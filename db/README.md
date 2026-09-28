@@ -1374,32 +1374,35 @@ windowed thought with any window parsed is succeeded, a model answering many
 windows malformed writes partial rows, not failed ones. So the run counts its
 answers, one per window sent of each thought that returned (a timeout's
 earlier windows are not counted), and when more than a fifth of at least 48
-were not JSON of the expected shape it says on stderr that the model, not the
-documents, is likely at fault, names `OB1_METADATA_MODEL` (and
-`OB1_EXTRACT_ESCALATE_MODEL` when it answered runaways), and exits 3, ahead of
-the 1 of rows failed, leased or pending, whose lines still print
-(`db/config.mjs`'s `malformedAlarm`). Its rows stand; its second line names
-the retries for the kinds of row the run left, with `--job` if
-`OB1_METADATA_MODEL` changes. A run of `--retry-failed`,
-`--retry-partial` or `--retry-left-out` chose its rows for failing, so its
-line says their documents may be at fault instead. A signal or the provider's
-refusal still exits 130 or 2, and the line says so. A `--follow` process
-judges its answers in blocks of 48 or more after each pass drains the pool, and
-prints the line when a block trips, so a breakage that starts late is not
-diluted by the good polls before it — but one started on a backlog says
-nothing until the backlog is done, as a plain run does, so try a new model
-with `--limit 48` first; stopped by a signal it still exits 0, and ending at its
-`--limit` with a block tripped it exits 3, the last pass's block judged with
-the exit it takes. An all-malformed run exits 3 where it exited 1; its rows are
-failed, as before. Measured on the stable
-brain's pool, read-only: qwen2.5:7b left out 11 of 1,658 answers, all in six
-papers' reference lists, and read those six again at 12 of 136 (9%). The
-wrong model, qwen3.5:0.8b, left out 17 of 61 over 24 windowed thoughts
-(28%), 14 of them partial and none failed. That is the quiet case: over 24
-one-window thoughts it failed 4, so a run with short thoughts in it already
-exits 1. There is no floor on one thought's share, since a thought's share
-reflects its text and a run's reflects the model. A floor of half would have
-failed only 3 of the wrong model's 14 partial thoughts. The three papers
+were not JSON of the expected shape (`db/config.mjs`'s `malformedAlarm`) it
+says so on stderr in two lines:
+- the first says the model, not the documents, is likely at fault, and names
+  `OB1_METADATA_MODEL`, and `OB1_EXTRACT_ESCALATE_MODEL` when it answered
+  runaways; a run of `--retry-failed`, `--retry-partial` or `--retry-left-out`
+  chose its rows for failing, so its first judgement says how many rows were
+  returned and that their documents may be at fault instead;
+- the second says the rows written stand, and names the retries for the kinds
+  of row the run left, with `--job` if `OB1_METADATA_MODEL` changes.
+
+The run exits 3, ahead of the 1 of rows failed, leased or pending, whose lines
+still print; a signal or the provider's refusal still exits 130 or 2, and the
+line says so. An all-malformed run exits 3 where it exited 1; its rows are
+failed, as before. A `--follow` process judges its answers in blocks of 48 or
+more after each pass drains the pool, so a breakage that starts late is not
+diluted by the good polls before it; one started on a backlog says nothing
+until the backlog is done, as a plain run does, so try a new model with
+`--limit 48` first. Stopped by a signal, a follower still exits 0; ending at
+its `--limit` with a block tripped, it exits 3, the last pass's block judged
+with the exit it takes.
+
+Measured on the stable brain's pool, read-only: qwen2.5:7b left out 11 of
+1,658 answers, all in six papers' reference lists, and read those six again at
+12 of 136 (9%). The wrong model, qwen3.5:0.8b, left out 17 of 61 over 24
+windowed thoughts (28%), 14 of them partial and none failed — the quiet case;
+over 24 one-window thoughts it failed 4, so a run with short thoughts in it
+already exits 1. There is no floor on one thought's share, since a thought's
+share reflects its text and a run's reflects the model; a floor of half would
+have failed only 3 of the wrong model's 14 partial thoughts. The three papers
 SMD-2260 was written for, read at 20 of 72 before it (28%), would pass a
 fifth: no share tells that reading apart from the wrong model's, and the floor
 of 48 keeps one such paper alone below the threshold at the default bound of
