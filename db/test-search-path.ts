@@ -334,15 +334,20 @@ try {
              `…and Postgres resolves the rewritten path to the raw one's schemas, the real public not among them (raw ${JSON.stringify(before)}, rewritten ${JSON.stringify(after)})`);
     });
     // The helper is held above; that the migrator uses it is read from its
-    // source, since no end-to-end run tells the paths apart: a schema kept
-    // ahead of public takes every file after the hole, whichever splitter
-    // ran. Its one set_config of the path goes through the helper, with the
-    // server's version read beside the path.
-    const migrator = readFileSync(join(HERE, "migrate.ts"), "utf8");
-    const setPaths = migrator.match(/set_config\('search_path'[^\n]*/g) ?? [];
-    assert(setPaths.length === 1 && setPaths[0].includes("${searchPathWithoutTemp(path, version)}")
-             && /current_setting\('server_version_num'\)::int AS version,/.test(migrator),
-           `…and migrate.ts sets 021's path through it, under the server's version (${setPaths.join(" | ") || "no set_config of search_path found"})`);
+    // source. On a fresh database a schema kept ahead of public tells the old
+    // splitter from this one at 021, but the run then fails at 052 on that
+    // schema either way, and once the migrator puts public first no run
+    // does. applyShadowed's setting of the path goes through the helper,
+    // with the server's version in the same catalog read, and nothing else in
+    // the migrator sets a path. Comment lines are left out, so a disabled
+    // line does not count.
+    const code = readFileSync(join(HERE, "migrate.ts"), "utf8").split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+    const shadowed = /async function applyShadowed\([\s\S]*?\n}\n/.exec(code)?.[0] ?? "";
+    const pathSets = code.match(/set_config\(\s*'search_path'|\bSET\s+(?:LOCAL\s+|SESSION\s+)?search_path\b/gi) ?? [];
+    assert(pathSets.length === 1
+             && /set_config\(\s*'search_path',\s*\$\{searchPathWithoutTemp\(path,\s*version\)\}/.test(shadowed)
+             && /^\s*current_setting\('server_version_num'\)::int AS version,/m.test(shadowed),
+           `…and migrate.ts sets 021's path through it alone, under the version read beside the path (${pathSets.length} path setting(s) in the migrator; applyShadowed ${shadowed ? "found" : "not found"})`);
   }
 } finally {
   // ci-parity.sh shares one Postgres: leave pgvector in public, this role's

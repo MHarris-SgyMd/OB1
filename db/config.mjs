@@ -1400,7 +1400,7 @@ export function quoteIdent(name) {
  * a quoted name kept as written, `""` inside it a quote; an unquoted name
  * folded A–Z only, as downcase_identifier does in a UTF-8 database. The empty
  * name a `''` path reads back as is dropped — it names no schema — unless
- * `keepEmpty`: in temp_tablespaces, the other list Postgres reads this way,
+ * `keepEmpty`: in temp_tablespaces, the other quoted list setting Postgres reads this way,
  * `""` is the database's default tablespace, a member of the list. Settings
  * Postgres rejects (`a,,b`, `a b`, an unterminated quote) never reach here: its
  * check hook refuses them on every route. `serverVersionNum` is the server's

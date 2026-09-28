@@ -397,6 +397,14 @@ export async function databaseSettings(sql: SQL): Promise<Record<string, string>
 }
 
 /**
+ * A value as an E'' string literal, the same text whatever the session's
+ * standard_conforming_strings: a plain '…' literal reads a backslash as an
+ * escape with it off, and a refresh's target session may start with it off —
+ * a setting of the source's that an earlier refresh copied.
+ */
+const literal = (v: string) => `E'${v.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
+
+/**
  * A list setting's stored value (`"$user", public`) as its elements. An
  * identifier list reaches here as databaseSettings re-spelled it, every name
  * quoted, so the split needs no case or whitespace rules of Postgres's.
@@ -440,8 +448,8 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
     // Each list element a string literal, never a quoted identifier: `""` is
     // no identifier, and temp_tablespaces' empty entry must be written. For
     // these settings Postgres stores a literal element as it would the
-    // identifier, quoted where the name needs it.
-    const literal = (v: string) => `'${v.replaceAll("'", "''")}'`;
+    // identifier, quoted where the name needs it — except that a literal is
+    // not cut to 63 bytes, where a quoted identifier cut a library path.
     const elements = LIST_SETTINGS.has(name) ? listElements(value) : null;
     const rhs = elements === null ? literal(value) : elements.length === 0 ? "''" : elements.map(literal).join(", ");
     await dst.unsafe(`ALTER DATABASE ${target} SET ${name} = ${rhs}`);
