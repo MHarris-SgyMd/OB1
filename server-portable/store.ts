@@ -30,6 +30,7 @@
 import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
+import type { JobSink } from "./jobs.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -1368,6 +1369,16 @@ export interface ThoughtStore {
    * to keep right; an empty list writes nothing.
    */
   logActions(rows: QueryActionLog[]): Promise<void>;
+
+  /**
+   * The durable backing store for the async job registry (SMD-2318, migration
+   * 069's `jobs` table), or null when this store cannot hold one. The SQL store
+   * returns a sink; the PostgREST store returns null, so the Workers/PostgREST
+   * path stays pure in-memory (no long-lived process to persist or resume a
+   * detached run). index.ts injects the result into jobs.ts (`setJobSink`) at
+   * startup and runs the reconcile once.
+   */
+  jobSink(): JobSink | null;
 
   close(): Promise<void>;
 }

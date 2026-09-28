@@ -1807,6 +1807,17 @@ export const ROLE_GRANTS = Object.freeze({
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
   ]),
+  // The durable async job registry (069, SMD-2318): the server writes a row per
+  // long-running job as the in-memory registry moves it along (INSERT on start,
+  // UPDATE on each state change, SELECT for the poll's read-back), and the owner
+  // or a scheduler prunes terminal rows with prune_jobs (DELETE). Like the query
+  // log, the surface degrades without it — no durable store means the async job
+  // handles fall back to the in-memory registry (SMD-2273), so a role missing
+  // this grant is not refused, only less durable. The dogfood server connects as
+  // owner and is unaffected.
+  jobs: Object.freeze([
+    Object.freeze({ table: "jobs", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "069" }),
+  ]),
   // The page store (064, SMD-1812): a page is a thought (its id, its render as
   // the content — written through the capture group's functions, so a role
   // that writes pages holds `capture` too), and the sections, their pending
@@ -1997,7 +2008,7 @@ export const ROLE_GRANTS = Object.freeze({
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "pages", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs
