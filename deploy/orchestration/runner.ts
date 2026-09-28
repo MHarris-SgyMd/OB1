@@ -468,22 +468,24 @@ export function helloName(b: Buffer): string | null | "more" | Error {
     if (i === end) return null;
     const extEnd = i + 2 + r.readUInt16BE(i);
     if (extEnd > end) return new Error("a malformed ClientHello");
+    let name: string | null = null;
     for (i += 2; i + 4 <= extEnd;) {
       const [type, size] = [r.readUInt16BE(i), r.readUInt16BE(i + 2)];
       i += 4;
       if (i + size > extEnd) return new Error("a malformed ClientHello");
+      // Encrypted ClientHello (and the draft ESNI before it) carries an inner server name the proxy cannot read, behind an outer one it would check; the TLS clients an emitter uses send neither (review pass 2).
+      if (type === 0xfe0d || type === 0xffce) return new Error("a ClientHello carrying an encrypted inner one, whose server name the proxy cannot read");
       if (type === 0) {
+        if (name !== null) return new Error("a ClientHello with two server_name extensions");
+        // Read as servers read it: the list fills the extension, and its first entry is a host name (review pass 2: entries were read past the extension, and a host name after another type was taken).
         const listEnd = i + 2 + r.readUInt16BE(i);
-        for (let j = i + 2; j + 3 <= listEnd;) {
-          const n = r.readUInt16BE(j + 1);
-          if (r[j] === 0 && j + 3 + n <= listEnd) return r.subarray(j + 3, j + 3 + n).toString("latin1").toLowerCase().replace(/\.$/, "");
-          j += 3 + n;
-        }
-        return new Error("a server_name extension naming no host");
+        const n = r.readUInt16BE(i + 3);
+        if (listEnd !== i + size || r[i + 2] !== 0 || i + 5 + n > listEnd || n === 0) return new Error("a malformed server_name extension");
+        name = r.subarray(i + 5, i + 5 + n).toString("latin1").toLowerCase().replace(/\.$/, "");
       }
       i += size;
     }
-    return null;
+    return name;
   } catch {
     return new Error("a malformed ClientHello");
   }
@@ -493,7 +495,8 @@ export function helloName(b: Buffer): string | null | "more" | Error {
 export type ProxyOptions = {
   /** Whether a named host may resolve to a LOCAL address: only the self-check's stand-in upstream, on 127.0.0.1. */
   allowLocal?: boolean;
-  lookup?: (host: string) => Promise<string>;
+  /** Every address a name resolves to. */
+  lookup?: (host: string) => Promise<string[]>;
   /** How long a connection has to send its request, and then its ClientHello. */
   headMs?: number;
   /** How long the named host has to answer the dial. */
@@ -523,14 +526,21 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
   let dropped = 0;
   const cut = (s: string) => (s.length > 120 ? `${s.slice(0, 120)}…` : s);
   const named = p.network.map((h) => `${h.host}:${h.port}`).join(", ");
-  const resolve = o.lookup ?? (async (host: string) => (await lookup(host)).address);
+  const resolve = o.lookup ?? (async (host: string) => (await lookup(host, { all: true })).map((a) => a.address));
   const [headMs, dialMs] = [o.headMs ?? 30_000, o.dialMs ?? 10_000];
   const note = (why: string) => { if (refused.length < REFUSALS_SHOWN) refused.push(why); else dropped++; };
   // Half-open on both sides: a client that sends and then shuts its write side still gets the answer (review pass 1).
   const server = createServer({ allowHalfOpen: true }, (client) => {
     let head = Buffer.alloc(0);
-    // Until the request and the ClientHello arrive; a tunnel, once open, lasts as long as its emitter.
-    client.setTimeout(headMs, () => client.destroy());
+    // Until the request and the ClientHello arrive, and reset by each byte (a quiet bound, not a deadline); an open tunnel lasts while both sides are open, and the same quiet bound after either ends.
+    let tunneled = false;
+    // Kept from the start: a client that shuts its write side while the name resolves has its end emitted before any pipe is there to pass it on (measured in Bun, a paused socket included), and its tunnel then never let go (review pass 2).
+    let clientEnded = false;
+    client.once("end", () => { clientEnded = true; });
+    client.setTimeout(headMs, () => {
+      if (!tunneled) note(`a connection sent no whole request and ClientHello in ${headMs / 1000} s of quiet, and was closed`);
+      client.destroy();
+    });
     client.on("error", () => {});
     const answer = (status: string, why: string) => {
       note(why);
@@ -548,9 +558,13 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
       if (!m) return answer("405 Method Not Allowed", `${cut(line)}: the runner's proxy tunnels HTTPS only (CONNECT host:port)`);
       const [host, want] = [m[1].toLowerCase(), Number(m[2])];
       if (!p.network.some((h) => h.host === host && h.port === want)) return answer("403 Forbidden", `CONNECT ${cut(`${host}:${want}`)}: not a host ${p.name} names (network: ${named})`);
-      let address: string;
-      try { address = await resolve(host); } catch { return answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${host} did not resolve`); }
-      if (!o.allowLocal && isLocalAddress(address)) return answer("403 Forbidden", `CONNECT ${host}:${want}: ${host} resolves to ${address}, a loopback, link-local or metadata address, which no emitter may reach`);
+      let addresses: string[];
+      try { addresses = await resolve(host); } catch { addresses = []; }
+      if (!addresses.length) return answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${host} did not resolve`);
+      // Every address is screened, not only the one dialled: an answer that mixes a public address with a loopback one is a rebinding answer (review pass 2). IPv4 first, since a container often has no IPv6 route.
+      const local = addresses.find(isLocalAddress);
+      if (!o.allowLocal && local) return answer("403 Forbidden", `CONNECT ${host}:${want}: ${host} resolves to ${local}, a loopback, link-local or metadata address, which no emitter may reach`);
+      const address = addresses.find((a) => isIP(a) === 4) ?? addresses[0];
       // Gone while the name resolved (its emitter stopped, the request timed out): nothing to tunnel for.
       if (client.destroyed) return;
       const up = tcpConnect({ host: address, port: want, allowHalfOpen: true });
@@ -572,10 +586,20 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
             client.destroy();
             return;
           }
+          tunneled = true;
           client.setTimeout(0);
+          // Once either side has ended, the tunnel has the request's quiet bound before both go: a named host that never closes held a half-closed tunnel, and the pipeline's connections, until the runner restarted (review pass 2).
+          const linger = () => { for (const x of [client, up]) x.setTimeout(headMs, () => { up.destroy(); client.destroy(); }); };
+          up.once("end", linger);
           up.write(hello);
-          client.pipe(up);
           up.pipe(client);
+          if (clientEnded) {
+            up.end();
+            linger();
+          } else {
+            client.once("end", linger);
+            client.pipe(up);
+          }
         };
         const onHello = (c: Buffer) => { hello = Buffer.concat([hello, c]); check(); };
         client.on("data", onHello);
@@ -591,6 +615,7 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
   });
   // Bounded: a networked emitter an export has taken over cannot hold the runner's descriptors (review pass 1).
   server.maxConnections = o.maxConnections ?? 64;
+  server.on("drop", () => note(`a connection past the proxy's ${server.maxConnections} at once, closed`));
   return new Promise((ok, fail) => {
     server.once("error", fail);
     server.listen(port, "127.0.0.1", () => {
@@ -946,9 +971,16 @@ const EMITTER_PROBE = [
  * - an export its uid cannot read and an imports root the runner cannot
  *   search, each refused; reembed's refusals told apart (configuration or
  *   retryable), by phrases that must still be in reembed's source; live steps
- *   stopped when the runner stops.
- * Running as another user is the image's, and the eval kit holds it live
- * (evals/orchestration/n8n.ts, I).
+ *   stopped when the runner stops;
+ * - SMD-2289: a pipeline's `network` parsed and refused, the address screen,
+ *   the egress rules' text and the capabilities read from CapEff; the proxy
+ *   through the service and on its own, against a stand-in for DNS and
+ *   stand-in hosts on 127.0.0.1: the ClientHello's server name read and held
+ *   to the named host, what it refuses and reports, the bounds on a
+ *   connection and a tunnel, half-open tunnels, and what a host that never
+ *   closes or ends first does to them.
+ * Running as another user, and the egress rules themselves, are the image's,
+ * and the eval kit holds them live (evals/orchestration/n8n.ts, I).
  */
 async function selfCheck(): Promise<number> {
   const fails: string[] = [];
@@ -1269,6 +1301,24 @@ async function selfCheck(): Promise<number> {
     helloName(captured) === "api.example.com" && helloName(clientHello("API.Example.com.")) === "api.example.com" && helloName(clientHello(null)) === null
     && helloName(captured.subarray(0, 20)) === "more" && helloName(Buffer.from("GET / HTTP/1.1\r\n\r\n")) instanceof Error
     && String(helloName(split.subarray(0, split.length - 4))).includes("split across") && helloName(Buffer.concat([Buffer.from([0x16, 3, 1, 0, 6]), Buffer.from([1, 0, 0, 40, 3, 3])])) instanceof Error);
+  // Review pass 2: extensions spliced into a hello naming x.example.
+  const withExt = (extra: Buffer, sni: Buffer | null = null) => {
+    const h = clientHello("x.example");
+    const sniExt = sni ?? h.subarray(h.length - (4 + 2 + 3 + "x.example".length));
+    const body = Buffer.concat([Buffer.from([3, 3]), Buffer.alloc(32), Buffer.from([0]), u16(2), Buffer.from([0x13, 0x01]), Buffer.from([1, 0])]);
+    const exts = Buffer.concat([sniExt, extra]);
+    const all = Buffer.concat([body, u16(exts.length), exts]);
+    const hs = Buffer.concat([Buffer.from([1, 0]), u16(all.length), all]);
+    return Buffer.concat([Buffer.from([0x16, 3, 1]), u16(hs.length), hs]);
+  };
+  const nameExt = (entries: Buffer, listLen = entries.length, extLen = entries.length + 2) => Buffer.concat([u16(0), u16(extLen), u16(listLen), entries]);
+  const entry = (type: number, n: string) => Buffer.concat([Buffer.from([type]), u16(n.length), Buffer.from(n)]);
+  expect(`a ClientHello carrying an encrypted inner hello (ECH, or draft ESNI), a second server_name, a name list that does not fill its extension, or a first entry that is not a host name is refused; a plain one reads (${helloName(withExt(Buffer.alloc(0)))})`,
+    helloName(withExt(Buffer.alloc(0))) === "x.example"
+    && String(helloName(withExt(Buffer.concat([u16(0xfe0d), u16(1), Buffer.from([0])])))).includes("encrypted inner") && String(helloName(withExt(Buffer.concat([u16(0xffce), u16(1), Buffer.from([0])])))).includes("encrypted inner")
+    && String(helloName(withExt(nameExt(entry(0, "y.example"))))).includes("two server_name")
+    && String(helloName(withExt(Buffer.alloc(0), nameExt(Buffer.concat([entry(0, "x.example"), entry(0, "y.example")]), 12)))).includes("malformed server_name")
+    && String(helloName(withExt(Buffer.alloc(0), nameExt(Buffer.concat([entry(1, "z"), entry(0, "x.example")]))))).includes("malformed server_name"));
 
   const echo = createServer({ allowHalfOpen: true }, (s) => { s.on("data", (d) => s.write(d)); s.on("end", () => s.end("BYE")); s.on("error", () => {}); });
   await new Promise<void>((ok) => echo.listen(0, "127.0.0.1", ok));
@@ -1309,10 +1359,10 @@ async function selfCheck(): Promise<number> {
   // to the echo on 127.0.0.1, after 100 ms; a proxy dialling the name rather
   // than the address it checked finds no such host.
   type Say = [number, Buffer | string | "END"];
-  const session = (port: number, says: Say[], waitMs = 3000) => new Promise<{ text: string; closedAt: number }>((ok) => {
+  const session = (port: number, says: Say[], waitMs = 3000, halfOpen = false) => new Promise<{ text: string; closedAt: number }>((ok) => {
     const t0 = Date.now();
     let b = "";
-    const s = tcpConnect(port, "127.0.0.1", async () => { for (const [ms, what] of says) { await Bun.sleep(ms); if (s.destroyed) break; if (what === "END") s.end(); else s.write(what); } });
+    const s = tcpConnect({ port, host: "127.0.0.1", allowHalfOpen: halfOpen }, async () => { for (const [ms, what] of says) { await Bun.sleep(ms); if (s.destroyed) break; if (what === "END") s.end(); else s.write(what); } });
     const done = () => ok({ text: b, closedAt: Date.now() - t0 });
     s.on("data", (d) => (b += d.toString("latin1")));
     s.on("close", done);
@@ -1320,9 +1370,10 @@ async function selfCheck(): Promise<number> {
     setTimeout(() => { s.destroy(); }, waitMs);
   });
   const connectTo = (host: string, port = echoPort) => `CONNECT ${host}:${port} HTTP/1.1\r\n\r\n`;
-  const dns: Record<string, string> = { "up.test": "127.0.0.1", "10.9.9.9": "127.0.0.1", "dark.test": "192.0.2.1" };
-  const own = await startProxy({ ...reaches, network: [{ host: "up.test", port: echoPort }, { host: "10.9.9.9", port: echoPort }, { host: "dark.test", port: echoPort }] }, 0,
-    { allowLocal: true, lookup: async (h) => { await Bun.sleep(100); if (!dns[h]) throw new Error("no such host"); return dns[h]; }, headMs: 400, dialMs: 200, maxConnections: 4 });
+  const dns: Record<string, string[]> = { "up.test": ["127.0.0.1"], "10.9.9.9": ["127.0.0.1"], "dark.test": ["192.0.2.1"], "v6first.test": ["::1", "127.0.0.1"], "mixed.test": ["192.0.2.7", "127.0.0.1"] };
+  const standIn = async (h: string) => { await Bun.sleep(100); if (!dns[h]) throw new Error("no such host"); return dns[h]; };
+  const own = await startProxy({ ...reaches, network: [{ host: "up.test", port: echoPort }, { host: "10.9.9.9", port: echoPort }, { host: "dark.test", port: echoPort }, { host: "v6first.test", port: echoPort }] }, 0,
+    { allowLocal: true, lookup: standIn, headMs: 400, dialMs: 200, maxConnections: 4 });
   const strict = await startProxy({ ...reaches, network: [{ host: "localhost", port: echoPort }] }, 0);
   const loose = await startProxy({ ...reaches, network: [{ host: "127.0.0.1", port: gonePort }] }, 0, { allowLocal: true });
   const ok200 = "HTTP/1.1 200 Connection Established\r\n\r\n";
@@ -1344,12 +1395,57 @@ async function selfCheck(): Promise<number> {
     const idle = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("up.test")], [700, "late"], [0, "END"]]);
     expect(`an open tunnel outlives the request's 400 ms bound (${JSON.stringify(idle.text.slice(-12))})`, idle.text.endsWith("lateBYE"));
     const mute = await session(own.port, []);
-    expect(`a connection that sends no request is closed at the bound (${mute.closedAt} ms)`, mute.text === "" && mute.closedAt >= 350 && mute.closedAt < 1500);
+    expect(`a connection that sends no request is closed at the bound, and the report says so (${mute.closedAt} ms)`, mute.text === "" && mute.closedAt >= 350 && mute.closedAt < 1500 && /no whole request and ClientHello in 0\.4 s of quiet/.test(own.take()[0] ?? ""));
+    const ipSni = await session(own.port, [[0, connectTo("10.9.9.9")], [0, clientHello("up.test")], [0, "ping"], [0, "END"]]);
+    expect(`a named IPv4 address with TLS naming another server is cut off: a CDN's address is not a way to the names it serves (${JSON.stringify(ipSni.text.slice(-12))})`, ipSni.text === ok200 && /names up\.test, not 10\.9\.9\.9$/.test(own.take()[0] ?? ""));
+    const v6 = await session(own.port, [[0, connectTo("v6first.test")], [0, clientHello("v6first.test")], [0, "ping"], [0, "END"]]);
+    expect(`of a name's addresses, IPv4 is dialled first (${JSON.stringify(v6.text.slice(-12))})`, v6.text.endsWith("pingBYE"));
     const dark = await session(own.port, [[0, connectTo("dark.test")]]);
     const darkNote = own.take()[0] ?? "";
-    expect(`a named host that does not answer the dial is 504, named (${dark.text.split("\r\n")[0]}; ${darkNote})`, (dark.text.startsWith("HTTP/1.1 504") && /did not answer within 0\.2 s/.test(darkNote)) || (dark.text.startsWith("HTTP/1.1 502") && /unreachable/i.test(darkNote)));
+    expect(`a named host that does not answer the dial is 504, named (${dark.text.split("\r\n")[0]}; ${darkNote})`, (dark.text.startsWith("HTTP/1.1 504") && /did not answer within 0\.2 s/.test(darkNote)) || (dark.text.startsWith("HTTP/1.1 502") && /unreach/i.test(darkNote)));
     const held = await Promise.all([0, 1, 2, 3, 4].map((i) => session(own.port, [[i * 20, ""]], 250)));
-    expect(`the proxy holds ${4} connections at once and closes the next (${held.map((h) => h.closedAt).join(", ")} ms)`, held.filter((h) => h.closedAt < 150).length === 1 && held.filter((h) => h.closedAt >= 240).length === 4);
+    expect(`the proxy holds ${4} connections at once and closes the next, and the report says so (${held.map((h) => h.closedAt).join(", ")} ms)`, held.filter((h) => h.closedAt < 150).length === 1 && held.filter((h) => h.closedAt >= 240).length === 4 && own.take().some((x) => /past the proxy's 4 at once/.test(x)));
+    // A named host that never closes and never answers: a half-closed tunnel to it is let go after the quiet bound, and a client that resets takes its upstream with it (review pass 2).
+    // It reads, but never answers and keeps its own side open whatever the proxy does, so what is counted is each tunnel it saw end (a FIN, a reset or a close).
+    let silentEnds = 0;
+    const silent = createServer({ allowHalfOpen: true }, (x) => { let seen = false; const count = () => { if (!seen) { seen = true; silentEnds++; } }; x.resume(); x.on("end", count); x.on("error", count); x.on("close", count); });
+    await new Promise<void>((ok) => silent.listen(0, "127.0.0.1", ok));
+    const silentPort = (silent.address() as { port: number }).port;
+    // A named host that ends its side first and still reads: what the client sends after that must arrive.
+    let lateBytes = "";
+    const shut = createServer({ allowHalfOpen: true }, (x) => { x.once("data", () => x.end("BYE")); x.on("data", (d) => (lateBytes += d.toString("latin1"))); x.on("error", () => {}); });
+    await new Promise<void>((ok) => shut.listen(0, "127.0.0.1", ok));
+    const shutPort = (shut.address() as { port: number }).port;
+    const tight = await startProxy({ ...reaches, network: [{ host: "up.test", port: silentPort }, { host: "up.test", port: shutPort }] }, 0, { allowLocal: true, lookup: standIn, headMs: 300, maxConnections: 8 });
+    const screened = await startProxy({ ...reaches, network: [{ host: "mixed.test", port: echoPort }] }, 0, { lookup: standIn });
+    try {
+      // Eight clients shut their write side 50 ms in, while the name is still resolving (100 ms): each end must still reach the host. Whether Bun hands a paused socket's end on before the tunnel opens is a race (2 of 3 single runs won it without the fix), so eight are asked.
+      const halves = await Promise.all([0, 1, 2, 3, 4, 5, 6, 7].map(() => session(tight.port, [[0, connectTo("up.test", silentPort)], [0, clientHello("up.test")], [50, "END"]], 3000)));
+      await Bun.sleep(100);
+      const sawEnds = silentEnds;
+      const after = await session(tight.port, [[0, connectTo("up.test", silentPort)]], 400);
+      expect(`a half-closed tunnel to a host that never closes is let go after the quiet bound, its end passed on, and the proxy's connections freed (closed after ${halves.map((h) => h.closedAt).join(", ")} ms; the host saw ${sawEnds} end; the next request ${JSON.stringify(after.text.split("\r\n")[0])})`,
+        halves.every((h) => h.closedAt >= 300 && h.closedAt < 1500) && sawEnds === 8 && after.text.startsWith(ok200));
+      tight.take();
+      await Bun.sleep(100);
+      const reset = tcpConnect(tight.port, "127.0.0.1", () => reset.write(Buffer.concat([Buffer.from(connectTo("up.test", silentPort)), clientHello("up.test")])));
+      reset.on("error", () => {});
+      await Bun.sleep(300);
+      const endsBefore = silentEnds;
+      reset.resetAndDestroy();
+      await Bun.sleep(150);
+      expect(`a client that resets takes its upstream with it (the host saw ${silentEnds - endsBefore} end)`, silentEnds - endsBefore === 1);
+      const shutSaid = await session(tight.port, [[0, connectTo("up.test", shutPort)], [0, clientHello("up.test")], [150, "more"], [50, "END"]], 1500, true);
+      await Bun.sleep(100);
+      expect(`a host that ends its side first still gets what the client sends after (${JSON.stringify(shutSaid.text.slice(-3))}, it read ${JSON.stringify(lateBytes.slice(-4))})`, shutSaid.text.endsWith("BYE") && lateBytes.endsWith("more"));
+      const mixed = await session(screened.port, [[0, connectTo("mixed.test")]]);
+      expect(`a name whose answer mixes a public address with a loopback one is refused (${mixed.text.split("\r\n")[0]})`, mixed.text.startsWith("HTTP/1.1 403") && /mixed\.test resolves to 127\.0\.0\.1/.test(screened.take()[0] ?? ""));
+    } finally {
+      tight.close();
+      screened.close();
+      silent.close();
+      shut.close();
+    }
     const lo = await session(strict.port, [[0, connectTo("localhost")]]);
     expect(`a named host that resolves to a loopback address is refused (${lo.text.split("\r\n")[0]})`, lo.text.startsWith("HTTP/1.1 403") && /resolves to (127\.0\.0\.1|::1), a loopback, link-local or metadata address/.test(strict.take()[0] ?? ""));
     const down = await session(loose.port, [[0, connectTo("127.0.0.1", gonePort)]]);

@@ -31,7 +31,7 @@ leaves open.
 
 **Amended by SMD-2289** (emitter egress, built):
 - An emitter has no network. A live-API pipeline names its hosts, and its
-  emitter reaches only those, through a proxy of the runner's ("Running a
+  emitter connects to those alone, through a proxy of the runner's ("Running a
   pipeline from a workflow").
 
 ## The decision
@@ -440,7 +440,10 @@ runs outside n8n:
   loopback included. A live-API emitter's pipeline names its hosts
   (`network`), and the emitter reaches them only through a proxy the runner
   keeps for it, which tunnels TLS naming those hosts (their ClientHello's
-  server name) and nothing else. Before
+  server name, with no encrypted inner hello) and nothing else. What travels
+  inside TLS is not read, so a CDN that honours an HTTP Host unlike the
+  server name (domain fronting, which the large CDNs refuse) could still
+  carry it to another of its sites. Before
   that, an emitter an export had taken over could reach the host's Ollama,
   admin API and all, Postgres, and on a VPS the cloud metadata endpoint.
   Two limits are named rather than closed:
@@ -470,7 +473,7 @@ The runner is built with SMD-2212's generic import template. Its allowlist
 ships empty: each recipe's ticket adds its line, its emitter and the
 emitter's packages when it converts. The eval kit proves the path with a
 fixture emitter in Python. The runner publishes no port, where n8n
-publishes one on loopback. A live-API emitter reaches only the hosts its
+publishes one on loopback. A live-API emitter connects only to the hosts its
 line names, through its proxy (SMD-2289), and SMD-2211's checkpoint governs
 those hosts. How their vendor credential reaches the runner is decided when
 the first of them converts (SMD-2149, SMD-2021).
