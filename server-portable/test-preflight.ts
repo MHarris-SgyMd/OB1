@@ -1738,10 +1738,9 @@ else {
   // takes the older form; then the body dropped by hand — a brain at 068
   // under this server — is 029's alone, every listing fails, and the check
   // warns the same way.
-  const lineageLn = (out: string) => (out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim();
   const beside029 = await run(SQL_ENV);
   assert(beside029.code === 0 && /!  lineage\s+every derived row has its lineage row, but 029's two-argument list_supersession_proposals stands beside 069's \(029 re-applied by hand over it\): a call passing fewer than three arguments is ambiguous \(not unique\) and fails, so every reader outside the fork's callers — which pass three — errors on the queue \(SMD-2313\)/.test(beside029.out) && /Apply db\/migrations\/069_listing_flags_lineage_pair\.sql\./.test(fix(beside029.out, "lineage")),
-         `029 re-applied over 069 leaves its two-argument listing beside 069's: a warning naming 069 (${lineageLn(beside029.out).slice(0, 200)})`);
+         `029 re-applied over 069 leaves its two-argument listing beside 069's: a warning naming 069 (${lpLine(beside029.out).slice(0, 200)})`);
   // …and with a lineage pair standing in that state the census speaks first,
   // its fix line the file THEN the review — the combined remedy and the arm
   // order, which no state of this ladder had exercised (run-it, first review
@@ -1750,14 +1749,14 @@ else {
   await claims`UPDATE thoughts SET derived_from = jsonb_build_array(${ids[0]}::text) WHERE id = ${ids[1]}::uuid`;
   const lpBeside = await run(SQL_ENV);
   assert(lpBeside.code === 0 && /!  lineage\s+every derived row has its lineage row, but 1 unreviewed proposal\(s\) stand on a lineage pair/.test(lpBeside.out) && /^\s*→ Apply db\/migrations\/069_listing_flags_lineage_pair\.sql\. Then review them: cd db && bun consolidate\.ts --url <url> --list lineage shows them/.test(fix(lpBeside.out, "lineage")),
-         `a lineage pair standing while the listing is older: the census speaks, and its fix line applies 069 before the review (${lineageLn(lpBeside.out).slice(0, 120)} / ${fix(lpBeside.out, "lineage").trim().slice(0, 140)})`);
+         `a lineage pair standing while the listing is older: the census speaks, and its fix line applies 069 before the review (${lpLine(lpBeside.out).slice(0, 120)} / ${fix(lpBeside.out, "lineage").trim().slice(0, 140)})`);
   await claims`UPDATE thoughts SET derived_from = NULL WHERE id = ${ids[1]}::uuid`;
   await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`; // 061's trigger takes the proposal's lineage row with it
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("069_") });
   await claims.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
   const pre069 = await run(SQL_ENV);
   assert(pre069.code === 0 && /!  lineage\s+every derived row has its lineage row, but list_supersession_proposals is from before 069 \(migration 069 not yet applied, or its form dropped by hand\): every listing fails — the CLI's --list, the stores and the MCP tool pass 069's third argument, which this form does not take — and no proposal standing on a lineage pair can be flagged \(SMD-2313\)/.test(pre069.out) && /Apply db\/migrations\/069_listing_flags_lineage_pair\.sql\./.test(fix(pre069.out, "lineage")),
-         `069's listing gone is a warning naming 069 and the failing readers (${lineageLn(pre069.out).slice(0, 200)})`);
+         `069's listing gone is a warning naming 069 and the failing readers (${lpLine(pre069.out).slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("069_") });
   // The older bodies this ladder ran by hand (056's and 060's extraction
   // writer) replaced mention rows without sweeping their lineage rows, and

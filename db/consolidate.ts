@@ -347,6 +347,9 @@ const passActor = () => ({ name: actorName, via: "consolidate", session: JOB, ..
 
 /** 067: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). */
 const readStaleStandings = async () => staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], JOB);
+/** 069: --status's clause for the unreviewed rows standing on a lineage pair — the listing named, or the file it needs first (its own SQL reads on a brain at 068). */
+const lineageClause = (n: number, has069: boolean): string =>
+  `${n} unreviewed standing on a lineage pair (${has069 ? "--list lineage shows them" : "apply migration 069 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
 const staleClause = (st: ReturnType<typeof staleStandings>): string =>
   `${st.total} stale (a text moved under the verdict: ${staleStandingsText(st, JOB)}; the pass replaces one it finds in conflict again and settles one it does not)`;
 
@@ -362,6 +365,11 @@ type Listed = {
 };
 /** The reject a reviewer runs on a lineage pair, as --list prints it beside the row and preflight names it. */
 const rejectLineage = (id: string) => `--reject ${id} --note "lineage pair (066)"`;
+/** 069: the row's lineage line — the reject while the row is the reviewer's, the repair once a pointer was written, the fact alone on a rejected row. */
+const lineageLine = (p: Listed) =>
+  `     lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066${p.status === "pending" || p.status === "stale" ? `; reject it: ${rejectLineage(p.id)}` : p.status === "accepted" ? `; accepted while the derivation names its input — --reject ${p.id} clears the pointer (029)` : ""}`;
+/** review_supersession_proposal's answer (029/036), plus the CLI's own LINEAGE_PAIR refusal (069). */
+type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
 // Thought content and entity names are untrusted; cleanForDisplay strips what
 // would move the cursor or rewrite the ID: line a reviewer is about to paste.
 const snippet = (s: string, n = 160) => { const t = cleanForDisplay(s).replace(/\s+/g, " ").trim(); return t.slice(0, n) + (t.length > n ? "…" : ""); };
@@ -390,16 +398,18 @@ async function printList(status: string | undefined, limit = 50): Promise<number
   // reviewer's alone (a pending row holds its pair, 066 never re-finds it;
   // a stale one waits for the pass's settle, 067) — pending first, then
   // stale, each most confident first.
-  const rows = status === "lineage" ? [...await listed("pending", true), ...await listed("stale", true)] : await listed(status ?? null, null);
-  const what = status === "lineage" ? "unreviewed proposal(s) standing on a lineage pair (pending, then stale)" : `${status ? `${status} ` : ""}proposal(s)`;
+  const lineageMode = status === "lineage";
+  const rows = lineageMode ? [...await listed("pending", true), ...await listed("stale", true)] : await listed(status ?? null, null);
+  const what = lineageMode ? "unreviewed proposals standing on a lineage pair" : `${status ? `${status} ` : ""}proposals`;
   if (rows.length === 0) {
-    console.log(`  no ${status === "lineage" ? "unreviewed proposals standing on a lineage pair" : `${status ? `${status} ` : ""}proposals`}`);
+    console.log(`  no ${what}`);
     return 0;
   }
   // A list that hits its cap says so: --status counts every row (definitions
   // probe, second review pass: 61 rows, 50 printed, the header counted 50).
-  const capped = status === "lineage" ? rows.filter((r) => r.status === "pending").length === limit || rows.filter((r) => r.status === "stale").length === limit : rows.length === limit;
-  console.log(`  ${rows.length} ${what}, most confident first${capped ? ` — ${status === "lineage" ? `pending and stale capped at ${limit} each` : `the first ${limit}`}; --status counts them all` : ""}:\n`);
+  const hit = (st: string) => rows.filter((r) => r.status === st).length === limit;
+  const capped = lineageMode ? hit("pending") || hit("stale") : rows.length === limit;
+  console.log(`  ${rows.length} ${what.replace("proposals", "proposal(s)")}${lineageMode ? " (pending, then stale)" : ""}, most confident first${capped ? ` — ${lineageMode ? `pending and stale capped at ${limit} each` : `the first ${limit}`}; --status counts them all` : ""}:\n`);
   // 067: a stale row's standing against the pools, beside its status. (A
   // row the pass settled needs no tag: its note begins with the marker.)
   const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
@@ -412,7 +422,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     // 069: a lineage pair — one side derived from the other — is never
     // proposed since 066; a row standing on one is said so, with the reject
     // while the row is the reviewer's.
-    if (p.lineage) console.log(`     lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066${p.status === "pending" || p.status === "stale" ? `; reject it: ${rejectLineage(p.id)}` : p.status === "accepted" ? `; accepted while the derivation names its input — --reject ${p.id} clears the pointer (029)` : ""}`);
+    if (p.lineage) console.log(lineageLine(p));
     if (p.status === "pending" || p.status === "stale") {
       // Commands as they run: a placeholder the shell cannot parse rather
       // than `newer|older`, which it would read as a pipe (review pass 3).
@@ -458,7 +468,6 @@ if (REVIEW_ONLY) {
     // as not yet written). A guard, not a verdict — nothing is written
     // (definitions probe, second review pass: the accept went through under
     // the reject's own advice).
-    type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
     const lineageRow = decision === "accept" && !FORCE
       ? (await sql`SELECT (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)) AS lineage
                      FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
@@ -551,7 +560,7 @@ async function printQueue(): Promise<void> {
            to_regprocedure('list_supersession_proposals(text, int, boolean)') IS NOT NULL AS has_069
     FROM supersession_proposals`;
   const stale = await readStaleStandings();
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${q.lineage} unreviewed standing on a lineage pair (${q.has_069 ? "--list lineage shows them" : "apply migration 069 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)` : ""} — --list shows them; --accept / --reject decides one`);
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${lineageClause(q.lineage, q.has_069)}` : ""} — --list shows them; --accept / --reject decides one`);
 }
 
 /**
