@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
-import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES } from "../server-portable/consolidate.ts";
+import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
@@ -4136,6 +4136,205 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const [{ n: actorRows }] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`;
   assert(Number(actorRows) === 5, `the worker's audit rows are exactly the reviews: three accepts and two cleared rejects (${actorRows})`);
 
+  // 067 (SMD-2297): a stale proposal — 063's rebuild set it stale when a text
+  // moved under the verdict — is the pass's to settle or replace. Through the
+  // real worker against the stub judge: the pair judged again with no
+  // conflict is REJECTED with the pass's marker note and its lineage row
+  // rewritten at the texts judged; one still in conflict is REPLACED in
+  // place; a later move under a pass-settled row reopens it; a side without a
+  // vector waits and the next run re-pools it; a pair the candidate rule no
+  // longer admits is settled as such. The ticket's mutant — skip the settle —
+  // leaves the row stale and fails the first tooth.
+  {
+    const proposalRow = async (id: string) => (await sql`SELECT status, reviewed_at::text AS reviewed_at, review_note, judge_key FROM supersession_proposals WHERE id = ${id}::uuid`)[0] as { status: string; reviewed_at: string | null; review_note: string | null; judge_key: string };
+    const lineageOf = async (id: string) => (await sql`SELECT produced_by AS by, input_fingerprints AS fps, stale_reason AS why, recipe FROM derivations WHERE artifact_kind = 'proposal' AND artifact_id = ${id}::uuid ORDER BY produced_by`) as { by: string; fps: string[]; why: string | null; recipe: Record<string, unknown> }[];
+    const fpOf = async (id: string) => (await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f as string;
+    const moveRaw = async (id: string, content: string) => { await sql`UPDATE thoughts SET content = ${content}, content_fingerprint = content_fingerprint_of(${content}) WHERE id = ${id}::uuid`; return fpOf(id); };
+    const rebuild = async (id: string) => (await sql`SELECT rebuild_derived(${id}::uuid, 'live: edit') AS r`)[0].r as { ok: boolean; stale_proposals: number };
+    const staleLine = (out: string) => out.split("\n").find((l) => /stale proposals:/.test(l))?.trim() ?? "(no stale line)";
+    const proposalsBefore = (await proposals()).length;
+    // The atlas pair: a conflict the stub reads from monthly/annually.
+    const atlasOld = await seed("Invoices go out monthly for the atlas account.", 9, 12, ["atlas"]);
+    const atlasNew = await seed("Invoices go out annually for the atlas account.", 9, 0, ["atlas"]);
+    const proposed = await consolidate();
+    const atlas = (await proposals()).find((p) => p.older_id === atlasOld && p.newer_id === atlasNew);
+    assert(proposed.code === 0 && atlas !== undefined && atlas.status === "pending" && (await proposals()).length === proposalsBefore + 1, `the atlas pair is proposed pending (exit ${proposed.code})`);
+    // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
+    const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
+    const rb1 = await rebuild(atlasNew);
+    assert(rb1.ok === true && rb1.stale_proposals === 1 && (await proposalRow(atlas!.id)).status === "stale", "a raw text move under the verdict: the rebuild sets the proposal stale and requeues the pair under the judge's key");
+    const staleStatus = await consolidate("--status");
+    assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it finds in conflict again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
+    const staleList = await consolidate("--list", "stale");
+    assert(staleList.code === 0 && /1 stale proposal\(s\)/.test(staleList.out) && /\(stale — in this pass's pool\)/.test(staleList.out) && staleList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`), `--list stale tags the row's standing and still offers the reviewer's decision (${staleList.out.split("\n").find((l) => /stale —/.test(l))?.trim().slice(0, 200)})`);
+    // The standing is read under THIS pass's key (second review pass): the
+    // row's-key claim gone and one requeued under another judge's key is
+    // another pass's pool — named beside "waiting", since this run re-pools
+    // or pools the thought itself; db/rebuild.ts --status, keyless, names
+    // the key it is pooled under. The run then adds the thought through the
+    // pool rule (no claim under its key), not the re-pool — --dry-run and the
+    // run count it once (first review pass, mutant + run-it).
+    const rebuildStatus = () => runScript(["bun", join(HERE, "rebuild.ts"), "--url", URL_!, "--status"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: HERE });
+    await sql`DELETE FROM thought_work_claims WHERE thought_id = ${atlasNew}::uuid AND work_type = ${KEY}`;
+    await sql`SELECT requeue_thought_work(${consolidateKey("other-judge")}, ${atlasNew}::uuid)`;
+    assert((await consolidate("--status")).out.includes(`1 waiting for the next run (a claim stands under ${consolidateKey("other-judge")}, another judge's pool);`) && (await consolidate("--list", "stale")).out.includes(`(stale — waiting for the next run to re-pool it (a claim stands under ${consolidateKey("other-judge")}, another judge's pool))`),
+           "a live claim under another judge's key is not this pass's pool: the row waits for this run, the other key named by both lines");
+    const doorStatus = await rebuildStatus();
+    assert(doorStatus.code === 0 && doorStatus.out.includes(`1 in a pass's pool under ${consolidateKey("other-judge")}`), `rebuild.ts --status, keyless, names the key the row is pooled under (${doorStatus.out.split("\n").find((l) => /proposals:/.test(l))?.trim().slice(0, 200)})`);
+    const dryOnce = await consolidate("--dry-run");
+    assert(/would: add 1 thoughts to the pool; judge 1 thought\(s\)/.test(dryOnce.out), `a thought the pool rule adds is not counted again as a re-pool (${dryOnce.out.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
+    seen.length = 0;
+    const settled = await consolidate();
+    const atlasAfter = await proposalRow(atlas!.id);
+    const settledNote = passSettledNote("judged again after a text moved — unrelated", KEY);
+    assert(settled.code === 0 && /pool: 1 thought\(s\) added\s*$/m.test(settled.out) && seen.some((p) => /monthly/.test(p.a) && /deploy calendar/.test(p.b)) && /stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\)/.test(settled.out),
+           `the pass judges the stale pair again and reports settling it (exit ${settled.code}: ${staleLine(settled.out)})`);
+    assert(atlasAfter.status === "rejected" && atlasAfter.reviewed_at !== null && atlasAfter.review_note === settledNote,
+           `…the row is rejected with the pass's marker note and reviewed_at set (${JSON.stringify(atlasAfter)})`);
+    const atlasLin = await lineageOf(atlas!.id);
+    assert(atlasLin.length === 1 && atlasLin[0].by === KEY && atlasLin[0].fps[1] === atlasFp2 && atlasLin[0].fps[0] === await fpOf(atlasOld) && atlasLin[0].why === null && atlasLin[0].recipe.settled === "unrelated",
+           `…and its one lineage row is rewritten at the texts judged, under the pass's key, with the settle in the recipe (${JSON.stringify(atlasLin.map((l) => [l.by, l.recipe.settled]))})`);
+    const afterSettle = await consolidate("--status");
+    assert(/queue: \d+ pending \(\d+ without a direction\), 1 accepted, 2 rejected \(1 by the pass\) — --list shows them/.test(afterSettle.out), `--status counts the pass's rejection apart from the person's (${afterSettle.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 200)})`);
+    assert(/no stale proposals/.test((await consolidate("--list", "stale")).out) && (await consolidate("--list", "rejected")).out.includes(settledNote), "the row leaves --list stale and --list rejected shows the pass's note");
+    seen.length = 0;
+    const again = await consolidate();
+    assert(again.code === 0 && !seen.some((p) => /atlas/.test(p.a) || /atlas/.test(p.b)) && (await proposals()).length === proposalsBefore + 1 && (await proposalRow(atlas!.id)).status === "rejected",
+           "a second pass shows the settled pair to the judge no more and proposes nothing on it — 029's candidate rule, a rejected pair");
+    // The other outcome: the beacon pair still conflicts after the move — replaced in place.
+    const beaconOld = await seed("Fees are billed monthly for the beacon account.", 10, 12, ["beacon"]);
+    const beaconNew = await seed("Fees are billed annually for the beacon account.", 10, 0, ["beacon"]);
+    await consolidate();
+    const beacon = (await proposals()).find((p) => p.older_id === beaconOld && p.newer_id === beaconNew)!;
+    assert(beacon?.status === "pending", "the beacon pair is proposed pending");
+    const beaconFp2 = await moveRaw(beaconNew, "Fees are billed annually for the beacon account, confirmed in writing.");
+    await rebuild(beaconNew);
+    const replaced = await consolidate();
+    const beaconAfter = await proposalRow(beacon.id);
+    assert(replaced.code === 0 && /stale proposals: 1 replaced in place — the conflict found again/.test(replaced.out) && beaconAfter.status === "pending" && beaconAfter.review_note === null && (await lineageOf(beacon.id)).length === 1 && (await lineageOf(beacon.id))[0].fps[1] === beaconFp2,
+           `a stale pair the pass finds in conflict again is replaced in place: pending, one lineage row at the moved text (exit ${replaced.code}: ${staleLine(replaced.out)}; ${JSON.stringify(beaconAfter)})`);
+    // A later move under the pass-settled atlas row reopens it (067's arm), and the pass settles it again.
+    await moveRaw(atlasNew, "Invoices for the atlas account: see the deploy calendar, second edit.");
+    const rb2 = await rebuild(atlasNew);
+    const reopened = await proposalRow(atlas!.id);
+    assert(rb2.stale_proposals === 1 && reopened.status === "stale" && reopened.reviewed_at === null && reopened.review_note === null, `a text move under a pass-settled row sets it stale again, unreviewed, the note cleared (${JSON.stringify(reopened)})`);
+    const resettled = await consolidate();
+    assert(resettled.code === 0 && /stale proposals: 1 settled by the pass/.test(resettled.out) && (await proposalRow(atlas!.id)).status === "rejected", `…and the next pass settles it again (${staleLine(resettled.out)})`);
+    // A side without a vector: the row waits, the claim finishes, the next run re-pools it once the vector is back.
+    await moveRaw(beaconNew, "Fees are billed annually for the beacon account, third edit.");
+    await rebuild(beaconNew);
+    await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${beaconNew}::uuid`;
+    const waited = await consolidate();
+    assert(waited.code === 0 && /stale proposals: 1 wait on a vector the reembed pool writes \(re-pooled by the run after it lands\)/.test(waited.out) && (await proposalRow(beacon.id)).status === "stale",
+           `a stale row whose newer thought has no vector is left stale and reported waiting (exit ${waited.code}: ${staleLine(waited.out)})`);
+    const waitStatus = await consolidate("--status");
+    assert(/1 stale \(a text moved under the verdict: 1 waiting for a vector the reembed pool writes; the pass replaces/.test(waitStatus.out) && /\(stale — waiting for a vector the reembed pool writes\)/.test((await consolidate("--list", "stale")).out),
+           `--status and --list stale place it as waiting for a vector (${waitStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
+    // …and a run meanwhile does not re-pool it (the mutant dropping the
+    // vector condition from the re-pool churned a claim every run — first
+    // review pass, mutant).
+    seen.length = 0;
+    const idle = await consolidate();
+    assert(idle.code === 0 && !/re-pooled/.test(idle.out) && !/stale proposals:/.test(idle.out) && seen.length === 0 && (await proposalRow(beacon.id)).status === "stale", `a run while the vector is missing re-pools nothing and calls no judge (${idle.out.split("\n").find((l) => /pool:/.test(l))?.trim()})`);
+    await sql`UPDATE thoughts SET embedding = ${unit(10)}::vector WHERE id = ${beaconNew}::uuid`;
+    const dryRepool = await consolidate("--dry-run");
+    assert(dryRepool.code === 0 && /add 0 thoughts to the pool and re-pool 1 for stale proposals/.test(dryRepool.out) && (await proposalRow(beacon.id)).status === "stale", `--dry-run counts the thought the next run re-pools for its stale row and writes nothing (${dryRepool.out.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 200)})`);
+    const repooled = await consolidate();
+    assert(repooled.code === 0 && /pool: 0 thought\(s\) added \(1 more re-pooled for stale proposals\)/.test(repooled.out) && /stale proposals: 1 replaced in place/.test(repooled.out) && (await proposalRow(beacon.id)).status === "pending",
+           `the next run re-pools the thought under its own key though its claim had finished, and replaces the row (exit ${repooled.code}: ${repooled.out.split("\n").find((l) => /pool:/.test(l))?.trim()}; ${staleLine(repooled.out)})`);
+    // A pair the candidate rule no longer admits: the shared entity gone — settled as such.
+    await moveRaw(beaconNew, "Fees are billed annually for the beacon account, fourth edit.");
+    await rebuild(beaconNew);
+    await sql`DELETE FROM thought_entities WHERE thought_id = ${beaconNew}::uuid`;
+    const fellOut = await consolidate();
+    const beaconOut = await proposalRow(beacon.id);
+    assert(fellOut.code === 0 && /stale proposals: 1 settled by the pass \(1 no longer a candidate pair\)/.test(fellOut.out) && beaconOut.status === "rejected" && beaconOut.review_note === passSettledNote("no longer a candidate pair — no shared entity", KEY) && (await lineageOf(beacon.id))[0].recipe.settled === "not-a-candidate" && (await lineageOf(beacon.id))[0].recipe.reason === "no shared entity",
+           `a stale pair with no shared entity left is settled as no longer a candidate, at the current texts (exit ${fellOut.code}: ${staleLine(fellOut.out)}; ${JSON.stringify(beaconOut)})`);
+    assert(beaconOut.review_note!.startsWith(PASS_SETTLED_PREFIX) && (await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "every settle carries the marker, and none appended an audit row: the pass never wrote thoughts");
+    // A stale pair whose judge call TIMES OUT was reached, not left out: the
+    // row stays stale, the thought is recorded failed, --retry-failed
+    // revisits it — and a run meanwhile does not re-pool a failed thought
+    // (first review pass, run-it: the timed-out pair fell to the leftover
+    // rule and was settled as "no longer a candidate"; mutant: a re-pool that
+    // took failed claims judged it every run).
+    const cedarOld = await seed("Backups run monthly for the cedar vault.", 11, 12, ["cedar"]);
+    const cedarNew = await seed("Backups run annually for the cedar vault.", 11, 0, ["cedar"]);
+    await consolidate();
+    const cedar = (await proposals()).find((p) => p.older_id === cedarOld && p.newer_id === cedarNew)!;
+    assert(cedar?.status === "pending", "the cedar pair is proposed pending");
+    await moveRaw(cedarNew, "Backups for the cedar vault follow the deploy calendar.");
+    await rebuild(cedarNew);
+    slowMs = 2500;
+    seen.length = 0;
+    const timedOut = await consolidate("--timeout", "1");
+    slowMs = 0;
+    assert(timedOut.code === 1 && /timed out after 1 s/.test(timedOut.out) && !/stale proposals:/.test(timedOut.out) && (await proposalRow(cedar.id)).status === "stale",
+           `a stale pair whose call timed out is left stale with the thought failed, not settled (exit ${timedOut.code}: ${timedOut.out.split("\n").find((l) => /timed out/.test(l))?.trim().slice(0, 160)})`);
+    assert(/1 stale \(a text moved under the verdict: 1 failed in this pass — --retry-failed;/.test((await consolidate("--status")).out) && /\(stale — failed in this pass — --retry-failed\)/.test((await consolidate("--list", "stale")).out),
+           "--status and --list stale place it as failed in this pass, with the remedy");
+    // …and a live claim under ANOTHER judge's key does not hide this pass's
+    // failure (second review pass, mutant: the rank swapped survived every
+    // suite); rebuild.ts, keyless, names the failed key.
+    await sql`SELECT requeue_thought_work(${consolidateKey("other-judge")}, ${cedarNew}::uuid)`;
+    assert(/1 failed in this pass — --retry-failed;/.test((await consolidate("--status")).out) && /\(stale — failed in this pass/.test((await consolidate("--list", "stale")).out)
+        && (await rebuildStatus()).out.includes(`1 failed in a pass under ${KEY} — bun db/consolidate.ts --retry-failed with that judge's model`),
+           "a live claim under another judge's key beside this pass's failure: still failed here, the key named by the keyless door");
+    await sql`DELETE FROM thought_work_claims WHERE thought_id = ${cedarNew}::uuid AND work_type = ${consolidateKey("other-judge")}`;
+    seen.length = 0;
+    const notRepooled = await consolidate();
+    assert(notRepooled.code === 1 && !/re-pooled/.test(notRepooled.out) && !seen.some((p) => /cedar/.test(p.a + p.b)) && (await proposalRow(cedar.id)).status === "stale", "a run meanwhile leaves the failed thought to --retry-failed: no re-pool, no judge call on the pair");
+    const retried = await consolidate("--retry-failed");
+    assert(retried.code === 0 && /stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\)/.test(retried.out) && (await proposalRow(cedar.id)).status === "rejected", `--retry-failed judges the pair again and the pass settles it (${staleLine(retried.out)})`);
+    // The OLDER side without a vector waits too, and is not re-pooled every
+    // run (first review pass, run-it: it was, with a judge call on the
+    // thought's other pairs each time).
+    await moveRaw(cedarNew, "Backups for the cedar vault: see the deploy calendar, second edit.");
+    const rbCedar = await rebuild(cedarNew);
+    assert(rbCedar.stale_proposals === 1 && (await proposalRow(cedar.id)).status === "stale", "a move under the pass-settled cedar row reopens it");
+    // The inverse: a FAILED claim under another judge's key beside this
+    // pass's live one is not this pass's to retry — pooled here.
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, finished_at, last_error) VALUES (${cedarNew}::uuid, ${consolidateKey("other-judge")}, 'failed', now(), 'planted')`;
+    assert(/1 in this pass's pool;/.test((await consolidate("--status")).out) && (await rebuildStatus()).out.includes(`1 failed in a pass under ${consolidateKey("other-judge")}`),
+           "a failed claim under another judge's key beside this pass's live claim: pooled here, the failure named by the keyless door");
+    await sql`DELETE FROM thought_work_claims WHERE thought_id = ${cedarNew}::uuid AND work_type = ${consolidateKey("other-judge")}`;
+    await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${cedarOld}::uuid`;
+    const olderWait = await consolidate();
+    assert(olderWait.code === 0 && /stale proposals: 1 wait on a vector/.test(olderWait.out) && (await proposalRow(cedar.id)).status === "stale" && /1 waiting for a vector the reembed pool writes;/.test((await consolidate("--status")).out),
+           `a stale row whose OLDER thought has no vector waits, and --status says for what (${staleLine(olderWait.out)})`);
+    seen.length = 0;
+    const olderIdle = await consolidate();
+    assert(olderIdle.code === 0 && !/re-pooled/.test(olderIdle.out) && !/stale proposals:/.test(olderIdle.out) && seen.length === 0, `…and a run meanwhile re-pools nothing and calls no judge (${olderIdle.out.split("\n").find((l) => /pool:/.test(l))?.trim()})`);
+    // …and under --follow the summary counts rows, not encounters: the row
+    // waits on the first polls and is settled once the vector lands, and the
+    // line says "1 settled" alone — anchored, so a "; 1 wait" suffix fails
+    // (third review pass, mutant: bags for the sets survived every tooth).
+    seen.length = 0;
+    const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    await Bun.sleep(2500);
+    assert((await proposalRow(cedar.id)).status === "stale" && seen.length === 0, "the follower's first polls leave the row waiting and call no judge");
+    await sql`UPDATE thoughts SET embedding = ${unit(11)}::vector WHERE id = ${cedarOld}::uuid`;
+    let followSettled = false;
+    for (let i = 0; i < 40 && !followSettled; i++) {
+      await Bun.sleep(250);
+      followSettled = (await proposalRow(cedar.id)).status === "rejected";
+    }
+    follower.kill("SIGINT");
+    const followOut = (await new Response(follower.stdout).text()) + (await new Response(follower.stderr).text());
+    const followCode = await follower.exited;
+    assert(followSettled && followCode === 0 && /\(1 more re-pooled for stale proposals\)/.test(followOut) && seen.length === 1,
+           `the poll after the vector lands re-pools the thought and settles the row, one judge call in all (exit ${followCode}; ${followOut.split("\n").filter((l) => /pool:|stale proposals:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
+    assert(/^\s*stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\) — distinct rows across the polls\s*$/m.test(followOut),
+           `…and the summary counts the row once, settled, with no wait clause (${staleLine(followOut)})`);
+    const olderBack = await consolidate("--status");
+    assert(olderBack.code === 0 && !/stale/.test(olderBack.out.split("\n").find((l) => /queue:/.test(l)) ?? "x stale"), `no stale row is left (${olderBack.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 160)})`);
+    assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "…still without an audit row");
+    // A person may not borrow the marker: rebuild_derived would read the
+    // rejection as the pass's and reopen it on a move.
+    const borrowed = await consolidate("--reject", cedar.id, "--note", `${PASS_SETTLED_PREFIX} by hand`);
+    assert(borrowed.code === 2 && /that marker is the pass's own/.test(borrowed.out) && (await proposalRow(cedar.id)).review_note?.startsWith(PASS_SETTLED_PREFIX) === true && /judged again/.test((await proposalRow(cedar.id)).review_note ?? ""),
+           `--note beginning with the marker is refused as usage, the row untouched (exit ${borrowed.code})`);
+  }
+
   // SMD-1803: the CLI's day() over a proposal thought with no ISO-form date.
   // Every --list above ran on real dates, where the pre-fix new Date().toISOString()
   // and the fix agree — so a revert of db/consolidate.ts's null/infinity handling
@@ -6484,7 +6683,7 @@ console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild
   assert(dry.code === 0 && /dry run: the call runs and rolls back/.test(dry.out) && /enqueued:\s+3 \(thought, pool\) claim\(s\)/.test(dry.out) && (await claimsOf(newer.id)) === "" && (await status(pid)) === "pending" && (await marksOf(newer.id)) === "chunks:-,entities:-,vector:-",
     `a dry run prints the report the function would give and keeps nothing (exit ${dry.code}: ${dry.out.split("\n").find((l) => /enqueued/.test(l))?.trim()}; claims "${await claimsOf(newer.id)}")`);
   const live = await rebuildTs("--input", newer.id, "--reason", "live: edit");
-  assert(live.code === 0 && /rebuilt:\s+0/.test(live.out) && /enqueued:\s+3/.test(live.out) && /marked:\s+3 lineage row\(s\)[^\n]*1 pending proposal\(s\) set stale/.test(live.out) && new RegExp(`${REEMBED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+→\\s+bun db/reembed\\.ts --url <url>`).test(live.out) && /extract:live@p2\s+→\s+bun db\/extract-entities\.ts/.test(live.out) && /consolidate:live@p1\s+→\s+bun db\/consolidate\.ts/.test(live.out),
+  assert(live.code === 0 && /rebuilt:\s+0/.test(live.out) && /enqueued:\s+3/.test(live.out) && /marked:\s+3 lineage row\(s\)[^\n]*1 proposal\(s\) set stale/.test(live.out) && new RegExp(`${REEMBED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+→\\s+bun db/reembed\\.ts --url <url>`).test(live.out) && /extract:live@p2\s+→\s+bun db\/extract-entities\.ts/.test(live.out) && /consolidate:live@p1\s+→\s+bun db\/consolidate\.ts/.test(live.out),
     `a run hands the windows and the vector to the reembed pool, the extraction to the configured key, the pair to the judge's, and names the command that drains each (exit ${live.code}: ${live.out.trim().split("\n").slice(2, 6).join(" / ").slice(0, 300)})`);
   assert((await claimsOf(newer.id)) === `${JUDGE}:pending,${CUR_KEY}:pending,${REEMBED}:pending` && (await status(pid)) === "stale" && (await marksOf(newer.id)) === "chunks:live: edit,entities:live: edit,vector:live: edit",
     `…the claims stand under the three keys, the proposal is stale, the reason is on every row (${await claimsOf(newer.id)}; ${await marksOf(newer.id)})`);
@@ -6698,6 +6897,274 @@ console.log("\n[32] Migration 064 on a real server: the page store under concurr
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM derivations`;
   await sql.close();
+}
+
+console.log("\n[33] Migration 068's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a row gaining a key while it is superseded holds its own pointer lock; a pointer write waits for a concurrent move of its target's issue; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
+{
+  // test-schema [62] holds the rules on one connection; what it cannot hold is
+  // a second writer's uncommitted row. Each race below goes stale without the
+  // lock it names, and drift() — 058's formulas against the
+  // tables — is the check.
+  const db = new SQL({ url: URL_!, max: 1 });
+  const drift = async () => Number((await db`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`)[0].n);
+  const suiteDrift = await drift();
+  const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+  const waitingOn = async (pid: number, cls: number) =>
+    Number((await db`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${pid} AND classid = ${cls} AND objsubid = 2`)[0].n);
+  const gate = () => { let open: () => void = () => {}; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+  const row = async (content: string, meta: Record<string, unknown>) =>
+    String((await db`INSERT INTO thoughts (content, metadata) VALUES (${content}, ${meta}::jsonb) RETURNING id`)[0].id);
+  const head = async (issue: string) => (await db`SELECT head_id::text AS id, status_type FROM ob1_ticket_head WHERE issue = ${issue}`)[0] as { id: string; status_type: string } | undefined;
+
+  // Same ticket, two writers. X1 is R-1's head (the newer watermark); A moves
+  // its status and holds its transaction open; B moves X2's. B's recompute
+  // waits on R-1's key until A commits and then sees X1's new status — without
+  // the lock it would read X1's old one and its upsert, queued behind A's,
+  // would overwrite A's head with it.
+  const x1 = await row("[33] R-1's head", { kind: "race2256", issue: "R-1", status_type: "started", linear_updated_at: "2026-09-02" });
+  const x2 = await row("[33] R-1's older row", { kind: "race2256", issue: "R-1", status_type: "started", linear_updated_at: "2026-09-01" });
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, aError = "", bPid = -1, bError = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}' WHERE id = ${x1}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { aError = e.message; });
+    await waitFor(() => aHolding || aError !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status": "Todo"}' WHERE id = ${x2}::uuid`;
+    }).catch((e: Error) => { bError = e.message; });
+    // On R-1's issue bucket — or first on a pointer bucket, when the two rows'
+    // ids share one (one time in 256; second review pass).
+    const waitingOnEither = async () => (await waitingOn(bPid, 22561)) + (await waitingOn(bPid, 22562));
+    await waitFor(async () => bPid > 0 && (await waitingOnEither()) === 1);
+    const bWaited = bPid > 0 && (await waitingOnEither()) === 1;
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const h = await head("R-1");
+    assert(aHolding && bWaited && aError === "" && bError === "" && h?.id === x1 && h.status_type === "completed" && (await drift()) === 0,
+      `a second writer of R-1 waits on its key (class 22561, or 22562 when the rows' ids share a bucket) until the first commits, then recomputes from it: the head is X1 with the first writer's status, and no drift (${JSON.stringify(h)}; ${aError || bError || "clean"})`);
+  }
+
+  // A row gaining an issue key while a new row supersedes it (first review
+  // pass). X, newer than R but without a key, joins A-1 in an open
+  // transaction; Y points at X. Without a lock on X itself, Y read X's issue
+  // as none (not yet committed) and reconciled nothing of A-1, while X's own
+  // recompute had not seen Y: A-1's head stayed X, completed. Now X's write
+  // holds X's pointer bucket (class 22562), Y waits on it, and after X commits
+  // Y reads X's issue and recomputes A-1 with X superseded: the head is R.
+  const r1 = await row("[33] A-1's older row", { kind: "race2256", issue: "A-1", status_type: "started", linear_updated_at: "2026-01-01" });
+  const xk = await row("[33] X, joining A-1", { kind: "race2256", status_type: "completed", linear_updated_at: "2026-09-01" });
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET metadata = metadata || '{"issue": "A-1"}' WHERE id = ${xk}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`INSERT INTO thoughts (content, metadata, supersedes) VALUES ('[33] Y, superseding X', ${{ kind: "race2256" }}::jsonb, ${xk}::uuid)`;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22562)) === 1);
+    const bWaited = bPid > 0 && (await waitingOn(bPid, 22562)) === 1;
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const h = await head("A-1");
+    assert(aHolding && bWaited && errors === "" && h?.id === r1 && h.status_type === "started" && (await drift()) === 0,
+      `a row gaining an issue key holds its own pointer bucket, so a concurrent row superseding it waits (class 22562) and then recomputes the issue with it superseded: A-1's head is R, started, and no drift (${JSON.stringify(h)}; ${errors || "clean"})`);
+  }
+
+  // A pointer write whose target's issue is moving. C holds M-1's bucket; A
+  // moves P from M-1 to M-2, takes P's pointer bucket and queues on M-1's; B
+  // points Y at P and queues on P's pointer bucket, which A holds, before it
+  // reads P's issue. C lets go: A recomputes M-2 with P live (B's pointer is
+  // not committed) and commits; B reads P's issue — now M-2 — and recomputes
+  // it with P superseded, so M-2's head is Q. Before the first review pass B
+  // read P's issue as M-1 and needed a re-read after the grant to find M-2.
+  const p = await row("[33] P, moving to M-2", { kind: "race2256", issue: "M-1", status_type: "started", linear_updated_at: "2026-09-05" });
+  const qRow = await row("[33] Q, M-2's older row", { kind: "race2256", issue: "M-2", status_type: "completed", linear_updated_at: "2026-09-01" });
+  const y = await row("[33] Y, P's successor", { kind: "race2256" });
+  {
+    const connC = racer(), connA = racer(), connB = racer();
+    const { p: releaseP, open: release } = gate();
+    let cHolding = false, aPid = -1, bPid = -1, errors = "";
+    const cDone = connC.begin(async (tx: SQL) => {
+      await tx`SELECT pg_advisory_xact_lock(22561, hashtext(md5('M-1')) & 255)`;  // M-1's bucket, as the trigger takes it (on its md5 key)
+      cHolding = true;
+      await releaseP;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(() => cHolding);
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"issue": "M-2"}' WHERE id = ${p}::uuid`;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(async () => aPid > 0 && (await waitingOn(aPid, 22561)) === 1);
+    const aQueued = aPid > 0 && (await waitingOn(aPid, 22561)) === 1;
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET supersedes = ${p}::uuid WHERE id = ${y}::uuid`;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22562)) === 1);
+    const bQueued = bPid > 0 && (await waitingOn(bPid, 22562)) === 1;
+    release();
+    await cDone; await aDone; await bDone;
+    await connC.close(); await connA.close(); await connB.close();
+    const h = await head("M-2");
+    assert(aQueued && bQueued && errors === "" && h?.id === qRow && (await head("M-1")) === undefined && (await drift()) === 0,
+      `a pointer write waits on its target's pointer bucket (class 22562) while a concurrent write moves the target's issue, then reads it: M-2's head is Q, M-1 has none, and no drift (${JSON.stringify(h)}; ${errors || "clean"})`);
+  }
+
+  // Two successors of one thought written at once: both take its superseder
+  // key (class 22562), so the later sees the earlier and the newest wins.
+  const target = await row("[33] a thought superseded twice at once", { kind: "race2256" });
+  const [s1, s2] = [await row("[33] successor one", { kind: "race2256" }), await row("[33] successor two", { kind: "race2256" })];
+  await db`UPDATE thoughts SET created_at = now() - interval '1 hour' WHERE id = ${s1}::uuid`;
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET supersedes = ${target}::uuid WHERE id = ${s2}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(() => aHolding);
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET supersedes = ${target}::uuid WHERE id = ${s1}::uuid`;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22562)) === 1);
+    const bWaited = bPid > 0 && (await waitingOn(bPid, 22562)) === 1;
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [sb] = await db`SELECT new_id::text AS id FROM ob1_superseded_by WHERE old_id = ${target}::uuid`;
+    assert(bWaited && errors === "" && sb?.id === s2 && (await drift()) === 0,
+      `two successors written at once serialise on the target's key (class 22562): the newer one is its superseder, and no drift (${sb?.id === s2 ? "s2" : sb?.id}; ${errors || "clean"})`);
+  }
+
+  // A multi-row DELETE mixing a keyed row with a plain row that another row
+  // supersedes (third review pass). The DELETE's own firing locks D-1's issue
+  // bucket; the ON DELETE SET NULL cascade then fires the trigger again, for
+  // the plain row X2's pointer bucket. Before the fix only keyed rows took
+  // their bucket in the first firing, so the cascade asked for X2's after an
+  // issue bucket — and a single-row status write of P (a D-1 row whose id
+  // shares X2's bucket) holding X2's bucket and waiting for D-1's closed a
+  // cycle. A test trigger sorting between the two firings pauses the DELETE
+  // there; now P's writer waits on X2's bucket instead, and both commit.
+  const xk1 = await row("[33] X1, D-1's row, deleted", { kind: "race2256", issue: "D-1", status_type: "started", linear_updated_at: "2026-09-01" });
+  const xp2 = await row("[33] X2, plain, deleted", { kind: "race2256" });
+  await row("[33] W2, superseding X2", { kind: "race2256" }).then((id) => db`UPDATE thoughts SET supersedes = ${xp2}::uuid WHERE id = ${id}::uuid`);
+  const [{ b: x2bucket }] = await db`SELECT hashtext(${xp2}) & 255 AS b`;
+  let pk = "";
+  for (let k = 0; !pk; k++) {
+    const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[33] P candidate ${k}`}, ${{ kind: "race2256" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
+    if (c.b === x2bucket) pk = c.id;
+  }
+  await db`UPDATE thoughts SET metadata = metadata || '{"issue": "D-1", "status_type": "started", "linear_updated_at": "2026-08-01"}' WHERE id = ${pk}::uuid`;
+  await db.unsafe(`CREATE OR REPLACE FUNCTION ob1_test_pause_2256() RETURNS trigger LANGUAGE plpgsql AS $$
+                   BEGIN IF current_setting('ob1.test_pause_2256', true) = 'on' THEN PERFORM pg_sleep(2); END IF; RETURN NULL; END $$;
+                   CREATE TRIGGER thoughts_node_projection_a_pause_2256 AFTER UPDATE ON thoughts FOR EACH STATEMENT EXECUTE FUNCTION ob1_test_pause_2256()`);
+  {
+    const connA = racer(), connB = racer();
+    let aPid = -1, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`SELECT set_config('ob1.test_pause_2256', 'on', true)`;
+      aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`DELETE FROM thoughts WHERE id = ANY(${`{${xk1},${xp2}}`}::uuid[])`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    const pausing = async () => aPid > 0 && Number((await db`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${aPid} AND wait_event = 'PgSleep'`)[0].n) === 1;
+    await waitFor(pausing);
+    const aPaused = await pausing();
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}' WHERE id = ${pk}::uuid`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22562)) === 1);
+    const bWaited = bPid > 0 && (await waitingOn(bPid, 22562)) === 1;
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    await db.unsafe(`DROP TRIGGER thoughts_node_projection_a_pause_2256 ON thoughts; DROP FUNCTION ob1_test_pause_2256()`);
+    assert(aPaused && bWaited && errors === "" && (await drift()) === 0,
+      `a DELETE of a keyed row and a plain superseded one, paused between its firing and its cascade's, holds the plain row's pointer bucket already: a status write of a row sharing that bucket waits on it (class 22562) and both commit, no deadlock, no drift (${errors || "clean"})`);
+  }
+
+  // One statement that deletes a thought and updates its successor — a
+  // writable CTE, and a MERGE — lists the successor twice on the UPDATE's
+  // side, once from the statement (moving it to G-5, where it must become the
+  // head) and once from the cascade that nulls its pointer (fourth review
+  // pass: a filter on each side dropped the pair that shows the move). The
+  // MERGE is here, on real PostgreSQL, because PGlite's 17.5 leaves the
+  // MERGE's own UPDATE rows out of the transition table when a cascade updates
+  // them too (16.15 and 17.8 do not).
+  const moved: string[] = [];
+  for (const shape of ["cte", "merge"]) {
+    const t = await row(`[33] ${shape} T, deleted`, { kind: "race2256", issue: `G-7-${shape}` });
+    const sRow = await row(`[33] ${shape} S, T's successor`, { kind: "race2256", issue: `G-2-${shape}` });
+    await db`UPDATE thoughts SET supersedes = ${t}::uuid WHERE id = ${sRow}::uuid`;
+    await row(`[33] ${shape} B, G-5's older row`, { kind: "race2256", issue: `G-5-${shape}`, status_type: "started", linear_updated_at: "2026-09-01" });
+    const patch = { issue: `G-5-${shape}`, status_type: "canceled", linear_updated_at: "2026-09-02" };
+    if (shape === "cte") await db`WITH d AS (DELETE FROM thoughts WHERE id = ${t}::uuid RETURNING id) UPDATE thoughts SET metadata = metadata || ${patch}::jsonb WHERE id = ${sRow}::uuid`;
+    else await db`MERGE INTO thoughts x USING (VALUES (${t}::uuid, 'delete'), (${sRow}::uuid, 'update')) v(id, op) ON x.id = v.id
+                  WHEN MATCHED AND v.op = 'delete' THEN DELETE WHEN MATCHED THEN UPDATE SET metadata = x.metadata || ${patch}::jsonb`;
+    const h = await head(`G-5-${shape}`);
+    moved.push(`${shape}: head ${h?.id === sRow ? "S" : h?.id}, drift ${await drift()}`);
+  }
+  assert(moved.every((m) => /head S, drift 0$/.test(m)),
+    `a writable CTE and a MERGE that delete a thought and update its successor into another ticket leave that ticket's head the successor and no drift (${moved.join("; ")})`);
+
+  // A ticket write on a brain of twenty thousand thoughts, five thousand of
+  // them superseding another, reads a handful of rows: its keys are index
+  // probes. A NULL passed for "no keys" would reconcile every key — correct,
+  // and every pointer read through 025's index per write, which counts no
+  // sequential scan (mutation testing: a scan count alone let it pass), so the
+  // rows read are counted too — of the projection's tables as well, which a
+  // hash join over every superseded thought scanned per write (third review
+  // pass).
+  await db`INSERT INTO thoughts (content, metadata) SELECT '[33] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
+  await db`UPDATE thoughts t SET supersedes = s.id FROM thoughts s
+            WHERE t.metadata->>'kind' = 'race2256' AND s.metadata->>'kind' = 'race2256'
+              AND (t.metadata->>'n')::int <= 5000 AND (s.metadata->>'n')::int = (t.metadata->>'n')::int + 10000`;
+  await db`ANALYZE thoughts`;
+  const reads = async () => {
+    await db`SELECT pg_stat_force_next_flush()`;
+    await db`SELECT pg_stat_clear_snapshot()`;
+    const rs = await db`SELECT relname, seq_scan::int AS scans, (coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0))::int AS rows FROM pg_stat_user_tables
+                         WHERE relname IN ('thoughts', 'ob1_superseded_by', 'ob1_ticket_head')` as { relname: string; scans: number; rows: number }[];
+    return Object.fromEntries(rs.map((r) => [r.relname, r]));
+  };
+  const before = await reads();
+  await db`UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled", "linear_updated_at": "2026-09-09"}' WHERE id = ${x2}::uuid`;
+  await db`UPDATE thoughts SET supersedes = ${x1}::uuid WHERE id = ${x2}::uuid`;
+  const after = await reads();
+  const delta = (t: string) => ({ scans: after[t].scans - before[t].scans, rows: after[t].rows - before[t].rows });
+  const [th, sb, hd] = [delta("thoughts"), delta("ob1_superseded_by"), delta("ob1_ticket_head")];
+  // The heads table holds a dozen rows here, which the planner rightly scans;
+  // the superseders hold five thousand, which a hash join used to scan whole.
+  assert(th.scans === 0 && th.rows < 100 && sb.scans === 0 && sb.rows < 100 && hd.rows < 100 && (await drift()) === 0,
+    `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers, scan neither thoughts nor the five thousand superseders and read a handful of rows (thoughts ${th.rows}, superseders ${sb.rows}, heads ${hd.rows}; scans ${th.scans}/${sb.scans}/${hd.scans}), and no drift`);
+
+  await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2256'`;
+  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'D-1', 'M-1', 'M-2') OR issue LIKE 'G-%') AS heads`;
+  assert(suiteDrift === 0 && left.drift === 0 && left.heads === 0,
+    `every section before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
+  await db.close();
 }
 
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");

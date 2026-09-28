@@ -68,6 +68,10 @@ const TABLES = [
   // either way — two row triggers drop what a deleted thought or proposal
   // keyed — so its place in the order is free.
   "derivations",
+  // 068's node_state projection (SMD-2256): no foreign key either way, so its
+  // place is free too.
+  "ob1_ticket_head",
+  "ob1_superseded_by",
   // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
@@ -165,6 +169,14 @@ const FUNCTIONS = [
   // 059 (SMD-2255)
   "search_thoughts_current(vector, text, float, int, jsonb, float, float)",
   "search_demote_weight()",
+  // 068 (SMD-2256): the triggers go with thoughts; their function is named here.
+  "ob1_node_projection_sync()",
+  "ob1_node_projection_truncate()",
+  "ob1_node_projection_drift()",
+  "ob1_rebuild_node_projection()",
+  "ob1_node_projection_reconcile(text[], uuid[])",
+  "ob1_ticket_heads_of(text[])",
+  "ob1_superseders_of(uuid[])",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
@@ -226,6 +238,8 @@ const FUNCTIONS = [
   // record_supersession_proposal) keep their signatures and are named above.
   "derivation_descendants(uuid, int, int)",
   "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)",
+  // 066 (SMD-2292): consolidation_candidates redefined on 063's body — the
+  // signature above, no new name.
   // 064 (SMD-1812): the page store's nine functions, its four helpers, the
   // page-thought writer, the revisions' refusal trigger and the section drop
   // trigger; ob1_record_derivation, redefined on 063's body, is named above.
@@ -245,6 +259,9 @@ const FUNCTIONS = [
   "ob1_page_recipe(jsonb, text)",
   "page_section_revisions_refuse_mutation()",
   "ob1_drop_section_derivations()",
+  // 067 (SMD-2297): the pass's settle of a stale proposal; rebuild_derived
+  // keeps its signature and is named above.
+  "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)",
 ];
 
 /**

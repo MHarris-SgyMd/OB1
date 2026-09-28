@@ -1712,6 +1712,13 @@ export const ROLE_GRANTS = Object.freeze({
     // (SMD-1731). The workers' passes write through the same table, and
     // --grant issues every group.
     Object.freeze({ table: "derivations",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "061" }),
+    // 068's triggers run as the caller on every write of a row carrying an
+    // issue key or a supersedes pointer, and reconcile the node_state
+    // projection; node_lifecycle() and node_state() read it. A role without
+    // these cannot write a ticket row or a pointer, nor read a lifecycle
+    // (SMD-2256).
+    Object.freeze({ table: "ob1_ticket_head",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "068" }),
+    Object.freeze({ table: "ob1_superseded_by", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "068" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
@@ -1783,8 +1790,9 @@ export const ROLE_GRANTS = Object.freeze({
   // graph-centrality.ts's dependency read (--startable, --decay-blocked) is
   // 058's node_state(), which reads `thought_sources` too, so a reader running
   // it needs SELECT on it — this group's, or the server group's since 059
-  // (SMD-2255); its default modes read node_lifecycle(), `thoughts` alone
-  // (SMD-2074).
+  // (SMD-2255); its default modes read node_lifecycle() — `thoughts` and,
+  // since 068, `ob1_ticket_head`, both the capture group's (SMD-2074,
+  // SMD-2256).
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),

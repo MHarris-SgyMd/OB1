@@ -296,9 +296,16 @@ const sql = new SQL({ url, max: 1 });
 // migrator's — README §5 says so: the search_path it aligns is session state
 // too.) 023's call sets its own, locally, for its transaction.
 await sql.unsafe(`SET lock_timeout = '${LOCK_TIMEOUT_S}s'`);
-/** A transaction with the run's lock_timeout set inside it, as its first statement. */
+/**
+ * A transaction under READ COMMITTED with the run's lock_timeout set inside it,
+ * as its first statements. READ COMMITTED whatever the database's default:
+ * the migrations are written for it — 068's seed reads the rows after
+ * CREATE TRIGGER's lock, and under REPEATABLE READ its snapshot would predate
+ * the writes that lock waited for (SMD-2256, second review pass).
+ */
 const begin = <T>(fn: (tx: SQL) => Promise<T>): Promise<T> =>
   sql.begin(async (tx: SQL) => {
+    await tx.unsafe(`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`);
     await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_S}s'`);
     return fn(tx);
   }) as Promise<T>;

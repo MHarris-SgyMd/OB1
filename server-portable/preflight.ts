@@ -30,7 +30,7 @@ import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEn
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
-import { quoteIdent, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
+import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
@@ -163,6 +163,8 @@ const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
+const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
+const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -853,10 +855,12 @@ if (configFailed) {
                      (SELECT c.relrowsecurity FROM pg_class c WHERE c.oid = to_regclass('thoughts')) AS rls,
                      current_setting('row_security') AS "rowSecurity",
                      (SELECT string_agg(name, ', ' ORDER BY name) FROM pol) AS policies,
-                     (SELECT count(*)::int FROM pol) AS "policyCount"`) as {
+                     (SELECT count(*)::int FROM pol) AS "policyCount",
+                     (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+                       WHERE e.extname = 'vector' AND to_regtype('vector') IS NULL) AS "vectorSchema"`) as {
               present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
               roleName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
-              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number;
+              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number; vectorSchema: string | null;
             }[];
             if (r?.present && r.unresolved) {
               let source: string | null = null;
@@ -872,20 +876,11 @@ if (configFailed) {
               }
               if (r.usage || !schemas.includes("public")) {
                 causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
-                // A superuser, a CREATEROLE role (from PostgreSQL 16, one with ADMIN
-                // on it), or the login role itself may alter it; under a SET ROLE the
-                // login role must drop it first (RESET ROLE returns to the role its
-                // settings SET).
-                const alter = r.login !== r.role
-                  ? `SET ROLE NONE; ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};  (as ${r.login}, or a superuser)`
-                  : `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`;
-                fixes.push(source === "client"
-                  ? `the connection string sets search_path (a search_path= parameter, or -c search_path= in options=), which outranks any ALTER ROLE: remove that and put this in options=, beside any other -c setting there (separated by %20): ${withPublicInOptions(schemas)}`
-                  : source === "session"
-                  ? `${alter}  (this session's path was SET after login — by a pooler replaying the connection string's, or a login trigger — which outranks it; change it there)`
-                  : source === null
-                  ? `${alter}  (unless the connection string sets search_path, which outranks it)`
-                  : alter);
+                // pgvector's schema too, when the type does not resolve, so this
+                // row and `vector extension` print one path statement, which, run,
+                // puts both on the path (SMD-2238). A missing USAGE on pgvector's
+                // schema is the vector row's GRANT.
+                fixes.push(`${pathFix({ schemas, extension: r.vectorSchema, login: r.login, role: r.role, db: r.db, source })}  Then reconnect.`);
               }
               found = {
                 detail: `public.thoughts exists but does not resolve for this role (${causes.join("; ")})`,
@@ -1261,9 +1256,26 @@ if (configFailed) {
                  v.schema, quote_ident(v.schema) AS schema_ident,
                  CASE WHEN v.schema IS NOT NULL THEN has_schema_privilege(v.schema, 'USAGE') END AS usage,
                  current_user::text AS role, quote_ident(current_user) AS role_ident,
-                 current_database()::text AS db, quote_ident(current_database()) AS db_ident
+                 current_database()::text AS db, quote_ident(current_database()) AS db_ident,
+                 quote_ident(session_user) AS login_ident,
+                 current_setting('search_path') AS path, current_setting('server_version_num')::int AS version
             FROM (SELECT (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector') AS schema) v`;
-        const setPath = (verb: string, ident: string) => `${verb} ${ident} SET search_path = "$user", public, ${vec.schema_ident};`;
+        // The path's fix is the `schema` row's statement, pgvector's schema
+        // added (search-path.ts), so the two rows agree on one screen: the
+        // login role's setting IN DATABASE, which a plain ALTER ROLE or ALTER
+        // DATABASE is outranked by, the role's own path kept, public added
+        // once, and the connection string's path replaced where it sets one
+        // (SMD-2238). Only when the schema is not on the path already — with
+        // no USAGE it may be, and the GRANT alone is the fix.
+        const vecSchemas = searchPathSchemas(String(vec.path ?? ""), Number(vec.version));
+        const vecOnPath = !!vec.schema && vecSchemas.includes(vec.schema);
+        let vecSource: string | null = null;
+        if (!vec.resolves && vec.schema && !vecOnPath) {
+          try {
+            vecSource = ((await sql`SELECT source FROM pg_settings WHERE name = 'search_path'`) as { source: string }[])[0]?.source ?? null;
+          } catch { /* unread: the statement stands, with its caveat */ }
+        }
+        const vecPathFix = () => pathFix({ schemas: vecSchemas, extension: vec.schema, login: vec.login_ident, role: vec.role_ident, db: vec.db_ident, source: vecSource });
         // What the database says about itself, read ONCE through brain-info.ts —
         // the read brain_info and the keyed /health body make (SMD-2041) — so
         // this row, `migration ledger` and `schema version` below report what
@@ -1283,11 +1295,17 @@ if (configFailed) {
         } else if (vec.usage === false) {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", but role ${vec.role} has no USAGE on that schema, so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist' — SET search_path alone will not help here`,
-              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can), then put it on the path: ${setPath("ALTER ROLE", vec.role_ident)}`);
+              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can)${vecOnPath ? "" : vecSource === "client"
+                ? `  ${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `  then put it on the path: ${vecPathFix()}  Then reconnect.`}`);
         } else {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", which is not on this connection's search_path (role ${vec.role}, database ${vec.db}) — so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist'`,
-              `Put ${vec.schema} on the connection's search_path. Least-scoped (this role only): ${setPath("ALTER ROLE", vec.role_ident)}  — or database-wide: ${setPath("ALTER DATABASE", vec.db_ident)}  then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
+              // A connection string's path is replaced there, beside its other
+              // -c settings; a role's is a setting beside any hnsw.* bounds.
+              vecSource === "client"
+                ? `${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `Put ${quoteIdent(vec.schema)} on the connection's search_path: ${vecPathFix()}  Then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
         }
 
         // One schema-qualified read of every form, signature and body; no name
@@ -1626,7 +1644,8 @@ if (configFailed) {
             // thought_facets as the caller on every delete — every delete of a
             // thought for that one, said separately so an operator whose
             // capture succeeds is not told the check was wrong (seventh pass).
-            const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets");
+            const PROJECTION = ["ob1_ticket_head", "ob1_superseded_by"];
+            const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets" && !PROJECTION.includes(t));
             // 046's audit trigger reads the key's kind from ob1_agents as the caller
             // on every write that carries an actor — captures, edits AND deletes
             // — so that one is named with the trigger (SMD-1730).
@@ -1651,6 +1670,20 @@ if (configFailed) {
               + (snapshotMiss ? " (060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector)" : "")
               + (lineageMiss ? " (061's vector lineage trigger and the write functions record derivations as the caller on every capture and edit, and drop a replaced set's row)" : ""));
             if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
+            // 068's triggers reconcile the node_state projection as the caller on
+            // a write of a ticket row or a pointer, and node_lifecycle() reads it:
+            // a plain capture returns before touching it (SMD-2256).
+            const projectionMiss = PROJECTION.flatMap((t) => missingByTable.get(t) ?? []);
+            if (projectionMiss.length) {
+              // Split by privilege (first review pass): SELECT alone keeps every
+              // lifecycle read working. Any of the four missing breaks the writes
+              // that move a key, a status, a watermark or a pointer — the
+              // triggers read the tables too (second review pass) — and SELECT
+              // missing breaks the reads as well.
+              fails.push((projectionMiss.includes("SELECT") ? "every lifecycle read (node_lifecycle, node_state, search_thoughts' prefer_current) and " : "")
+                + "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included"
+                + " (068's triggers keep the node_state projection as the caller)");
+            }
             const why = ` — so ${fails.join(", and ")} would fail`;
             if (missingByTable.size) {
               const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");
@@ -2081,13 +2114,19 @@ if (configFailed) {
                      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'derivations' AND column_name = 'stale_since') AS has_063,
                      (SELECT w.prosrc LIKE '%ob1:rerun-clears-the-mark%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)')) AS marks_clear,
                      (SELECT w.prosrc LIKE '%supersession_proposals.status = ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)')) AS replaces_stale,
-                     (SELECT w.prosrc LIKE '%p.status <> ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS yields_stale
+                     (SELECT w.prosrc LIKE '%p.status <> ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS yields_stale,
+                     -- 067 (SMD-2297), where its settle function stands: rebuild_derived's body reopens a pass-settled proposal
+                     -- on a text move (its sentinel); 063 re-applied by hand over 067 puts the body back that keeps every rejected row.
+                     to_regprocedure('public.settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS has_067,
+                     (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
+                     (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
+            const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
             type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
@@ -2199,6 +2238,17 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${rebuildOlder.length === 3 ? "the three bodies 063 redefines are" : `${rebuildOlder.join(" and ")} ${rebuildOlder.length === 1 ? "is" : "are"}`} from before 063 (061 or 029 re-applied by hand over it): a rebuild's mark is never cleared by the producer's next write, and a stale proposal is never replaced by the next judgement (SMD-1732). ${coverage}`,
                   ledgerRemedy("063", APPLY_063));
+            } else if (bodies.has_063 && bodies.excludes_lineage !== true) {
+              // 066 (SMD-2292): 029's or 063's candidate body over 066's — the
+              // exclusion of a thought's derived_from members gone, the pass
+              // asks the judge whether a page supersedes its own evidence.
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but consolidation_candidates is from before 066 (migration 066 not yet applied, or 063 re-applied by hand over it): the judge is asked whether a page supersedes its own evidence, and a digest its sources (SMD-2292). ${coverage}`,
+                  ledgerRemedy("066", APPLY_066));
+            } else if (reopenOlder) {
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but rebuild_derived is from before 067 (063 re-applied by hand over it): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again (SMD-2297). ${coverage}`,
+                  ledgerRemedy("067", APPLY_067));
             } else if (Number(c.orphans)) {
               // The other direction (063): a row whose artifact is gone while
               // its thought stands — nothing it describes exists, and the
@@ -2714,18 +2764,41 @@ if (configFailed) {
          * default is REPEATABLE READ or SERIALIZABLE (a role or database
          * setting, a pooler) reads its transaction's snapshot instead, and
          * 042's guard then cannot see a citation committed after that
-         * snapshot — its source goes from under it. A warning, not a refusal:
-         * the server still works, the guarantees named do not (third review
-         * pass, SMD-1712).
+         * snapshot — its source goes from under it. Before 068 a warning, not a
+         * refusal: the server still worked, the guarantees named did not (third
+         * review pass, SMD-1712).
          */
+        // Since 068 REPEATABLE READ is more than a lost guarantee: the node_state
+        // projection's triggers refuse, under it, every write that moves a
+        // ticket's key, status or watermark or a supersedes pointer — captures
+        // naming supersedes, and deletes of ticket rows or of any superseded
+        // thought (the cascade nulling pointers to it), among them — so it
+        // fails, and the image's entrypoint does not start the server;
+        // SERIALIZABLE keeps the projection exact only if every ticket writer
+        // is serializable (SMD-2256, second review pass). The fix names where
+        // the setting comes from (third review pass: a role-in-database or a
+        // connection-string setting outranks the ALTER ROLE it used to name).
         try {
-          const [{ level }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level`) as { level: string }[];
+          const [{ level, projection, source, db }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level,
+                                                            to_regprocedure('public.ob1_node_projection_sync()') IS NOT NULL AS projection,
+                                                            (SELECT source FROM pg_settings WHERE name = 'default_transaction_isolation') AS source,
+                                                            quote_ident(current_database()) AS db`) as { level: string; projection: boolean; source: string; db: string }[];
+          const fixIsolation = source === "database" ? `Set it back where it was changed, on the database: ALTER DATABASE ${db} SET default_transaction_isolation = 'read committed';`
+            : source === "database user" ? `Set it back where it was changed, on this role in this database: ALTER ROLE ${ident} IN DATABASE ${db} SET default_transaction_isolation = 'read committed';`
+            : source === "user" ? `Set it back where it was changed, on the role: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed';`
+            : source === "client" ? "It comes from the connection: remove default_transaction_isolation from the connection string's options (or the pooler's startup parameters)."
+            : source === "configuration file" ? "It comes from the server's configuration: set default_transaction_isolation = 'read committed' in postgresql.conf (or ALTER SYSTEM) and reload."
+            : `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed — pg_settings says the source is ${source}).`;
           if (/^read (committed|uncommitted)$/i.test(level)) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
+          } else if (projection && /^repeatable read$/i.test(level)) {
+            add("transaction isolation", "fail",
+                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included) — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                fixIsolation);
           } else {
             add("transaction isolation", "warn",
-                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source`,
-                `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed).`);
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? "; and 068's node_state projection stays exact only if every writer of ticket rows is serializable" : ""}`,
+                fixIsolation);
           }
         } catch (e) {
           add("transaction isolation", "warn", `could not verify: ${(e as Error).message}`);
@@ -3490,13 +3563,14 @@ if (configFailed) {
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; thoughts: number }[];
             // 063 (SMD-1732): a stale row is a pending verdict whose texts
-            // moved; the next pass replaces one it finds in conflict again,
-            // and one it does not is the reviewer's — said here, since no
-            // other row counts them (third review pass, cold read).
+            // moved; 067 (SMD-2297): the next pass replaces one it finds in
+            // conflict again and settles one it does not — said here, since
+            // no other row counts them (063's third review pass, cold read);
+            // the reviewer's --list shows them, and may decide one sooner.
             const [{ pending: queued, stale: staleQueued }] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'stale')::int AS stale FROM supersession_proposals`;
             const queue = [
               Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "",
-              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again, a reviewer settles one it does not) — cd db && bun consolidate.ts --url $DATABASE_URL --list stale` : "",
+              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not) — cd db && bun consolidate.ts --url $DATABASE_URL --list stale` : "",
             ].filter(Boolean).join("; ");
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {
