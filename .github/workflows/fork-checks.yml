@@ -447,6 +447,14 @@ jobs:
         working-directory: db
         run: bun test-brain-compare.ts
 
+      # SMD-2134. Every db/ script reads its arguments through db/cli.ts: the
+      # scanner's rules, every entry point importing it, and each entry point
+      # run with a flag it does not have (exit 2) and --help (exit 0), before
+      # any database URL is resolved. No database, no model.
+      - name: Flag scanner (every db/ script, no database)
+        working-directory: db
+        run: bun test-cli.ts
+
   db-live:
     name: Schema against real Postgres
     runs-on: ubuntu-24.04

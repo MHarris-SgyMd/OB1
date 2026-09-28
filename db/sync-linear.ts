@@ -115,6 +115,7 @@ import type { Derived } from "./ingest-contract.ts";
 // pass; the self-check holds this file's import closure to db/ and
 // server-portable/).
 import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
+import { commandLine, readNumber } from "./cli.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
 // the markup strip moved to db/ingest-linear.ts (SMD-1867) so the sync and
@@ -1557,28 +1558,16 @@ function selfCheck(): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const TAKES_ONE = new Set(["url", "initiative", "interval", "only"]);
-  const TAKES_NONE = new Set(["dry-run", "loop", "audit", "full", "self-check", "quiet", "allow-refused"]);
-  const USAGE = "  flags: --url <postgres://…>, --initiative <name>, --interval <seconds>, --only <SMD-1,SMD-2>, --dry-run, --loop, --audit, --full, --quiet, --allow-refused, --self-check";
-  const values = new Map<string, string>();
-  const flags = new Set<string>();
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    const name = a.startsWith("--") ? a.slice(2) : null;
-    if (name === null) { console.error(`unknown argument: ${/:\/\//.test(a) ? "<a URL>" : a} (a value where no flag takes one)\n${USAGE}`); process.exit(2); }
-    if (values.has(name) || flags.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); }
-    if (TAKES_ONE.has(name)) {
-      if (i + 1 >= args.length || args[i + 1].startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
-      values.set(name, args[++i]);
-    } else if (TAKES_NONE.has(name)) flags.add(name);
-    else { console.error(`unknown argument: ${a}\n${USAGE}`); process.exit(2); }
-  }
-  if (flags.has("self-check")) process.exit(await selfCheck());
+  // Every argument accounted for (db/cli.ts), as the other db/ scripts do it.
+  const cli = commandLine("sync-linear.ts", {
+    url: "one", initiative: "one", interval: "one", only: "one",
+    "dry-run": "none", loop: "none", audit: "none", full: "none", "self-check": "none", quiet: "none", "allow-refused": "none",
+  }, { hints: { url: "<postgres://…>", initiative: "<name>", interval: "<seconds>", only: "<SMD-1,SMD-2>" } });
+  if (cli.has("self-check")) process.exit(await selfCheck());
   // --audit is the whole board's census; --only would be read by nothing on that branch (fourth review pass).
-  if (flags.has("audit") && values.has("only")) { console.error(`--audit takes no --only: the census is the whole board.\n${USAGE}`); process.exit(2); }
+  if (cli.has("audit") && cli.has("only")) { console.error("--audit takes no --only: the census is the whole board."); process.exit(2); }
   // …nor --full or --dry-run: the audit writes nothing and compares the census, not the text (eleventh review pass).
-  for (const f of ["full", "dry-run"]) if (flags.has("audit") && flags.has(f)) { console.error(`--audit takes no --${f}: it writes nothing and compares the census alone.\n${USAGE}`); process.exit(2); }
+  for (const f of ["full", "dry-run"] as const) if (cli.has("audit") && cli.has(f)) { console.error(`--audit takes no --${f}: it writes nothing and compares the census alone.`); process.exit(2); }
 
   // Every knob from the environment, else the `.env` files on db/env.ts's search
   // path — the provider knobs too, so a checkout run resolves the endpoint and
@@ -1592,15 +1581,17 @@ async function main(): Promise<void> {
     console.error(`LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  Read: ${describeEnv(envSources)}`);
     process.exit(2);
   }
-  const url = values.get("url") ?? process.env.DATABASE_URL;
+  const url = cli.value("url") ?? process.env.DATABASE_URL;
   if (!url) { console.error("No database URL. Pass --url or set DATABASE_URL."); process.exit(2); }
-  const initiative = values.get("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
-  const intervalRaw = values.get("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
-  const interval = intervalRaw ? Number(intervalRaw) : DEFAULT_INTERVAL_S;
-  if (!Number.isInteger(interval) || interval < 10) { console.error(`--interval / OB1_BOARD_SYNC_INTERVAL must be a whole number of seconds, at least 10 (got "${intervalRaw}").`); process.exit(2); }
-  const dryRun = flags.has("dry-run");
-  const quiet = flags.has("quiet");
-  const only = values.get("only")?.split(",").map((s) => s.trim()).filter(Boolean);
+  const initiative = cli.value("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
+  const intervalRaw = cli.value("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
+  // Seconds as decimal digits, by the scanner's rule: Number() read "0x10" as 16 and "1e3" as 1000.
+  const intervalRead = intervalRaw ? readNumber("--interval / OB1_BOARD_SYNC_INTERVAL", intervalRaw, { min: 10 }) : DEFAULT_INTERVAL_S;
+  if (typeof intervalRead !== "number") { console.error(`${intervalRead.error} (whole seconds).`); process.exit(2); }
+  const interval = intervalRead;
+  const dryRun = cli.has("dry-run");
+  const quiet = cli.has("quiet");
+  const only = cli.value("only")?.split(",").map((s) => s.trim()).filter(Boolean);
 
   const gql = linearClient(key);
   // One connection each: the reader and the store, serial by construction.
@@ -1620,7 +1611,7 @@ async function main(): Promise<void> {
   // nothing revisits until the ticket next moves in Linear.
   const wholesale = refusesEverything(cfg.embeddings, cfg.egress)
     ?? (cfg.chat.base !== cfg.embeddings.base || cfg.chat.local !== cfg.embeddings.local ? refusesEverything(cfg.chat, cfg.egress) : null);
-  if (wholesale && !flags.has("allow-refused") && !flags.has("audit")) {
+  if (wholesale && !cli.has("allow-refused") && !cli.has("audit")) {
     console.error(`  Refusing to run: ${wholesale}. Declare the endpoint local (OB1_LLM_LOCAL=1 / OB1_CHAT_LOCAL=1) when it is, allow this writer (OB1_EGRESS_ALLOW=actor:${ACTOR_NAME}), or pass --allow-refused to land every ticket without the refused call's result on purpose.\n  Read: ${describeEnv(envSources)}`);
     process.exit(2);
   }
@@ -1632,7 +1623,7 @@ async function main(): Promise<void> {
   // re-patched every pass, forever (fifth review pass, independent read). The
   // Writer's contract says the hook is absent on such a brain; this is where.
   const has053 = ((await sql`SELECT to_regproc('record_thought_source') IS NOT NULL AS ok`)[0] as { ok: boolean }).ok;
-  if (!has053 && !flags.has("audit")) console.error(`  migration 053 is not applied on this brain: tickets land without their canonical, links and mentions until it is (cd db && bun migrate.ts --url …)`);
+  if (!has053 && !cli.has("audit")) console.error(`  migration 053 is not applied on this brain: tickets land without their canonical, links and mentions until it is (cd db && bun migrate.ts --url …)`);
   // One run name per pass, for thought_sources.ingest_run (SMD-1867); a loop's
   // passes are told apart by it.
   let run = runName(SELF);
@@ -1699,7 +1690,7 @@ async function main(): Promise<void> {
     const readRows: ReadRows = (scanHeaders, claimed) => readTicketRows(sql, { scanHeaders, claimed });
     // The board the preflight resolved serves the first pass; later passes ask again, so a project added to the initiative is seen.
     const board = resolved; resolved = undefined;
-    if (flags.has("audit")) {
+    if (cli.has("audit")) {
       const { initiative: name, projects, census, plan } = await planBoard({ gql, readRows, initiative, full: false, scan: true, board });
       console.log(`  board: ${name} — ${projects.length} project(s), ${census.length} issue(s)`);
       console.log(`  missing ${plan.missing.length}${plan.missing.length ? ` (${plan.missing.join(", ")})` : ""}`);
@@ -1710,7 +1701,7 @@ async function main(): Promise<void> {
       console.log(`  in lockstep: ${drift === 0 ? "yes" : "NO"}  (${Date.now() - t0} ms)`);
       return drift ? 1 : 0;
     }
-    const report = await runPass({ gql, readRows, writer, initiative, full: flags.has("full"), only, board });
+    const report = await runPass({ gql, readRows, writer, initiative, full: cli.has("full"), only, board });
     console.log(formatReport(report, dryRun));
     console.log(`  ${dryRun ? "dry run — nothing written" : "done"} (${Date.now() - t0} ms)`);
     return report.errors.length ? 1 : 0;
@@ -1726,7 +1717,7 @@ async function main(): Promise<void> {
     // Configuration exits 2; a transport error is a pass that failed — under
     // --loop the next pass retries, a one-shot run exits 1 (twelfth pass).
     console.error(`  ${(e as Error).message}`);
-    if (e instanceof BoardConfigError || !flags.has("loop")) { await store.close(); await sql.close(); process.exit(e instanceof BoardConfigError ? 2 : 1); }
+    if (e instanceof BoardConfigError || !cli.has("loop")) { await store.close(); await sql.close(); process.exit(e instanceof BoardConfigError ? 2 : 1); }
   }
 
   // The signal handlers serve the one-shot pass too: a Ctrl-C mid-chain would
@@ -1739,7 +1730,7 @@ async function main(): Promise<void> {
 
   let code = 0;
   try {
-    if (!flags.has("loop")) { code = await once(); return; }
+    if (!cli.has("loop")) { code = await once(); return; }
     console.log(`  ${SELF}: a pass every ${interval} s against ${initiative}${dryRun ? " (dry run)" : ""}; SIGTERM/SIGINT ends the loop after the issue in hand`);
     while (!stopping) {
       console.log(`▸ ${new Date().toISOString()}`);

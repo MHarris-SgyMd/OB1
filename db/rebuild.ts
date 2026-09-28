@@ -54,45 +54,39 @@
  */
 
 import { SQL } from "bun";
+import { commandLine } from "./cli.ts";
+import { staleStandings, staleStandingsText, STALE_STANDING_ROWS_SQL, type StaleStandingRow } from "../server-portable/consolidate.ts";
 
-const args = process.argv.slice(2);
-const flag = (name: string): string | undefined => {
-  const i = args.indexOf(`--${name}`);
-  if (i < 0) return undefined;
-  const v = args[i + 1];
-  if (v === undefined || v.startsWith("--")) {
-    console.error(`--${name} needs a value`);
-    process.exit(2);
-  }
-  return v;
-};
-const has = (name: string) => args.includes(`--${name}`);
+// Every argument accounted for (db/cli.ts, SMD-2134): a flag this door does not
+// have is refused rather than ignored, and a blank --reason is refused as every
+// flag's blank value is (it is recorded on every row marked).
+const cli = commandLine("rebuild.ts", {
+  url: "one", input: "one", reason: "one", fingerprints: "one", limit: "one",
+  gone: "none", force: "none", orphans: "none", status: "none", "dry-run": "none",
+}, { hints: { url: "<postgres://…>", input: "<thought id>", reason: "<text> (with --input)", fingerprints: "<fp1,fp2> (with --gone)", limit: "<N> (with --orphans)", gone: "(with --input)", force: "(with --input)" } });
 
-const url = flag("url") ?? process.env.DATABASE_URL;
+const url = cli.value("url") ?? process.env.DATABASE_URL;
 if (!url) {
   console.error("No database URL. Pass --url or set DATABASE_URL.");
   process.exit(2);
 }
-const INPUT = flag("input");
-const ORPHANS = has("orphans");
-const STATUS = has("status");
-const GONE = has("gone");
-const FORCE = has("force");
-const DRY = has("dry-run");
-const limitRaw = flag("limit");
-if (limitRaw !== undefined && !/^\d+$/.test(limitRaw)) {
-  console.error(`--limit takes a whole number, got "${limitRaw}"`);
-  process.exit(2);
-}
-const LIMIT = Math.max(1, Math.min(Number(limitRaw ?? 500), 10000));
-const FINGERPRINTS = flag("fingerprints")?.split(",").map((s) => s.trim()).filter(Boolean) ?? null;
+const INPUT = cli.value("input");
+const ORPHANS = cli.has("orphans");
+const STATUS = cli.has("status");
+const GONE = cli.has("gone");
+const FORCE = cli.has("force");
+const DRY = cli.has("dry-run");
+// Decimal digits (cli.ts's rule), then held to 1..10,000 as before: 0 reads as 1.
+const LIMIT = Math.max(1, Math.min(cli.int("limit", { absent: 500, min: 0 }), 10000));
+const FINGERPRINTS = cli.value("fingerprints")?.split(",").map((s) => s.trim()).filter(Boolean) ?? null;
 const modes = [INPUT !== undefined, ORPHANS, STATUS].filter(Boolean).length;
 if (modes !== 1) {
   console.error("Say one thing: --input <id> [--reason …] [--gone [--fingerprints …]] [--force] [--dry-run] | --orphans [--limit N] [--dry-run] | --status");
   process.exit(2);
 }
+// What is allowed, not what was given (cli.ts's rule): the value may be a URL given without --url.
 if (INPUT !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(INPUT)) {
-  console.error(`--input takes a thought id (a UUID), got "${INPUT}"`);
+  console.error("--input takes a thought id (a UUID)");
   process.exit(2);
 }
 if ((GONE || FORCE || FINGERPRINTS) && INPUT === undefined) {
@@ -103,18 +97,14 @@ if (FINGERPRINTS && !GONE) {
   console.error("--fingerprints goes with --gone: the earlier texts' fingerprints are what a leaving thought's snapshot rows are found by");
   process.exit(2);
 }
-const reasonRaw = flag("reason");
-if (reasonRaw !== undefined && reasonRaw.trim() === "") {
-  console.error("--reason needs words: it is recorded on every row marked");
-  process.exit(2);
-}
+const reasonRaw = cli.value("reason");
 // A flag outside its mode is a usage error, not a silent no-op (second
 // review pass: --reason on the sweep landed nowhere — the sweep marks no row).
 if (reasonRaw !== undefined && INPUT === undefined) {
   console.error("--reason goes with --input: the sweep marks no row and --status writes nothing, so there is nothing to record it on");
   process.exit(2);
 }
-if (limitRaw !== undefined && !ORPHANS) {
+if (cli.has("limit") && !ORPHANS) {
   console.error("--limit goes with --orphans");
   process.exit(2);
 }
@@ -156,8 +146,8 @@ function printReport(r: Report): void {
   console.log(`  rebuilt:     ${r.rebuilt} (a vector restored from the snapshot at the model — the one re-derivation the database owns${r.force ? "; or, under --force, a vector at the configured model whose text did not move, its record renewed" : ""})`);
   console.log(`  enqueued:    ${r.enqueued} (thought, pool) claim(s) for the workers`);
   console.log(`  deleted:     ${r.deleted} (lineage rows whose artifact is gone${r.input_gone ? "; the windows, the graph and the snapshot rows the input keyed" : ""})`);
-  console.log(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} pending proposal(s) set stale (their status is the mark; the next consolidate pass replaces one it finds in conflict again, a reviewer settles one it does not)` : ""}`);
-  console.log(`  kept:        ${r.kept} (a structured pass reads its source, not the text; a decided proposal is a reviewer's)`);
+  console.log(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, a generated page section, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} proposal(s) set stale — pending ones, and ones the consolidate pass itself had settled (067) — their status the mark; the next pass replaces one it finds in conflict again and settles one it does not` : ""}`);
+  console.log(`  kept:        ${r.kept} (a structured pass reads its source, not the text; a person's decision on a proposal stands)`);
   console.log(`  current:     ${r.current} (nothing moved)${r.legacy ? `; ${r.legacy} legacy row(s) read current by construction — --force re-runs them` : ""}`);
   if (r.input_gone) console.log(`  cascade:     ${r.cascading.proposals} proposal(s) and ${r.cascading.lineage_rows} lineage row(s) go with the row delete (029's and 061's triggers)`);
   if (r.irreproducible.length) {
@@ -209,13 +199,19 @@ try {
              (SELECT count(*)::int FROM orph) AS orphans,
              (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
              (SELECT count(*)::int FROM supersession_proposals WHERE status = 'stale') AS stale_proposals`) as { rows: number; by_kind: Record<string, number> | null; marked: number; stale: number; orphans: number; legacy: number; stale_proposals: number }[];
+    // 067: where each stale row stands against the judge pools — the one read
+    // and rank db/consolidate.ts's --status uses (server-portable/consolidate.ts),
+    // so the two doors never disagree (first review pass, mutant: a copy here
+    // read one way while the worker's read another); keyless here, so a
+    // failed or live claim is named with its judge key.
+    const standings = staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], null);
     const bound = Number(c.rows) >= 10001 ? " (the first 10,001 lineage rows read; the rest not)" : "";
     console.log(`  lineage:     ${c.rows} row(s)${bound}: ${Object.entries(c.by_kind ?? {}).map(([k, n]) => `${n} ${k}`).join(", ") || "none"}`);
     console.log(`  stale:       ${c.stale} row(s) whose input's text moved since (the census's read) — bun db/rebuild.ts --input <id> acts on a thought's`);
     console.log(`  marked:      ${c.marked} row(s) await a re-run rebuild_derived asked for`);
     console.log(`  orphans:     ${c.orphans} row(s) whose artifact is gone${Number(c.orphans) ? " — bun db/rebuild.ts --orphans deletes them" : ""}`);
     console.log(`  legacy:      ${c.legacy} row(s) backfilled by 061 at the thought's current text (read as current; --force re-records a vector and re-runs the rest)`);
-    console.log(`  proposals:   ${c.stale_proposals} stale (a text moved under a pending verdict; the next consolidate pass replaces one it finds in conflict again — one it does not stays for a reviewer: bun db/consolidate.ts --list stale / --reject)`);
+    console.log(`  proposals:   ${c.stale_proposals} stale (a text moved under the verdict${standings.total ? `: ${staleStandingsText(standings, null, "bun db/consolidate.ts --retry-failed")}` : ""}; the pass replaces one it finds in conflict again and settles one it does not — a reviewer may decide one sooner: bun db/consolidate.ts --list stale)`);
     const pools = (await sql`SELECT work_type AS w, count(*)::int AS n FROM thought_work_claims WHERE status = 'pending' GROUP BY 1 ORDER BY 1`) as { w: string; n: number }[];
     console.log(`  pools:       ${pools.length ? pools.map((p) => `${p.w} (${p.n} pending)`).join(", ") : "nothing pending"}`);
     for (const p of pools) console.log(`    ${p.w}  →  ${drainer(p.w)}`);

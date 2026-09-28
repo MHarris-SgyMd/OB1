@@ -53,6 +53,7 @@
  */
 
 import { decodeUtf8Strict, IDENTITY_MAX, LINK_RELATIONS, normaliseLinks, normaliseMentions, SYSTEM_RE, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
+import { commandLine } from "./cli.ts";
 import { ENTITY_TYPES } from "../server-portable/entities.ts";
 
 /** The keys a line may carry — `Ingested`'s, less `derived`. */
@@ -620,7 +621,7 @@ export function selfCheck(): number {
 }
 
 if (import.meta.main) {
-  if (process.argv.includes("--self-check")) process.exit(selfCheck());
+  if (commandLine("ingest-items.ts", { "self-check": "none" }).has("self-check")) process.exit(selfCheck());
   console.error("ingest-items.ts is a library — the file adapter for db/ingest-records.ts --items. `--self-check` runs its pure rules.");
   process.exit(2);
 }

@@ -21,8 +21,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EMBEDDING_DIM } from "./config.mjs";
 import { dropSchema, runMigrator } from "./test-support.ts";
+import { commandLine } from "./cli.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+commandLine("measure-1288.ts", {}, { note: "it reads DATABASE_URL" });
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
   console.error("DATABASE_URL is not set. Use ./with-postgres.sh bun measure-1288.ts");

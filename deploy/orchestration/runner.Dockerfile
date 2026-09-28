@@ -21,7 +21,7 @@ WORKDIR /app
 # The pipeline's import graph, as the checkout has it, so `bun db/ingest-records.ts`
 # and `bun db/reembed.ts` run here exactly as from a checkout. Not bundled: a
 # bundle runs scripts/fork-index.ts's main block, which rewrites FORK.md.
-COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts db/ingest-*.ts db/reembed.ts db/lease.ts /app/db/
+COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts db/cli.ts db/ingest-*.ts db/reembed.ts db/lease.ts /app/db/
 COPY server-portable/*.ts /app/server-portable/
 COPY scripts/fragments.ts scripts/fork-index.ts /app/scripts/
 COPY evals/linear-corpus.ts /app/evals/
