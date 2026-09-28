@@ -17,6 +17,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { networkInterfaces } from "node:os";
 import {
   LOOPBACK_HOSTS, NO_DATABASE_URL, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, UNPARSEABLE_DATABASE_URL,
   databaseUrl, hostOf, mayReset, notThrowaway, openSql, remoteDbAllowed, resetRefusal,
@@ -154,6 +155,46 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   ok(through.code === 1 && /could not connect to --from/.test(through.err) && !through.err.includes(MARK), `…and with ${REMOTE_DB_FLAG}=1 it goes on, to the unreachable --from (exit ${through.code}: ${through.err.trim().split("\n")[0]})`);
   const retiredTier = refresh("postgres://u@db.example.com:5432/b", { [RETIRED_REMOTE_DB_FLAG]: "1" });
   ok(retiredTier.code === 1 && /not plainly this machine/.test(retiredTier.err), `…but not with the retired name (exit ${retiredTier.code})`);
+
+  // "Before connecting", counted. The names above do not resolve, so a
+  // connection opened before the guard would fail unseen; a listener on this
+  // machine's own non-loopback address is remote to the rule and reachable, so
+  // one is counted. The children run asynchronously so the listener accepts
+  // while they run; each socket is closed on arrival (review pass 6).
+  const lan = Object.values(networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal)?.address;
+  if (lan === undefined) {
+    console.log("  (no non-loopback IPv4 address here: the counted refusals are skipped)");
+  } else {
+    let seen = 0;
+    const listener = Bun.listen({ hostname: lan, port: 0, socket: { open(s) { seen++; s.end(); }, data() {} } });
+    // A control only has to show the listener is reached: Bun's client retries
+    // a socket closed on arrival, so the child is stopped at its first connection.
+    const counted = async (argv: string[], env: Record<string, string> = {}, control = false) => {
+      seen = 0;
+      const p = Bun.spawn(["bun", "--no-env-file", ...argv], { cwd: HERE, env: { ...BASE_ENV, ...env }, stdout: "pipe", stderr: "pipe" });
+      const killer = setTimeout(() => p.kill(), 30_000);
+      const watch = control ? setInterval(() => { if (seen > 0) p.kill(); }, 20) : undefined;
+      const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+      const code = await p.exited;
+      clearTimeout(killer);
+      if (watch) clearInterval(watch);
+      await Bun.sleep(50);
+      return { code, out, err, seen };
+    };
+    const at = (db: string) => `postgres://u:${MARK}@${lan}:${listener.port}/${db}`;
+    for (const fn of ["dropSchema", "resetSchema"] as const) {
+      const r = await counted(["-e", `import { ${fn} } from "./test-support.ts"; await ${fn}(${JSON.stringify(at("x"))}, {} as never); console.log("dropped");`]);
+      ok(r.code === 2 && r.seen === 0 && /Refusing to drop the schema: .* is not a loopback host/.test(r.err) && !r.err.includes(MARK) && !r.out.includes("dropped"), `${fn} at a reachable non-loopback address refuses with no connection opened (exit ${r.code}, ${r.seen} connection(s))`);
+    }
+    const dropControl = await counted(["-e", `import { dropSchema } from "./test-support.ts"; await dropSchema(${JSON.stringify(at("x"))});`], { [REMOTE_DB_FLAG]: "1" }, true);
+    ok(dropControl.seen > 0, `…the control: with ${REMOTE_DB_FLAG}=1 dropSchema does reach the listener (${dropControl.seen} connection(s), exit ${dropControl.code})`);
+    const REFRESH = ["tier.ts", "--refresh", "--from", at("a"), "--to", at("b")];
+    const tierRefused = await counted(REFRESH);
+    ok(tierRefused.code === 1 && tierRefused.seen === 0 && /--to is not plainly this machine/.test(tierRefused.err) && !tierRefused.err.includes(MARK), `tier.ts --refresh with both sides at a reachable non-loopback address refuses with no connection to either (exit ${tierRefused.code}, ${tierRefused.seen} connection(s))`);
+    const tierControl = await counted(REFRESH, { [REMOTE_DB_FLAG]: "1" }, true);
+    ok(tierControl.seen > 0, `…the control: with ${REMOTE_DB_FLAG}=1 --refresh does reach the listener (${tierControl.seen} connection(s), exit ${tierControl.code})`);
+    listener.stop(true);
+  }
 }
 
 // ---------------------------------------------------------------------------
