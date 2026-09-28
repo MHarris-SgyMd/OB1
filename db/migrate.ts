@@ -547,8 +547,8 @@ async function reportSeeds(m: Migration): Promise<void> {
  * functions included — 021's update_thought landed there and vanished with the
  * transaction when the fifth review pass tried naming it first — so a role's
  * path is set, for the transaction, to itself without pg_temp (read as
- * Postgres reads it, rebuilt quoted: searchPathWithoutTemp, SMD-2247) — a no-op where it is absent,
- * and not restored: unlisted, pg_temp is still searched first and is never a
+ * Postgres reads it, rebuilt quoted: searchPathWithoutTemp, SMD-2247) — a
+ * no-op where it is absent, and not restored: unlisted, pg_temp is still searched first and is never a
  * creation target, so nothing after 021 differs — and that the name resolves
  * to the view is checked before the file runs,
  * and the file is refused if not. Creation targets are then unaffected: 021's

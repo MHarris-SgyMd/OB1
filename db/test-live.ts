@@ -5197,19 +5197,25 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       // A path stored raw (SET … FROM CURRENT keeps the text as written) is
       // read as Postgres reads it (SMD-2247): NoWhere folds to nowhere, a tab
       // separates, a quoted name keeps its case. Kept literally it came back
-      // as "NoWhere" and "\tpublic", two other schemas.
+      // as "NoWhere" and "\tpublic", two other schemas. temp_tablespaces the
+      // same, keeping its empty entry — the database's default tablespace,
+      // one of the list's members — which the path's reading drops.
       const rawSrc = new SQL({ url: urlOf(setSrc), max: 1 }), rawDst = new SQL({ url: urlOf(setDst), max: 1 });
-      let read: string | undefined;
+      let read: Record<string, string> = {};
       try {
         await rawSrc`SELECT set_config('search_path', ${'NoWhere,\tpublic, "Kept"'}, false)`;
         await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET search_path FROM CURRENT`);
-        read = (await databaseSettings(rawSrc)).search_path;
+        await rawSrc`SELECT set_config('temp_tablespaces', ${'"", PG_DEFAULT'}, false)`;
+        await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET temp_tablespaces FROM CURRENT`);
+        read = await databaseSettings(rawSrc);
         await applyDatabaseSettings(rawDst, await databaseSettings(rawSrc));
       } finally { await rawSrc.close(); await rawDst.close(); }
-      const [rawStored, copiedPath] = [(await rawOf(setSrc)).search_path, (await rawOf(setDst)).search_path];
-      assert(rawStored === 'NoWhere,\tpublic, "Kept"' && copiedPath === 'nowhere, public, "Kept"',
-             `a raw path on the source is copied as the schemas it names (source ${JSON.stringify(rawStored)}, target ${JSON.stringify(copiedPath)})`);
-      assert(read === '"nowhere", "public", "Kept"', `…read on the source, as its server reads it, each name quoted (${JSON.stringify(read)})`);
+      const [rawSrcCfg, rawDstCfg] = [await rawOf(setSrc), await rawOf(setDst)];
+      assert(rawSrcCfg.search_path === 'NoWhere,\tpublic, "Kept"' && rawDstCfg.search_path === 'nowhere, public, "Kept"',
+             `a raw path on the source is copied as the schemas it names (source ${JSON.stringify(rawSrcCfg.search_path)}, target ${JSON.stringify(rawDstCfg.search_path)})`);
+      assert(read.search_path === '"nowhere", "public", "Kept"', `…read on the source, as its server reads it, each name quoted (${JSON.stringify(read.search_path)})`);
+      assert(rawSrcCfg.temp_tablespaces === '"", PG_DEFAULT' && read.temp_tablespaces === '"", "pg_default"' && rawDstCfg.temp_tablespaces === '"", pg_default',
+             `…and a raw temp_tablespaces keeps its empty entry, the default tablespace, and folds its name (source ${JSON.stringify(rawSrcCfg.temp_tablespaces)}, read ${JSON.stringify(read.temp_tablespaces)}, target ${JSON.stringify(rawDstCfg.temp_tablespaces)})`);
     } finally {
       for (const db of [setSrc, setDst]) await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     }

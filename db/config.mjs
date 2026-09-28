@@ -1377,7 +1377,7 @@ export const HNSW_SEED_SCAN_MEM_MULTIPLIER = HNSW_SEEDS["hnsw.scan_mem_multiplie
  */
 export const HNSW_BOUNDS = Object.keys(HNSW_SEEDS);
 
-/** A database name as an SQL identifier — `open-brain` and `OpenBrain` both need the quotes. */
+/** A name as an SQL identifier, always quoted — a database's (`open-brain` and `OpenBrain` both need the quotes), a schema's or a tablespace's. */
 export function quoteIdent(name) {
   return name == null ? "<database>" : `"${String(name).replace(/"/g, '""')}"`;
 }
@@ -1399,11 +1399,14 @@ export function quoteIdent(name) {
  * vertical tab, nothing outside ASCII, so JavaScript's trim() is wrong here;
  * a quoted name kept as written, `""` inside it a quote; an unquoted name
  * folded A–Z only, as downcase_identifier does in a UTF-8 database. The empty
- * name a `''` path reads back as is dropped. Settings Postgres rejects (`a,,b`,
- * `a b`, an unterminated quote) never reach here: its check hook refuses them
- * on every route. `serverVersionNum` is the server's `server_version_num`.
+ * name a `''` path reads back as is dropped — it names no schema — unless
+ * `keepEmpty`: in temp_tablespaces, the other list Postgres reads this way,
+ * `""` is the database's default tablespace, a member of the list. Settings
+ * Postgres rejects (`a,,b`, `a b`, an unterminated quote) never reach here: its
+ * check hook refuses them on every route. `serverVersionNum` is the server's
+ * `server_version_num`.
  */
-export function searchPathSchemas(setting, serverVersionNum) {
+export function searchPathSchemas(setting, serverVersionNum, keepEmpty = false) {
   const isSpace = (c) =>
     c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || (c === "\v" && serverVersionNum >= 170000);
   const names = [];
@@ -1423,7 +1426,7 @@ export function searchPathSchemas(setting, serverVersionNum) {
     }
     while (i < setting.length && setting[i] !== ",") i++;
     i++;
-    if (name !== "") names.push(name);
+    if (name !== "" || keepEmpty) names.push(name);
   }
   return names;
 }

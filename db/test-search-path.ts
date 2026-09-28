@@ -40,7 +40,7 @@
  */
 
 import { SQL } from "bun";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EMBEDDING_DIM, EMBEDDING_MODEL, searchPathWithoutTemp } from "./config.mjs";
@@ -321,18 +321,28 @@ try {
     // "PG_TEMP" is a schema of that name (which a case-blind match dropped),
     // and an unquoted PG_TEMP and a quoted "pg_temp" are the temp schema.
     await freshSession(async (sql) => {
-      await sql.unsafe(`CREATE SCHEMA "\u00a0public"; CREATE SCHEMA "PG_TEMP"`);
-      const raw = `"$user",\u00a0public, "PG_TEMP", PG_TEMP, "pg_temp"`;
+      await sql.unsafe(`CREATE SCHEMA "\u00a0public"; CREATE SCHEMA "PG_TEMP"; CREATE SCHEMA "a""b"`);
+      const raw = `"$user",\u00a0public, "PG_TEMP", PG_TEMP, "pg_temp", "a""b"`;
       const [{ path, version, before }] = await sql`
         SELECT set_config('search_path', ${raw}, false) AS path, current_setting('server_version_num')::int AS version,
                current_schemas(false)::text[] AS before`;
       const rewritten = searchPathWithoutTemp(path, version);
       const [{ after }] = await sql`SELECT set_config('search_path', ${rewritten}, false), current_schemas(false)::text[] AS after`;
-      assert(rewritten === '"$user", "\u00a0public", "PG_TEMP"',
-             `the NBSP-prefixed name and the quoted "PG_TEMP" are kept, PG_TEMP and "pg_temp" dropped (${JSON.stringify(rewritten)})`);
-      assert(JSON.stringify(after) === JSON.stringify(["\u00a0public", "PG_TEMP"]) && JSON.stringify(after) === JSON.stringify(before),
+      assert(rewritten === '"$user", "\u00a0public", "PG_TEMP", "a""b"',
+             `the NBSP-prefixed name, the quoted "PG_TEMP" and a name holding a quote are kept, PG_TEMP and "pg_temp" dropped (${JSON.stringify(rewritten)})`);
+      assert(JSON.stringify(after) === JSON.stringify(["\u00a0public", "PG_TEMP", 'a"b']) && JSON.stringify(after) === JSON.stringify(before),
              `…and Postgres resolves the rewritten path to the raw one's schemas, the real public not among them (raw ${JSON.stringify(before)}, rewritten ${JSON.stringify(after)})`);
     });
+    // The helper is held above; that the migrator uses it is read from its
+    // source, since no end-to-end run tells the paths apart: a schema kept
+    // ahead of public takes every file after the hole, whichever splitter
+    // ran. Its one set_config of the path goes through the helper, with the
+    // server's version read beside the path.
+    const migrator = readFileSync(join(HERE, "migrate.ts"), "utf8");
+    const setPaths = migrator.match(/set_config\('search_path'[^\n]*/g) ?? [];
+    assert(setPaths.length === 1 && setPaths[0].includes("${searchPathWithoutTemp(path, version)}")
+             && /current_setting\('server_version_num'\)::int AS version,/.test(migrator),
+           `…and migrate.ts sets 021's path through it, under the server's version (${setPaths.join(" | ") || "no set_config of search_path found"})`);
   }
 } finally {
   // ci-parity.sh shares one Postgres: leave pgvector in public, this role's
@@ -345,7 +355,7 @@ try {
     EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET hnsw.max_scan_tuples', session_user, current_database());
   END $r$`));
   await freshSession((sql) => sql.unsafe(`DROP ROLE IF EXISTS ob1_nousage`));
-  await freshSession((sql) => sql.unsafe(`DROP SCHEMA IF EXISTS "\u00a0public", "PG_TEMP"`));
+  await freshSession((sql) => sql.unsafe(`DROP SCHEMA IF EXISTS "\u00a0public", "PG_TEMP", "a""b"`));
   await restoreVectorToPublic(URL_);
   await dropSchema(URL_);
 }

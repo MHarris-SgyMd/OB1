@@ -369,7 +369,8 @@ const LIST_SETTINGS = new Set(["local_preload_libraries", "search_path", "sessio
  * SplitIdentifierString: searchPathSchemas, so an unquoted name folds and only
  * Postgres's whitespace separates (SMD-2247). A value stored by `SET … FROM
  * CURRENT` is the text as written — `NoWhere` is the schema nowhere, never
- * `"NoWhere"`.
+ * `"NoWhere"`. temp_tablespaces keeps an empty entry, the database's default
+ * tablespace, which search_path's reading drops.
  */
 const IDENTIFIER_LISTS = new Set(["search_path", "temp_tablespaces"]);
 const SETTING_NAME = /^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)*$/i;
@@ -390,7 +391,7 @@ export async function databaseSettings(sql: SQL): Promise<Record<string, string>
   const { ["ob1.refresh_target"]: _mark, ...settings } = parseSetConfig(row?.cfg);
   for (const [name, value] of Object.entries(settings)) {
     if (!SETTING_NAME.test(name)) throw new Error(`database setting ${JSON.stringify(name)} is not a name this tool can write back`);
-    if (IDENTIFIER_LISTS.has(name)) settings[name] = searchPathSchemas(value, version).map(quoteIdent).join(", ");
+    if (IDENTIFIER_LISTS.has(name)) settings[name] = searchPathSchemas(value, version, name === "temp_tablespaces").map(quoteIdent).join(", ");
   }
   return settings;
 }
@@ -436,10 +437,13 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
     if (!(name in settings)) await dst.unsafe(`ALTER DATABASE ${target} RESET ${name}`);
   }
   for (const [name, value] of Object.entries(settings)) {
+    // Each list element a string literal, never a quoted identifier: `""` is
+    // no identifier, and temp_tablespaces' empty entry must be written. For
+    // these settings Postgres stores a literal element as it would the
+    // identifier, quoted where the name needs it.
+    const literal = (v: string) => `'${v.replaceAll("'", "''")}'`;
     const elements = LIST_SETTINGS.has(name) ? listElements(value) : null;
-    const rhs = elements === null ? `'${value.replaceAll("'", "''")}'`
-      : elements.length === 0 || (elements.length === 1 && elements[0] === "") ? "''"
-      : elements.map((e) => `"${e.replaceAll('"', '""')}"`).join(", ");
+    const rhs = elements === null ? literal(value) : elements.length === 0 ? "''" : elements.map(literal).join(", ");
     await dst.unsafe(`ALTER DATABASE ${target} SET ${name} = ${rhs}`);
   }
 }
