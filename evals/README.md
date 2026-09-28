@@ -2627,9 +2627,15 @@ the window was exact on 59 of 59.
 +2.8 ms over 2.4 on the dogfood brain — `node_state` computes the whole brain's
 lifecycle on every call. The budget pre-registered (added cost at most the
 hybrid's own median at 10,000) was missed; the flag shipped opt-in on the
-maintainer's call, the cost stated in the flag's description, and SMD-2256
-narrows `node_state` for a list of ids. The numbers are one machine's: a review
-pass measured +18.8 ms over 1.6 at 10,000 — over budget either way.
+maintainer's call, the cost stated in the flag's description. The numbers are
+one machine's: a review pass measured +18.8 ms over 1.6 at 10,000 — over budget
+either way. Migration 068 (SMD-2256) stores the heads and superseders
+`node_state` read, kept current by triggers on `thoughts`, and re-creates the
+wrapper in plpgsql: in the bench's run of that code the arm adds +0.50 ms at
+10,000 with no needle (the difference of medians, alternating order — inside
+the budget, 0.88) and +1.11 at 100,000, about all of it the hybrid's own cost
+at the 4N window; the
+eval's SQL-equals-oracle check is unchanged by it (the rows are 058's).
 
 **A tie-break, after the first review pass.** On a query that is only literals
 every row without one scores 0, and 0 × 0.25 is 0, so the demoted zeros stayed

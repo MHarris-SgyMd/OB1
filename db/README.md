@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2248 assertions: 2248 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty-seven (67) migrations applied, and
+`bun test-schema.ts` prints `2261 assertions: 2261 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports sixty-eight (68) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,8 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
+068 SMD-2256).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -427,15 +428,17 @@ INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 `node_lifecycle_types()` and `node_settled_types()` (the six status types this
 schema knows, and the two that settle a node); `node_lifecycle()` (per thought:
 status, status_type, the source watermark `synced_at` and `created_at` — a row
-carrying `ticket` or `issue` reads its ticket's head; it reads `thoughts`
-alone); `node_dependencies()` (one row per `blocks` / `blocked_by` link facet,
-active or closed, with whether its system gates — SMD-2218's rule); and
+carrying `ticket` or `issue` reads its ticket's head; it read `thoughts`
+alone until 068 stored the heads); `node_dependencies()` (one row per
+`blocks` / `blocked_by` link facet, active or closed, with whether its system
+gates — SMD-2218's rule); and
 `node_state(ids)` (every thought, or those named: the lifecycle beside `open`,
 `blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
 `superseded_by`). Coverage and freshness are columns — a node carries a
 lifecycle when `open` is not NULL; its freshness is `synced_at`, never
-`updated_at` — so each consumer counts over what it ranks. The ids narrow the
-rows returned, not the work: the whole brain is computed and filtered last.
+`updated_at` — so each consumer counts over what it ranks. At 058 the ids
+narrowed the rows returned, not the work: the whole brain was computed and
+filtered last (068 stores the heads and superseders, below).
 `graph-centrality.ts` is the first reader, its reports byte for byte what they
 were; search is the second (`search_thoughts`' opt-in `prefer_current`, through
 059). `metadata.status_type` is a
@@ -479,12 +482,13 @@ count, latest source watermark and whether its top N is exact. Priced first in
 MRR +0.052, live-ticket MRR +0.194; costs disclosed — topical −0.127, a note
 under a Done ticket −0.292, a settled key −0.750); the query log records such a
 search as arm `current` (the CHECK widened), and `db/tier.ts` replays it. The
-server group gains SELECT on `thought_sources`, which `node_state` reads; the
-wrapper is dropped before it is created, as 058's three are. It costs what
-`node_state` costs — the whole brain's lifecycle per call: +10.7 ms at 10,000
-thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the budget
-pre-registered for it; shipped opt-in on the maintainer's call, and SMD-2256
-narrows it.
+server group gains SELECT on `thought_sources`, which `node_state` reads for
+its dependency columns (since 068 the search's columns do not); the wrapper
+is dropped before it is created, as 058's three are. At 059 it cost what
+`node_state` cost — the whole brain's lifecycle per call: +10.7 ms
+at 10,000 thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the
+budget pre-registered for it; shipped opt-in on the maintainer's call, and 068
+made it a lookup.
 
 Migration 060 has the write functions append then project (SMD-2116, step 2 of
 `../docs/event-log-as-truth.md`). `upsert_thought` (2- and 3-argument),
@@ -762,6 +766,71 @@ settle function stands). The status column's and the table's comments are
 re-issued. Additive: one function, one body redefined with no arity change,
 no grant moves. test-schema [61], test-live [16], test-upgrade [20s].
 
+Migration 068 stores what `node_state` read per call (SMD-2256):
+`ob1_ticket_head`, every issue key a row carries with its head (058's rule) and
+the head's status, status_type and watermark, and `ob1_superseded_by`, every
+superseded thought with its newest successor. Three statement triggers on
+`thoughts` (AFTER INSERT, UPDATE and DELETE, with transition tables) keep them
+current, and a fourth empties both on TRUNCATE: a statement touching no row with
+an issue key or a `supersedes` pointer returns at once; otherwise the keys it
+moved — both sides of a key's move, a pointer's targets and their issues, a
+successor's `created_at` — are locked and reconciled through
+`ob1_ticket_heads_of()` and `ob1_superseders_of()`, each rule written once. The
+locks are transaction advisory locks on buckets of the keys' hashes (classes
+22560–22562, at most 513 held by a transaction), taken before the recompute:
+statements moving one ticket's key, status, watermark or pointers serialise
+until commit (a content-only edit takes none), a row whose head fields move
+holds its own pointer bucket so a concurrent pointer to it waits and reads its
+issue after, a DELETE holds the buckets of its deleted issue rows and of the
+deleted rows something supersedes so the cascade that nulls pointers to them
+needs none it lacks (not of every deleted row: a prune of plain rows stalls no
+ticket writer), and a transaction whose ticket writes take more than one round
+of locks — two or more statements, or one that fires the trigger twice (a MERGE
+with several actions, a multi-row upsert that both inserts and updates, a
+writable CTE with several kinds of write) — can now deadlock (40P01) where it
+waited: retry it (the repo's writers are single-row, one statement per
+transaction). Such a statement is refused under REPEATABLE READ (its snapshot
+predates the lock); SERIALIZABLE keeps the tables exact only when every ticket
+writer is serializable. The trigger and the reconcile plan every statement that
+takes the keys afresh: a plan cached while the tables were small went on
+scanning them. The reconcile is internal (it takes no lock; call the rebuild).
+On a PostgreSQL release that drops them from the transition table (PGlite's 17.5
+does; 16.15 and 17.8 do not), the rows a MERGE updates when its own DELETE's
+cascade updates them too are not seen: rebuild after such a MERGE there. It is
+fed by the row store, not the log: every writer reaches `thoughts`, raw ones
+included, and the log carries no `created_at` move; SMD-1997's fold can later
+feed the heads' status. `node_lifecycle()` and `node_state()` keep their
+signatures and rows and read the tables; `node_state` lost its top-level WITH,
+so a caller's planner pulls it up, drops the dependency joins it does not read
+(still whole-brain reads — `blockers`, `unknown_blockers`, `in_dependencies`,
+and `node_dependencies()`' gate on the status scalar — SMD-2267) and looks the
+rest up by primary key. `search_thoughts_hybrid` is estimated at 100 rows, its
+window's bound, so a ten-thousand-thought brain does not hash-join the whole
+table to it. Measured on `bench-hybrid.ts`'s arm: `prefer_current` adds, in the
+bench's run of this code, +0.50 ms at 10,000 thoughts with no needle and +0.66
+with one (the difference of medians, alternating order; the budget 059 missed is
+the hybrid's own median, 0.88 and 1.14 — as sql, re-planned per call, the
+wrapper was once +1.11 against 1.10), and +1.11 and +1.34 at 100,000. With no
+needle, the hybrid asked for its window of 40 costs +0.44 at 10,000 and +0.99 at
+100,000 on its own, about all of the no-needle addition: the two differences of
+medians do not subtract. A narrow read is what got cheaper: a whole-brain read
+of every thought's lifecycle still reads every row (6.3 ms at 10,000, 78 at
+100,000). A writer's cost is measured against the triggers dropped — disabling
+them still fills their transition tables — and is in `changes/smd-2256.md`.
+`ob1_node_projection_drift()` compares the tables with 058's formulas (zero rows
+when exact) and `ob1_rebuild_node_projection()` repairs them after a write made
+with the triggers disabled (`DISABLE TRIGGER`, `session_replication_role =
+replica`); it refuses to run outside READ COMMITTED, and `migrate.ts` now runs
+every file under READ COMMITTED, so 068's seed is right on a brain whose default
+is not. Preflight fails a connection whose default is REPEATABLE READ. The
+triggers run as the writer, so the **capture** group gains the writes on both
+tables: a role granted before 068 fails preflight until `migrate.ts --grant`
+runs again, and a reader of `node_lifecycle()` needs SELECT on
+`ob1_ticket_head`. On PostgreSQL 16 and 17 the search's lifecycle columns no
+longer read `thought_sources` (a removed join's tables are not
+permission-checked — observed, not documented), so the server group keeps that
+grant.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -818,10 +887,12 @@ issues every group at once.
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
+| | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
+| | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
-| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which reads 058's node_state, which reads the source rows (SMD-2255); without it that search is refused naming this grant, and every other search runs |
+| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
@@ -1667,8 +1738,9 @@ thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
 thoughts weighed in. The status, and every rule below, is migration 058's
 `node_state` (SMD-2074): `node_lifecycle()` without a dependency flag, which
-reads `thoughts` alone, and `node_state()` with one, which reads
-`thought_sources` too (the `structure` group); when SMD-1997 folds
+reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture group's),
+and `node_state()` with one, which reads `thought_sources` too (the
+`structure` group); when SMD-1997 folds
 `thought_audit`'s transitions, the functions' bodies change and this script
 does not.
 
@@ -2870,8 +2942,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2248 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 897 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2261 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 905 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

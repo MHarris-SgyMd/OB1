@@ -1644,7 +1644,8 @@ if (configFailed) {
             // thought_facets as the caller on every delete — every delete of a
             // thought for that one, said separately so an operator whose
             // capture succeeds is not told the check was wrong (seventh pass).
-            const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets");
+            const PROJECTION = ["ob1_ticket_head", "ob1_superseded_by"];
+            const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets" && !PROJECTION.includes(t));
             // 046's audit trigger reads the key's kind from ob1_agents as the caller
             // on every write that carries an actor — captures, edits AND deletes
             // — so that one is named with the trigger (SMD-1730).
@@ -1669,6 +1670,20 @@ if (configFailed) {
               + (snapshotMiss ? " (060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector)" : "")
               + (lineageMiss ? " (061's vector lineage trigger and the write functions record derivations as the caller on every capture and edit, and drop a replaced set's row)" : ""));
             if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
+            // 068's triggers reconcile the node_state projection as the caller on
+            // a write of a ticket row or a pointer, and node_lifecycle() reads it:
+            // a plain capture returns before touching it (SMD-2256).
+            const projectionMiss = PROJECTION.flatMap((t) => missingByTable.get(t) ?? []);
+            if (projectionMiss.length) {
+              // Split by privilege (first review pass): SELECT alone keeps every
+              // lifecycle read working. Any of the four missing breaks the writes
+              // that move a key, a status, a watermark or a pointer — the
+              // triggers read the tables too (second review pass) — and SELECT
+              // missing breaks the reads as well.
+              fails.push((projectionMiss.includes("SELECT") ? "every lifecycle read (node_lifecycle, node_state, search_thoughts' prefer_current) and " : "")
+                + "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included"
+                + " (068's triggers keep the node_state projection as the caller)");
+            }
             const why = ` — so ${fails.join(", and ")} would fail`;
             if (missingByTable.size) {
               const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");
@@ -2749,18 +2764,41 @@ if (configFailed) {
          * default is REPEATABLE READ or SERIALIZABLE (a role or database
          * setting, a pooler) reads its transaction's snapshot instead, and
          * 042's guard then cannot see a citation committed after that
-         * snapshot — its source goes from under it. A warning, not a refusal:
-         * the server still works, the guarantees named do not (third review
-         * pass, SMD-1712).
+         * snapshot — its source goes from under it. Before 068 a warning, not a
+         * refusal: the server still worked, the guarantees named did not (third
+         * review pass, SMD-1712).
          */
+        // Since 068 REPEATABLE READ is more than a lost guarantee: the node_state
+        // projection's triggers refuse, under it, every write that moves a
+        // ticket's key, status or watermark or a supersedes pointer — captures
+        // naming supersedes, and deletes of ticket rows or of any superseded
+        // thought (the cascade nulling pointers to it), among them — so it
+        // fails, and the image's entrypoint does not start the server;
+        // SERIALIZABLE keeps the projection exact only if every ticket writer
+        // is serializable (SMD-2256, second review pass). The fix names where
+        // the setting comes from (third review pass: a role-in-database or a
+        // connection-string setting outranks the ALTER ROLE it used to name).
         try {
-          const [{ level }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level`) as { level: string }[];
+          const [{ level, projection, source, db }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level,
+                                                            to_regprocedure('public.ob1_node_projection_sync()') IS NOT NULL AS projection,
+                                                            (SELECT source FROM pg_settings WHERE name = 'default_transaction_isolation') AS source,
+                                                            quote_ident(current_database()) AS db`) as { level: string; projection: boolean; source: string; db: string }[];
+          const fixIsolation = source === "database" ? `Set it back where it was changed, on the database: ALTER DATABASE ${db} SET default_transaction_isolation = 'read committed';`
+            : source === "database user" ? `Set it back where it was changed, on this role in this database: ALTER ROLE ${ident} IN DATABASE ${db} SET default_transaction_isolation = 'read committed';`
+            : source === "user" ? `Set it back where it was changed, on the role: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed';`
+            : source === "client" ? "It comes from the connection: remove default_transaction_isolation from the connection string's options (or the pooler's startup parameters)."
+            : source === "configuration file" ? "It comes from the server's configuration: set default_transaction_isolation = 'read committed' in postgresql.conf (or ALTER SYSTEM) and reload."
+            : `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed — pg_settings says the source is ${source}).`;
           if (/^read (committed|uncommitted)$/i.test(level)) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
+          } else if (projection && /^repeatable read$/i.test(level)) {
+            add("transaction isolation", "fail",
+                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included) — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                fixIsolation);
           } else {
             add("transaction isolation", "warn",
-                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source`,
-                `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed).`);
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? "; and 068's node_state projection stays exact only if every writer of ticket rows is serializable" : ""}`,
+                fixIsolation);
           }
         } catch (e) {
           add("transaction isolation", "warn", `could not verify: ${(e as Error).message}`);

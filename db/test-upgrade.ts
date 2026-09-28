@@ -509,8 +509,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // amendment and its backfill, SMD-2115), 056 (the entity name gate,
   // SMD-1935), 057 (the third release's schema_version, 1.2.0), 058
   // (node_state, the shared read of a thought's lifecycle and blockers,
-  // SMD-2074) and 059 (search_thoughts_current, the hybrid with settled and
-  // superseded thoughts ranked below current ones, SMD-2255) stay recorded and
+  // SMD-2074), 059 (search_thoughts_current, the hybrid with settled and
+  // superseded thoughts ranked below current ones, SMD-2255), 060 to 067
+  // (append then project, SMD-2116; lineage, SMD-1731; the fourth release's
+  // schema_version, 1.3.0; rebuild_derived, SMD-1732; the page store,
+  // SMD-1812; the entity name gate's allowlist, SMD-2300; a derivation never
+  // paired with its inputs, SMD-2292; the pass settling stale proposals,
+  // SMD-2297) and 068 (the node_state projection kept current on write,
+  // SMD-2256) stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -577,10 +583,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // over 025's derived_from, refusing by name without 025, 029 or 063
   // ([20r]); 067 adds settle_supersession_proposal and redefines 063's
   // rebuild_derived on its own body, refusing by name without 036, 061 or
-  // 063 ([20s]) — all recorded by the baseline with their prerequisites
-  // present, so none becomes the plain-run failure point above).
+  // 063 ([20s]); 068 adds two tables, an index and four triggers on 001's
+  // thoughts and redefines 058's node_lifecycle and node_state on their own
+  // signatures, refusing by name without 025 or 058 ([20t]) — all recorded
+  // by the baseline with their prerequisites present, so none becomes the
+  // plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 38, `030 is among the last thirty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 39, `030 is among the last thirty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2618,7 +2627,6 @@ console.log("\n[20q] Migration 065 on a schema without 016, and on 016's tables 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "056" });
   const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'entity_type_gate(text, text)'::regprocedure`;
   assert(/SMD-2300/.test(String(body?.s ?? "")) && String(body?.s ?? "").includes("[A-Za-z]{2,}-[0-9]{3,}"), "…and applied once both are there: the live entity_type_gate carries 065's good-shape allowlist (the three-or-more-digit ticket shape)");
-  await sql.close();
 }
 
 console.log("\n[20r] Migration 066 onto a populated brain at the file before it — the candidate filter redefined on 063's body, no audit row written, no row moved, no lineage row moved; a page re-embedded and extracted at 064 listed its own evidence as a candidate before the file and lists the unrelated note alone after it; a re-apply a no-op; refused by name without 025, 029 or 063 (SMD-2292)");
@@ -2851,6 +2859,48 @@ console.log("\n[20s] Migration 067 onto a populated brain at 063 — settle_supe
   const [present] = await sql3`SELECT to_regprocedure('settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS settle`;
   assert(present.settle === true, "…and applied once every prerequisite is there: the settle function is present");
   await sql3.close();
+}
+
+console.log("\n[20t] Migration 068 on a schema without 058 — refused up front, naming 058 and --reapply; applied over a brain with tickets and pointers, node_state() reads what 058's did and the seed leaves no drift (SMD-2256)");
+{
+  // 068's bodies are SQL, validated at CREATE, and it redefines 058's two
+  // reads: without the guard a schema stopping before 058 would fail at a
+  // bare "function node_dependencies() does not exist". 025 is older than
+  // every schema that reaches 058, so 058 is the check reached here.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "058" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-058 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the068 = MIGRATIONS.find((f) => f.startsWith("068_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the068}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /068_node_state_projection\.sql\s+FAILED: migration 068 needs 058 \(node_state\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 068 naming 058 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the068}`)[0].c) === 0, "…068 records nothing");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "058" && f < "068" });
+  // A brain 058 already reads: a ticket whose earlier row its head
+  // supersedes, a note under it, a Done ticket, a row superseded twice.
+  const row = async (content: string, meta: Record<string, unknown>) =>
+    (await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, ${meta}::jsonb) RETURNING id`)[0].id as string;
+  const head = await row("[20t] the head", { issue: "U-1", status: "Done", status_type: "completed", linear_updated_at: "2026-09-01" });
+  const prev = await row("[20t] the earlier row", { issue: "U-1", status: "In Progress", status_type: "started", linear_updated_at: "2026-09-02" });
+  await row("[20t] a note", { ticket: "U-1" });
+  await row("[20t] a live ticket", { issue: "U-2", status: "Todo", status_type: "unstarted" });
+  const old = await row("[20t] superseded twice", {});
+  await sql`UPDATE thoughts SET supersedes = ${prev} WHERE id = ${head}`;
+  await row("[20t] first successor", {}).then((id) => sql`UPDATE thoughts SET supersedes = ${old}, created_at = now() - interval '1 hour' WHERE id = ${id}`);
+  await row("[20t] second successor", {}).then((id) => sql`UPDATE thoughts SET supersedes = ${old} WHERE id = ${id}`);
+  const before = (await sql`SELECT * FROM node_state() ORDER BY thought_id`).map((r: Record<string, unknown>) => JSON.stringify(r));
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "068" });
+  const after = (await sql`SELECT * FROM node_state() ORDER BY thought_id`).map((r: Record<string, unknown>) => JSON.stringify(r));
+  const [state] = await sql`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head) AS heads,
+                                   (SELECT count(*)::int FROM ob1_superseded_by) AS sup, (SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('node_lifecycle()')) AS body`;
+  assert(before.length === 7 && JSON.stringify(after) === JSON.stringify(before) && state.drift === 0 && state.heads === 2 && state.sup === 2 && /ob1_ticket_head/.test(String(state.body)),
+    `…and applied once 058 is there: node_state() reads what 058's did row for row, the seed wrote two heads and two superseders, drift() is empty and node_lifecycle() reads the table (${after.length} rows, drift ${state.drift}, ${state.heads}/${state.sup})`);
+  await sql.close();
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");

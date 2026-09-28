@@ -791,8 +791,10 @@ export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">
 export function currentSearchHint(msg: string): string {
   return /search_thoughts_current/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — migration 059 (db/migrations/059_search_prefers_current.sql) is not applied, or PostgREST has not reloaded its schema cache; search without prefer_current meanwhile"
+    : /permission denied for table ob1_(ticket_head|superseded_by)\b/i.test(msg)
+    ? " — prefer_current reads node_state's projection (migration 068), and the server's role needs the capture group's grants on ob1_ticket_head and ob1_superseded_by (db/README.md, Grants for a capturing role; migrate.ts --grant issues them); search without prefer_current meanwhile"
     : /permission denied for table thought_sources/i.test(msg)
-    ? " — prefer_current reads node_state, and the server's role needs SELECT on thought_sources (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues); search without prefer_current meanwhile"
+    ? " — prefer_current reads node_state; before migration 068, and after it wherever PostgreSQL checks a removed join's tables, the server's role needs SELECT on thought_sources (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues); search without prefer_current meanwhile"
     : "";
 }
 
@@ -1129,7 +1131,7 @@ function buildServer(principal: Principal): McpServer {
         // finished ticket looked up by its key found lower. The 0.25 below is
         // held to search_demote_weight() by test-e2e-sql.
         prefer_current: z.boolean().optional().default(false)
-          .describe("Rank settled and superseded thoughts below current ones. Off (default): by meaning alone. On: a thought whose ticket is completed or canceled (a note filed under such a ticket included), or that a newer thought supersedes, has its score multiplied by 0.25 — in practice every current match among the top candidates comes first, then the rest in their own order, each marked with why, so a demoted thought usually leaves the top results. A blocked or unknown status does not demote a thought (superseded still does). An exact identifier hit on a settled thought is demoted too: to look a finished ticket up by its key, leave this off. It reads every thought's lifecycle per search, so it costs more as the brain grows (milliseconds at a thousand thoughts, over 100 ms at 100,000)."),
+          .describe("Rank settled and superseded thoughts below current ones. Off (default): by meaning alone. On: a thought whose ticket is completed or canceled (a note filed under such a ticket included), or that a newer thought supersedes, has its score multiplied by 0.25 — in practice every current match among the top candidates comes first, then the rest in their own order, each marked with why, so a demoted thought usually leaves the top results. A blocked or unknown status does not demote a thought (superseded still does). An exact identifier hit on a settled thought is demoted too: to look a finished ticket up by its key, leave this off. Each candidate's lifecycle is a lookup in a table kept current on write (migration 068): about half a millisecond over an ordinary search at 10,000 thoughts, about one at 100,000, most of it the wider window it reads; before 068 it read every thought's lifecycle per search (over 100 ms at 100,000)."),
       },
     },
     async ({ query, limit, threshold, recency_weight, filter, said_by, actor, prefer_current }) => {
