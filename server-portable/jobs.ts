@@ -13,18 +13,25 @@
  * fan-out; index.ts owns the transport (the routes, the auth gate, the
  * keepalive wrapper) and passes the work in.
  *
- * The store is a single in-memory Map, deliberately (the durability the first
- * consumers need, weighed in the SMD-2273 plan): it fits the single-process Bun
- * server, needs no migration, and a job it holds does not survive a restart. A
- * job still running when the process stops is marked `lost` (`markRunningLost`,
- * from index.ts's SIGTERM drain) so an in-flight poll or stream sees a terminal
- * answer rather than hanging; after a restart the Map is empty, so a poll for a
- * job that was running gets `not found` — told it is gone, not left waiting. A
- * durable `jobs` table (with a `worker_status`-style read and retention) is the
- * fast-follow when a consumer needs a job to survive a restart or a second
- * replica. On Workers there is no long-lived process to hold the Map or run the
- * detached body past the response, so job handles are a Bun-server feature; the
- * REST routes still answer, they just never hold a running job.
+ * The live registry is a single in-memory Map: it holds the running jobs, the
+ * SSE subscribers and the detached runner, and it is authoritative while the
+ * process is up. A job still running when the process stops is marked `lost`
+ * (`markRunningLost`, from index.ts's SIGTERM drain) so an in-flight poll or
+ * stream sees a terminal answer rather than hanging.
+ *
+ * Durability is an optional write-through sink (SMD-2318, migration 069's `jobs`
+ * table), injected by index.ts on the Bun/SQL server via `setJobSink`: the
+ * registry mirrors each state change to it, and a poll for a job no longer in
+ * the Map — evicted under the cap, or held by a prior process before a restart —
+ * reads the row back through it. So a job that finished before a restart is
+ * still readable with its result, and a running one is reconciled to `lost` at
+ * startup (`reconcileDurableJobsLost`) rather than becoming `not found`. Left
+ * unset, the registry is pure in-memory (the SMD-2273 behaviour), and a poll for
+ * a job the Map no longer holds gets `not found`. On Workers there is no
+ * long-lived process to hold the Map or run the detached body past the response,
+ * so no sink is set and job handles are a Bun-server feature; the REST routes
+ * still answer, they just never hold a running job. A `worker_status`-style
+ * listing over the durable table, and a second replica, remain fast-follows.
  */
 
 /** Who owns a job — the fields index.ts's Principal carries that this module needs. */
@@ -80,6 +87,65 @@ export interface JobContext {
   readonly signal: AbortSignal;
 }
 
+/**
+ * The row a durable sink persists (SMD-2318) — the public projection plus the
+ * ownership token the read filters on. Timestamps are epoch ms, as the public
+ * shape carries them; the SQL sink converts to and from timestamptz.
+ */
+export interface JobRow {
+  id: string;
+  kind: string;
+  ownerKeyHash: string;
+  actor: string;
+  status: JobStatus;
+  progress?: JobProgress;
+  result?: unknown;
+  error?: { message: string; code?: string };
+  createdAt: number;
+  startedAt?: number;
+  endedAt?: number;
+}
+
+/**
+ * A durable backing store for the registry (SMD-2318, migration 069's `jobs`
+ * table). index.ts injects the SQL implementation on the Bun server; left unset,
+ * the registry is pure in-memory — the SMD-2273 behaviour, which is what Workers
+ * (no long-lived process) and any suite without a database run. The live SSE
+ * fan-out and the detached runner always stay in this process; the sink holds
+ * only the record, so a job survives a restart. Every write is best-effort from
+ * the registry's side (fire-and-forget, its failure swallowed so it can never
+ * fail a tool call); the startup reconcile is the durable guarantee if a write
+ * did not land before the process stopped.
+ */
+export interface JobSink {
+  /**
+   * Upsert the row. The registry serializes a job's writes (a per-record chain),
+   * so they arrive in lifecycle order; the sink must additionally never move a
+   * terminal row back to a live state (a late write after a restart's reconcile).
+   */
+  write(row: JobRow): Promise<void>;
+  /** The ownership-checked row, for a poll of a job no longer in the Map (evicted under the cap, or after a restart). */
+  read(ownerKeyHash: string, id: string): Promise<PublicJob | null>;
+  /** Mark every durable job still pending/running as lost — the process that ran it is gone, and an in-memory run does not resume. Returns the count. Run once at startup. */
+  reconcileRunningLost(): Promise<number>;
+}
+
+/** The injected durable store, or null for the pure in-memory registry (Workers, no-DB suites). */
+let sink: JobSink | null = null;
+
+/** How often a running job's progress is written through to the sink; the running-transition and every terminal state are always written. */
+const PERSIST_THROTTLE_MS = 1_000;
+
+/** index.ts sets the durable store once at startup (SQL server) or clears it (a suite). */
+export function setJobSink(s: JobSink | null): void {
+  sink = s;
+}
+
+/** Mark every durable job left pending/running by a prior process as lost. Run once at startup, after setJobSink; 0 when there is no sink. */
+export async function reconcileDurableJobsLost(): Promise<number> {
+  return sink ? sink.reconcileRunningLost() : 0;
+}
+
 /** Tunables index.ts feeds from env(); each has a default so this module stands alone in tests. */
 export interface StartJobOptions {
   /** How long a terminal record is kept before eviction. */
@@ -125,6 +191,10 @@ interface JobRecord {
   now: () => number;
   retentionTimer?: ReturnType<typeof setTimeout>;
   maxRunTimer?: ReturnType<typeof setTimeout>;
+  /** Serializes this job's durable writes so they land in lifecycle order (SMD-2318); resolves once there is no sink. */
+  writeChain: Promise<void>;
+  /** When the last progress write went to the sink, for the throttle. */
+  lastPersistMs: number;
 }
 
 /** The registry: one process-wide Map, keyed by job id. */
@@ -145,6 +215,38 @@ function toPublic(rec: JobRecord): PublicJob {
     ...(rec.result !== undefined ? { result: rec.result } : {}),
     ...(rec.error !== undefined ? { error: rec.error } : {}),
   };
+}
+
+/** The durable row for a record — its public fields plus the ownership token (SMD-2318). */
+function rowOf(rec: JobRecord): JobRow {
+  return {
+    id: rec.id,
+    kind: rec.kind,
+    ownerKeyHash: rec.ownerKeyHash,
+    actor: rec.actor,
+    status: rec.status,
+    createdAt: rec.createdAt,
+    ...(rec.startedAt !== undefined ? { startedAt: rec.startedAt } : {}),
+    ...(rec.endedAt !== undefined ? { endedAt: rec.endedAt } : {}),
+    ...(rec.progress !== undefined ? { progress: rec.progress } : {}),
+    ...(rec.result !== undefined ? { result: rec.result } : {}),
+    ...(rec.error !== undefined ? { error: rec.error } : {}),
+  };
+}
+
+/**
+ * Write the record's current state through to the durable sink, best-effort and
+ * in lifecycle order (SMD-2318). A no-op when there is no sink (the in-memory
+ * registry). The row is snapshotted now, because the record keeps mutating; the
+ * write is queued on the record's chain so a later state cannot land before an
+ * earlier one, and its failure is swallowed so a durable-store hiccup never
+ * fails the job.
+ */
+function persist(rec: JobRecord): void {
+  const s = sink;
+  if (!s) return;
+  const row = rowOf(rec);
+  rec.writeChain = rec.writeChain.then(() => s.write(row)).catch(() => {});
 }
 
 function frame(event: string, data: unknown): string {
@@ -207,6 +309,11 @@ function finish(rec: JobRecord, status: Exclude<JobStatus, "pending" | "running"
     }
   }
   rec.subs.clear();
+  // Persist the terminal state (SMD-2318): a job that finished before a restart
+  // is then still readable with its result; a `lost` marked by the stop's drain
+  // survives the restart rather than becoming `not found`. Best-effort — the
+  // startup reconcile catches a write that did not land.
+  persist(rec);
   rec.retentionTimer = setTimeout(() => jobs.delete(rec.id), rec.retentionMs);
   rec.retentionTimer.unref?.();
 }
@@ -244,8 +351,13 @@ export function startJob(
     abort: new AbortController(),
     retentionMs,
     now,
+    writeChain: Promise.resolve(),
+    lastPersistMs: now(),
   };
   jobs.set(id, rec);
+  // Insert the pending row (SMD-2318). Best-effort and fire-and-forget: the
+  // handle returns at once, and the durable store never gates the start.
+  persist(rec);
 
   const ctx: JobContext = {
     signal: rec.abort.signal,
@@ -253,6 +365,14 @@ export function startJob(
       if (isTerminal(rec.status)) return;
       rec.progress = { done, total, ...(message !== undefined ? { message } : {}) };
       broadcast(rec, frame("progress", rec.progress));
+      // Write progress through at most once a second (SMD-2318): a live
+      // subscriber sees every tick over SSE, but a long scan must not hammer the
+      // durable store — a poll after a restart wants a recent figure, not each.
+      const t = rec.now();
+      if (t - rec.lastPersistMs >= PERSIST_THROTTLE_MS) {
+        rec.lastPersistMs = t;
+        persist(rec);
+      }
     },
   };
 
@@ -266,7 +386,9 @@ export function startJob(
   const exec = async (): Promise<void> => {
     rec.status = "running";
     rec.startedAt = now();
+    rec.lastPersistMs = rec.startedAt;
     broadcast(rec, frame("status", toPublic(rec)));
+    persist(rec); // the running-transition (SMD-2318)
     try {
       const result = await run(ctx);
       finish(rec, "succeeded", { result });
@@ -283,11 +405,31 @@ export function startJob(
   return { jobId: id, status: "accepted", poll: `/jobs/${id}`, stream: `/jobs/${id}/stream` };
 }
 
-/** The ownership-checked projection of a job, or null when the id is unknown or the key is not its owner. */
-export function readJob(principal: Pick<JobPrincipal, "keyHash">, id: string): PublicJob | null {
+/**
+ * The ownership-checked projection of a job, or null when the id is unknown or
+ * the key is not its owner. The live in-process record is authoritative (it
+ * carries progress between the throttled durable writes); a job no longer in the
+ * Map — evicted under the cap, or held by a prior process before a restart — is
+ * read from the durable sink when one is configured (SMD-2318).
+ */
+export async function readJob(principal: Pick<JobPrincipal, "keyHash">, id: string): Promise<PublicJob | null> {
   const rec = jobs.get(id);
-  if (!rec || rec.ownerKeyHash !== principal.keyHash) return null;
-  return toPublic(rec);
+  if (rec) return rec.ownerKeyHash === principal.keyHash ? toPublic(rec) : null;
+  return sink ? sink.read(principal.keyHash, id) : null;
+}
+
+/** An SSE body that emits a durable row's snapshot (and its terminal event, if terminal) once, then closes — for a job no longer in the Map. */
+function snapshotStream(row: PublicJob): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(enc.encode(frame("status", row)));
+      if (isTerminal(row.status)) {
+        controller.enqueue(enc.encode(frame(row.status === "succeeded" ? "done" : "error", row)));
+      }
+      controller.close();
+    },
+  });
 }
 
 /**
@@ -298,9 +440,17 @@ export function readJob(principal: Pick<JobPrincipal, "keyHash">, id: string): P
  * it does for the poll). The route sets `content-type: text/event-stream` and
  * wraps this in withSseKeepalive.
  */
-export function subscribe(principal: Pick<JobPrincipal, "keyHash">, id: string): ReadableStream<Uint8Array> | null {
+export async function subscribe(principal: Pick<JobPrincipal, "keyHash">, id: string): Promise<ReadableStream<Uint8Array> | null> {
   const rec = jobs.get(id);
-  if (!rec || rec.ownerKeyHash !== principal.keyHash) return null;
+  if (!rec) {
+    // Not in the Map: a durable job from a prior process (reconciled to a
+    // terminal state at startup) or one evicted under the cap. Read the row and
+    // replay its snapshot; there is no live runner in this process to attach to.
+    if (!sink) return null;
+    const row = await sink.read(principal.keyHash, id);
+    return row ? snapshotStream(row) : null;
+  }
+  if (rec.ownerKeyHash !== principal.keyHash) return null;
   const enc = new TextEncoder();
   let sub: Sub | null = null;
   return new ReadableStream<Uint8Array>({
