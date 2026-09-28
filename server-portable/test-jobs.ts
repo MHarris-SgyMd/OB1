@@ -277,6 +277,20 @@ console.log("[10] a durable sink (SMD-2318): write-through, read-back after a re
   await fake.write({ id: handle.jobId, kind: "scan", ownerKeyHash: OWNER.keyHash, actor: "owner", status: "running", createdAt: stored!.createdAt });
   assert(rows.get(handle.jobId)?.status === "succeeded", "a late write does not revert a terminal row");
 
+  // A durable read that ERRORS (e.g. a role missing the jobs grant after 069)
+  // degrades to not-found, never throwing — the store is additive, symmetric
+  // with the best-effort write.
+  setJobSink({ ...fake, read: async () => { throw new Error("permission denied for table jobs"); } });
+  resetJobsForTest();
+  let threw = false;
+  let val: unknown = "unset";
+  try { val = await readJob(OWNER, handle.jobId); } catch { threw = true; }
+  assert(!threw && val === null, "a durable read error degrades to not-found (null), never throws");
+  let subThrew = false;
+  let sub: unknown = "unset";
+  try { sub = await subscribe(OWNER, handle.jobId); } catch { subThrew = true; }
+  assert(!subThrew && sub === null, "a durable subscribe read error degrades to null, never throws");
+
   setJobSink(null);
   resetJobsForTest();
 }

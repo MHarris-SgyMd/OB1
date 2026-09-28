@@ -415,7 +415,23 @@ export function startJob(
 export async function readJob(principal: Pick<JobPrincipal, "keyHash">, id: string): Promise<PublicJob | null> {
   const rec = jobs.get(id);
   if (rec) return rec.ownerKeyHash === principal.keyHash ? toPublic(rec) : null;
-  return sink ? sink.read(principal.keyHash, id) : null;
+  return sink ? readFromSink(sink, principal.keyHash, id) : null;
+}
+
+/**
+ * Read a job from the durable sink, degrading a read error to `not found`
+ * (null) rather than propagating it. The durable store is additive: its writes
+ * are best-effort and swallowed, so a read must be symmetric — a role missing
+ * the `jobs` grant (a --grant role not re-granted after migration 069) or a
+ * transient database error should leave a poll answering as the in-memory
+ * registry would (not found), never turning it into a 500.
+ */
+async function readFromSink(s: JobSink, ownerKeyHash: string, id: string): Promise<PublicJob | null> {
+  try {
+    return await s.read(ownerKeyHash, id);
+  } catch {
+    return null;
+  }
 }
 
 /** An SSE body that emits a durable row's snapshot (and its terminal event, if terminal) once, then closes — for a job no longer in the Map. */
@@ -447,7 +463,7 @@ export async function subscribe(principal: Pick<JobPrincipal, "keyHash">, id: st
     // terminal state at startup) or one evicted under the cap. Read the row and
     // replay its snapshot; there is no live runner in this process to attach to.
     if (!sink) return null;
-    const row = await sink.read(principal.keyHash, id);
+    const row = await readFromSink(sink, principal.keyHash, id);
     return row ? snapshotStream(row) : null;
   }
   if (rec.ownerKeyHash !== principal.keyHash) return null;
