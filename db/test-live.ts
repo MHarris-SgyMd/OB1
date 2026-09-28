@@ -4167,6 +4167,20 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it finds in conflict again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
     const staleList = await consolidate("--list", "stale");
     assert(staleList.code === 0 && /1 stale proposal\(s\)/.test(staleList.out) && /\(stale — in this pass's pool\)/.test(staleList.out) && staleList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`), `--list stale tags the row's standing and still offers the reviewer's decision (${staleList.out.split("\n").find((l) => /stale —/.test(l))?.trim().slice(0, 200)})`);
+    // 069 (SMD-2313): the same stale row standing on a lineage pair — the
+    // newer thought's derived_from set raw to name the older, the shape 066
+    // left behind — is tagged under --list stale, listed under --list lineage
+    // with the reject to run, and counted by --status; the array is cleared
+    // before the pass's run below, whose settle reason is the unrelated verdict.
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${atlasOld}::text) WHERE id = ${atlasNew}::uuid`;
+    const lineageList = await consolidate("--list", "lineage");
+    assert(lineageList.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\), most confident first/.test(lineageList.out) && /\(stale — in this pass's pool\)/.test(lineageList.out)
+           && lineageList.out.includes(`lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066; reject it: --reject ${atlas!.id} --note "lineage pair (066)"`) && lineageList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`),
+           `--list lineage lists the row with its standing, the lineage line and the reject to run (${lineageList.out.split("\n").find((l) => /lineage pair:/.test(l))?.trim().slice(0, 200)})`);
+    assert(/LINEAGE PAIR  \(stale — in this pass's pool\)/.test((await consolidate("--list", "stale")).out), "…--list stale tags it LINEAGE PAIR beside its standing");
+    assert(/, 1 unreviewed standing on a lineage pair \(--list lineage shows them; the reviewer rejects each — the pass never replaces a pending one\) — --list shows them/.test((await consolidate("--status")).out), "…and --status counts it");
+    await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
+    assert(/no unreviewed proposals standing on a lineage pair/.test((await consolidate("--list", "lineage")).out) && !/LINEAGE PAIR/.test((await consolidate("--list", "stale")).out), "…and cleared, nothing stands there and the tag is gone");
     // The standing is read under THIS pass's key (second review pass): the
     // row's-key claim gone and one requeued under another judge's key is
     // another pass's pool — named beside "waiting", since this run re-pools

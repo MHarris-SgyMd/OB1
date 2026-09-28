@@ -634,10 +634,14 @@ export class SqlStore implements ThoughtStore {
     return rows.map(normaliseDerivative);
   }
 
-  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number }): Promise<SupersessionProposal[]> {
-    // Migration 029. NULL status lists every state; the function caps the limit.
+  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean }): Promise<SupersessionProposal[]> {
+    // Migration 029, under 069's three-argument form. NULL status lists every
+    // state, NULL lineage every pair; the function caps the limit. Three
+    // arguments, always: 029 re-applied by hand lands its two-argument form
+    // beside 069's, and a two-argument call would reach that body, which
+    // reads no flag (preflight's lineage check names the leftover).
     const rows = await this.sql`
-      SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int)`;
+      SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean)`;
     return rows.map((r: Record<string, unknown>) => normaliseProposal(r));
   }
 

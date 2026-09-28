@@ -606,6 +606,8 @@ export type SupersessionProposal = {
   /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). `created_at` is `string | null` for the same reason the read path is (SMD-1803). */
   older: { id: string; content: string; created_at: string | null; edited: boolean };
   newer: { id: string; content: string; created_at: string | null; edited: boolean };
+  /** Since migration 069 (SMD-2313): one side's `derived_from` names the other — a derivation and its input (a page and its evidence), a pair 066's candidate filter never proposes; a standing one is a reviewer's to reject. False under a listing from before 069. */
+  lineage: boolean;
 };
 
 /** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
@@ -628,6 +630,7 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     supersedingId: r.superseding_id == null ? null : String(r.superseding_id),
     older: { id: String(r.older_id), content: String(r.older_content), created_at: isoTimestampOrNull(r.older_created_at), edited: r.older_edited === true },
     newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: isoTimestampOrNull(r.newer_created_at), edited: r.newer_edited === true },
+    lineage: r.lineage === true,
   };
 }
 
@@ -1310,7 +1313,8 @@ export interface ThoughtStore {
    * write to thoughts.supersedes has one path. Throws on a schema before 029;
    * the tool names the migration.
    */
-  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number }): Promise<SupersessionProposal[]>;
+  /** `lineage` true selects the proposals standing on a lineage pair, false the rest, absent every pair (migration 069, SMD-2313). */
+  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean }): Promise<SupersessionProposal[]>;
 
   /**
    * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest

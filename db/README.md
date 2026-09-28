@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2261 assertions: 2261 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty-eight (68) migrations applied, and
+`bun test-schema.ts` prints `2275 assertions: 2275 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports sixty-nine (69) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -208,7 +208,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256).
+068 SMD-2256, 069 SMD-2313).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -724,8 +724,9 @@ apply time but the DDL; a pair proposed before the file stands for its
 reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
 pair — the listing reads nothing of `derived_from`, the pass never replaces
 it (a text move, once `rebuild_derived` runs — `db/rebuild.ts` — leaves it
-`stale` for a reviewer), and the recorder has no
-lineage guard; reject it by hand, and SMD-2313 counts and flags such rows.
+`stale` for a reviewer, and the pass settles it on its next run — 067), and
+the recorder has no lineage guard; 069 flags such a row `LINEAGE PAIR`, and
+`consolidate.ts --list lineage` lists the unreviewed ones for the reject.
 test-schema [60], test-upgrade [20r] (a proposal planted on the pair before
 the file is pending and unmoved after it); `server-portable/test-preflight.ts`
 drives the re-applied-body arm.
@@ -830,6 +831,37 @@ runs again, and a reader of `node_lifecycle()` needs SELECT on
 longer read `thought_sources` (a removed join's tables are not
 permission-checked — observed, not documented), so the server group keeps that
 grant.
+
+Migration 069 makes a proposal standing on a lineage pair visible as such
+(SMD-2313). 066 stopped the pass proposing a thought against a member of its
+`derived_from`, and changed nothing about a proposal already standing on such a
+pair — judged before 066, or recorded raw (the recorder has no lineage guard):
+the listing read nothing of `derived_from`, so a reviewer saw "the page
+supersedes its evidence" as any other pending row, and an accept would have
+archived the evidence while the page still named it. Such a row is nobody's but
+the reviewer's — a pending proposal holds its pair (029) and 066 keeps the pair
+out of every later candidate list, so the pass never judges it again and never
+replaces it; a stale one is the pass's to settle since 067, on the next run that
+reaches its newer thought. The file redefines `list_supersession_proposals` on
+029's body with a trailing `lineage` column — 066's predicate, either direction,
+direct members, NULL-safe — and a third parameter `p_lineage` (NULL every pair,
+true the lineage pairs alone, false the rest); the two-argument form is dropped
+first (a `RETURNS TABLE` cannot gain a column under `CREATE OR REPLACE`), and a
+two-argument call resolves to the new form through the default. The readers
+follow: `consolidate.ts --list` prints `LINEAGE PAIR` on such a row with the
+reject to run, `--list lineage` selects the unreviewed ones (pending, then
+stale), `--status` counts them; the MCP tool prints the tag and takes
+`lineage: true`; preflight's `lineage` check counts unreviewed proposals on a
+lineage pair (bounded, as its census is) and warns with the ids and the remedy,
+and warns when the listing is from before 069 or 029's two-argument form stands
+beside it (029 re-applied by hand lands it beside, and a two-argument caller
+then reaches 029's body; the fork's callers pass three arguments, so they reach
+069's regardless). No verdict is written at apply time — a rejection is a
+reviewer's, with a name on it — and a `--reject-lineage` sweep is not taken
+until the flag has been used. DDL alone; no row moves; no grant moves (EXECUTE
+is PUBLIC, as on 029's). test-schema [63], test-upgrade [20u], test-live [16];
+`server-portable/test-preflight.ts` drives the census, the leftover-form and
+the older-body arms; the store and e2e suites read the column.
 
 ## What changed relative to the guide
 
@@ -1893,7 +1925,7 @@ bun consolidate.ts --url … --limit 25              # a trial: this many though
 bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
-bun consolidate.ts --url … --list [pending|accepted|rejected|stale|all]
+bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (069)
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
@@ -1916,7 +1948,14 @@ of them real on a hand grading — two per hundred thoughts, half worth acceptin
 **Reviewing.** `--list` prints the queue most confident first, each with the
 judge's reason, both thoughts with their capture dates and `ID:` lines, and
 the two commands that decide it; the MCP tool `list_supersession_proposals`
-prints the same queue to a client. `--accept` writes the pointer on the thought
+prints the same queue to a client. A row standing on a lineage pair — one
+side's `derived_from` names the other, a page and its evidence — is tagged
+`LINEAGE PAIR` with the reject to run (`--reject <id> --note "lineage pair
+(066)"`); `--list lineage` lists the unreviewed ones, pending then stale, and
+`--status` counts them (069, SMD-2313). Such a pair is never proposed since
+066, and a standing row is the reviewer's alone: the pass never replaces a
+pending one, and settles a stale one on its next run (067). `--accept` writes
+the pointer on the thought
 the verdict names as current (or the one `--direction` names — required for an
 undirected verdict, and an override for a directed one) and refuses what would
 leave the column wrong: the superseding thought already pointing at a third
@@ -2942,8 +2981,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2261 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 905 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2275 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 909 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

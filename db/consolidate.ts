@@ -23,7 +23,7 @@
  *   bun db/consolidate.ts --url … --dry-run               # what a run would do; writes nothing
  *   bun db/consolidate.ts --url … --retry-failed          # failed rows back into the pool first
  *   bun db/consolidate.ts --url … --dump verdicts.jsonl   # also append every verdict, for evals/eval-consolidate.ts
- *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|all]   # the queue, with both thoughts
+ *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (069)
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
@@ -141,7 +141,7 @@ const cli = commandLine("consolidate.ts", {
   k: "one", "min-sim": "one", "min-confidence": "one", limit: "one", follow: "optional", stale: "optional", dump: "one",
   list: "optional", accept: "one", reject: "one", direction: "one", note: "one", force: "none",
   status: "none", "dry-run": "none", "retry-failed": "none",
-}, { hints: { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|all]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" } });
+}, { hints: { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" } });
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const url = cli.value("url") ?? process.env.DATABASE_URL;
@@ -187,8 +187,8 @@ const STALE_DAYS = cli.int("stale", { absent: 0, bare: 90, min: 1 });
 const DIRECTION = cli.value("direction");
 const FORCE = cli.has("force");
 const NOTE = cli.value("note");
-if (LIST !== undefined && !["pending", "accepted", "rejected", "stale", "all"].includes(LIST)) {
-  console.error("--list takes pending, accepted, rejected, stale or all (or nothing, for pending).");
+if (LIST !== undefined && !["pending", "accepted", "rejected", "stale", "lineage", "all"].includes(LIST)) {
+  console.error("--list takes pending, accepted, rejected, stale, lineage or all (or nothing, for pending).");
   process.exit(2);
 }
 for (const [name, v] of [["accept", ACCEPT], ["reject", REJECT]] as const) {
@@ -351,7 +351,11 @@ type Listed = {
   judge_key: string; judged_at: string; reviewed_at: string | null; review_note: string | null; superseding_id: string | null;
   older_id: string; older_content: string; older_created_at: string | null; newer_id: string; newer_content: string; newer_created_at: string | null;
   older_edited: boolean; newer_edited: boolean;
+  /** 069 (SMD-2313): one side's derived_from names the other — a pair 066's candidate filter never proposes; a standing row is the reviewer's to reject. */
+  lineage: boolean;
 };
+/** The reject a reviewer runs on a lineage pair, as --list prints it beside the row and preflight names it. */
+const rejectLineage = (id: string) => `--reject ${id} --note "lineage pair (066)"`;
 // Thought content and entity names are untrusted; cleanForDisplay strips what
 // would move the cursor or rewrite the ID: line a reviewer is about to paste.
 const snippet = (s: string, n = 160) => { const t = cleanForDisplay(s).replace(/\s+/g, " ").trim(); return t.slice(0, n) + (t.length > n ? "…" : ""); };
@@ -370,21 +374,35 @@ const verdictPhrase = (v: string) =>
   : "conflict, direction not stated";
 
 async function printList(status: string | undefined, limit = 50): Promise<number> {
-  const rows = (await sql`SELECT * FROM list_supersession_proposals(${status ?? null}::text, ${limit}::int)`) as Listed[];
+  // 069's three-argument form, always: 029 re-applied by hand lands its
+  // two-argument form beside 069's, and a two-argument call would reach that
+  // body, which reads no flag (preflight's lineage check names the leftover).
+  const listed = async (st: string | null, lineage: boolean | null) =>
+    (await sql`SELECT * FROM list_supersession_proposals(${st}::text, ${limit}::int, ${lineage}::boolean)`) as Listed[];
+  // --list lineage: the unreviewed rows standing on a lineage pair — the
+  // reviewer's alone (a pending row holds its pair, 066 never re-finds it;
+  // a stale one waits for the pass's settle, 067) — pending first, then
+  // stale, each most confident first.
+  const rows = status === "lineage" ? [...await listed("pending", true), ...await listed("stale", true)] : await listed(status ?? null, null);
+  const what = status === "lineage" ? "unreviewed proposal(s) standing on a lineage pair (pending, then stale)" : `${status ?? ""} proposal(s)`;
   if (rows.length === 0) {
-    console.log(`  no ${status ?? ""} proposals`);
+    console.log(`  no ${status === "lineage" ? "unreviewed proposals standing on a lineage pair" : `${status ?? ""} proposals`}`);
     return 0;
   }
-  console.log(`  ${rows.length} ${status ?? ""} proposal(s), most confident first:\n`);
+  console.log(`  ${rows.length} ${what}, most confident first:\n`);
   // 067: a stale row's standing against the pools, beside its status. (A
   // row the pass settled needs no tag: its note begins with the marker.)
   const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
   rows.forEach((p, i) => {
-    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.status !== "pending" ? `  (${p.status}${p.status === "stale" ? ` — ${staleStandingText(standing.get(p.id) ?? { s: "waiting", keys: [] }, JOB)}` : ""}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
+    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${p.status !== "pending" ? `  (${p.status}${p.status === "stale" ? ` — ${staleStandingText(standing.get(p.id) ?? { s: "waiting", keys: [] }, JOB)}` : ""}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
     if (p.reason) console.log(`     ${cleanForDisplay(p.reason)}`);
     console.log(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
     console.log(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
     console.log(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${p.judge_key} on ${day(p.judged_at)}`);
+    // 069: a lineage pair — one side derived from the other — is never
+    // proposed since 066; a row standing on one is said so, with the reject
+    // while the row is the reviewer's.
+    if (p.lineage) console.log(`     lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066${p.status === "pending" || p.status === "stale" ? `; reject it: ${rejectLineage(p.id)}` : ""}`);
     if (p.status === "pending" || p.status === "stale") {
       // Commands as they run: a placeholder the shell cannot parse rather
       // than `newer|older`, which it would read as a pipe (review pass 3).
@@ -484,10 +502,14 @@ async function printQueue(): Promise<void> {
            count(*) FILTER (WHERE status = 'accepted')::int AS accepted,
            count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
            count(*) FILTER (WHERE status = 'rejected' AND review_note LIKE ${`${PASS_SETTLED_PREFIX}%`})::int AS settled,
-           count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected
+           count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected,
+           -- 069 (SMD-2313): the unreviewed rows standing on a lineage pair — 066's predicate, as the stale read above spells it — the reviewer's alone.
+           (SELECT count(*)::int FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
+             WHERE p.status IN ('pending', 'stale')
+               AND (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false))) AS lineage
     FROM supersession_proposals`;
   const stale = await readStaleStandings();
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""} — --list shows them; --accept / --reject decides one`);
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${q.lineage} unreviewed standing on a lineage pair (--list lineage shows them; the reviewer rejects each — the pass never replaces a pending one)` : ""} — --list shows them; --accept / --reject decides one`);
 }
 
 /**

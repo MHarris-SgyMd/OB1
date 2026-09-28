@@ -730,6 +730,19 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
          "…both ids, and the accept command with the direction placeholder the shell cannot parse");
   assert(!listed.includes("\x1b") && /forged line/.test(listed) && /A then B/.test(listed), "…with the escape sequences stripped from the thought and the reason, the words kept");
   assert(!/edited since judged/.test(listed), "…and nothing marked edited yet");
+  // 069 (SMD-2313): the newer thought's derived_from naming the older — set
+  // raw, the shape a page and its evidence take — tags the row LINEAGE PAIR
+  // with the reject to run; `lineage: false` leaves it out and `true` selects
+  // it, each said in the headline; the array cleared, the rest of this
+  // section reads as before.
+  await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${older}::text) WHERE id = ${newer}::uuid`;
+  const tagged = await call("list_supersession_proposals", {});
+  assert(/accepting needs --direction newer or older  LINEAGE PAIR/.test(tagged) && tagged.includes(`LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${pid} --note "lineage pair (066)"`),
+         `a proposal standing on a lineage pair is tagged, with the reject to run (${tagged.split("\n").find((l) => /LINEAGE PAIR:/.test(l))?.trim().slice(0, 200)})`);
+  assert(/No pending supersession proposals off a lineage pair\./.test(await call("list_supersession_proposals", { lineage: false })) && /1 pending supersession proposal\(s\) on a lineage pair, most confident first/.test(await call("list_supersession_proposals", { lineage: true })),
+         "lineage: true selects it and false leaves it out, each said in the headline");
+  await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${newer}::uuid`;
+  assert(!/LINEAGE PAIR/.test(await call("list_supersession_proposals", {})), "…and cleared, no tag");
   await sql`SELECT update_thought(${newer}::uuid, ${"queue newer: the plan is B, revised"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
   const edited = await call("list_supersession_proposals", { status: "pending", limit: 5 });
   assert(/newer \[[^\]]+\] \(edited since judged\)/.test(edited) && edited.includes(`--accept ${pid} --direction <newer|older> --force`) && /verdict is about an earlier text/.test(edited),

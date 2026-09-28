@@ -725,6 +725,16 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   const all = await store.listSupersessionProposals({ status: null });
   assert(all.length === 1 && all[0].status === "accepted" && all[0].supersedingId === newer.id && all[0].reviewNote === "confirmed" && all[0].reviewedAt !== null,
          "null lists every state, and the accepted row names the thought it wrote");
+  // 069 (SMD-2313): the flag, false on this pair; the newer thought's
+  // derived_from set raw to name the older — the shape 066 stops the pass
+  // proposing, a page and its evidence — and the row reads lineage, the
+  // selector picks it, false leaves it out.
+  assert(all[0].lineage === false, "…and lineage is false on a pair neither side of which names the other (069)");
+  await admin5`UPDATE thoughts SET derived_from = jsonb_build_array(${older.id}::text) WHERE id = ${newer.id}::uuid`;
+  const flaggedRows = await store.listSupersessionProposals({ status: null });
+  assert(flaggedRows.length === 1 && flaggedRows[0].lineage === true, "with the newer thought's derived_from naming the older, the row reads lineage");
+  assert((await store.listSupersessionProposals({ status: null, lineage: true })).length === 1 && (await store.listSupersessionProposals({ status: null, lineage: false })).length === 0,
+         "lineage: true selects it, false leaves it out — the third argument on every call");
   await admin5.close();
 }
 
