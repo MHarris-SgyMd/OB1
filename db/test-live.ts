@@ -4159,6 +4159,16 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const proposed = await consolidate();
     const atlas = (await proposals()).find((p) => p.older_id === atlasOld && p.newer_id === atlasNew);
     assert(proposed.code === 0 && atlas !== undefined && atlas.status === "pending" && (await proposals()).length === proposalsBefore + 1, `the atlas pair is proposed pending (exit ${proposed.code})`);
+    // 069 (SMD-2313): the PENDING row on a lineage pair — the ticket's own
+    // case, a page over its evidence judged before 066 — under --list
+    // lineage, with no stale standing on it; the array set raw and cleared
+    // (run-it, first review pass: the one --list lineage tooth was a stale
+    // row, so the pending call dropped passed every suite).
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${atlasOld}::text) WHERE id = ${atlasNew}::uuid`;
+    const pendingLineage = await consolidate("--list", "lineage");
+    assert(pendingLineage.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\)/.test(pendingLineage.out) && /LINEAGE PAIR\s*$/m.test(pendingLineage.out) && !/\(stale/.test(pendingLineage.out) && pendingLineage.out.includes(`--accept ${atlas!.id}    --reject ${atlas!.id}`),
+           `--list lineage lists the pending row, tagged, with no stale standing and the plain accept/reject line (${pendingLineage.out.split("\n").find((l) => /LINEAGE PAIR/.test(l))?.trim().slice(0, 160)})`);
+    await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
     const rb1 = await rebuild(atlasNew);

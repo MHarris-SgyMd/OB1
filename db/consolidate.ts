@@ -375,8 +375,9 @@ const verdictPhrase = (v: string) =>
 
 async function printList(status: string | undefined, limit = 50): Promise<number> {
   // 069's three-argument form, always: 029 re-applied by hand lands its
-  // two-argument form beside 069's, and a two-argument call would reach that
-  // body, which reads no flag (preflight's lineage check names the leftover).
+  // two-argument form beside 069's, and a call short of three is then
+  // ambiguous (not unique) and fails; three resolve (preflight's lineage
+  // check names the leftover).
   const listed = async (st: string | null, lineage: boolean | null) =>
     (await sql`SELECT * FROM list_supersession_proposals(${st}::text, ${limit}::int, ${lineage}::boolean)`) as Listed[];
   // --list lineage: the unreviewed rows standing on a lineage pair — the

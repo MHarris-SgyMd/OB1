@@ -1523,7 +1523,12 @@ function buildServer(principal: Principal): McpServer {
         };
       } catch (err: unknown) {
         const msg = (err as Error).message;
-        const hint = /list_supersession_proposals|supersession_proposals/.test(msg)
+        // 069 (SMD-2313): both stores call the three-argument form, so a brain
+        // at 029..068 fails naming it (or PostgREST names p_lineage) — the
+        // remedy is 069, not 029 (cold read, first review pass).
+        const hint = /list_supersession_proposals\(text, ?integer, ?boolean\)|p_lineage/.test(msg)
+          ? " — migration 069 (db/migrations/069_listing_flags_lineage_pair.sql) is not applied, or PostgREST has not reloaded its schema cache"
+          : /list_supersession_proposals|supersession_proposals/.test(msg)
           ? " — migration 029 (db/migrations/029_supersession_proposals.sql) is not applied, or PostgREST has not reloaded its schema cache"
           : "";
         return {

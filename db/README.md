@@ -722,7 +722,7 @@ earlier, by the producer-count arm; the remedies run 061, 063, 066 in turn).
 One body redefined on its own text with no arity change; nothing runs at
 apply time but the DDL; a pair proposed before the file stands for its
 reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
-pair — the listing reads nothing of `derived_from`, the pass never replaces
+pair — the listing read nothing of `derived_from` until 069, the pass never replaces
 it (a text move, once `rebuild_derived` runs — `db/rebuild.ts` — leaves it
 `stale` for a reviewer, and the pass settles it on its next run — 067), and
 the recorder has no lineage guard; 069 flags such a row `LINEAGE PAIR`, and
@@ -853,10 +853,10 @@ reject to run, `--list lineage` selects the unreviewed ones (pending, then
 stale), `--status` counts them; the MCP tool prints the tag and takes
 `lineage: true`; preflight's `lineage` check counts unreviewed proposals on a
 lineage pair (bounded, as its census is) and warns with the ids and the remedy,
-and warns when the listing is from before 069 or 029's two-argument form stands
-beside it (029 re-applied by hand lands it beside, and a two-argument caller
-then reaches 029's body; the fork's callers pass three arguments, so they reach
-069's regardless). No verdict is written at apply time — a rejection is a
+and warns when the listing is from before 069 (every listing fails there: the
+callers pass the third argument) or 029's two-argument form stands beside it
+(029 re-applied by hand lands it beside, and a call short of three arguments
+is then ambiguous and fails; the fork's callers pass three, which resolve). No verdict is written at apply time — a rejection is a
 reviewer's, with a name on it — and a `--reject-lineage` sweep is not taken
 until the flag has been used. DDL alone; no row moves; no grant moves (EXECUTE
 is PUBLIC, as on 029's). test-schema [63], test-upgrade [20u], test-live [16];
@@ -2982,7 +2982,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2275 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 909 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 910 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

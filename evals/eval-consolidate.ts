@@ -265,7 +265,7 @@ if (FULL || REPLAY) {
   console.log(`  cost: ${lines.length} judge calls for ${loaded.size} thoughts (${withEntities} with entities) = ${Math.round((1000 * lines.length) / loaded.size)} calls per thousand thoughts; ~${promptTokens.toLocaleString()} estimated prompt tokens, ~${Math.round(promptTokens / lines.length || 0)} per call, ~${Math.round((promptTokens / loaded.size) * 1000).toLocaleString()} per thousand thoughts` +
     (wall ? `; ${(wall / 60).toFixed(1)} min wall on ${cfg.judgeModel}` : ""));
 
-  const proposals = (await sql`SELECT * FROM list_supersession_proposals(NULL::text, 200)`) as Record<string, unknown>[];
+  const proposals = (await sql`SELECT * FROM list_supersession_proposals(NULL::text, 200, NULL::boolean)`) as Record<string, unknown>[];
   const issueOf = async (id: string) => (await sql`SELECT metadata->>'issue' AS i FROM thoughts WHERE id = ${id}::uuid`)[0]?.i as string | undefined;
   const graded = new Map((labels.proposals ?? []).map((g) => [`${g.older}|${g.newer}`, g]));
   let gTrue = 0, gFalse = 0, ungraded = 0;

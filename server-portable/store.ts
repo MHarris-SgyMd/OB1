@@ -606,7 +606,7 @@ export type SupersessionProposal = {
   /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). `created_at` is `string | null` for the same reason the read path is (SMD-1803). */
   older: { id: string; content: string; created_at: string | null; edited: boolean };
   newer: { id: string; content: string; created_at: string | null; edited: boolean };
-  /** Since migration 069 (SMD-2313): one side's `derived_from` names the other — a derivation and its input (a page and its evidence), a pair 066's candidate filter never proposes; a standing one is a reviewer's to reject. False under a listing from before 069. */
+  /** Since migration 069 (SMD-2313): one side's `derived_from` names the other — a derivation and its input (a page and its evidence), a pair 066's candidate filter never proposes; a standing one is a reviewer's to reject; false when the column is absent from a row. */
   lineage: boolean;
 };
 

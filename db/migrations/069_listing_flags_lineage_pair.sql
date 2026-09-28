@@ -59,9 +59,15 @@
 --      preflight's `lineage` check counts unreviewed (pending, stale)
 --      proposals on a lineage pair — bounded, as its census is — and WARNs
 --      with the count, the first ids and the remedy, and WARNs when the
---      listing's body is from before this file (029 re-applied by hand over
---      it cannot land — CREATE OR REPLACE refuses the narrower return type —
---      so that state is this file not yet applied, or a hand DROP).
+--      listing's body is from before this file — this file not yet applied,
+--      or a hand DROP — or when 029's two-argument form stands beside it:
+--      029 re-applied by hand does not touch this body (a different argument
+--      list is a new overload, not a replacement), it lands its own form
+--      BESIDE this one, and a call passing fewer than three arguments is then
+--      ambiguous — Postgres does not prefer the form without the default
+--      (42725, not unique; measured) — so it fails, while a call passing
+--      three resolves here. The fork's callers pass three arguments for that
+--      reason; the second arm reads the count of forms.
 --   3. NOT this file: a verdict. An auto-reject of the standing rows at apply
 --      time was decided against in SMD-2292 and here — a rejection is a
 --      reviewer's, with a name on it, and 066 promised nothing runs at apply
@@ -76,12 +82,24 @@
 -- SAFETY
 --   One function dropped and created under a new arity (the two-argument
 --   form is gone: a caller naming it positionally with two arguments
---   resolves to this one through the default; PostgREST's rpc by name does
---   too, once its schema cache reloads); one COMMENT. Nothing runs at apply
+--   resolves to this one through the default — while the two-argument form
+--   ALONE stands, a brain at 068 under a server built from this tree, every
+--   fork caller fails naming the three-argument form, and the MCP tool's
+--   hint and preflight's lineage check name this file; PostgREST's rpc by
+--   name resolves once its schema cache reloads); one COMMENT. Nothing runs at apply
 --   time but the DDL; no row moves; no table is touched; no grant moves. The
---   predicate costs two per-row jsonb containments on rows the listing
---   already joins (at most 200); no index. MINOR under FORK.md's version
---   rules. 029's file is not edited: it is frozen by release 1.0.0.
+--   predicate costs two per-row jsonb containments on the rows the listing
+--   joins — the 200 it returns, or every row of the status when p_lineage
+--   selects; no index. Functions are PUBLIC EXECUTE by default and --grant
+--   grants tables, not functions, so no ACL is carried onto the new form: a
+--   brain that revoked EXECUTE on the listing by hand re-grants it by hand
+--   (061's rule for the forms it dropped). MINOR under FORK.md's version
+--   rules, on 061's precedent for a dropped form: the parameter is trailing
+--   and defaulted, so every two-argument caller resolves to this form; the
+--   column is trailing, and every reader in the tree keys by name (the
+--   store's mapper, the CLI's row type, PostgREST's JSON, the eval's
+--   SELECT *), so none moves. 029's file is not edited: it is frozen by
+--   release 1.0.0.
 --   test-schema [63], test-upgrade [20u] (proposals planted before the file
 --   read the flag after it, the table whole and unmoved),
 --   server-portable/test-preflight.ts (the census arm and the older-body
