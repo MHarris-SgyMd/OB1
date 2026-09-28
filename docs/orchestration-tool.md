@@ -474,8 +474,9 @@ ships empty: each recipe's ticket adds its line, its emitter and the
 emitter's packages when it converts. The eval kit proves the path with a
 fixture emitter in Python. The runner publishes no port, where n8n
 publishes one on loopback. A live-API emitter connects only to the hosts its
-line names, through its proxy (SMD-2289), and SMD-2211's checkpoint governs
-those hosts. How their vendor credential reaches the runner is decided when
+line names, through its proxy (SMD-2289), and only by TLS. The hosts are the
+operator's to choose: nothing reviews them yet, since SMD-2211's checkpoint
+covers n8n's credentials, not these. How their vendor credential reaches the runner is decided when
 the first of them converts (SMD-2149, SMD-2021).
 
 ## What moves, what stays

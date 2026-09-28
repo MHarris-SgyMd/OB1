@@ -833,7 +833,9 @@ lines naming the same one are refused.
          as the container starts, keyed on the emitter uids (nft), and then
          drops the capability to change them. The runner refuses to start
          if an emitter uid can reach a port of its on loopback (asked before
-         it listens), or if it still holds that capability.
+         it listens), or if it still holds that capability. The engine's
+         kernel needs nf_tables (Docker, Docker Desktop and podman have it);
+         without it the runner refuses to start, and says why, every 30 s.
        - A live-API emitter's pipeline names the hosts it needs:
          `"network": ["api.readwise.io"]` (port 443), or `"host:port"`.
          The emitter reaches them only through a proxy the runner keeps
@@ -854,8 +856,10 @@ lines naming the same one are refused.
          network. So is a host that names or resolves to a loopback,
          link-local or cloud metadata address (every address it resolves
          to is read); a private address is not refused, since a compose
-         service has one. SMD-2211's egress checkpoint governs the hosts a
-         pipeline names.
+         service has one. A named host must speak TLS: a plain-HTTP one
+         (the host's Ollama, say) is cut off at its first bytes. The hosts
+         are the operator's to choose; nothing reviews them yet (SMD-2211's
+         checkpoint covers n8n's credentials, not these).
        - The ingester and reembed run as `bun` and keep the runner's
          network: Postgres and the model provider.
        - The container's init process keeps the two capabilities, which

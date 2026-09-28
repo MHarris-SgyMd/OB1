@@ -625,10 +625,12 @@ services:
     # pipeline's emitter as a uid of its own, the pipeline as bun). These are
     # the only capabilities it keeps: changing user, and signalling a step's
     # processes (at the deadline, and to kill what an emitter leaves).
-    # NET_ADMIN and SETPCAP are for its first second only: the image's command
-    # sets the rules that give emitter uids no network, but for a networked
-    # pipeline's proxy, then drops both before the runner starts, and the
-    # runner refuses to start holding either (SMD-2289). init reaps what exits.
+    # NET_ADMIN and SETPCAP are for the image's command: it sets the rules that
+    # give emitter uids no network, but for a networked pipeline's proxy, then
+    # drops both before the runner starts, and the runner refuses to start
+    # holding either (SMD-2289). init keeps them, as does a `compose exec` as
+    # root; nothing the runner starts has them. The kernel needs nf_tables.
+    # init reaps what exits.
     init: true
     # Bounds on what one emitter an export has taken over can take from the
     # host: processes and memory (review pass 7: neither was set, and Docker

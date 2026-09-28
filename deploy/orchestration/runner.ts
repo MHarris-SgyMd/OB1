@@ -533,13 +533,13 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
   // Half-open on both sides: a client that sends and then shuts its write side still gets the answer (review pass 1).
   const server = createServer({ allowHalfOpen: true }, (client) => {
     let head = Buffer.alloc(0);
-    // Until the request and the ClientHello arrive, and reset by each byte (a quiet bound, not a deadline); an open tunnel lasts while both sides are open, and the same quiet bound after either ends.
     // Where the connection is, for what a quiet cut says: its request, the proxy's own lookup and dial, its ClientHello, answered, or tunneled (review pass 3: a slow lookup, and a refused client that stayed, were each reported as a request never sent).
     let stage: "request" | "dial" | "hello" | "answered" | "tunneled" = "request";
     let target = "";
     // Kept from the start: a client that shuts its write side while the name resolves has its end emitted before any pipe is there to pass it on (measured in Bun, a paused socket included), and its tunnel then never let go (review pass 2).
     let clientEnded = false;
     client.once("end", () => { clientEnded = true; });
+    // Until the request and the ClientHello arrive, and reset by each byte (a quiet bound, not a deadline); an open tunnel lasts while both sides are open, and the same quiet bound after either ends.
     client.setTimeout(headMs, () => {
       const quiet = `${headMs / 1000} s of quiet`;
       if (stage === "request") note(`a connection sent no whole request in ${quiet}, and was closed`);
@@ -558,7 +558,8 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
     const onData = async (chunk: Buffer) => {
       head = Buffer.concat([head, chunk]);
       const end = head.indexOf("\r\n\r\n");
-      if (end < 0) { if (head.length > 8192) { client.off("data", onData); answer("431 Request Header Fields Too Large", "a request past 8 KB of headers"); } return; }
+      // A head past 8 KB is refused whether or not its end has arrived: a whole one in one read was accepted at any size (review pass 4).
+      if (end < 0 || end > 8192) { if (head.length > 8192) { client.off("data", onData); answer("431 Request Header Fields Too Large", "a request past 8 KB of headers"); } return; }
       client.off("data", onData);
       client.pause();
       const line = head.subarray(0, head.indexOf("\r\n")).toString("latin1");
@@ -571,13 +572,13 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
       target = `${host}:${want}`;
       let addresses: string[];
       try { addresses = await resolve(host); } catch { addresses = []; }
+      // Gone while the name resolved (its emitter stopped, the quiet bound cut it): nothing to answer or tunnel for (review pass 4: a cut connection was answered a second time).
+      if (client.destroyed) return;
       if (!addresses.length) return answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${host} did not resolve`);
       // Every address is screened, not only the one dialled: an answer that mixes a public address with a loopback one is a rebinding answer (review pass 2). IPv4 first, since a container often has no IPv6 route.
       const local = addresses.find(isLocalAddress);
       if (!o.allowLocal && local) return answer("403 Forbidden", `CONNECT ${host}:${want}: ${host} resolves to ${local}, a loopback, link-local or metadata address, which no emitter may reach`);
       const address = addresses.find((a) => isIP(a) === 4) ?? addresses[0];
-      // Gone while the name resolved (its emitter stopped, the request timed out): nothing to tunnel for.
-      if (client.destroyed) return;
       const up = tcpConnect({ host: address, port: want, allowHalfOpen: true });
       const dialing = setTimeout(() => { up.destroy(); answer("504 Gateway Timeout", `CONNECT ${host}:${want}: ${address} did not answer within ${dialMs / 1000} s`); }, dialMs);
       up.once("connect", () => {
@@ -653,7 +654,7 @@ export type Report = {
   report?: string[];
   notes?: string[];
   reembed?: { exit: number; tail: string[]; unembedded?: number };
-  /** What the pipeline's proxy refused its emitter during the run (SMD-2289): a host it does not name, a request that is not CONNECT. */
+  /** What the pipeline's proxy refused or cut during the run (SMD-2289): a host or port it does not name, a request that is not CONNECT or too long, a ClientHello naming another server, a host that did not resolve or answer, a connection quiet too long or past the cap. */
   egress?: string[];
 };
 
@@ -1380,9 +1381,9 @@ async function selfCheck(): Promise<number> {
     setTimeout(() => { s.destroy(); }, waitMs);
   });
   const connectTo = (host: string, port = echoPort) => `CONNECT ${host}:${port} HTTP/1.1\r\n\r\n`;
-  const dns: Record<string, string[]> = { "up.test": ["127.0.0.1"], "10.9.9.9": ["127.0.0.1"], "dark.test": ["192.0.2.1"], "v6first.test": ["::1", "127.0.0.1"], "mixed.test": ["192.0.2.7", "127.0.0.1"], "empty.test": [], "slow.test": ["127.0.0.1"] };
-  const standIn = async (h: string) => { await Bun.sleep(h === "slow.test" ? 700 : 100); if (!dns[h]) throw new Error("no such host"); return dns[h]; };
-  const own = await startProxy({ ...reaches, network: ["up.test", "10.9.9.9", "dark.test", "v6first.test", "empty.test", "slow.test"].map((host) => ({ host, port: echoPort })) }, 0,
+  const dns: Record<string, string[]> = { "up.test": ["127.0.0.1"], "10.9.9.9": ["127.0.0.1"], "dark.test": ["192.0.2.1"], "v6first.test": ["::1", "127.0.0.1"], "mixed.test": ["192.0.2.7", "127.0.0.1"], "empty.test": [], "slow.test": ["127.0.0.1"], "slow-empty.test": [], "late.test": ["127.0.0.1"] };
+  const standIn = async (h: string) => { await Bun.sleep(h.startsWith("slow") ? 700 : h === "late.test" ? 300 : 100); if (!dns[h]) throw new Error("no such host"); return dns[h]; };
+  const own = await startProxy({ ...reaches, network: ["up.test", "10.9.9.9", "dark.test", "v6first.test", "empty.test", "slow.test", "slow-empty.test"].map((host) => ({ host, port: echoPort })) }, 0,
     { allowLocal: true, lookup: standIn, headMs: 400, dialMs: 200, maxConnections: 4 });
   const strict = await startProxy({ ...reaches, network: [{ host: "localhost", port: echoPort }] }, 0);
   const loose = await startProxy({ ...reaches, network: [{ host: "127.0.0.1", port: gonePort }] }, 0, { allowLocal: true });
@@ -1409,9 +1410,13 @@ async function selfCheck(): Promise<number> {
     // Review pass 3: a quiet cut says where the connection was, and a refused client that stays is let go without a second note.
     const slow = await session(own.port, [[0, connectTo("slow.test")]]);
     const hushed = await session(own.port, [[0, connectTo("up.test")]]);
+    // Cut while its name resolves to nothing: the cut is its one note, not a "did not resolve" after it (review pass 4).
+    await session(own.port, [[0, connectTo("slow-empty.test")]]);
+    await Bun.sleep(400);
     const stages = own.take();
     expect(`a quiet cut says where the connection was: the proxy's own lookup and dial, the ClientHello (${JSON.stringify(stages)}; ${slow.closedAt}, ${hushed.closedAt} ms)`,
-      stages.length === 2 && /^CONNECT slow\.test:\d+: resolving and dialling it took past 0\.4 s of quiet/.test(stages[0]) && /^CONNECT up\.test:\d+: no whole ClientHello in 0\.4 s of quiet/.test(stages[1]));
+      stages.length === 3 && /^CONNECT slow\.test:\d+: resolving and dialling it took past 0\.4 s of quiet/.test(stages[0]) && /^CONNECT up\.test:\d+: no whole ClientHello in 0\.4 s of quiet/.test(stages[1])
+      && /^CONNECT slow-empty\.test:\d+: resolving and dialling it took past/.test(stages[2]));
     const patient = await startProxy({ ...reaches, network: [{ host: "up.test", port: echoPort }] }, 0, { allowLocal: true, lookup: standIn, headMs: 5000 });
     try {
       const stayed = await session(patient.port, [[0, connectTo("elsewhere.test")], [1500, "x"], [300, "x"]], 3500, true);
@@ -1443,16 +1448,16 @@ async function selfCheck(): Promise<number> {
     const shut = createServer({ allowHalfOpen: true }, (x) => { x.once("data", () => x.end("BYE")); x.on("data", (d) => (lateBytes += d.toString("latin1"))); x.on("error", () => {}); });
     await new Promise<void>((ok) => shut.listen(0, "127.0.0.1", ok));
     const shutPort = (shut.address() as { port: number }).port;
-    const tight = await startProxy({ ...reaches, network: [{ host: "up.test", port: silentPort }, { host: "up.test", port: shutPort }] }, 0, { allowLocal: true, lookup: standIn, headMs: 300, maxConnections: 8 });
+    const tight = await startProxy({ ...reaches, network: [{ host: "up.test", port: silentPort }, { host: "up.test", port: shutPort }, { host: "late.test", port: silentPort }] }, 0, { allowLocal: true, lookup: standIn, headMs: 600, maxConnections: 8 });
     const screened = await startProxy({ ...reaches, network: [{ host: "mixed.test", port: echoPort }] }, 0, { lookup: standIn });
     try {
-      // Eight clients shut their write side 50 ms in, while the name is still resolving (100 ms): each end must still reach the host. Whether Bun hands a paused socket's end on before the tunnel opens is a race (2 of 3 single runs won it without the fix), so eight are asked.
-      const halves = await Promise.all([0, 1, 2, 3, 4, 5, 6, 7].map(() => session(tight.port, [[0, connectTo("up.test", silentPort)], [0, clientHello("up.test")], [50, "END"]], 3000)));
+      // Eight clients send the request and the ClientHello in one write and shut their write side 20 ms in, while late.test is still resolving (300 ms): each end must still reach the host. Bun hands a paused socket's end on at once only when nothing is buffered, so the hello must not trail in a read of its own (review pass 4: sent apart, the fix's mutant survived 2 of 5 runs under load).
+      const halves = await Promise.all([0, 1, 2, 3, 4, 5, 6, 7].map(() => session(tight.port, [[0, Buffer.concat([Buffer.from(connectTo("late.test", silentPort)), clientHello("late.test")])], [20, "END"]], 3000)));
       await Bun.sleep(100);
       const sawEnds = silentEnds;
       const after = await session(tight.port, [[0, connectTo("up.test", silentPort)]], 400);
       expect(`a half-closed tunnel to a host that never closes is let go after the quiet bound, its end passed on, and the proxy's connections freed (closed after ${halves.map((h) => h.closedAt).join(", ")} ms; the host saw ${sawEnds} end; the next request ${JSON.stringify(after.text.split("\r\n")[0])})`,
-        halves.every((h) => h.closedAt >= 300 && h.closedAt < 1500) && sawEnds === 8 && after.text.startsWith(ok200));
+        halves.every((h) => h.closedAt >= 600 && h.closedAt < 2500) && sawEnds === 8 && after.text.startsWith(ok200));
       tight.take();
       await Bun.sleep(100);
       const reset = tcpConnect(tight.port, "127.0.0.1", () => reset.write(Buffer.concat([Buffer.from(connectTo("up.test", silentPort)), clientHello("up.test")])));
@@ -1472,9 +1477,9 @@ async function selfCheck(): Promise<number> {
       gone.resetAndDestroy();
       await Bun.sleep(250);
       expect(`a client gone while its name resolves is not dialled for (${silentConns - connsBefore} dialled)`, silentConns === connsBefore);
-      // The client stays silent, half-open; a write it sends at 900 ms is reset only if the proxy has let the tunnel go.
-      const silentClient = await session(tight.port, [[0, connectTo("up.test", shutPort)], [0, clientHello("up.test")], [900, "x"], [200, "x"]], 3000, true);
-      expect(`a host that ends first while its client stays silent is let go after the quiet bound (the client's late write reset at ${silentClient.closedAt} ms)`, silentClient.text.endsWith("BYE") && silentClient.closedAt >= 850 && silentClient.closedAt < 2000);
+      // The client stays silent, half-open; a write it sends at 1.3 s is reset only if the proxy has let the tunnel go (its bound here is 600 ms).
+      const silentClient = await session(tight.port, [[0, connectTo("up.test", shutPort)], [0, clientHello("up.test")], [1300, "x"], [200, "x"]], 3500, true);
+      expect(`a host that ends first while its client stays silent is let go after the quiet bound (the client's late write reset at ${silentClient.closedAt} ms)`, silentClient.text.endsWith("BYE") && silentClient.closedAt >= 1250 && silentClient.closedAt < 2800);
       const mixed = await session(screened.port, [[0, connectTo("mixed.test")]]);
       expect(`a name whose answer mixes a public address with a loopback one is refused (${mixed.text.split("\r\n")[0]})`, mixed.text.startsWith("HTTP/1.1 403") && /mixed\.test resolves to 127\.0\.0\.1/.test(screened.take()[0] ?? ""));
     } finally {
@@ -1491,7 +1496,8 @@ async function selfCheck(): Promise<number> {
     const many = strict.take();
     expect(`one report lists ${REFUSALS_SHOWN} refusals and counts the rest, and take() clears them (${many.length}: ${many.at(-1)})`, many.length === REFUSALS_SHOWN + 1 && many.at(-1) === "…and 5 more" && strict.take().length === 0);
     const long = await session(strict.port, [[0, "A".repeat(9000)]]);
-    expect(`a request past 8 KB of headers is refused, not buffered (${long.text.split("\r\n")[0]})`, long.text.startsWith("HTTP/1.1 431"));
+    const whole = await session(strict.port, [[0, `CONNECT localhost:${echoPort} HTTP/1.1\r\nx-pad: ${"a".repeat(9000)}\r\n\r\n`]]);
+    expect(`a request past 8 KB of headers is refused, not buffered, whether or not its end has arrived (${long.text.split("\r\n")[0]}; whole, in one write: ${whole.text.split("\r\n")[0]})`, long.text.startsWith("HTTP/1.1 431") && whole.text.startsWith("HTTP/1.1 431"));
   } finally {
     own.close();
     strict.close();
