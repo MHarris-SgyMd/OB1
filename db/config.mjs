@@ -1719,6 +1719,13 @@ export const ROLE_GRANTS = Object.freeze({
     // (SMD-2256).
     Object.freeze({ table: "ob1_ticket_head",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "068" }),
     Object.freeze({ table: "ob1_superseded_by", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "068" }),
+    // 069's triggers run as the caller on every write of a source row (a
+    // delete of a thought that has one included, through the cascade) and on
+    // every status move between a known and an unknown status_type, and keep
+    // node_state's gate; node_dependencies() and the dependency columns read
+    // it. A role without these cannot make those writes nor read those
+    // columns (SMD-2267).
+    Object.freeze({ table: "ob1_source_gate",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "069" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)

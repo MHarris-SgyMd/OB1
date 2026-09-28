@@ -55,10 +55,17 @@
  * printed beside it — against the budget the flag was pre-registered with (at
  * most the hybrid's own median at 10,000 rows); then what 068's triggers cost
  * a writer, against the triggers dropped.
+ *
+ * ── The dependency read (069, SMD-2267) ──────────────────────────────────────
+ * Then source rows and blocked_by links on the ticket rows, and node_state's
+ * dependency columns timed for forty ids and for every thought, and
+ * node_dependencies(), on 069's reads against the reads as 068 left them;
+ * then what 069's gate triggers cost a writer, against them dropped.
  */
 
 import { SQL } from "bun";
-import { requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { readFileSync } from "node:fs";
+import { applyMigrations, migrationFiles, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 import { commandLine } from "./cli.ts";
 
 commandLine("bench-hybrid.ts", {}, { note: "its knobs are OB1_BENCH_* environment variables" });
@@ -117,6 +124,8 @@ async function time(fn: () => Promise<unknown>): Promise<number> {
   return median(ms);
 }
 
+/** node_state(<40 ids>) at each scale run, for the 100,000-row budget (069). */
+const keyedBudget = new Map<number, number>();
 for (const n of SCALES) {
   console.log(`\n  ${n.toLocaleString()} rows, ${DIM} dimensions, ${MARKED} rows carry ${IDENT}, ${MARKED} carry the decoy ${DECOY}`);
   await resetSchema(URL_, { dim: DIM, model: "stub-embed", trgm: true });
@@ -293,6 +302,103 @@ for (const n of SCALES) {
   console.log(`    a ticket's status update                ${fmt(statusUpdate.on).padStart(9)} vs ${fmt(statusUpdate.off)}   (+${fmt(statusUpdate.on - statusUpdate.off)}; budget 0.50 ms: ${within(statusUpdate.on - statusUpdate.off <= 0.5)})`);
   console.log(`    stamping 40% of the rows                ${fmt(stampOn).padStart(9)} vs ${fmt(tStampOff)}   (${stampOn >= tStampOff ? "+" : ""}${((stampOn / tStampOff - 1) * 100).toFixed(0)}%; budget +20%: ${within(stampOn <= tStampOff * 1.2)})`);
   console.log(`    drift() after the last triggered stamp  ${String(drift).padStart(9)}${drift === 0 ? "" : "  ← the triggers left the projection behind"}`);
+
+  // ── The dependency read (069, SMD-2267) ────────────────────────────────────
+  // After the arms above, so their numbers do not move: the ticket rows get
+  // their statuses back (the stamps left unknown ones), each head a linear
+  // source row, and every even ticket a blocked_by link to the next. Timed on
+  // 069's reads and on the reads as 068 left them (053's source_thought,
+  // 058's node_dependencies and 068's node_state, re-applied from their
+  // files, then 069 again). The
+  // budget, pre-registered: node_state(<40 ids>) at most 2 ms at 10,000 rows,
+  // and at 100,000 at most 1.5 times that — the ids' cost, not the brain's.
+  await stampTickets("completed", "started");
+  await sql.unsafe(`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+                    SELECT head_id, 'linear', issue, 'x', 'text/plain', encode(sha256('x'), 'hex') FROM ob1_ticket_head`);
+  await sql.unsafe(`INSERT INTO thought_facets (thought_id, kind, payload)
+                    SELECT s.thought_id, 'link', jsonb_build_object('relation', 'blocked_by', 'system', 'linear', 'target', 'B-' || (substr(s.identity, 3)::int + 1))
+                      FROM thought_sources s WHERE substr(s.identity, 3)::int % 2 = 0`);
+  await sql.unsafe("VACUUM ANALYZE");
+  const [dep] = await sql`SELECT (SELECT count(*)::int FROM thought_sources) AS sources, (SELECT count(*)::int FROM thought_facets WHERE kind = 'link') AS links`;
+  const [{ ids40 }] = await sql`SELECT array_agg(id)::text AS ids40 FROM (SELECT thought_id AS id FROM thought_sources ORDER BY md5(thought_id::text) LIMIT 40) x`;
+  // The reads as 068 left them are timed once each, not as a median: on this
+  // brain 053's resolver costs each unheld blocker a GIN scan, seconds a read
+  // at 10,000 rows and minutes at 100,000.
+  const once = async (fn: () => Promise<unknown>) => { const t = performance.now(); await fn(); return performance.now() - t; };
+  const depReads = async (timer: (fn: () => Promise<unknown>) => Promise<number>) => ({
+    keyed: await timer(() => sql`SELECT * FROM node_state(${ids40}::uuid[])`),
+    whole: await timer(() => sql`SELECT count(blockers) + count(unknown_blockers) + count(nullif(in_dependencies, false)) FROM node_state()`),
+    deps: await timer(() => sql`SELECT count(*) FROM node_dependencies()`),
+    rows: (await sql`SELECT md5(string_agg(x::text, '|' ORDER BY x::text)) AS h FROM node_state(${ids40}::uuid[]) x`)[0].h as string,
+  });
+  const keyedNow = await depReads(time);
+  await applyMigrations(URL_, { dim: DIM, model: "stub-embed", trgm: true, only: (f) => f.startsWith("058_") || f.startsWith("068_") });
+  // 053's resolver alone: its file redefines much that later files redefine again.
+  const src053 = readFileSync(new URL(`./migrations/${migrationFiles().find((f) => f.startsWith("053_"))}`, import.meta.url), "utf8");
+  const at053 = src053.indexOf("CREATE OR REPLACE FUNCTION source_thought(");
+  await sql.unsafe(src053.slice(at053, src053.indexOf("\n$$;", at053) + 4));
+  const keyedBefore = await depReads(once);
+  await applyMigrations(URL_, { dim: DIM, model: "stub-embed", trgm: true, only: (f) => f.startsWith("069_") });
+  const [{ blockedRows }] = await sql`SELECT count(*) FILTER (WHERE blockers IS NOT NULL)::int AS "blockedRows" FROM node_state(${ids40}::uuid[])`;
+  keyedBudget.set(n, keyedNow.keyed);
+  const keyedVerdict = n === 10000 ? `budget 2.00 ms: ${within(keyedNow.keyed <= 2)}`
+    : keyedBudget.has(10000) ? `budget 1.5 × ${fmt(keyedBudget.get(10000)!)}: ${within(keyedNow.keyed <= 1.5 * keyedBudget.get(10000)!)}` : "no 10,000-row run to compare";
+  console.log(`\n  node_state's dependency read (069), ${dep.sources.toLocaleString()} source rows and ${dep.links.toLocaleString()} links; 069 (median) vs the reads as 068 left them (once):\n`);
+  console.log(`    node_state(<40 ids>), every column      ${fmt(keyedNow.keyed).padStart(9)} vs ${fmt(keyedBefore.keyed)}   (${blockedRows} of 40 blocked; ${keyedVerdict}; rows ${keyedNow.rows === keyedBefore.rows ? "identical" : "DIFFER"})`);
+  console.log(`    node_state(), the dependency columns    ${fmt(keyedNow.whole).padStart(9)} vs ${fmt(keyedBefore.whole)}`);
+  console.log(`    node_dependencies()                     ${fmt(keyedNow.deps).padStart(9)} vs ${fmt(keyedBefore.deps)}`);
+
+  // What 069's triggers cost a writer, pre-registered: a plain capture at most
+  // +0.03 ms, a status move on a sourced row between known and unknown at most
+  // +0.2 ms, a source row's write at most +0.2 ms; the bulk stamp, moving 40%
+  // of the rows between known and unknown, is printed against +20%. Off is the
+  // four row-change triggers dropped, as 068's above; the mirror drifts while
+  // they are, so it is rebuilt after, and a last triggered stamp tests them.
+  const gateDefs = (await sql`SELECT tgname, tgrelid::regclass::text AS rel, pg_get_triggerdef(oid) AS def FROM pg_trigger
+                               WHERE tgname IN ('thought_sources_node_gate_insert', 'thought_sources_node_gate_update', 'thought_sources_node_gate_delete', 'thoughts_node_source_gate_update')`) as { tgname: string; rel: string; def: string }[];
+  if (gateDefs.length !== 4) throw new Error(`expected 069's four row-change triggers, found ${gateDefs.length}`);
+  const gateTriggers = (on: boolean) => sql.unsafe(gateDefs.map((t) => `DROP TRIGGER IF EXISTS ${t.tgname} ON ${t.rel};${on ? ` ${t.def};` : ""}`).join(" "));
+  const gateBlocks = async (call: () => Promise<unknown>) => {
+    const on: number[] = [], off: number[] = [];
+    for (let block = 0; block < 10; block++) {
+      const enabled = block % 2 === 0;
+      await gateTriggers(enabled);
+      for (let i = 0; i < 20; i++) (enabled ? on : off).push(await timed(call));
+    }
+    await gateTriggers(true);
+    return { on: median(on), off: median(off) };
+  };
+  const gateCapture = await gateBlocks(() => sql`SELECT upsert_thought(${`bench gate capture ${n} ${++captures}`}, '{"metadata":{}}'::jsonb)`);
+  const sourced = (await sql`SELECT thought_id AS id FROM thought_sources ORDER BY thought_id LIMIT 200`).map((r: { id: string }) => r.id);
+  let move = 0;
+  const gateStatus = await gateBlocks(() => {
+    const i = move++;
+    return sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status_type', ${i % 4 < 2 ? "weird" : "started"}::text) WHERE id = ${sourced[i % sourced.length]}`;
+  });
+  const unsourced = (await sql`SELECT id FROM thoughts t WHERE NOT EXISTS (SELECT 1 FROM thought_sources s WHERE s.thought_id = t.id) ORDER BY id LIMIT 200`).map((r: { id: string }) => r.id);
+  let rec = 0;
+  const gateSource = await gateBlocks(() => {
+    const i = rec++;
+    return sql`SELECT record_thought_source(${unsourced[i % unsourced.length]}::uuid, 'github', ${`W-${n}-${i}`}, 'x', 'text/plain', NULL, true)`;
+  });
+  const flipsOn: number[] = [], flipsOff: number[] = [];
+  let flip = 0;
+  for (const order of [[false, true], [true, false], [false, true]]) for (const on of order) {
+    await gateTriggers(on);
+    const k = ++flip;
+    (on ? flipsOn : flipsOff).push(await timed(() => k % 2 ? stampTickets(`settled-${k}`, `live-${k}`) : stampTickets("completed", "started")));
+  }
+  await gateTriggers(true);
+  await sql`SELECT * FROM ob1_rebuild_source_gate()`;
+  await stampTickets("canceled", "unstarted");
+  const [{ gateDrift }] = await sql`SELECT count(*)::int AS "gateDrift" FROM ob1_node_projection_drift()`;
+  const flipOn = median(flipsOn), flipOff = median(flipsOff);
+  console.log(`\n  069's triggers on a writer, against them dropped (medians; the bulk stamp three times each way):\n`);
+  console.log(`    a plain upsert_thought                  ${fmt(gateCapture.on).padStart(9)} vs ${fmt(gateCapture.off)}   (+${fmt(gateCapture.on - gateCapture.off)}; budget 0.03 ms: ${within(gateCapture.on - gateCapture.off <= 0.03)})`);
+  console.log(`    a sourced row's status, known↔unknown   ${fmt(gateStatus.on).padStart(9)} vs ${fmt(gateStatus.off)}   (+${fmt(gateStatus.on - gateStatus.off)}; budget 0.20 ms: ${within(gateStatus.on - gateStatus.off <= 0.2)})`);
+  console.log(`    record_thought_source, a new row        ${fmt(gateSource.on).padStart(9)} vs ${fmt(gateSource.off)}   (+${fmt(gateSource.on - gateSource.off)}; budget 0.20 ms: ${within(gateSource.on - gateSource.off <= 0.2)})`);
+  console.log(`    40% of the rows, known↔unknown          ${fmt(flipOn).padStart(9)} vs ${fmt(flipOff)}   (${flipOn >= flipOff ? "+" : ""}${((flipOn / flipOff - 1) * 100).toFixed(0)}%; against +20%: ${within(flipOn <= flipOff * 1.2)})`);
+  console.log(`    drift() after a rebuild and a stamp     ${String(gateDrift).padStart(9)}${gateDrift === 0 ? "" : "  ← the triggers left the gate behind"}`);
   await sql.close();
 }
 console.log("");

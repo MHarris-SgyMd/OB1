@@ -72,6 +72,8 @@ const TABLES = [
   // place is free too.
   "ob1_ticket_head",
   "ob1_superseded_by",
+  // 069's gate mirror (SMD-2267): no foreign key either way, as 068's.
+  "ob1_source_gate",
   // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
@@ -177,6 +179,14 @@ const FUNCTIONS = [
   "ob1_node_projection_reconcile(text[], uuid[])",
   "ob1_ticket_heads_of(text[])",
   "ob1_superseders_of(uuid[])",
+  // 069 (SMD-2267): the triggers go with thought_sources and thoughts.
+  "ob1_node_dependencies_of(uuid[])",
+  "ob1_system_gates(text)",
+  "ob1_source_gate_sync()",
+  "ob1_source_gate_status()",
+  "ob1_source_gate_truncate()",
+  "ob1_source_gate_reconcile(uuid[])",
+  "ob1_rebuild_source_gate()",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
