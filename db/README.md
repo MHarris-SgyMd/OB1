@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2275 assertions: 2275 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2276 assertions: 2276 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-nine (69) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -855,8 +855,10 @@ reject to run, `--list lineage` selects the unreviewed ones (pending, then
 stale), `--status` counts them, `--accept` refuses such a row unless `--force`
 (029's edited-since rule, CLI-side); the MCP tool prints the tag and takes
 `lineage: true`; preflight's `lineage` check counts unreviewed proposals on a
-lineage pair (bounded, as its census is) and warns with the ids and the remedy,
-and warns when the listing is from before 069 (every listing fails there: the
+lineage pair (bounded, as its census is) and warns with the ids and the remedy
+— on a brain at 068 the remedy applies 069 first, since `--list` needs it while
+the census and `--status` read the tables — and, with no such row standing,
+warns when the listing is from before 069 (every listing fails there: the
 callers pass the third argument) or 029's two-argument form stands beside it
 (029 re-applied by hand lands it beside, and a call short of three arguments
 is then ambiguous and fails; the fork's callers pass three, which resolve). No
@@ -2988,8 +2990,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2275 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 918 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2276 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 920 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

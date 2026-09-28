@@ -60,7 +60,9 @@
 --      the body for preflight.
 --   2. The readers, in the same change. db/consolidate.ts --list prints
 --      LINEAGE PAIR on such a row with the reject to run, --list lineage
---      selects them, --status counts the unreviewed ones; the MCP tool
+--      selects the unreviewed ones (pending, then stale; a decided row is
+--      under its own status, tagged), --status counts them (its own SQL,
+--      so it reads on a brain at 068 and names this file there); the MCP tool
 --      list_supersession_proposals prints the tag and takes `lineage: true`;
 --      db/consolidate.ts --accept on a lineage pair is refused with the
 --      reject named unless --force (029's rule for a text edited since

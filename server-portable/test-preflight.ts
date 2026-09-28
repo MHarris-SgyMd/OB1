@@ -1752,7 +1752,7 @@ else {
   assert(lpBeside.code === 0 && /!  lineage\s+every derived row has its lineage row, but 1 unreviewed proposal\(s\) stand on a lineage pair/.test(lpBeside.out) && /^\s*→ Apply db\/migrations\/069_listing_flags_lineage_pair\.sql\. Then review them: cd db && bun consolidate\.ts --url <url> --list lineage shows them/.test(fix(lpBeside.out, "lineage")),
          `a lineage pair standing while the listing is older: the census speaks, and its fix line applies 069 before the review (${lineageLn(lpBeside.out).slice(0, 120)} / ${fix(lpBeside.out, "lineage").trim().slice(0, 140)})`);
   await claims`UPDATE thoughts SET derived_from = NULL WHERE id = ${ids[1]}::uuid`;
-  await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`; // the lineage row this leaves is the orphan sweep's below
+  await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`; // 061's trigger takes the proposal's lineage row with it
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("069_") });
   await claims.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
   const pre069 = await run(SQL_ENV);

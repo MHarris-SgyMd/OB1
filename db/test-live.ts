@@ -4183,6 +4183,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 069/.test(listBoom.out),
            `an unrelated error inside --list is shown as itself, not as a missing 069 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
     await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 069 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 069 and says the listing needs the file before pointing at it");
     const listPre069 = await consolidate("--list", "lineage");
     assert(listPre069.code === 1 && /--list needs migration 069 \(db\/migrations\/069_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre069.out) && !/PostgresError/.test(listPre069.out),
            `on a brain without 069 --list names the file, not a driver error (exit ${listPre069.code}: ${listPre069.out.trim().slice(0, 160)})`);
@@ -4400,6 +4402,9 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       const forcedLineage = await consolidate("--accept", r3, "--force");
       assert(forcedLineage.code === 0 && /^\s*accepted /m.test(forcedLineage.out) && (await supersedesOf(r3New)) === r3Old,
              `--accept --force on a lineage pair writes the pointer (exit ${forcedLineage.code}: ${forcedLineage.out.trim().slice(-160)})`);
+      const acceptedAgain = await consolidate("--accept", r3);
+      assert(acceptedAgain.code === 1 && /accept refused: already accepted/.test(acceptedAgain.out) && !/lineage/.test(acceptedAgain.out),
+             `an accept on the accepted lineage row is 029's ALREADY_ACCEPTED, not the guard's advice about a pointer not yet written (exit ${acceptedAgain.code}: ${acceptedAgain.out.trim().slice(-140)})`);
       const acceptedList = await consolidate("--list", "accepted");
       assert(/LINEAGE PAIR  \(accepted/.test(acceptedList.out) && acceptedList.out.includes(`accepted while the derivation names its input — --reject ${r3} clears the pointer (029)`),
              `--list accepted tags the row and names the reject as the repair for a pointer already written (${acceptedList.out.split("\n").find((l) => /lineage pair:/.test(l))?.trim().slice(0, 160)})`);

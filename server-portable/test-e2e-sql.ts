@@ -750,8 +750,8 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   // puts it back.
   await sql`DROP FUNCTION list_supersession_proposals(text, int, boolean)`;
   const pre069 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
-  assert(/list_supersession_proposals\(text, integer, boolean\) does not exist/.test(pre069) && /migration 069 \(db\/migrations\/069_listing_flags_lineage_pair\.sql\) is not applied/.test(pre069) && !/migration 029/.test(pre069),
-         `on a brain without 069 the tool's error names 069 as the migration to apply, not 029 (${pre069.replace(/\n/g, " ").slice(0, 200)})`);
+  assert(/list_supersession_proposals\(text, integer, boolean\) does not exist/.test(pre069) && /the migrations through 069 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 069, db\/migrations\/069_listing_flags_lineage_pair\.sql, its current listing\)/.test(pre069),
+         `on a brain without 069 the tool's error names the migrations through 069, 029's queue and 069's listing both (${pre069.replace(/\n/g, " ").slice(0, 200)})`);
   await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("069_") });
   assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 069 applied, the queue lists again");
   await sql`SELECT update_thought(${newer}::uuid, ${"queue newer: the plan is B, revised"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;

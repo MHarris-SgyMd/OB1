@@ -1475,7 +1475,7 @@ function buildServer(principal: Principal): McpServer {
       inputSchema: {
         status: z.enum(["pending", "accepted", "rejected", "stale", "all"]).optional().default("pending"),
         limit: z.number().int().min(1).max(200).optional().default(10),
-        lineage: z.boolean().optional(),
+        lineage: z.boolean().optional().describe("true: only proposals standing on a lineage pair (one side's derived_from names the other); false: only the rest; absent: every pair (migration 069)"),
       },
     },
     async ({ status, limit, lineage }) => {
@@ -1527,12 +1527,12 @@ function buildServer(principal: Principal): McpServer {
       } catch (err: unknown) {
         const msg = (err as Error).message;
         // 069 (SMD-2313): both stores call the three-argument form, so a brain
-        // at 029..068 fails naming it (or PostgREST names p_lineage) — the
-        // remedy is 069, not 029 (cold read, first review pass).
-        const hint = /list_supersession_proposals\(text, ?integer, ?boolean\)|p_lineage/.test(msg)
-          ? " — migration 069 (db/migrations/069_listing_flags_lineage_pair.sql) is not applied, or PostgREST has not reloaded its schema cache"
-          : /list_supersession_proposals|supersession_proposals/.test(msg)
-          ? " — migration 029 (db/migrations/029_supersession_proposals.sql) is not applied, or PostgREST has not reloaded its schema cache"
+        // short of 069 — or of 029, whose queue the listing reads — fails
+        // naming that form (PostgREST names p_lineage); the driver's message
+        // is the same either way, so one hint names both files (cold read,
+        // first and fourth review passes).
+        const hint = /list_supersession_proposals|supersession_proposals|p_lineage/.test(msg)
+          ? " — the migrations through 069 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 069, db/migrations/069_listing_flags_lineage_pair.sql, its current listing), or PostgREST has not reloaded its schema cache"
           : "";
         return {
           content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],

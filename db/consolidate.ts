@@ -391,9 +391,9 @@ async function printList(status: string | undefined, limit = 50): Promise<number
   // a stale one waits for the pass's settle, 067) — pending first, then
   // stale, each most confident first.
   const rows = status === "lineage" ? [...await listed("pending", true), ...await listed("stale", true)] : await listed(status ?? null, null);
-  const what = status === "lineage" ? "unreviewed proposal(s) standing on a lineage pair (pending, then stale)" : `${status ?? ""} proposal(s)`;
+  const what = status === "lineage" ? "unreviewed proposal(s) standing on a lineage pair (pending, then stale)" : `${status ? `${status} ` : ""}proposal(s)`;
   if (rows.length === 0) {
-    console.log(`  no ${status === "lineage" ? "unreviewed proposals standing on a lineage pair" : `${status ?? ""} proposals`}`);
+    console.log(`  no ${status === "lineage" ? "unreviewed proposals standing on a lineage pair" : `${status ? `${status} ` : ""}proposals`}`);
     return 0;
   }
   // A list that hits its cap says so: --status counts every row (definitions
@@ -452,13 +452,17 @@ if (REVIEW_ONLY) {
     // unless --force says the reviewer has read both texts and means it —
     // 029's rule for a text edited since judged, applied CLI-side (this is
     // the one accept door; the stores and the tool have none). Read from the
-    // row's own predicate, not the 200-capped listing; a guard, not a
-    // verdict — nothing is written (definitions probe, second review pass:
-    // the accept went through under the reject's own advice).
+    // row's own predicate, not the 200-capped listing, and only while the
+    // row is unreviewed — a decided row is 029's to answer (ALREADY_ACCEPTED
+    // on an accepted one; fourth review pass: the guard described a pointer
+    // as not yet written). A guard, not a verdict — nothing is written
+    // (definitions probe, second review pass: the accept went through under
+    // the reject's own advice).
     type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
     const lineageRow = decision === "accept" && !FORCE
       ? (await sql`SELECT (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)) AS lineage
-                     FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id WHERE p.id = ${id}::uuid`) as { lineage: boolean }[]
+                     FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
+                    WHERE p.id = ${id}::uuid AND p.status IN ('pending', 'stale')`) as { lineage: boolean }[]
       : [];
     const res: ReviewResult = lineageRow[0]?.lineage === true
       ? { ok: false, error: "LINEAGE_PAIR" }
@@ -541,10 +545,13 @@ async function printQueue(): Promise<void> {
            -- 069 (SMD-2313): the unreviewed rows standing on a lineage pair — 066's predicate, as the stale read above spells it — the reviewer's alone.
            (SELECT count(*)::int FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
              WHERE p.status IN ('pending', 'stale')
-               AND (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false))) AS lineage
+               AND (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false))) AS lineage,
+           -- The count above is this file's own SQL and reads on a brain at 068; the listing it points at is 069's, so its absence is
+           -- said here rather than one command later (operator walkthrough, fourth review pass).
+           to_regprocedure('list_supersession_proposals(text, int, boolean)') IS NOT NULL AS has_069
     FROM supersession_proposals`;
   const stale = await readStaleStandings();
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${q.lineage} unreviewed standing on a lineage pair (--list lineage shows them; the reviewer rejects each — the pass never replaces a pending one)` : ""} — --list shows them; --accept / --reject decides one`);
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${q.lineage} unreviewed standing on a lineage pair (${q.has_069 ? "--list lineage shows them" : "apply migration 069 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)` : ""} — --list shows them; --accept / --reject decides one`);
 }
 
 /**

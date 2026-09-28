@@ -10767,6 +10767,14 @@ console.log("\n[63] Migration 069: a proposal standing on a lineage pair is visi
   // the flag's; the other lineage rows still read.
   await db.query(`SELECT delete_thought($1::uuid, $2::jsonb)`, [E, JSON.stringify(ACTOR)]);
   assert((await list("rejected", true)).length === 0 && idsOf(await list(null, true)) === [pX, pN].sort().join(), "with the evidence deleted its proposal is gone with it, and the other lineage rows still read");
+  // The predicate is spelled inline in the TypeScript readers too — the CLI's
+  // accept guard and --status count, preflight's census — and nothing but
+  // this holds them to the body's spelling until SMD-2366 gives every reader
+  // one SQL function (fourth review pass, cold read).
+  const PREDICATE = "COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)";
+  const spelled = (file: string) => readFileSync(join(HERE, file), "utf8").split(PREDICATE).length - 1;
+  assert(spelled("consolidate.ts") === 2 && spelled("../server-portable/preflight.ts") === 1 && (await src(SIG)).split("COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false)").length - 1 === 2,
+    `the TypeScript readers spell 066's predicate as the body does — twice in consolidate.ts (the guard, --status), once in preflight.ts (the census) (${spelled("consolidate.ts")}, ${spelled("../server-portable/preflight.ts")})`);
   // A re-apply is a no-op: one form, the flag reading the same.
   await reapply("069");
   assert((await functionsNamed("list_supersession_proposals")) === 1 && /ob1:listing-flags-the-lineage-pair/.test(await src(SIG)) && idsOf(await list(null, true)) === [pX, pN].sort().join(), "a re-apply leaves one form carrying the flag");
