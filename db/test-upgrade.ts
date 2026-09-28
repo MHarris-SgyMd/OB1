@@ -585,11 +585,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // rebuild_derived on its own body, refusing by name without 036, 061 or
   // 063 ([20s]); 068 adds two tables, an index and four triggers on 001's
   // thoughts and redefines 058's node_lifecycle and node_state on their own
-  // signatures, refusing by name without 025 or 058 ([20t]) — all recorded
+  // signatures, refusing by name without 025 or 058 ([20t]); 069 adds the
+  // durable jobs table and prune_jobs, keyed to nothing prior — nothing to
+  // refuse, so it applies cleanly over an older baseline ([20u]) — all recorded
   // by the baseline with their prerequisites present, so none becomes the
   // plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 39, `030 is among the last thirty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 40, `030 is among the last forty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2900,6 +2902,32 @@ console.log("\n[20t] Migration 068 on a schema without 058 — refused up front,
                                    (SELECT count(*)::int FROM ob1_superseded_by) AS sup, (SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('node_lifecycle()')) AS body`;
   assert(before.length === 7 && JSON.stringify(after) === JSON.stringify(before) && state.drift === 0 && state.heads === 2 && state.sup === 2 && /ob1_ticket_head/.test(String(state.body)),
     `…and applied once 058 is there: node_state() reads what 058's did row for row, the seed wrote two heads and two superseders, drift() is empty and node_lifecycle() reads the table (${after.length} rows, drift ${state.drift}, ${state.heads}/${state.sup})`);
+  await sql.close();
+}
+
+console.log("\n[20u] Migration 069 adds the durable jobs table and prune_jobs with nothing to refuse — applied cleanly over a pre-069 baseline, and the objects work (SMD-2318)");
+{
+  // 069 references no earlier migration (no FK, no function it redefines), so
+  // unlike the guarded migrations above there is nothing to refuse: a plain run
+  // over an older baseline just applies it. The point here is that it applies
+  // cleanly through the upgrade harness and its table and function work.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "069" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-069 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the069 = MIGRATIONS.find((f) => f.startsWith("069_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the069}`;
+  const plain = await migrate();
+  assert(plain.code === 0 && !/FAILED/.test(plain.out), `a plain run applies 069 cleanly, nothing refused (exit ${plain.code})${plain.code === 0 ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the069}`)[0].c) === 1, "…069 is recorded once");
+  // The table and function work: an aged terminal row prunes, a live one never does.
+  const OWNER = "b".repeat(64);
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan', ${OWNER}, 'a', 'running')`;
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', ${OWNER}, 'a', 'succeeded', now() - interval '2 hours')`;
+  const pruned = Number((await sql`SELECT prune_jobs(60) AS n`)[0].n);
+  const live = Number((await sql`SELECT count(*)::int AS c FROM jobs WHERE ended_at IS NULL`)[0].c);
+  assert(pruned === 1 && live === 1, `prune_jobs drops the aged terminal row and keeps the live one (pruned ${pruned}, live ${live})`);
   await sql.close();
 }
 

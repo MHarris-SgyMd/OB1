@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2261 assertions: 2261 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty-eight (68) migrations applied, and
+`bun test-schema.ts` prints `2285 assertions: 2285 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports sixty-nine (69) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -208,7 +208,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256).
+068 SMD-2256, 069 SMD-2318).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -904,6 +904,7 @@ issues every group at once.
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
+| **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
@@ -2942,7 +2943,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2261 assertions, PGlite, no container
+bun test-schema.ts                          # 2285 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 905 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

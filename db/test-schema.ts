@@ -10657,6 +10657,49 @@ console.log("\n[62] Migration 068: node_state reads a stored projection kept cur
   await db.exec(`SELECT prune_orphan_entities()`);
 }
 
+console.log("[63] the durable async job registry: jobs + prune_jobs (069, SMD-2318)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const fails = async (sql: string, params: unknown[] = []): Promise<string> => {
+    try { await db.query(sql, params); return "ok"; } catch (e) { return (e as Error).message.split("\n")[0]; }
+  };
+  const OWNER = "a".repeat(64); // the SHA-256 shape of an owner key
+
+  // The table and its function are present with the columns the sink writes.
+  const cols = (await q<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'jobs'`)).map((r) => r.column_name);
+  for (const c of ["id", "kind", "owner_key_hash", "actor", "status", "progress", "result", "error", "created_at", "started_at", "ended_at", "updated_at"])
+    assert(cols.includes(c), `jobs has column ${c} (${cols.join(", ")})`);
+
+  // The status CHECK and the terminal/ended pairing hold.
+  const badStatus = await fails(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'weird')`, [OWNER]);
+  assert(/violates check constraint/.test(badStatus), `an unknown status is refused (${badStatus})`);
+  const termNoEnd = await fails(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'succeeded')`, [OWNER]);
+  assert(/jobs_terminal_has_ended/.test(termNoEnd), `a terminal row with no ended_at is refused (${termNoEnd})`);
+  const liveWithEnd = await fails(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'running', now())`, [OWNER]);
+  assert(/jobs_terminal_has_ended/.test(liveWithEnd), `a live row with an ended_at is refused (${liveWithEnd})`);
+
+  // Seed one live row, one terminal aged past an hour, one terminal fresh.
+  await db.query(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'running')`, [OWNER]);
+  const [old] = await q<{ id: string }>(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'succeeded', now() - interval '2 hours') RETURNING id::text AS id`, [OWNER]);
+  const [fresh] = await q<{ id: string }>(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'failed', now()) RETURNING id::text AS id`, [OWNER]);
+
+  // prune_jobs(60) drops the aged terminal row, keeps the fresh terminal and the live one.
+  const [{ n: pruned }] = await q<{ n: number }>(`SELECT prune_jobs(60) AS n`);
+  assert(Number(pruned) === 1, `prune_jobs(60) deletes the one aged terminal row (${pruned})`);
+  assert((await q(`SELECT 1 FROM jobs WHERE id = $1`, [old.id])).length === 0, "the aged terminal row is gone");
+  assert((await q(`SELECT 1 FROM jobs WHERE id = $1`, [fresh.id])).length === 1, "the fresh terminal row is kept");
+  assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM jobs WHERE ended_at IS NULL`))[0].n === 1, "a live row (ended_at NULL) is never pruned");
+
+  // prune_jobs(0) drops every terminal row, still never the live one; a negative window raises.
+  const [{ n: pruned0 }] = await q<{ n: number }>(`SELECT prune_jobs(0) AS n`);
+  assert(Number(pruned0) === 1, `prune_jobs(0) deletes the remaining terminal row (${pruned0})`);
+  assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM jobs WHERE ended_at IS NULL`))[0].n === 1, "the live row still stands after prune_jobs(0)");
+  const neg = await fails(`SELECT prune_jobs(-1)`);
+  assert(/must be >= 0/.test(neg), `prune_jobs(-1) raises (${neg})`);
+
+  await db.query(`DELETE FROM jobs WHERE ended_at IS NULL`); // leave the table empty for any later look
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite
