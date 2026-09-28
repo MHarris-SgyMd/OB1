@@ -830,8 +830,8 @@ lines naming the same one are refused.
          not the runner's own port. The runner's command sets these rules
          as the container starts, keyed on the emitter uids (nft), and then
          drops the capability to change them. The runner refuses to start
-         if an emitter uid can reach its port, or if it still holds that
-         capability.
+         if an emitter uid can reach a port of its on loopback (asked before
+         it listens), or if it still holds that capability.
        - A live-API emitter's pipeline names the hosts it needs:
          `"network": ["api.readwise.io"]` (port 443), or `"host:port"`.
          The emitter reaches them only through a proxy the runner keeps

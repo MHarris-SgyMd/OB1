@@ -48,7 +48,8 @@
  * capability to change them before the runner starts. A live-API pipeline
  * names its hosts (`network` in pipelines.json), and its emitter reaches them
  * only through the runner's proxy for that pipeline (startProxy), found in
- * HTTPS_PROXY: CONNECT to a named host, nothing else.
+ * HTTPS_PROXY: TLS to a named host, held to it by the ClientHello's server
+ * name, and nothing else.
  */
 import { SQL } from "bun";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -511,8 +512,8 @@ export type ProxyOptions = {
  * - `CONNECT host:port` for a named host on its named port; another is 403, a
  *   request that is not CONNECT 405. It resolves the host itself, refuses one
  *   that resolves to a LOCAL address (the runner's own ports, a metadata
- *   endpoint), and dials the address it checked. A host that refuses the
- *   dial is 502, one that does not answer 504.
+ *   endpoint), and dials the address it checked. A host that resolves to
+ *   nothing or refuses the dial is 502, one that does not answer it 504.
  * - The tunnel's first bytes must be a TLS ClientHello whose server name is
  *   the named host (for a named IPv4 address, that address or none). Without
  *   this, a host behind a CDN that routes by server name made the tunnel a
@@ -578,10 +579,8 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
       // Gone while the name resolved (its emitter stopped, the request timed out): nothing to tunnel for.
       if (client.destroyed) return;
       const up = tcpConnect({ host: address, port: want, allowHalfOpen: true });
-      let connected = false;
       const dialing = setTimeout(() => { up.destroy(); answer("504 Gateway Timeout", `CONNECT ${host}:${want}: ${address} did not answer within ${dialMs / 1000} s`); }, dialMs);
       up.once("connect", () => {
-        connected = true;
         stage = "hello";
         clearTimeout(dialing);
         client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
@@ -617,7 +616,7 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
         client.resume();
         if (hello.length) check();
       });
-      up.on("error", (e) => { clearTimeout(dialing); if (connected) client.destroy(); else answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${(e as Error).message}`); });
+      up.on("error", (e) => { clearTimeout(dialing); if (stage === "dial") answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${(e as Error).message}`); else client.destroy(); });
       // A side that closes cleanly has ended the other through pipe; one that failed takes the other with it.
       client.once("close", () => { clearTimeout(dialing); up.destroy(); });
       up.once("close", (failed) => { if (failed) client.destroy(); });

@@ -6269,11 +6269,10 @@ is its answer to a provider outage.
 
 Every check passed on the change's code, plain (C1s after 301 s) and
 sealed, on review pass 1's and 2's, plain and sealed, and on pass 3's, plain
-(2026-09-27). With the rules deleted
-inside the running container, `snoop` reported every
-target reached (a DNS answer, the host alias's `:11434`, `postgres:5432`,
-`n8n:5678`, `1.1.1.1:443`, `127.0.0.1:8090`) and `vendor` a direct
-connection, and a restart set the rules again. The runner, started with a
+(2026-09-27). With the rules deleted inside the running container, `snoop`
+reported every target reached (a DNS answer, the host alias's `:11434`,
+`postgres:5432`, `n8n:5678`, `1.1.1.1:443`, `127.0.0.1:8090`) and `vendor`
+a direct connection, and a restart set the rules again. The runner, started with a
 stand-in key on its own image:
 - by its plain command, holding NET_ADMIN and SETPCAP: refused, naming both;
 - by its plain command without them, so with no rules: refused before it
