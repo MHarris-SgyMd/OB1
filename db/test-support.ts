@@ -46,6 +46,11 @@ const TABLES = [
   "ob1_entity_edges",
   "thought_entities",
   "ob1_entities",
+  // 064's page store (SMD-1812): the revisions reference the sections, the
+  // sections the pages, the pages `thoughts` — so all three before it.
+  "page_section_revisions",
+  "page_sections",
+  "pages",
   "thoughts",
   "ob1_agent_keys",
   "ob1_agents",
@@ -64,6 +69,10 @@ const TABLES = [
   // either way — two row triggers drop what a deleted thought or proposal
   // keyed — so its place in the order is free.
   "derivations",
+  // 068's node_state projection (SMD-2256): no foreign key either way, so its
+  // place is free too.
+  "ob1_ticket_head",
+  "ob1_superseded_by",
   // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
@@ -161,6 +170,14 @@ const FUNCTIONS = [
   // 059 (SMD-2255)
   "search_thoughts_current(vector, text, float, int, jsonb, float, float)",
   "search_demote_weight()",
+  // 068 (SMD-2256): the triggers go with thoughts; their function is named here.
+  "ob1_node_projection_sync()",
+  "ob1_node_projection_truncate()",
+  "ob1_node_projection_drift()",
+  "ob1_rebuild_node_projection()",
+  "ob1_node_projection_reconcile(text[], uuid[])",
+  "ob1_ticket_heads_of(text[])",
+  "ob1_superseders_of(uuid[])",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
@@ -222,6 +239,30 @@ const FUNCTIONS = [
   // record_supersession_proposal) keep their signatures and are named above.
   "derivation_descendants(uuid, int, int)",
   "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)",
+  // 066 (SMD-2292): consolidation_candidates redefined on 063's body — the
+  // signature above, no new name.
+  // 064 (SMD-1812): the page store's nine functions, its four helpers, the
+  // page-thought writer, the revisions' refusal trigger and the section drop
+  // trigger; ob1_record_derivation, redefined on 063's body, is named above.
+  "upsert_page(text, text, text, jsonb, text, uuid)",
+  "write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)",
+  "accept_page_section(uuid, text)",
+  "release_page_section(uuid, text)",
+  "reject_page_section(uuid, text)",
+  "lock_page_section(uuid, boolean, text)",
+  "delete_page_section(uuid, text)",
+  "render_page(uuid, timestamptz)",
+  "page_sections_as_of(uuid, timestamptz)",
+  "ob1_render_page_thought(uuid, uuid)",
+  "ob1_page_actor(text)",
+  "ob1_page_lock(uuid, text)",
+  "ob1_page_evidence(uuid[], text, uuid)",
+  "ob1_page_recipe(jsonb, text)",
+  "page_section_revisions_refuse_mutation()",
+  "ob1_drop_section_derivations()",
+  // 067 (SMD-2297): the pass's settle of a stale proposal; rebuild_derived
+  // keeps its signature and is named above.
+  "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)",
 ];
 
 /**
@@ -475,6 +516,27 @@ export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
 /** A specifier of one of STACK's packages — the bare name or a subpath of it. No name holds a regex metacharacter. */
 export const PACKAGES = new RegExp(`^(${STACK.join("|")})(/|$)`);
+
+/**
+ * The MCP stack server-portable runs on since SMD-2278 — stage 1 of the SDK v2
+ * migration (docs/mcp-sdk-v2-migration.md). The v1 single package
+ * `@modelcontextprotocol/sdk` and the third-party `@hono/mcp` gave way to the v2
+ * scoped packages `@modelcontextprotocol/core` + `@modelcontextprotocol/server`;
+ * `hono` and `zod` are shared with STACK. The vendored servers (extensions) and
+ * the Kubernetes image stay on STACK until stages 2 and 3 (SMD-2279, SMD-2281), so
+ * during the window the two stacks coexist and extensions/test-auth.ts's pin guard
+ * holds each install to its own.
+ */
+export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextprotocol/core", "@modelcontextprotocol/server"];
+/**
+ * The v2 packages' pinned versions — the independent truth the drift guard holds
+ * server-portable to while it is the sole v2 install. Stage 3 (SMD-2281) moves the
+ * Kubernetes image onto these too and the cross-install version check resumes.
+ */
+export const SERVER_V2_PINS: Readonly<Record<string, string>> = {
+  "@modelcontextprotocol/core": "2.1.0",
+  "@modelcontextprotocol/server": "2.1.0",
+};
 
 /**
  * A counting assert. Returned as an object rather than module state so two suites

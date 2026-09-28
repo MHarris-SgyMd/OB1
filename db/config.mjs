@@ -1712,6 +1712,13 @@ export const ROLE_GRANTS = Object.freeze({
     // (SMD-1731). The workers' passes write through the same table, and
     // --grant issues every group.
     Object.freeze({ table: "derivations",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "061" }),
+    // 068's triggers run as the caller on every write of a row carrying an
+    // issue key or a supersedes pointer, and reconcile the node_state
+    // projection; node_lifecycle() and node_state() read it. A role without
+    // these cannot write a ticket row or a pointer, nor read a lifecycle
+    // (SMD-2256).
+    Object.freeze({ table: "ob1_ticket_head",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "068" }),
+    Object.freeze({ table: "ob1_superseded_by", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "068" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
@@ -1783,8 +1790,9 @@ export const ROLE_GRANTS = Object.freeze({
   // graph-centrality.ts's dependency read (--startable, --decay-blocked) is
   // 058's node_state(), which reads `thought_sources` too, so a reader running
   // it needs SELECT on it — this group's, or the server group's since 059
-  // (SMD-2255); its default modes read node_lifecycle(), `thoughts` alone
-  // (SMD-2074).
+  // (SMD-2255); its default modes read node_lifecycle() — `thoughts` and,
+  // since 068, `ob1_ticket_head`, both the capture group's (SMD-2074,
+  // SMD-2256).
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),
@@ -1798,6 +1806,25 @@ export const ROLE_GRANTS = Object.freeze({
   // check as "log off; grant needed if you enable it".
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
+  ]),
+  // The page store (064, SMD-1812): a page is a thought (its id, its render as
+  // the content — written through the capture group's functions, so a role
+  // that writes pages holds `capture` too), and the sections, their pending
+  // drafts and their revisions are these three tables, written only through
+  // upsert_page, write_page_section, accept_page_section and
+  // release_page_section, reject_page_section, lock_page_section, delete_page_section
+  // (SECURITY INVOKER, PUBLIC's EXECUTE as every core function). No DELETE
+  // on pages (a page goes with its thought's delete, the capture group's) or
+  // on the revisions (they go with their section's cascade, which runs as the
+  // tables' owner); DELETE on page_sections, since delete_page_section deletes
+  // the row as the caller. The revisions take INSERT alone, and a trigger
+  // refuses UPDATE, a DELETE while the section stands, and TRUNCATE, for the
+  // owner too. The identity column needs no sequence grant (test-schema [59]
+  // measures it).
+  pages: Object.freeze([
+    Object.freeze({ table: "pages",                  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "064" }),
+    Object.freeze({ table: "page_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "064" }),
+    Object.freeze({ table: "page_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),           since: "064" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
@@ -1864,13 +1891,6 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/typed-reasoning-edges" }),
     Object.freeze({ sequence: "thought_edges_id_seq", privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/typed-reasoning-edges" }),
     Object.freeze({ function: "thought_edges_upsert(uuid, uuid, text, numeric, integer, text, timestamptz, timestamptz, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/typed-reasoning-edges" }),
-    // schemas/wiki-pages (revisions are append-only; the three RPCs are REVOKEd FROM PUBLIC; the identity id needs no sequence grant)
-    Object.freeze({ table: "wiki_pages",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ table: "wiki_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ table: "wiki_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),                     since: "schemas/wiki-pages" }),
-    Object.freeze({ function: "wiki_upsert_page(text, text, text, jsonb, text)",                               privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ function: "wiki_write_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ function: "wiki_accept_pending(uuid, text)",                                                privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
     // schemas/crm-person-tiers
     Object.freeze({ table: "crm_persons",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/crm-person-tiers" }),
     Object.freeze({ table: "crm_person_mentions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/crm-person-tiers" }),
@@ -1977,7 +1997,7 @@ export const ROLE_GRANTS = Object.freeze({
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "pages", "community", "extensions", "recipes"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs
