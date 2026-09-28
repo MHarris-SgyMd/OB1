@@ -5211,6 +5211,7 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
         await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET search_path FROM CURRENT`);
         await rawSrc`SELECT set_config('temp_tablespaces', ${'"", PG_DEFAULT'}, false)`;
         await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET temp_tablespaces FROM CURRENT`);
+        await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET ob1.scalar_probe = 'C:\\temp'`);
         read = await databaseSettings(rawSrc);
         await applyDatabaseSettings(rawDst, await databaseSettings(rawSrc));
       } finally { await rawSrc.close(); await rawDst.close(); }
@@ -5220,6 +5221,8 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       assert(read.search_path === '"nowhere", "public", "Kept", "a\\b"', `…read on the source, as its server reads it, each name quoted (${JSON.stringify(read.search_path)})`);
       assert(rawSrcCfg.temp_tablespaces === '"", PG_DEFAULT' && read.temp_tablespaces === '"", "pg_default"' && rawDstCfg.temp_tablespaces === '"", pg_default',
              `…and a raw temp_tablespaces keeps its empty entry, the default tablespace, and folds its name (source ${JSON.stringify(rawSrcCfg.temp_tablespaces)}, read ${JSON.stringify(read.temp_tablespaces)}, target ${JSON.stringify(rawDstCfg.temp_tablespaces)})`);
+      assert(rawSrcCfg["ob1.scalar_probe"] === "C:\\temp" && rawDstCfg["ob1.scalar_probe"] === "C:\\temp",
+             `…and a scalar holding a backslash is copied as written, not read as an escape (source ${JSON.stringify(rawSrcCfg["ob1.scalar_probe"])}, target ${JSON.stringify(rawDstCfg["ob1.scalar_probe"])})`);
       // A path set to the empty list: no name to write, so the copy writes ''.
       await sql.unsafe(`ALTER DATABASE ${setSrc} SET search_path = ''`);
       const emptySrc = new SQL({ url: urlOf(setSrc), max: 1 }), emptyDst = new SQL({ url: urlOf(setDst), max: 1 });

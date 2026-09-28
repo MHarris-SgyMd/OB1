@@ -40,10 +40,10 @@
  */
 
 import { SQL } from "bun";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { EMBEDDING_DIM, EMBEDDING_MODEL, searchPathWithoutTemp } from "./config.mjs";
+import { EMBEDDING_DIM, EMBEDDING_MODEL, setPathWithoutTemp } from "./config.mjs";
 import {
   applyMigrations,
   createAssert,
@@ -314,40 +314,29 @@ try {
 
   console.log("\n[7] The migrator's path without pg_temp keeps every other schema, as Postgres reads the path (SMD-2247)");
   {
-    // What migrate.ts gives 021's transaction: the session's path, pg_temp
-    // dropped. A connection string or set_config stores the text raw, so an
-    // NBSP before a name is part of it (no whitespace to Postgres, which
-    // trim() stripped, putting the real public on the path), a quoted
-    // "PG_TEMP" is a schema of that name (which a case-blind match dropped),
-    // and an unquoted PG_TEMP and a quoted "pg_temp" are the temp schema.
+    // What migrate.ts gives 021's transaction — setPathWithoutTemp, the step
+    // itself — run in a transaction on a session whose path is stored raw, as
+    // a connection string or set_config stores it. An NBSP before a name is
+    // part of it (no whitespace to Postgres, which trim() stripped, putting
+    // the real public on the path), a quoted "PG_TEMP" is a schema of that
+    // name (which a case-blind match dropped), a name may hold a quote, and an
+    // unquoted PG_TEMP and a quoted "pg_temp" are the temp schema.
     await freshSession(async (sql) => {
       await sql.unsafe(`CREATE SCHEMA "\u00a0public"; CREATE SCHEMA "PG_TEMP"; CREATE SCHEMA "a""b"`);
       const raw = `"$user",\u00a0public, "PG_TEMP", PG_TEMP, "pg_temp", "a""b"`;
-      const [{ path, version, before }] = await sql`
-        SELECT set_config('search_path', ${raw}, false) AS path, current_setting('server_version_num')::int AS version,
-               current_schemas(false)::text[] AS before`;
-      const rewritten = searchPathWithoutTemp(path, version);
-      const [{ after }] = await sql`SELECT set_config('search_path', ${rewritten}, false), current_schemas(false)::text[] AS after`;
-      assert(rewritten === '"$user", "\u00a0public", "PG_TEMP", "a""b"',
-             `the NBSP-prefixed name, the quoted "PG_TEMP" and a name holding a quote are kept, PG_TEMP and "pg_temp" dropped (${JSON.stringify(rewritten)})`);
-      assert(JSON.stringify(after) === JSON.stringify(["\u00a0public", "PG_TEMP", 'a"b']) && JSON.stringify(after) === JSON.stringify(before),
-             `…and Postgres resolves the rewritten path to the raw one's schemas, the real public not among them (raw ${JSON.stringify(before)}, rewritten ${JSON.stringify(after)})`);
+      const [{ before }] = await sql`SELECT set_config('search_path', ${raw}, false), current_schemas(false)::text[] AS before`;
+      const within = await sql.begin(async (tx) => {
+        const read = await setPathWithoutTemp(tx);
+        const [{ path, after }] = await tx`SELECT current_setting('search_path') AS path, current_schemas(false)::text[] AS after`;
+        return { read, path: path as string, after: after as string[] };
+      });
+      const [{ outside }] = await sql`SELECT current_setting('search_path') AS outside`;
+      assert(within.read === raw && within.path === '"$user", "\u00a0public", "PG_TEMP", "a""b"',
+             `the NBSP-prefixed name, the quoted "PG_TEMP" and a name holding a quote are kept, PG_TEMP and "pg_temp" dropped (read ${JSON.stringify(within.read)}, set ${JSON.stringify(within.path)})`);
+      assert(JSON.stringify(within.after) === JSON.stringify(["\u00a0public", "PG_TEMP", 'a"b']) && JSON.stringify(within.after) === JSON.stringify(before),
+             `…and Postgres resolves the rewritten path to the raw one's schemas, the real public not among them (raw ${JSON.stringify(before)}, rewritten ${JSON.stringify(within.after)})`);
+      assert(outside === raw, `…and the rewrite ends with the transaction: the session's path is the raw one again (${JSON.stringify(outside)})`);
     });
-    // The helper is held above; that the migrator uses it is read from its
-    // source. On a fresh database a schema kept ahead of public tells the old
-    // splitter from this one at 021, but the run then fails at 052 on that
-    // schema either way, and once the migrator puts public first no run
-    // does. applyShadowed's setting of the path goes through the helper,
-    // with the server's version in the same catalog read, and nothing else in
-    // the migrator sets a path. Comment lines are left out, so a disabled
-    // line does not count.
-    const code = readFileSync(join(HERE, "migrate.ts"), "utf8").split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
-    const shadowed = /async function applyShadowed\([\s\S]*?\n}\n/.exec(code)?.[0] ?? "";
-    const pathSets = code.match(/set_config\(\s*'search_path'|\bSET\s+(?:LOCAL\s+|SESSION\s+)?search_path\b/gi) ?? [];
-    assert(pathSets.length === 1
-             && /set_config\(\s*'search_path',\s*\$\{searchPathWithoutTemp\(path,\s*version\)\}/.test(shadowed)
-             && /^\s*current_setting\('server_version_num'\)::int AS version,/m.test(shadowed),
-           `…and migrate.ts sets 021's path through it alone, under the version read beside the path (${pathSets.length} path setting(s) in the migrator; applyShadowed ${shadowed ? "found" : "not found"})`);
   }
 } finally {
   // ci-parity.sh shares one Postgres: leave pgvector in public, this role's

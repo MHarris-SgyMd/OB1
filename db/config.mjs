@@ -1438,8 +1438,24 @@ export function searchPathSchemas(setting, serverVersionNum, keepEmpty = false) 
  * schema of that name, stays. `"$user"` quoted is still the role's schema. ""
  * when nothing is left, which set_config takes as the empty path.
  */
-export function searchPathWithoutTemp(setting, serverVersionNum) {
+function searchPathWithoutTemp(setting, serverVersionNum) {
   return searchPathSchemas(setting, serverVersionNum).filter((s) => s !== "pg_temp").map(quoteIdent).join(", ");
+}
+
+/**
+ * Set the transaction's search_path to itself without the temp schema: what
+ * migrate.ts gives 021's transaction, so that a temp view shadows the claim
+ * table (applyShadowed, SMD-1421). The path is read as Postgres reads it,
+ * under the server's version (SMD-2247), and set LOCAL, so it ends with the
+ * transaction. Returns the path it read. Here rather than in the migrator so
+ * that the step itself, not a copy of it, is what db/test-search-path [7] runs
+ * against Postgres. Bun.sql only (a tagged-template client), inside a
+ * transaction.
+ */
+export async function setPathWithoutTemp(tx) {
+  const [{ path, version }] = await tx`SELECT current_setting('search_path') AS path, current_setting('server_version_num')::int AS version`;
+  await tx`SELECT set_config('search_path', ${searchPathWithoutTemp(path, version)}, true)`;
+  return path;
 }
 
 /**

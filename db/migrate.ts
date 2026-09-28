@@ -72,7 +72,7 @@ import {
   migrationValues,
   parseSetConfig,
   quoteIdent,
-  searchPathWithoutTemp,
+  setPathWithoutTemp,
   substituteMigration,
   validateEmbeddingConfig,
   versionAtLeast,
@@ -547,7 +547,7 @@ async function reportSeeds(m: Migration): Promise<void> {
  * functions included — 021's update_thought landed there and vanished with the
  * transaction when the fifth review pass tried naming it first — so a role's
  * path is set, for the transaction, to itself without pg_temp (read as
- * Postgres reads it, rebuilt quoted: searchPathWithoutTemp, SMD-2247) — a
+ * Postgres reads it, rebuilt quoted: setPathWithoutTemp, SMD-2247) — a
  * no-op where it is absent, and not restored: unlisted, pg_temp is still searched first and is never a
  * creation target, so nothing after 021 differs — and that the name resolves
  * to the view is checked before the file runs,
@@ -584,12 +584,10 @@ async function applyShadowed(tx: SQL, m: Migration): Promise<string | null> {
     return null;
   }
   // Catalog reads only: no lock on thoughts before the file's own ADD COLUMN.
-  const [{ nsp, stale, path, version, counted }] = (await tx`
+  const [{ nsp, stale, counted }] = (await tx`
     SELECT (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass('thought_work_claims')) AS nsp,
            to_regclass('pg_temp.thought_work_claims') IS NOT NULL AS stale,
-           current_setting('search_path') AS path,
-           current_setting('server_version_num')::int AS version,
-           current_setting('track_counts') = 'on' AS counted`) as { nsp: string | null; stale: boolean; path: string; version: number; counted: boolean }[];
+           current_setting('track_counts') = 'on' AS counted`) as { nsp: string | null; stale: boolean; counted: boolean }[];
   if (stale) {
     // Not ours: nothing here creates one before this point, and a pooled
     // connection handed over with one is not a state to read the block from.
@@ -611,7 +609,7 @@ async function applyShadowed(tx: SQL, m: Migration): Promise<string | null> {
   // pg_temp first for relations exactly when unlisted: the path, for the
   // transaction, without it — a no-op where it is absent, never added first
   // (see above), not restored (nothing after 021 differs).
-  await tx`SELECT set_config('search_path', ${searchPathWithoutTemp(path, version)}, true)`;
+  const path = await setPathWithoutTemp(tx);
   const [{ shadowed }] = (await tx`SELECT to_regclass('thought_work_claims') = 'pg_temp.thought_work_claims'::regclass AS shadowed`) as { shadowed: boolean }[];
   if (!shadowed) {
     throw new Error(`the view of thought_work_claims without the acceptances does not shadow the table for 021 (search_path: ${path}); its backfill would have read them`);
