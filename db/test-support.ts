@@ -60,6 +60,9 @@ const TABLES = [
   // schema "without 034" and found the previous section's table standing —
   // the reset had carried it across every boundary since 034 landed.
   "query_log",
+  // 069's durable async job registry (SMD-2318): no foreign key either way — a
+  // job's record outlives the agent or thoughts it names — so its place is free.
+  "jobs",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -185,6 +188,8 @@ const FUNCTIONS = [
   "validate_derived_from(jsonb)",
   // 034 (SMD-1295); listed with its table, above.
   "prune_query_log(int)",
+  // 069 (SMD-2318); listed with its `jobs` table, above.
+  "prune_jobs(int)",
   // 024, 025 and 026: the three this list had also missed, found when
   // SMD-1749's second review pass listed what survives a reset on a fully
   // applied brain. test-upgrade [21] asks the catalog the same question after

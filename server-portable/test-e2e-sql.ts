@@ -618,6 +618,74 @@ console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll w
   assert(/No job/.test(mirrorRefusal), `job_status for another key is a tool error, not another key's job (${mirrorRefusal.slice(0, 60)})`);
 }
 
+console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a restart, reconcile marks orphans lost, prune_jobs retains (real Postgres)");
+{
+  // The suite runs the server in-process (not import.meta.main), so index.ts's
+  // startup wiring does not fire — set the sink here, sharing jobs.ts's module
+  // state with the running server. A separate SqlStore on the same database is
+  // enough: the durable table is shared. resetJobsForTest() clears the in-memory
+  // registry, standing in for a restart.
+  const { setJobSink, resetJobsForTest, reconcileDurableJobsLost } = await import("./jobs.ts");
+  const { SqlStore } = await import("./store-sql.ts");
+  const jobStore = new SqlStore(URL_!);
+  const sink = jobStore.jobSink();
+  assert(sink !== null, "the SQL store returns a durable job sink");
+  setJobSink(sink);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const OWNER_HASH = hashKey("e2e-key");
+
+  // Start a scan and let it finish; its record is written through to jobs.
+  const handle = JSON.parse(await call("scan_thoughts", { limit: 5 })) as { jobId: string };
+  let job: Record<string, unknown> = {};
+  for (let i = 0; i < 100; i++) {
+    job = (await (await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
+    if (["succeeded", "failed", "lost"].includes(String(job.status))) break;
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  assert(job.status === "succeeded", `the job reaches succeeded (${job.status})`);
+
+  // The terminal write is best-effort/async, so poll the DB for the durable row.
+  let dbRow: Record<string, unknown> | undefined;
+  for (let i = 0; i < 100; i++) {
+    const rows = await sql`SELECT status, owner_key_hash FROM jobs WHERE id = ${handle.jobId}::uuid`;
+    if (rows[0]?.status === "succeeded") { dbRow = rows[0]; break; }
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  assert(dbRow?.status === "succeeded" && dbRow?.owner_key_hash === OWNER_HASH, `the terminal row is durable in jobs, owned by the starting key (${dbRow?.status})`);
+
+  // A restart: the in-memory registry is gone, but the poll falls back to the
+  // durable row and still carries the result.
+  resetJobsForTest();
+  const afterRestart = (await (await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
+  const restartResult = afterRestart.result as { scanned?: number } | undefined;
+  assert(afterRestart.status === "succeeded" && (restartResult?.scanned ?? 0) >= 1, `after a restart the poll reads the durable result (${afterRestart.status}, ${JSON.stringify(restartResult)})`);
+  const mirror = JSON.parse(await call("job_status", { job_id: handle.jobId })) as Record<string, unknown>;
+  assert(mirror.status === "succeeded", "the job_status tool reads the durable job after a restart");
+  const sse = await fetch(`${BASE}/jobs/${handle.jobId}/stream`, { headers: { "x-brain-key": "e2e-key" }, signal: AbortSignal.timeout(5_000) });
+  assert(/event: done\b/.test(await sse.text()), "the SSE stream replays the durable snapshot + done after a restart");
+  const other = await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "op-raw" } });
+  assert(other.status === 404, `another key's durable poll gets 404 (${other.status})`);
+
+  // Reconcile: a job left running (its process gone) is marked lost, durably.
+  const orphan = crypto.randomUUID();
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (${orphan}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'running')`;
+  const cut = await reconcileDurableJobsLost();
+  assert(cut >= 1, `reconcile marks the orphaned running job lost (${cut})`);
+  const lost = (await (await fetch(`${BASE}/jobs/${orphan}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
+  assert(lost.status === "lost" && (lost.error as { code?: string })?.code === "SERVER_RESTARTED", `the reconciled job reads back lost over HTTP with SERVER_RESTARTED (${lost.status})`);
+
+  // prune_jobs retains: an aged terminal row goes, the live ones do not.
+  const aged = crypto.randomUUID();
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (${aged}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'failed', now() - interval '2 hours')`;
+  const prunedN = Number((await sql`SELECT prune_jobs(60) AS n`)[0].n);
+  assert(prunedN >= 1 && Number((await sql`SELECT count(*)::int AS c FROM jobs WHERE id = ${aged}::uuid`)[0].c) === 0, `prune_jobs deletes the aged terminal row and keeps the fresh ones (${prunedN})`);
+
+  setJobSink(null);
+  resetJobsForTest();
+  await jobStore.close();
+  await sql.close();
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");

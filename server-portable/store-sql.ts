@@ -23,6 +23,7 @@
  */
 
 import { SQL } from "bun";
+import type { JobSink, JobRow, PublicJob, JobStatus, JobProgress } from "./jobs.ts";
 import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import type { Lineage } from "./lineage.ts";
@@ -715,6 +716,81 @@ export class SqlStore implements ThoughtStore {
         FROM unnest(${this.sql.array(clean.map((r) => r.tool), "TEXT")}::text[],
                     ${toUuidArray(clean.map((r) => r.agentId))}::uuid[],
                     ${toUuidArray(clean.map((r) => r.targetId))}::uuid[]) AS t(tool, agent_id, target_id)`;
+  }
+
+  /**
+   * The durable backing store for the async job registry (SMD-2318, migration
+   * 069's `jobs` table). Timestamps cross as epoch ms (the public shape), so the
+   * writes convert to timestamptz with to_timestamp and the read back with
+   * extract(epoch …). The upsert freezes a terminal row: `WHERE jobs.ended_at IS
+   * NULL` on the conflict path means a late write after the startup reconcile (or
+   * any out-of-order arrival the per-record chain did not already serialize)
+   * cannot move a finished job back to a live state.
+   */
+  jobSink(): JobSink {
+    const sql = this.sql;
+    return {
+      async write(row: JobRow): Promise<void> {
+        await sql`
+          INSERT INTO jobs (id, kind, owner_key_hash, actor, status, progress, result, error, created_at, started_at, ended_at, updated_at)
+          VALUES (
+            ${row.id}::uuid, ${row.kind}, ${row.ownerKeyHash}, ${row.actor}, ${row.status},
+            ${row.progress ?? null}::jsonb,
+            ${row.result ?? null}::jsonb,
+            ${row.error ?? null}::jsonb,
+            to_timestamp(${row.createdAt}::double precision / 1000.0),
+            to_timestamp(${row.startedAt ?? null}::double precision / 1000.0),
+            to_timestamp(${row.endedAt ?? null}::double precision / 1000.0),
+            now()
+          )
+          ON CONFLICT (id) DO UPDATE SET
+            status     = EXCLUDED.status,
+            progress   = EXCLUDED.progress,
+            result     = EXCLUDED.result,
+            error      = EXCLUDED.error,
+            started_at = EXCLUDED.started_at,
+            ended_at   = EXCLUDED.ended_at,
+            updated_at = now()
+          WHERE jobs.ended_at IS NULL`;
+      },
+      async read(ownerKeyHash: string, id: string): Promise<PublicJob | null> {
+        // A non-uuid id would throw on the ::uuid cast; the poll answers it as an
+        // unknown id (null → the route's 404), not a 500.
+        if (!UUID_RE.test(id)) return null;
+        const rows = await sql`
+          SELECT id, kind, status, actor, progress, result, error,
+                 (extract(epoch FROM created_at) * 1000)::bigint AS created_ms,
+                 (extract(epoch FROM started_at) * 1000)::bigint AS started_ms,
+                 (extract(epoch FROM ended_at)   * 1000)::bigint AS ended_ms
+            FROM jobs
+           WHERE id = ${id}::uuid AND owner_key_hash = ${ownerKeyHash}`;
+        const r = rows[0];
+        if (!r) return null;
+        return {
+          jobId: String(r.id),
+          kind: String(r.kind),
+          status: String(r.status) as JobStatus,
+          actor: String(r.actor),
+          createdAt: Number(r.created_ms),
+          ...(r.started_ms != null ? { startedAt: Number(r.started_ms) } : {}),
+          ...(r.ended_ms != null ? { endedAt: Number(r.ended_ms) } : {}),
+          ...(r.progress != null ? { progress: r.progress as JobProgress } : {}),
+          ...(r.result != null ? { result: r.result } : {}),
+          ...(r.error != null ? { error: r.error as { message: string; code?: string } } : {}),
+        };
+      },
+      async reconcileRunningLost(): Promise<number> {
+        const rows = await sql`
+          UPDATE jobs
+             SET status     = 'lost',
+                 ended_at   = now(),
+                 updated_at = now(),
+                 error      = ${{ message: "the server restarted before the job finished; re-run it (a detached run does not survive a restart)", code: "SERVER_RESTARTED" }}::jsonb
+           WHERE status IN ('pending', 'running')
+          RETURNING id`;
+        return rows.length;
+      },
+    };
   }
 
   async close(): Promise<void> {
