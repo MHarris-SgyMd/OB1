@@ -2153,6 +2153,7 @@ if (configFailed) {
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'proposal' AND d.artifact_id = s.id)),
                    -- 069 (SMD-2313): the unreviewed proposals standing on a lineage pair — one side's derived_from names the other,
                    -- 066's predicate — which the pass never replaces (a pending row holds its pair; a stale one waits for 067's settle).
+                   -- lp_s reads a subset of pr_s under the same bound, so pr_read >= BOUND whenever lp_read is: the READ headline's disclosure covers it.
                    lp_s AS (SELECT p.id, p.older_id, p.newer_id FROM public.supersession_proposals p WHERE p.status IN ('pending', 'stale') LIMIT ${BOUND}),
                    lp AS (SELECT s.id FROM lp_s s JOIN public.thoughts n ON n.id = s.newer_id JOIN public.thoughts o ON o.id = s.older_id
                            WHERE COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)),
@@ -2283,7 +2284,9 @@ if (configFailed) {
               // a call short of three arguments is ambiguous (42725, not
               // unique) and fails, while the fork's callers resolve (run-it,
               // first review pass: the arm said the older body answered).
-              // 069 drops the older form.
+              // 069 drops the older form. Gated on 063 like the arms above:
+              // a brain before 063 is the older-bodies arm's, and one at
+              // 029..062 the ledger check's (LATEST_MIGRATION), read first.
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${bodies.lists_lineage !== true
                     ? "list_supersession_proposals is from before 069 (migration 069 not yet applied, or its form dropped by hand): every listing fails — the CLI's --list, the stores and the MCP tool pass 069's third argument, which this form does not take — and no proposal standing on a lineage pair can be flagged"

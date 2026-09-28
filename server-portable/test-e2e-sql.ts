@@ -726,8 +726,8 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
     SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'conflict_undirected', 0.7, ${"A then B \x1b[31mred"}, 0.9, 'consolidate:stub@p2', NULL) AS id`;
   const listed = await call("list_supersession_proposals", {});
   assert(/1 pending supersession proposal/.test(listed) && /conflict, direction not stated/.test(listed), "the tool lists the pending proposal with its verdict phrase");
-  assert(listed.includes(`ID: ${older}`) && listed.includes(`ID: ${newer}`) && listed.includes(`--accept ${pid} --direction <newer|older>`) && listed.includes(`--reject ${pid}`),
-         "…both ids, and the accept command with the direction placeholder the shell cannot parse");
+  assert(listed.includes(`ID: ${older}`) && listed.includes(`ID: ${newer}`) && listed.includes(`--accept ${pid} --direction <newer|older>`) && listed.includes(`--reject ${pid}`) && !listed.includes("--force"),
+         "…both ids, and the accept command with the direction placeholder the shell cannot parse, and no --force on a row neither edited nor on a lineage pair");
   assert(!listed.includes("\x1b") && /forged line/.test(listed) && /A then B/.test(listed), "…with the escape sequences stripped from the thought and the reason, the words kept");
   assert(!/edited since judged/.test(listed), "…and nothing marked edited yet");
   // 069 (SMD-2313): the newer thought's derived_from naming the older — set
@@ -735,12 +735,12 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   // with the reject to run; `lineage: false` leaves it out and `true` selects
   // it, each said in the headline; the array cleared, the rest of this
   // section reads as before.
-  assert(/1 pending supersession proposal\(s\) off a lineage pair, most confident first/.test(await call("list_supersession_proposals", { lineage: false })), "before either names the other, lineage: false is the one row (a selector that read false as nothing would drop it)");
+  assert(/1 pending supersession proposal\(s\) not on a lineage pair, most confident first/.test(await call("list_supersession_proposals", { lineage: false })), "before either names the other, lineage: false is the one row (a selector that read false as nothing would drop it)");
   await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${older}::text) WHERE id = ${newer}::uuid`;
   const tagged = await call("list_supersession_proposals", {});
   assert(/accepting needs --direction newer or older  LINEAGE PAIR/.test(tagged) && tagged.includes(`LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${pid} --note "lineage pair (066)"`) && tagged.includes(`--accept ${pid} --direction <newer|older> --force`),
          `a proposal standing on a lineage pair is tagged, with the reject to run and --force on the accept the CLI would otherwise refuse (${tagged.split("\n").find((l) => /LINEAGE PAIR:/.test(l))?.trim().slice(0, 200)})`);
-  assert(/No pending supersession proposals off a lineage pair\./.test(await call("list_supersession_proposals", { lineage: false })) && /1 pending supersession proposal\(s\) on a lineage pair, most confident first/.test(await call("list_supersession_proposals", { lineage: true })),
+  assert(/No pending supersession proposals not on a lineage pair\./.test(await call("list_supersession_proposals", { lineage: false })) && /1 pending supersession proposal\(s\) on a lineage pair, most confident first/.test(await call("list_supersession_proposals", { lineage: true })),
          "lineage: true selects it and false leaves it out, each said in the headline");
   await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${newer}::uuid`;
   assert(!/LINEAGE PAIR/.test(await call("list_supersession_proposals", {})), "…and cleared, no tag");
@@ -759,6 +759,14 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   assert(/newer \[[^\]]+\] \(edited since judged\)/.test(edited) && edited.includes(`--accept ${pid} --direction <newer|older> --force`) && /verdict is about an earlier text/.test(edited),
          "after an edit the tool marks the side, adds --force to the accept command and says why");
   assert(/No accepted supersession proposals/.test(await call("list_supersession_proposals", { status: "accepted" })), "an empty status says so and names the pass that fills it");
+  // 069: a lineage pair accepted before it was one (the pointer standing) is
+  // the harm realised; the tool tags the accepted row and names the reject
+  // that clears the pointer as the repair (adversarial re-run, third pass).
+  await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, 'newer', NULL, true)`;
+  await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${older}::text) WHERE id = ${newer}::uuid`;
+  const acceptedTagged = await call("list_supersession_proposals", { status: "accepted" });
+  assert(/LINEAGE PAIR/.test(acceptedTagged) && acceptedTagged.includes(`accepted while the derivation names its input — cd db && bun consolidate.ts --url $DATABASE_URL --reject ${pid} clears the pointer (029)`) && !/reject it:/.test(acceptedTagged),
+         `an accepted lineage pair is tagged with the reject that clears its pointer as the repair, not the pending row's line (${acceptedTagged.split("\n").find((l) => /LINEAGE PAIR:/.test(l))?.trim().slice(0, 160)})`);
   await sql`DELETE FROM supersession_proposals`;
   await sql`DELETE FROM thoughts WHERE id IN (${older}::uuid, ${newer}::uuid)`;
   await sql.close();

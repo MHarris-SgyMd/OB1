@@ -209,6 +209,12 @@ if (FORCE && !ACCEPT) {
   console.error("--force goes with --accept: it accepts a proposal whose thought was edited after it was judged.");
   process.exit(2);
 }
+// The pass's thought cap: beside --list it would be dropped without a word (SMD-2015's kind) — the
+// listing prints up to 50 of a status and --status counts them all (adversarial re-run, third review pass).
+if (cli.has("limit") && LIST !== undefined) {
+  console.error("--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status (--status counts them all).");
+  process.exit(2);
+}
 // Read only by the decision: beside anything else it would be dropped without a word (SMD-2015's kind).
 if (NOTE !== undefined && !ACCEPT && !REJECT) {
   console.error("--note goes with --accept or --reject: it is recorded with the decision.");
@@ -393,7 +399,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
   // A list that hits its cap says so: --status counts every row (definitions
   // probe, second review pass: 61 rows, 50 printed, the header counted 50).
   const capped = status === "lineage" ? rows.filter((r) => r.status === "pending").length === limit || rows.filter((r) => r.status === "stale").length === limit : rows.length === limit;
-  console.log(`  ${rows.length} ${what}, most confident first${capped ? ` — the first ${limit}${status === "lineage" ? " of a status" : ""}; --status counts them all` : ""}:\n`);
+  console.log(`  ${rows.length} ${what}, most confident first${capped ? ` — ${status === "lineage" ? `pending and stale capped at ${limit} each` : `the first ${limit}`}; --status counts them all` : ""}:\n`);
   // 067: a stale row's standing against the pools, beside its status. (A
   // row the pass settled needs no tag: its note begins with the marker.)
   const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
@@ -406,7 +412,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     // 069: a lineage pair — one side derived from the other — is never
     // proposed since 066; a row standing on one is said so, with the reject
     // while the row is the reviewer's.
-    if (p.lineage) console.log(`     lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066${p.status === "pending" || p.status === "stale" ? `; reject it: ${rejectLineage(p.id)}` : ""}`);
+    if (p.lineage) console.log(`     lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066${p.status === "pending" || p.status === "stale" ? `; reject it: ${rejectLineage(p.id)}` : p.status === "accepted" ? `; accepted while the derivation names its input — --reject ${p.id} clears the pointer (029)` : ""}`);
     if (p.status === "pending" || p.status === "stale") {
       // Commands as they run: a placeholder the shell cannot parse rather
       // than `newer|older`, which it would read as a pipe (review pass 3).
@@ -449,14 +455,15 @@ if (REVIEW_ONLY) {
     // row's own predicate, not the 200-capped listing; a guard, not a
     // verdict — nothing is written (definitions probe, second review pass:
     // the accept went through under the reject's own advice).
+    type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
     const lineageRow = decision === "accept" && !FORCE
       ? (await sql`SELECT (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)) AS lineage
                      FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id WHERE p.id = ${id}::uuid`) as { lineage: boolean }[]
       : [];
-    const res = lineageRow[0]?.lineage === true
-      ? { ok: false, error: "LINEAGE_PAIR" } as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean }
-      : ((await sql`
-      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`)[0].r as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean });
+    const res: ReviewResult = lineageRow[0]?.lineage === true
+      ? { ok: false, error: "LINEAGE_PAIR" }
+      : (await sql`
+      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`)[0].r as ReviewResult;
     if (res.ok) {
       if (decision === "accept") {
         console.log(`  accepted ${id}: ${res.superseding_id} now supersedes ${res.superseded_id}${res.written ? "" : " (the pointer already held that value)"}; the change is in thought_audit under ${actorName}`);
@@ -467,7 +474,7 @@ if (REVIEW_ONLY) {
       code = 1;
       const why: Record<string, string> = {
         NOT_FOUND: "no such proposal (or the thought it names is gone)",
-        LINEAGE_PAIR: `one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${rejectLineage(id)} is the expected decision; pass --force if the pointer is what you mean`,
+        LINEAGE_PAIR: `one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${rejectLineage(id)} is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`,
         DIRECTION_REQUIRED: `the judge did not say which is current (${res.verdict}); pass --direction newer or --direction older`,
         ALREADY_ACCEPTED: `already accepted (${res.superseding_id} carries the pointer); --reject it first to undo`,
         EDITED_SINCE: `the ${res.older_edited && res.newer_edited ? "older and newer thoughts have" : res.older_edited ? "older thought has" : "newer thought has"} been edited since the pair was judged, so the verdict is about a text that is gone; read both with --list and pass --force if it still holds`,

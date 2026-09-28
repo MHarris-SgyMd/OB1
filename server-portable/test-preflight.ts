@@ -1380,7 +1380,12 @@ else {
   // clears the census. The row is put back for the fixtures below.
   const [{ id: lpId }] = await claims`SELECT id FROM supersession_proposals WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[1]}::uuid`;
   await claims`UPDATE thoughts SET derived_from = jsonb_build_array(${ids[0]}::text) WHERE id = ${ids[1]}::uuid`;
+  // A second pending proposal NOT on a lineage pair stands beside it: the
+  // census counts lineage pairs, not unreviewed rows (adversarial re-run,
+  // third review pass: counting every unreviewed row read 1 here too).
+  await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.6, 'stub reason', 0.9, ${CONS}, NULL)`;
   const lpWarn = await run(SQL_ENV);
+  await claims`DELETE FROM supersession_proposals WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[2]}::uuid`;
   const lpLine = (out: string) => (out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim();
   assert(lpWarn.code === 0 && new RegExp(`!  lineage\\s+every derived row has its lineage row, but 1 unreviewed proposal\\(s\\) stand on a lineage pair \\(${lpId}\\): one side's derived_from names the other, so the pair would never be proposed today \\(066\\), and an accept would archive a derivation's input while the derivation still names it; the pass never replaces a pending one \\(SMD-2313\\)\\. \\d+ lineage row`).test(lpWarn.out)
       && /^\s*→ Review them: cd db && bun consolidate\.ts --url <url> --list lineage shows them with both texts; reject each: bun consolidate\.ts --url <url> --reject <id> --note "lineage pair \(066\)"\.\s*$/.test(fix(lpWarn.out, "lineage")),
@@ -1747,7 +1752,7 @@ else {
   assert(lpBeside.code === 0 && /!  lineage\s+every derived row has its lineage row, but 1 unreviewed proposal\(s\) stand on a lineage pair/.test(lpBeside.out) && /^\s*→ Apply db\/migrations\/069_listing_flags_lineage_pair\.sql\. Then review them: cd db && bun consolidate\.ts --url <url> --list lineage shows them/.test(fix(lpBeside.out, "lineage")),
          `a lineage pair standing while the listing is older: the census speaks, and its fix line applies 069 before the review (${lineageLn(lpBeside.out).slice(0, 120)} / ${fix(lpBeside.out, "lineage").trim().slice(0, 140)})`);
   await claims`UPDATE thoughts SET derived_from = NULL WHERE id = ${ids[1]}::uuid`;
-  await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`;
+  await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`; // the lineage row this leaves is the orphan sweep's below
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("069_") });
   await claims.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
   const pre069 = await run(SQL_ENV);

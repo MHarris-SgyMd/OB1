@@ -12,7 +12,7 @@
 --   before 066, or recorded raw: the file ran no data step (a rejection is a
 --   verdict with a reviewer's name on it), record_supersession_proposal has
 --   no lineage guard (measured in SMD-2292's second review pass: a proposal
---   on (E, A) with A.derived_from = [E] is accepted at 066), and the
+--   on (E, A) with A.derived_from = [E] is recorded at 066), and the
 --   listing — 029's list_supersession_proposals, which db/consolidate.ts
 --   --list and the MCP tool print — reads the verdict, both texts, the ids,
 --   the cosine and the judge key, nothing of derived_from. A reviewer sees
@@ -29,8 +29,8 @@
 --   sides with a vector, no failed claim under the run's key — a failed one
 --   is --retry-failed's) finds the pair no longer a candidate and settles it,
 --   the note naming the term that failed — "a lineage pair" unless a side is
---   superseded, which is named first; until that run it was listed as any
---   stale row. A census counting
+--   superseded, which is named first; until that run it is listed as any
+--   stale row — tagged, since this file. A census counting
 --   unreviewed proposals on lineage pairs ran in about 10 ms on the probe
 --   corpus (SMD-2313, filed from SMD-2292's second review pass).
 --
@@ -47,8 +47,8 @@
 --      Postgres, so to_jsonb(id::text) would be the same rule; the regex in
 --      test-schema pins the spelling); false on a pair neither side of which
 --      names the other. The parameter, `p_lineage boolean DEFAULT NULL`,
---      selects on it: NULL every row (the callers' two-argument form
---      resolves here through the default), true the lineage pairs alone,
+--      selects on it: NULL every row (a two-argument call resolves here
+--      through the default), true the lineage pairs alone,
 --      false the rest. Read in every status: a rejected lineage row says
 --      what it was, and the pass's settle note (067) names the reason
 --      beside it.
@@ -90,21 +90,19 @@
 --      one source of pairs, and a raw recording is a raw writer's.
 --
 -- SAFETY
---   One function dropped and created under a new arity (the two-argument
---   form is gone: a caller naming it positionally with two arguments
---   resolves to this one through the default — while the two-argument form
---   ALONE stands, a brain at 068 under a server built from this tree, every
---   fork caller fails naming the three-argument form, and the MCP tool's
---   hint and preflight's lineage check name this file; PostgREST's rpc by
---   name resolves once its schema cache reloads); one COMMENT. Nothing runs at apply
---   time but the DDL; no row moves; no table is touched; no grant moves. The
---   predicate costs two per-row jsonb containments on every row of the
---   status the listing joins (projected below the sort, so before the cap,
---   p_lineage set or not); no index. Functions are PUBLIC EXECUTE by default
---   and no grant group in db/config.mjs names the listing (the groups grant
---   other functions), so no ACL is carried onto the new form: a
---   brain that revoked EXECUTE on the listing by hand re-grants it by hand
---   (061's rule for the forms it dropped). MINOR under FORK.md's version
+--   One function dropped and created under a new arity — the two-argument
+--   form is gone; while it ALONE stands (a brain at 068 under a server
+--   built from this tree) every fork caller fails naming the three-argument
+--   form, and the MCP tool's hint, the CLI's --list and preflight's lineage
+--   check name this file; PostgREST's rpc by name resolves once its schema
+--   cache reloads — and one COMMENT. Nothing runs at apply time but the
+--   DDL; no row moves; no table is touched. The predicate costs two per-row
+--   jsonb containments on every row of the status the listing joins
+--   (projected below the sort, so before the cap, p_lineage set or not); no
+--   index. No grant is carried: EXECUTE is PUBLIC by default and no grant
+--   group in db/config.mjs names the listing, so a hand REVOKE on the old
+--   form is lost and re-granted by hand (061's rule for the forms it
+--   dropped). MINOR under FORK.md's version
 --   rules, on the precedent 046 wrote ("an added, defaulted parameter
 --   keeps" every caller) and 058, 059 and 061 followed for a dropped-and-
 --   recreated form — FORK.md's MAJOR bullet reads a changed signature or

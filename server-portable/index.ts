@@ -1481,9 +1481,11 @@ function buildServer(principal: Principal): McpServer {
     async ({ status, limit, lineage }) => {
       try {
         const data = await (await db()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }) });
-        const onLineage = lineage === true ? " on a lineage pair" : lineage === false ? " off a lineage pair" : "";
+        const onLineage = lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "";
         if (!data.length) {
-          return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}. The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by).` }] };
+          // A lineage pair is never proposed since 066, so an empty lineage
+          // selection is not the pass's to fill (maintainer read, third pass).
+          return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}.${lineage === true ? "" : " The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by)."}` }] };
         }
         // SMD-1803: through displayDate, never new Date() on a raw column — an
         // undated thought reads "undated", an infinity/BC one its own text, not
@@ -1509,7 +1511,7 @@ function buildServer(principal: Principal): McpServer {
           // — is never proposed since 066; a row standing on one is the
           // reviewer's to reject, said with the command while it is theirs.
           const lineageLine = p.lineage
-            ? `\n   LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066${p.status === "pending" || p.status === "stale" ? `; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} --note "lineage pair (066)"` : ""}`
+            ? `\n   LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066${p.status === "pending" || p.status === "stale" ? `; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} --note "lineage pair (066)"` : p.status === "accepted" ? `; accepted while the derivation names its input — cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} clears the pointer (029)` : ""}`
             : "";
           return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${p.reason ? `\n   ${cleanForDisplay(p.reason)}` : ""}${lineageLine}` +
             `\n   newer [${day(p.newer.created_at)}]${p.newer.edited ? " (edited since judged)" : ""}: ${snip(p.newer.content)}\n      ID: ${p.newer.id}` +
