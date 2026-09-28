@@ -80,6 +80,7 @@ import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
+import { closeThenExit, openSql, resetRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -246,16 +247,6 @@ export async function replayAndDiff(
 // The refresh — a faithful whole-database snapshot, then migrate forward.
 // ---------------------------------------------------------------------------
 
-/** A host that is safe to reset without OB1_ALLOW_REMOTE_DB — refresh drops the target's schema. */
-function isLoopback(url: string): boolean {
-  try {
-    const h = new URL(url).hostname.toLowerCase();
-    return h === "" || h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Where a URL points, for a message: host:port/database, never its user or
  * password. An `@` after the host means the userinfo was not percent-encoded
@@ -269,7 +260,9 @@ export function where(url: string): string {
   try {
     const u = new URL(url);
     if (`${u.pathname}${u.search}${u.hash}`.includes("@")) return "a URL with an @ after its host — is its password percent-encoded?";
-    return `${u.hostname || "localhost"}:${u.port || "5432"}${u.pathname.length > 1 ? u.pathname : ""}`;
+    // No host is PGHOST's to decide (Bun's client and libpq both read it), not
+    // localhost; no port is PGPORT's when it is set, as both clients read it too.
+    return `${u.hostname || "$PGHOST"}:${u.port || (process.env.PGPORT ? "$PGPORT" : "5432")}${u.pathname.length > 1 ? u.pathname : ""}`;
   } catch {
     return "a URL that does not parse";
   }
@@ -535,11 +528,14 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  * Throws with a plain message on any failed step.
  */
 export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
-  if (!isLoopback(toUrl) && process.env.OB1_ALLOW_REMOTE_DB !== "1") {
-    throw new Error(`--to is not loopback and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset a remote database. (--refresh drops the target's schema.)`);
+  // connect.ts's one rule, the test scaffolding's too: loopback by name, not an
+  // empty host (it resolves through PGHOST), or the override.
+  const refusal = resetRefusal(toUrl);
+  if (refusal !== null) {
+    throw new Error(`--to is not plainly this machine — ${refusal} — and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset it. (--refresh drops the target's schema.)`);
   }
-  const src = new SQL({ url: fromUrl, max: 1 });
-  const target = new SQL({ url: toUrl, max: 1 });
+  const src = openSql(fromUrl);
+  const target = openSql(toUrl);
   let serverMaj: number;
   let settings: Record<string, string>;
   try {
@@ -574,7 +570,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     // fails on the copy, a Ctrl-C mid-restore — leaves a target the next one
     // recognises as its own (refreshMark). `tier` is one of TIERS, checked by
     // the caller; ALTER DATABASE takes no bind parameters.
-    const dst = new SQL({ url: toUrl, max: 1 });
+    const dst = openSql(toUrl);
     try {
       if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
       try {
@@ -596,7 +592,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     // pg_restore exits non-zero on benign warnings (e.g. a comment on an extension
     // it did not create); treat a restore that produced the core table as success,
     // otherwise surface it.
-    const check = new SQL({ url: toUrl, max: 1 });
+    const check = openSql(toUrl);
     let hasThoughts = false;
     try {
       const [{ present }] = await check<{ present: boolean }[]>`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`;
@@ -613,7 +609,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
 
     // Before the migration, so a migration that reads a setting sees the
     // source's; each later session on --to — migrate.ts's, the server's — does.
-    const settle = new SQL({ url: toUrl, max: 1 });
+    const settle = openSql(toUrl);
     try {
       await applyDatabaseSettings(settle, settings);
     } catch (e) {
@@ -625,7 +621,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     const migrated = await run(["bun", join(HERE, "migrate.ts"), "--url", toUrl], { stdio: "inherit" });
     if (migrated.code !== 0) throw new Error(`migrate.ts failed on the refreshed target (exit ${migrated.code})`);
 
-    const stamp = new SQL({ url: toUrl, max: 1 });
+    const stamp = openSql(toUrl);
     try {
       await stampTier(stamp, tier);
       await setConfig(stamp, "last_refresh", new Date().toISOString());
@@ -669,8 +665,8 @@ async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
  * performed because no image is published yet.
  */
 export async function promote(canaryUrl: string, stableUrl: string): Promise<{ version: string | null }> {
-  const canary = new SQL({ url: canaryUrl, max: 1 });
-  const stable = new SQL({ url: stableUrl, max: 1 });
+  const canary = openSql(canaryUrl);
+  const stable = openSql(stableUrl);
   try {
     await reach(canary, canaryUrl, "--from (canary)");
     await reach(stable, stableUrl, "--to (stable)");
@@ -851,16 +847,18 @@ async function main(): Promise<void> {
 
   // replay | diff
   const since = cli.value("since") ?? null;
-  const stable = new SQL({ url: from, max: 4 });
-  const canary = new SQL({ url: to, max: 4 });
-  try {
+  const stable = openSql(from, { max: 4 });
+  const canary = openSql(to, { max: 4 });
+  // The code is returned and applied after both pools close: an exit inside
+  // the body skipped the close (a throw still closes, then reaches main's catch).
+  await closeThenExit([stable, canary], async () => {
     // Each side answers and has the table; say so in the reader's words, not a driver trace.
     for (const [sql, url, label] of [[stable, from, "--from (stable)"], [canary, to, "--to (canary)"]] as const) {
       await reach(sql, url, label);
       const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.query_log') IS NOT NULL AS present`;
       if (!present) {
         console.error(`tier.ts --${verb}: query_log is not present on ${label} — migration 034 is not applied there.`);
-        process.exit(2);
+        return 2;
       }
     }
     // The default window is since the canary was last refreshed; else everything.
@@ -877,11 +875,9 @@ async function main(): Promise<void> {
     // The gate: 1 when a ranking moved, 3 when nothing was compared — not a
     // pass, and not a move either, so a caller can tell the two apart. (A
     // failed step is 1 as well, below; a usage error or refusal is 2.)
-    if (verb === "diff" && verdict !== "unmoved") process.exit(verdict === "moved" ? 1 : 3);
-  } finally {
-    await stable.close();
-    await canary.close();
-  }
+    if (verb === "diff" && verdict !== "unmoved") return verdict === "moved" ? 1 : 3;
+    return 0;
+  });
 }
 
 // A refusal or a failed step is a sentence for the operator, not a stack trace

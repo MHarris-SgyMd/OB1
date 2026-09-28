@@ -79,6 +79,7 @@ import {
 } from "./config.mjs";
 import { migrationSha, versionForMigration, readReleases } from "./version.mjs";
 import { commandLine } from "./cli.ts";
+import { databaseUrl, openSql } from "./connect.ts";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
 
@@ -92,16 +93,12 @@ const cli = commandLine("migrate.ts", {
   url: "one", grant: "one", "dry-run": "none", baseline: "none", reapply: "none", force: "none",
 }, { hints: { url: "<postgres://…>", grant: "<role>", force: "(with --baseline)" } });
 
-const url = cli.value("url") ?? process.env.DATABASE_URL;
+const url = databaseUrl(cli.value("url"));
 const dryRun = cli.has("dry-run");
 const baseline = cli.has("baseline");
 const reapply = cli.has("reapply");
 const force = cli.has("force");
 
-if (!url) {
-  console.error("No database URL. Pass --url or set DATABASE_URL.");
-  process.exit(2);
-}
 if (reapply && baseline) {
   console.error("--reapply re-runs what the ledger records; --baseline records without running. One or the other.");
   process.exit(2);
@@ -135,7 +132,7 @@ if (grantRole !== undefined) {
     console.error("--grant issues privileges; it does not apply or record migrations. Run it on its own.");
     process.exit(2);
   }
-  const gsql = new SQL({ url, max: 1 });
+  const gsql = openSql(url);
   try {
     const [{ present: roleExists }] = (await gsql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${grantRole}) AS present`) as { present: boolean }[];
     if (!roleExists) {
@@ -287,7 +284,7 @@ console.log(`  embedding: ${EMBEDDING_MODEL} @ ${EMBEDDING_DIM} dimensions`);
 console.log(`  trigram index: ${TRGM_INDEX ? "on" : "off"} (OB1_TRGM_INDEX)`);
 console.log(`  023/050/055 backfills: ${SUBSTITUTIONS.BACKFILL_LIMIT === "NULL" ? "every row waiting" : `one batch of ${SUBSTITUTIONS.BACKFILL_LIMIT} rows`} (OB1_BACKFILL_LIMIT)`);
 
-const sql = new SQL({ url, max: 1 });
+const sql = openSql(url);
 // One lock_timeout for the session — the checks' reads before a re-run, the
 // ledger reads below — and again, LOCAL, inside every transaction (begin): a
 // held lock fails the run rather than freezing it and every reader behind it.
