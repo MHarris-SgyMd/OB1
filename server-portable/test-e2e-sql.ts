@@ -738,8 +738,8 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   assert(/1 pending supersession proposal\(s\) off a lineage pair, most confident first/.test(await call("list_supersession_proposals", { lineage: false })), "before either names the other, lineage: false is the one row (a selector that read false as nothing would drop it)");
   await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${older}::text) WHERE id = ${newer}::uuid`;
   const tagged = await call("list_supersession_proposals", {});
-  assert(/accepting needs --direction newer or older  LINEAGE PAIR/.test(tagged) && tagged.includes(`LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${pid} --note "lineage pair (066)"`),
-         `a proposal standing on a lineage pair is tagged, with the reject to run (${tagged.split("\n").find((l) => /LINEAGE PAIR:/.test(l))?.trim().slice(0, 200)})`);
+  assert(/accepting needs --direction newer or older  LINEAGE PAIR/.test(tagged) && tagged.includes(`LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${pid} --note "lineage pair (066)"`) && tagged.includes(`--accept ${pid} --direction <newer|older> --force`),
+         `a proposal standing on a lineage pair is tagged, with the reject to run and --force on the accept the CLI would otherwise refuse (${tagged.split("\n").find((l) => /LINEAGE PAIR:/.test(l))?.trim().slice(0, 200)})`);
   assert(/No pending supersession proposals off a lineage pair\./.test(await call("list_supersession_proposals", { lineage: false })) && /1 pending supersession proposal\(s\) on a lineage pair, most confident first/.test(await call("list_supersession_proposals", { lineage: true })),
          "lineage: true selects it and false leaves it out, each said in the headline");
   await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${newer}::uuid`;

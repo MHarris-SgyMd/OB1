@@ -19,19 +19,25 @@
 --   "the page supersedes its evidence" as any other pending row, and an
 --   accept archives the evidence while the page still names it — the harm
 --   066's WHY describes. Such a row is nobody's but the reviewer's: a
---   pending proposal holds its pair (029's rule), 066 leaves the pair out of
---   every later candidate list, so the pass never judges it again and never
---   replaces it. A row that has gone stale (063: a text moved under the
---   verdict — a page re-rendered moves its text) is the pass's since 067,
---   which settles it as "no longer a candidate pair — a lineage pair" on
---   the next run that reaches its newer thought with a vector on each side;
---   until that run it is listed as any stale row. A census counting
+--   pending proposal holds its pair — 029's rule, which 063's candidate
+--   clause reads (a pair proposed in any state but stale is never a
+--   candidate), so no pass could ever re-judge it — and 063's recorder
+--   replaces stale rows alone, so nothing rewrites it. A row that has gone
+--   stale (063: a text moved under the verdict — a page re-rendered moves
+--   its text) is what 063's clause re-admits and 066 keeps out, so it is the
+--   pass's since 067: the next run that re-pools its newer thought (both
+--   sides with a vector, no failed claim under the run's key — a failed one
+--   is --retry-failed's) finds the pair no longer a candidate and settles it,
+--   the note naming the term that failed — "a lineage pair" unless a side is
+--   superseded, which is named first; until that run it was listed as any
+--   stale row. A census counting
 --   unreviewed proposals on lineage pairs ran in about 10 ms on the probe
 --   corpus (SMD-2313, filed from SMD-2292's second review pass).
 --
 -- WHAT
---   1. list_supersession_proposals redefined on 029's body, verbatim, plus
---      one column and one parameter. The column, `lineage boolean`, is 066's
+--   1. list_supersession_proposals redefined on 029's body — its columns,
+--      joins, order and cap unchanged — plus one column, one parameter and
+--      one WHERE term. The column, `lineage boolean`, is 066's
 --      predicate on the pair — the newer side's derived_from naming the
 --      older (a page and its evidence, a digest and its sources) or the
 --      older's naming the newer (an older note re-cited through
@@ -49,13 +55,17 @@
 --      A RETURNS TABLE cannot gain a column under CREATE OR REPLACE, so the
 --      two-argument form is dropped first and the three-argument one
 --      created; EXECUTE on it is PUBLIC by default, as on 029's, and no role
---      grant names the function (db/config.mjs grants the table), so no ACL
---      is carried. The sentinel `ob1:listing-flags-the-lineage-pair` marks
+--      grant group in db/config.mjs names the listing, so no ACL is
+--      carried. The sentinel `ob1:listing-flags-the-lineage-pair` marks
 --      the body for preflight.
 --   2. The readers, in the same change. db/consolidate.ts --list prints
 --      LINEAGE PAIR on such a row with the reject to run, --list lineage
 --      selects them, --status counts the unreviewed ones; the MCP tool
 --      list_supersession_proposals prints the tag and takes `lineage: true`;
+--      db/consolidate.ts --accept on a lineage pair is refused with the
+--      reject named unless --force (029's rule for a text edited since
+--      judged, CLI-side — a guard, not a verdict; the listing's and the
+--      tool's accept lines carry --force on such a row);
 --      preflight's `lineage` check counts unreviewed (pending, stale)
 --      proposals on a lineage pair — bounded, as its census is — and WARNs
 --      with the count, the first ids and the remedy, and WARNs when the
@@ -88,13 +98,18 @@
 --   hint and preflight's lineage check name this file; PostgREST's rpc by
 --   name resolves once its schema cache reloads); one COMMENT. Nothing runs at apply
 --   time but the DDL; no row moves; no table is touched; no grant moves. The
---   predicate costs two per-row jsonb containments on the rows the listing
---   joins — the 200 it returns, or every row of the status when p_lineage
---   selects; no index. Functions are PUBLIC EXECUTE by default and --grant
---   grants tables, not functions, so no ACL is carried onto the new form: a
+--   predicate costs two per-row jsonb containments on every row of the
+--   status the listing joins (projected below the sort, so before the cap,
+--   p_lineage set or not); no index. Functions are PUBLIC EXECUTE by default
+--   and no grant group in db/config.mjs names the listing (the groups grant
+--   other functions), so no ACL is carried onto the new form: a
 --   brain that revoked EXECUTE on the listing by hand re-grants it by hand
 --   (061's rule for the forms it dropped). MINOR under FORK.md's version
---   rules, on 061's precedent for a dropped form: the parameter is trailing
+--   rules, on the precedent 046 wrote ("an added, defaulted parameter
+--   keeps" every caller) and 058, 059 and 061 followed for a dropped-and-
+--   recreated form — FORK.md's MAJOR bullet reads a changed signature or
+--   return shape literally, and SMD-2324 asks it to carry the additive
+--   clause these five files argue: the parameter is trailing
 --   and defaulted, so every two-argument caller resolves to this form; the
 --   column is trailing, and every reader in the tree keys by name (the
 --   store's mapper, the CLI's row type, PostgREST's JSON, the eval's
@@ -152,7 +167,8 @@ DROP FUNCTION IF EXISTS list_supersession_proposals(text, int);
 -- list_supersession_proposals — the review queue, with both thoughts, and
 -- whether the pair is a lineage pair
 --
--- 029's body, verbatim, plus the last column and the last parameter.
+-- 029's body — columns, joins, order, cap — plus the last column, the last
+-- parameter and one WHERE term.
 -- p_status NULL lists every state; p_lineage NULL every pair. Most confident
 -- first; capped at 200.
 -- ---------------------------------------------------------------------------

@@ -839,10 +839,12 @@ pair — judged before 066, or recorded raw (the recorder has no lineage guard):
 the listing read nothing of `derived_from`, so a reviewer saw "the page
 supersedes its evidence" as any other pending row, and an accept would have
 archived the evidence while the page still named it. Such a row is nobody's but
-the reviewer's — a pending proposal holds its pair (029) and 066 keeps the pair
-out of every later candidate list, so the pass never judges it again and never
-replaces it; a stale one is the pass's to settle since 067, on the next run that
-reaches its newer thought. The file redefines `list_supersession_proposals` on
+the reviewer's — a pending proposal holds its pair (029's rule, read by 063's
+candidate clause), and 063's recorder rewrites stale rows alone, so no pass
+judges or replaces it; a stale one, which 063's clause re-admits and 066 keeps
+out, is the pass's to settle since 067, on the next run that re-pools its newer
+thought (both sides with a vector, no failed claim under the run's key). The
+file redefines `list_supersession_proposals` on
 029's body with a trailing `lineage` column — 066's predicate, either direction,
 direct members, NULL-safe — and a third parameter `p_lineage` (NULL every pair,
 true the lineage pairs alone, false the rest); the two-argument form is dropped
@@ -850,7 +852,8 @@ first (a `RETURNS TABLE` cannot gain a column under `CREATE OR REPLACE`), and a
 two-argument call resolves to the new form through the default. The readers
 follow: `consolidate.ts --list` prints `LINEAGE PAIR` on such a row with the
 reject to run, `--list lineage` selects the unreviewed ones (pending, then
-stale), `--status` counts them; the MCP tool prints the tag and takes
+stale), `--status` counts them, `--accept` refuses such a row unless `--force`
+(029's edited-since rule, CLI-side); the MCP tool prints the tag and takes
 `lineage: true`; preflight's `lineage` check counts unreviewed proposals on a
 lineage pair (bounded, as its census is) and warns with the ids and the remedy,
 and warns when the listing is from before 069 (every listing fails there: the
@@ -1952,9 +1955,11 @@ prints the same queue to a client. A row standing on a lineage pair — one
 side's `derived_from` names the other, a page and its evidence — is tagged
 `LINEAGE PAIR` with the reject to run (`--reject <id> --note "lineage pair
 (066)"`); `--list lineage` lists the unreviewed ones, pending then stale, and
-`--status` counts them (069, SMD-2313). Such a pair is never proposed since
-066, and a standing row is the reviewer's alone: the pass never replaces a
-pending one, and settles a stale one on its next run (067). `--accept` writes
+`--status` counts them (069, SMD-2313); `--accept` on such a row is refused
+naming the reject unless `--force` says the pointer is meant — a guard on the
+one accept door, not a verdict. Such a pair is never proposed since 066, and a
+standing row is the reviewer's alone: the pass never replaces a pending one,
+and settles a stale one on its next run (067). `--accept` writes
 the pointer on the thought
 the verdict names as current (or the one `--direction` names — required for an
 undirected verdict, and an override for a directed one) and refuses what would
@@ -2982,7 +2987,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2275 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 910 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 912 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

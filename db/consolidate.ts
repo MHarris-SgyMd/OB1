@@ -390,7 +390,10 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     console.log(`  no ${status === "lineage" ? "unreviewed proposals standing on a lineage pair" : `${status ?? ""} proposals`}`);
     return 0;
   }
-  console.log(`  ${rows.length} ${what}, most confident first:\n`);
+  // A list that hits its cap says so: --status counts every row (definitions
+  // probe, second review pass: 61 rows, 50 printed, the header counted 50).
+  const capped = status === "lineage" ? rows.filter((r) => r.status === "pending").length === limit || rows.filter((r) => r.status === "stale").length === limit : rows.length === limit;
+  console.log(`  ${rows.length} ${what}, most confident first${capped ? ` — the first ${limit}${status === "lineage" ? " of a status" : ""}; --status counts them all` : ""}:\n`);
   // 067: a stale row's standing against the pools, beside its status. (A
   // row the pass settled needs no tag: its note begins with the marker.)
   const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
@@ -411,7 +414,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
       // to replace or settle (067), and a reviewer's to decide sooner — its
       // texts moved, so an accept takes --force.
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
-      const force = p.older_edited || p.newer_edited || p.status === "stale" ? " --force" : "";
+      const force = p.older_edited || p.newer_edited || p.status === "stale" || p.lineage ? " --force" : "";
       console.log(`     --accept ${p.id}${dir}${force}    --reject ${p.id}`);
     }
     console.log("");
@@ -437,9 +440,23 @@ if (REVIEW_ONLY) {
   if (ACCEPT || REJECT) {
     const decision = ACCEPT ? "accept" : "reject";
     const id = (ACCEPT ?? REJECT)!;
-    const [{ r }] = await sql`
-      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`;
-    const res = r as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
+    // 069 (SMD-2313): an accept on a lineage pair — one side's derived_from
+    // names the other — is the harm 066 exists to prevent (the derivation
+    // archives its input while still naming it), so it is refused here
+    // unless --force says the reviewer has read both texts and means it —
+    // 029's rule for a text edited since judged, applied CLI-side (this is
+    // the one accept door; the stores and the tool have none). Read from the
+    // row's own predicate, not the 200-capped listing; a guard, not a
+    // verdict — nothing is written (definitions probe, second review pass:
+    // the accept went through under the reject's own advice).
+    const lineageRow = decision === "accept" && !FORCE
+      ? (await sql`SELECT (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)) AS lineage
+                     FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id WHERE p.id = ${id}::uuid`) as { lineage: boolean }[]
+      : [];
+    const res = lineageRow[0]?.lineage === true
+      ? { ok: false, error: "LINEAGE_PAIR" } as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean }
+      : ((await sql`
+      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`)[0].r as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean });
     if (res.ok) {
       if (decision === "accept") {
         console.log(`  accepted ${id}: ${res.superseding_id} now supersedes ${res.superseded_id}${res.written ? "" : " (the pointer already held that value)"}; the change is in thought_audit under ${actorName}`);
@@ -450,6 +467,7 @@ if (REVIEW_ONLY) {
       code = 1;
       const why: Record<string, string> = {
         NOT_FOUND: "no such proposal (or the thought it names is gone)",
+        LINEAGE_PAIR: `one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${rejectLineage(id)} is the expected decision; pass --force if the pointer is what you mean`,
         DIRECTION_REQUIRED: `the judge did not say which is current (${res.verdict}); pass --direction newer or --direction older`,
         ALREADY_ACCEPTED: `already accepted (${res.superseding_id} carries the pointer); --reject it first to undo`,
         EDITED_SINCE: `the ${res.older_edited && res.newer_edited ? "older and newer thoughts have" : res.older_edited ? "older thought has" : "newer thought has"} been edited since the pair was judged, so the verdict is about a text that is gone; read both with --list and pass --force if it still holds`,
@@ -462,7 +480,16 @@ if (REVIEW_ONLY) {
       console.error(`  ${decision} refused: ${why[res.error ?? ""] ?? res.error}`);
     }
   }
-  if (LIST !== undefined) await printList(LIST === "all" ? undefined : LIST);
+  if (LIST !== undefined) {
+    // 069 (SMD-2313): a brain at 068 under this tree has no three-argument
+    // listing — the one error every --list meets there, named with its file
+    // rather than a driver stack (definitions probe, second review pass).
+    try { await printList(LIST === "all" ? undefined : LIST); } catch (e) {
+      if (!/list_supersession_proposals\(text, ?integer, ?boolean\) does not exist/.test((e as Error).message)) throw e;
+      console.error("  --list needs migration 069 (db/migrations/069_listing_flags_lineage_pair.sql), which this brain has not applied: cd db && bun migrate.ts --url <url>");
+      code = 1;
+    }
+  }
   if (STALE_DAYS > 0) await printStale(STALE_DAYS);
   await sql.close();
   process.exit(code);

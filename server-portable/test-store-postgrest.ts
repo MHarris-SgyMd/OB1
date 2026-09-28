@@ -607,7 +607,8 @@ console.log("\n[10] listSupersessionProposals's rpc shape over PostgREST (migrat
   // 069 (SMD-2313): p_lineage named on the rpc — the flag false here, true
   // once the newer thought's derived_from names the older (set raw), the
   // selector picking it and false leaving it out.
-  assert(pending[0].lineage === false, "…lineage is false on a pair neither side of which names the other (069)");
+  assert(pending[0].lineage === false && (await store.listSupersessionProposals({ lineage: false })).length === 1 && (await store.listSupersessionProposals({ lineage: true })).length === 0,
+         "…lineage is false on a pair neither side of which names the other (069): false selects it over rpc, true does not");
   await admin`UPDATE thoughts SET derived_from = jsonb_build_array(${older}::text) WHERE id = ${newer}`;
   const lp = await store.listSupersessionProposals({ lineage: true });
   assert(lp.length === 1 && lp[0].id === pid && lp[0].lineage === true && (await store.listSupersessionProposals({ lineage: false })).length === 0,

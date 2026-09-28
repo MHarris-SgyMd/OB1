@@ -1500,8 +1500,9 @@ function buildServer(principal: Principal): McpServer {
         const results = data.map((p, i) => {
           const edited = p.older.edited || p.newer.edited;
           const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
+          // 069: the CLI refuses an accept on a lineage pair without --force.
           const review = p.status === "pending"
-            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited ? " --force" : ""}   reject: … --reject ${p.id}` +
+            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited || p.lineage ? " --force" : ""}   reject: … --reject ${p.id}` +
               (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
             : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${p.reviewNote ? `: ${cleanForDisplay(p.reviewNote)}` : ""}`;
           // 069 (SMD-2313): a lineage pair — one side derived from the other

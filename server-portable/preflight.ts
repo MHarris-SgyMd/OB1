@@ -2264,9 +2264,10 @@ if (configFailed) {
             } else if (Number(c.lineage_pairs)) {
               // 069 (SMD-2313): a proposal standing on a lineage pair — judged
               // before 066, or recorded raw — is a reviewer's alone: a pending
-              // row holds its pair (029) and 066 keeps the pair out of every
-              // later candidate list, so the pass never judges it again; a
-              // stale one waits for the pass's settle (067). Counted over the
+              // row holds its pair (029's rule, read by 063's candidate clause)
+              // and the recorder rewrites stale rows alone, so no pass judges
+              // or replaces it; a stale one — re-admitted by 063's clause, kept
+              // out by 066 — waits for the pass's settle (067). Counted over the
               // unreviewed rows, bounded as the census is; the remedy is the
               // listing's selector, after 069 where the listing is older.
               const review = `cd db && bun consolidate.ts --url <url> --list lineage shows them with both texts; reject each: bun consolidate.ts --url <url> --reject <id> --note "lineage pair (066)".`;

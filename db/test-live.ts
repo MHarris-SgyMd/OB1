@@ -4166,8 +4166,22 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     // row, so the pending call dropped passed every suite).
     await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${atlasOld}::text) WHERE id = ${atlasNew}::uuid`;
     const pendingLineage = await consolidate("--list", "lineage");
-    assert(pendingLineage.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\)/.test(pendingLineage.out) && /LINEAGE PAIR\s*$/m.test(pendingLineage.out) && !/\(stale/.test(pendingLineage.out) && pendingLineage.out.includes(`--accept ${atlas!.id}    --reject ${atlas!.id}`),
-           `--list lineage lists the pending row, tagged, with no stale standing and the plain accept/reject line (${pendingLineage.out.split("\n").find((l) => /LINEAGE PAIR/.test(l))?.trim().slice(0, 160)})`);
+    assert(pendingLineage.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\)/.test(pendingLineage.out) && /LINEAGE PAIR\s*$/m.test(pendingLineage.out) && !/\(stale/.test(pendingLineage.out) && pendingLineage.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`),
+           `--list lineage lists the pending row, tagged, with no stale standing and --force on the accept line (${pendingLineage.out.split("\n").find((l) => /LINEAGE PAIR/.test(l))?.trim().slice(0, 160)})`);
+    // …and the accept is refused without --force — a guard on the one accept
+    // door, not a verdict: the row stays pending, nothing is written
+    // (definitions probe, second review pass: the accept went through under
+    // the reject's own advice). A brain without 069's listing gets the file
+    // named on --list, not a driver stack: the form dropped and put back.
+    const acceptLineage = await consolidate("--accept", atlas!.id);
+    assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force if the pointer is what you mean`)
+           && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
+           `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
+    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
+    const listPre069 = await consolidate("--list", "lineage");
+    assert(listPre069.code === 1 && /--list needs migration 069 \(db\/migrations\/069_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre069.out) && !/PostgresError/.test(listPre069.out),
+           `on a brain without 069 --list names the file, not a driver error (exit ${listPre069.code}: ${listPre069.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("069_") });
     await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
