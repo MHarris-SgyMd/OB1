@@ -15,21 +15,17 @@
  *   ./with-postgres.sh bun measure-1288.ts
  *   DATABASE_URL=... bun measure-1288.ts
  */
-import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EMBEDDING_DIM } from "./config.mjs";
-import { dropSchema, runMigrator } from "./test-support.ts";
+import { dropSchema, requireDatabaseUrl, runMigrator } from "./test-support.ts";
 import { commandLine } from "./cli.ts";
+import { openSql } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 commandLine("measure-1288.ts", {}, { note: "it reads DATABASE_URL" });
-const URL_ = process.env.DATABASE_URL;
-if (!URL_) {
-  console.error("DATABASE_URL is not set. Use ./with-postgres.sh bun measure-1288.ts");
-  process.exit(2);
-}
+const URL_ = requireDatabaseUrl("measure-1288.ts");
 
 const subst = (sql: string) => sql.replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM));
 const file = (name: string) => subst(readFileSync(join(HERE, "migrations", name), "utf8"));
@@ -41,7 +37,7 @@ const unit = (i: number) => { const v = new Array(EMBEDDING_DIM).fill(0); v[i % 
 
 await dropSchema(URL_);
 await runMigrator(URL_, undefined);
-const sql = new SQL({ url: URL_, max: 1 });
+const sql = openSql(URL_);
 
 // Build a dense, cycle-free DAG: WIDTH nodes per layer for DEPTH layers, each
 // node deriving from EVERY node of the next-deeper layer, plus one root deriving
@@ -68,7 +64,7 @@ async function buildDag(width: number, depth: number): Promise<{ root: string; n
 }
 
 async function timeCall(root: string, depth: number, timeoutMs: number): Promise<{ ms: number; rows: number | null; timedOut: boolean }> {
-  const conn = new SQL({ url: URL_, max: 1 });
+  const conn = openSql(URL_);
   try {
     await conn.unsafe(`SET statement_timeout = ${Number(timeoutMs)}`);
     const t0 = performance.now();

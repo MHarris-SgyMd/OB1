@@ -30,6 +30,7 @@
 import { SQL } from "bun";
 import { applyMigrations, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 import { commandLine } from "./cli.ts";
+import { openSql } from "./connect.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
 const cli = commandLine("bench-stats.ts", { plans: "none" }, { note: "the rest of its knobs are OB1_BENCH_* environment variables" });
@@ -107,7 +108,7 @@ const results: Row[] = [];
 for (const scale of SCALES) {
   await resetSchema(URL_, OPTS);
   await applyMigrations(URL_, OPTS);
-  const sql = new SQL({ url: URL_, max: 1 });
+  const sql = openSql(URL_);
   try {
     await load(sql, scale);
 

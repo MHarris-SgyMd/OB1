@@ -2984,9 +2984,10 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2285 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 913 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 919 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
+bun test-connect.ts                         # every script's connection through connect.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -3001,6 +3002,23 @@ and `extract-entities.ts` ignored a flag they did not know, so `--K 10` ran the
 default `--k` and exited 0 (SMD-2015). `test-cli.ts` holds the scanner's rules,
 that every entry point imports `cli.ts` and nothing else reads `process.argv`,
 and runs each entry point with a flag it does not have and with `--help`.
+
+Every script reaches its database through `connect.ts` (SMD-2302): `--url`, else
+`DATABASE_URL`, else exit 2 with one refusal (a URL that does not parse is
+refused too, and never printed); one client constructor; and one answer to
+"may this database be reset?" — a loopback host by name (`localhost`,
+`127.0.0.1`, `[::1]`, `0.0.0.0`), not an empty host (it resolves through
+`PGHOST`), or `OB1_ALLOW_REMOTE_DB=1`. `tier.ts --refresh` and the suites'
+`dropSchema` both ask it, and print why not. The rule reads the URL's
+hostname; where a client actually connects can differ (Bun's `?path=` socket,
+libpq's `?host=`), which is SMD-2317. `hnsw-graph.ts`,
+`graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
+after connecting and return it from `closeThenExit`, which closes the pool and
+flushes their output first (the claim workers still close before each exit
+themselves, SMD-2304).
+`test-connect.ts` holds the rule as a truth table, runs the door, and checks
+that no script outside the suites reads `DATABASE_URL`, builds a client or
+exits inside the door.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
@@ -3023,7 +3041,9 @@ how SMD-1806's ingester met the step when it imported two `scripts/*.mjs`
 not resolve — and asserts the runner heals its own session while preflight names
 the persistent fix. The test container installs pgvector into `public`, on the
 path, so nothing else in the matrix sees this; the suite restores it afterward,
-which `ci-parity.sh` needs since it shares one Postgres.
+which `ci-parity.sh` needs since it shares one Postgres. Its [7] holds the path
+the migrator gives migration 021's transaction, `pg_temp` taken out, to the
+schemas Postgres reads in the raw path (SMD-2247).
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
 the command and removes the container on exit. It prefers podman (including the

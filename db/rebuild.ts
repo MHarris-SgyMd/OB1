@@ -53,8 +53,8 @@
  * brain without 063 (named, with the migrate command).
  */
 
-import { SQL } from "bun";
 import { commandLine } from "./cli.ts";
+import { databaseUrl, openSql } from "./connect.ts";
 import { staleStandings, staleStandingsText, STALE_STANDING_ROWS_SQL, type StaleStandingRow } from "../server-portable/consolidate.ts";
 
 // Every argument accounted for (db/cli.ts, SMD-2134): a flag this door does not
@@ -65,11 +65,7 @@ const cli = commandLine("rebuild.ts", {
   gone: "none", force: "none", orphans: "none", status: "none", "dry-run": "none",
 }, { hints: { url: "<postgres://…>", input: "<thought id>", reason: "<text> (with --input)", fingerprints: "<fp1,fp2> (with --gone)", limit: "<N> (with --orphans)", gone: "(with --input)", force: "(with --input)" } });
 
-const url = cli.value("url") ?? process.env.DATABASE_URL;
-if (!url) {
-  console.error("No database URL. Pass --url or set DATABASE_URL.");
-  process.exit(2);
-}
+const url = databaseUrl(cli.value("url"));
 const INPUT = cli.value("input");
 const ORPHANS = cli.has("orphans");
 const STATUS = cli.has("status");
@@ -121,7 +117,7 @@ const REASON = reasonRaw ?? (GONE ? "operator: forget" : FORCE ? "operator: forc
  */
 const FPS_LITERAL = FINGERPRINTS ? "{" + FINGERPRINTS.map((s) => `"${s.replace(/(["\\])/g, "\\$1")}"`).join(",") + "}" : null;
 
-const sql = new SQL({ url, max: 1 });
+const sql = openSql(url);
 
 type Report = {
   ok: boolean; error?: string; id?: string;

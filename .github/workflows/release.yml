@@ -52,6 +52,7 @@ on:
       - "db/Dockerfile"
       - "db/migrate.ts"
       - "db/cli.ts"
+      - "db/connect.ts"
       - "db/migrations/**"
       - "db/config.mjs"
       - "db/version.mjs"

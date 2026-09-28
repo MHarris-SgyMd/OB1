@@ -120,7 +120,6 @@
  * per-thought mixture that nothing repairs.
  */
 
-import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
@@ -133,6 +132,7 @@ import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
+import { databaseUrl, openSql } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
 
 /**
@@ -149,11 +149,7 @@ const cli = commandLine("extract-entities.ts", {
   status: "none", "dry-run": "none", "switch-key": "none", "retry-failed": "none", "retry-partial": "none", "retry-left-out": "none", decide: "none",
 }, { hints: { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>" } });
 
-const url = cli.value("url") ?? process.env.DATABASE_URL;
-if (!url) {
-  console.error("No database URL. Pass --url or set DATABASE_URL.");
-  process.exit(2);
-}
+const url = databaseUrl(cli.value("url"));
 
 const WORKERS = cli.int("workers", { absent: 2, min: 1 });
 // One thought per claim. A claim costs half a millisecond against a model call
@@ -232,7 +228,7 @@ console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "ch
 // through the pool, and a worker parked on a lock or a long statement holds
 // its own connection, so the spare is what keeps every worker's leases alive
 // then. Tightening this to WORKERS would recreate the lapse 031 removed.
-const sql = new SQL({ url, max: WORKERS + 1 });
+const sql = openSql(url, { max: WORKERS + 1 });
 
 // ── The database's side ─────────────────────────────────────────────────────
 

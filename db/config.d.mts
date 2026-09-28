@@ -284,8 +284,12 @@ export const HNSW_SEED_MAX_SCAN_TUPLES: number;
 export const HNSW_SEED_SCAN_MEM_MULTIPLIER: number;
 /** The bound names, in remedy order. Bind into Bun.sql with sql.array(HNSW_BOUNDS, "TEXT"). */
 export const HNSW_BOUNDS: string[];
-/** A database name as an SQL identifier. */
+/** A name (a database's, a schema's, a tablespace's) as an SQL identifier, always quoted. */
 export function quoteIdent(name: unknown): string;
+/** A search_path setting's schemas, in order, as Postgres resolves them; `serverVersionNum` is `server_version_num` (17 counts a vertical tab as whitespace); `keepEmpty` keeps a `""` entry (temp_tablespaces' default tablespace). */
+export function searchPathSchemas(setting: string, serverVersionNum: number, keepEmpty?: boolean): string[];
+/** Set the transaction's search_path to itself without the temp schema (dropped by parsed name, each name quoted), LOCAL; returns the path it read. */
+export function setPathWithoutTemp(tx: import("bun").SQL): Promise<string>;
 /** `SELECT name, value` of each bound as this session sees it (value NULL when pgvector is not loaded). */
 export const BOUNDS_IN_FORCE_SQL: string;
 /** match_thoughts clamps match_count to this inside the function (014). */

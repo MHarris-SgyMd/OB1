@@ -35,6 +35,7 @@
 import { SQL } from "bun";
 import { requireDatabaseUrl, resetSchema } from "./test-support.ts";
 import { commandLine } from "./cli.ts";
+import { openSql } from "./connect.ts";
 
 commandLine("bench-querylog.ts", {}, { note: "its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-querylog.ts");
@@ -106,7 +107,7 @@ const INDEX = "query_log_logged_at_idx";
  */
 async function load(): Promise<SQL> {
   await resetSchema(URL_, OPTS);
-  const c = new SQL({ url: URL_, max: 1 });
+  const c = openSql(URL_);
   const [n] = await c`SELECT count(*)::int AS c FROM pg_indexes WHERE indexname = ${INDEX}`;
   if (n.c !== 1) throw new Error(`${INDEX} was not built by the schema — the with-index arm would measure an index-less table`);
   return c;
