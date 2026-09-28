@@ -197,10 +197,12 @@ export function isoTimestampOrNull(v: unknown): string | null {
  * `toISOString`'s own form is cut to its date, an extended year's
  * (`+275760-09-13`) included; anything else — a sentinel ("infinity"), a
  * no-ISO-form text such as PostgREST's `0044-03-15T00:00:00+00:00 BC` —
- * comes out whole, not sliced to a stub or a BC date read as AD. The day is
- * UTC's. `db/consolidate.ts`'s `day` (SMD-1803), the judge prompt's `dateOf`
- * (`consolidate.ts`) and the grading report in `evals/eval-consolidate.ts`
- * print through it.
+ * comes out whole, not sliced to a stub or a BC date read as AD. Bun's own
+ * BC Date, when it has one, is ISO's astronomical year (44 BC is
+ * `-000043-03-15`). The day is UTC's. `db/consolidate.ts`'s `day` (SMD-1803)
+ * and the grading report in `evals/eval-consolidate.ts` print through it; the
+ * judge prompt's `dateOf` (`consolidate.ts`) does not, because its text is
+ * pinned by `CONSOLIDATE_PROMPT_VERSION`.
  */
 export function isoDay(v: unknown): string | null {
   const iso = isoTimestampOrNull(v);

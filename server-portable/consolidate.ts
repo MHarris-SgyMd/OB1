@@ -28,7 +28,6 @@
 
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
-import { isoDay } from "./store.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
 
 /**
@@ -160,11 +159,15 @@ export function wrapSide(tag: "thought_a" | "thought_b", content: string): strin
   return `<${tag}>\n${escaped}\n</${tag}>`;
 }
 
-// SMD-1803: a NULL created_at is "an unknown date" in the prompt, not the
-// fabricated 1970-01-01 new Date(null) gave; an infinity/BC one keeps its own
-// text rather than throwing. The rule says the dates decide nothing, so an
-// unknown one is inert. The day itself is isoDay's (SMD-1842).
-const dateOf = (d: string | Date | null): string => isoDay(d) ?? "an unknown date";
+const dateOf = (d: string | Date | null): string => {
+  // SMD-1803: a NULL created_at is "an unknown date" in the prompt, not the
+  // fabricated 1970-01-01 new Date(null) gave. infinity/BC are already safe:
+  // getTime() is NaN, so String(d) keeps the sentinel ("infinity") rather than
+  // throwing. The rule says the dates decide nothing, so an unknown one is inert.
+  if (d == null) return "an unknown date";
+  const t = d instanceof Date ? d : new Date(d);
+  return Number.isNaN(t.getTime()) ? String(d) : t.toISOString().slice(0, 10);
+};
 
 /**
  * The messages for one pair, older as A and newer as B. One pass over the

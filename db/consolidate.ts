@@ -359,7 +359,7 @@ const snippet = (s: string, n = 160) => { const t = cleanForDisplay(s).replace(/
 // canonical rule (isoDay), not new Date().toISOString(), which fabricated
 // 1970-01-01 on a NULL created_at and THREW on an infinity-dated one, taking
 // the whole listing down.
-const day = (d: string | null) => isoDay(d) ?? "undated";
+const day = (d: unknown) => isoDay(d) ?? "undated";
 const verdictPhrase = (v: string) =>
   v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
   : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
