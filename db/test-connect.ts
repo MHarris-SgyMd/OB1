@@ -19,7 +19,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   LOOPBACK_HOSTS, NO_DATABASE_URL, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, UNPARSEABLE_DATABASE_URL,
-  databaseUrl, hostOf, isThrowawayHost, mayReset, notThrowaway, openSql, remoteDbAllowed, resetRefusal,
+  databaseUrl, hostOf, mayReset, notThrowaway, openSql, remoteDbAllowed, resetRefusal,
 } from "./connect.ts";
 
 let pass = 0;
@@ -73,7 +73,7 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   ];
   const none = {};
   for (const [url, local, what] of HOSTS) {
-    ok(isThrowawayHost(url) === local, `isThrowawayHost: ${what} → ${local}`);
+    ok((notThrowaway(url) === null) === local, `notThrowaway: ${what} → ${local ? "no reason" : "a reason"}`);
     ok(mayReset(url, none) === local, `mayReset, no override: ${what} → ${local}`);
     ok(mayReset(url, { OB1_ALLOW_REMOTE_DB: "1" }) === true, `mayReset, OB1_ALLOW_REMOTE_DB=1: ${what} → true`);
     // The eval-local name, which the scaffolding honoured and tier.ts did not:

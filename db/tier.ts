@@ -260,8 +260,9 @@ export function where(url: string): string {
   try {
     const u = new URL(url);
     if (`${u.pathname}${u.search}${u.hash}`.includes("@")) return "a URL with an @ after its host — is its password percent-encoded?";
-    // No host is PGHOST's to decide (Bun's client and libpq both read it), not localhost.
-    return `${u.hostname || "$PGHOST"}:${u.port || "5432"}${u.pathname.length > 1 ? u.pathname : ""}`;
+    // No host is PGHOST's to decide (Bun's client and libpq both read it), not
+    // localhost; no port is PGPORT's when it is set, as both clients read it too.
+    return `${u.hostname || "$PGHOST"}:${u.port || (process.env.PGPORT ? "$PGPORT" : "5432")}${u.pathname.length > 1 ? u.pathname : ""}`;
   } catch {
     return "a URL that does not parse";
   }

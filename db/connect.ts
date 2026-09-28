@@ -148,11 +148,6 @@ export function notThrowaway(url: string): string | null {
   return null;
 }
 
-/** Is `url`'s host plainly this machine? (notThrowaway's yes.) */
-export function isThrowawayHost(url: string): boolean {
-  return notThrowaway(url) === null;
-}
-
 /** Has the operator said a non-loopback database may be reset? Exactly "1". */
 export function remoteDbAllowed(env: Record<string, string | undefined> = process.env): boolean {
   return env[REMOTE_DB_FLAG] === "1";
