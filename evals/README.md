@@ -6268,7 +6268,7 @@ is its answer to a provider outage.
   it back" probe, since it answers at once.
 
 Every check passed on the change's code, plain (C1s after 301 s) and
-sealed, on review pass 1's, plain and sealed, and on pass 2's, plain
+sealed, on review pass 1's and 2's, plain and sealed, and on pass 3's, plain
 (2026-09-27). With the rules deleted
 inside the running container, `snoop` reported every
 target reached (a DNS answer, the host alias's `:11434`, `postgres:5432`,
