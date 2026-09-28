@@ -328,7 +328,9 @@ for (const n of SCALES) {
   const depReads = async (timer: (fn: () => Promise<unknown>) => Promise<number>) => ({
     keyed: await timer(() => sql`SELECT * FROM node_state(${ids40}::uuid[])`),
     whole: await timer(() => sql`SELECT count(blockers) + count(unknown_blockers) + count(nullif(in_dependencies, false)) FROM node_state()`),
-    deps: await timer(() => sql`SELECT count(*) FROM node_dependencies()`),
+    // The gates column read: count(*) alone drops the gate's join, and a plan
+    // that re-read every gating row per link went unseen (first review pass).
+    deps: await timer(() => sql`SELECT count(*) FILTER (WHERE gates) FROM node_dependencies()`),
     rows: (await sql`SELECT md5(string_agg(x::text, '|' ORDER BY x::text)) AS h FROM node_state(${ids40}::uuid[]) x`)[0].h as string,
   });
   const keyedNow = await depReads(time);

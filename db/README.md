@@ -847,8 +847,10 @@ A source write and a status move of one thought meet on the thought's row: the
 sources trigger takes FOR SHARE on the thoughts it recomputes, which waits for a
 status move holding the row and then reads its commit, and a status move waits
 for that lock and then finds the mirror row — no advisory lock, so nothing is
-ordered against 068's classes. Both refuse such a statement under REPEATABLE
-READ; `ob1_rebuild_source_gate()` repairs the mirror after a write made with
+ordered against 068's classes. REPEATABLE READ is refused for a source row's
+insert or move and for every status move between known and unknown (a source
+row's delete and a re-record that changes nothing run), and a source writer's
+share lock holds off every edit of its thought until it commits; `ob1_rebuild_source_gate()` repairs the mirror after a write made with
 triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm.
 `node_dependencies()` keeps its rows and joins the gating systems instead of
 grouping every source row with its thought. `source_thought()` keeps its
@@ -867,7 +869,7 @@ columns still drops. `node_state()` joins it once. On `bench-hybrid.ts`'s arm
 (two links in three naming a ticket the brain does not hold), `SELECT * FROM
 node_state(<40 ids>)` costs 2.9 ms at 10,000 thoughts and 2.9 at 100,000 (6.5 s
 and 656 s on the reads 068 left), every thought's dependency columns 31 and 308
-ms (6.1 s and 732 s), and `node_dependencies()` 1.0 and 9.1 (2.7 and 32.9); a
+ms (6.1 s and 732 s), and `node_dependencies()` read for its gates 2.1 and 15.7 (3.5 and 45.8); a
 writer pays +0.03 ms at most (a new source row), measured paired. A caller that passes NULL and
 joins its own ids still computes every thought: pass the ids. The triggers run as
 the writer, so the **capture** group gains the four privileges on
@@ -932,7 +934,7 @@ issues every group at once.
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
 | | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
 | | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
-| | `ob1_source_gate` (069) | `SELECT, INSERT, UPDATE, DELETE` — 069's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()` and the dependency columns read it (SMD-2267); a plain capture never touches it |
+| | `ob1_source_gate` (069) | `SELECT, INSERT, UPDATE, DELETE` — 069's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()`' gates and the dependency columns read it (SMD-2267); a plain capture, an edit that moves no status and a delete of an unsourced thought never touch it. A source write's FOR SHARE on its thought needs `UPDATE` on `thoughts`, above |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
@@ -2987,7 +2989,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2274 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 911 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 912 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

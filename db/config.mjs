@@ -1722,9 +1722,12 @@ export const ROLE_GRANTS = Object.freeze({
     // 069's triggers run as the caller on every write of a source row (a
     // delete of a thought that has one included, through the cascade) and on
     // every status move between a known and an unknown status_type, and keep
-    // node_state's gate; node_dependencies() and the dependency columns read
-    // it. A role without these cannot make those writes nor read those
-    // columns (SMD-2267).
+    // node_state's gate; node_dependencies()' gates and the dependency
+    // columns read it. A role without these cannot make those writes nor
+    // read those columns; a delete of an unsourced thought and an edit that
+    // moves no status need none of it (SMD-2267). Every source write takes
+    // FOR SHARE on its thought, which needs UPDATE on thoughts — this group's,
+    // above; a structured pass's role has it through this group.
     Object.freeze({ table: "ob1_source_gate",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "069" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its

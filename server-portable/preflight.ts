@@ -1692,8 +1692,8 @@ if (configFailed) {
             // no status between those two return before touching it (SMD-2267).
             const gateMiss = missingByTable.get(GATE) ?? [];
             if (gateMiss.length) {
-              fails.push((gateMiss.includes("SELECT") ? "every read of node_state's dependency columns (graph-centrality --startable and --decay-blocked, node_dependencies()) and " : "")
-                + "a write of a source row — a structured pass, and a delete of a thought that has one, included — or of a status_type that moves between a known and an unknown one"
+              fails.push((gateMiss.includes("SELECT") ? "the reads of node_state's dependency columns that reach the gate (graph-centrality --startable and --decay-blocked, node_dependencies()' gates, a keyed read whose ids carry a link) and " : "")
+                + "the writes that keep the gate — a source row's insert, move or delete (a structured pass, and a delete of a thought that has one) and a status_type moving between a known and an unknown one, each needing some of these"
                 + " (069's triggers keep node_state's gate as the caller)");
             }
             const why = ` — so ${fails.join(", and ")} would fail`;
@@ -2808,7 +2808,7 @@ if (configFailed) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
           } else if (projection && /^repeatable read$/i.test(level)) {
             add("transaction isolation", "fail",
-                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included)${gate ? ", and 069's gate every write of a source row and every status move between a known and an unknown status_type" : ""} — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included)${gate ? ", and 069's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type" : ""} — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
                 fixIsolation);
           } else {
             add("transaction isolation", "warn",

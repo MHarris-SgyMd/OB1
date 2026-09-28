@@ -7243,6 +7243,40 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
       `a source row moving system while its thought's status moves waits on the thought's row, then reads the committed status: the mirror row is jira's and gates, and no drift (${JSON.stringify(g)}; ${errors || "clean"})`);
   }
 
+  // A take against one status update of both thoughts (first review pass).
+  // B holds linear L-TK; one statement moves A's and B's statuses and sleeps
+  // before its trigger runs, holding both rows; meanwhile T1 takes L-TK for A —
+  // the take deletes B's source row, then inserts A's. The delete's trigger
+  // locks B's row before it touches B's mirror row, so it waits for the
+  // statement, whose trigger then updates both mirror rows and commits; T1
+  // goes on. Before, the delete took B's mirror row first, T1's insert waited
+  // for A's row and the statement's trigger for B's mirror row: a deadlock.
+  {
+    const a = await row("[34] TK A", { kind: "race2267", status_type: "started" });
+    const b = await row("[34] TK B", { kind: "race2267", status_type: "started" });
+    await db`SELECT record_thought_source(${b}::uuid, 'linear', 'L-TK', 'x', 'text/plain')`;
+    const connA = racer(), connB = racer();
+    let errors = "", bPid = -1;
+    const bDone = (async () => {
+      bPid = Number((await connB`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await connB.unsafe(`SET statement_timeout = '15s'`);
+      await connB.unsafe(`WITH u AS (UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${a}', '${b}') RETURNING 1)
+                          SELECT pg_sleep(1.5) FROM (SELECT count(*) FROM u) x`);
+    })().catch((e: Error) => { errors += `B: ${e.message}; `; });
+    const sleeping = async () => bPid > 0 && Number((await db`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${bPid} AND wait_event = 'PgSleep'`)[0].n) === 1;
+    await waitFor(sleeping);
+    const bSlept = await sleeping();
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`SELECT record_thought_source(${a}::uuid, 'linear', 'L-TK', 'x2', 'text/plain', NULL, true)`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [held] = await db`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = 'L-TK'`;
+    assert(bSlept && errors === "" && held?.id === a && (await mirror(a)) === false && (await mirror(b)) === undefined && (await drift()) === 0,
+      `a take of a source row against one status update of both thoughts waits and commits after it — no deadlock: A holds L-TK, its mirror row reads the committed status, B's is gone, and no drift (${errors || "clean"})`);
+  }
+
   // The source write first. A records Y's source row and holds its
   // transaction open (its mirror row gates: Y states started); B moves Y's
   // status to unknown and waits on A's FOR SHARE. Once A commits, B's update
@@ -7286,8 +7320,9 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
              jsonb_build_object('kind', 'race2267', 'source', 'linear', 'issue', 'K-' || g, 'status_type', (ARRAY['started', 'completed', 'weird'])[1 + g % 3])
              FROM generate_series(1, 4000) g`;
   await db`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
-           SELECT id, CASE WHEN metadata ? 'issue' THEN 'linear' ELSE 'markdown' END, coalesce(metadata->>'issue', content), 'x', 'text/plain', encode(sha256('x'), 'hex')
-             FROM thoughts WHERE metadata->>'kind' = 'race2267' AND content LIKE '[34] %' AND content NOT LIKE '[34] X,%' AND content NOT LIKE '[34] Y,%'`;
+           SELECT t.id, CASE WHEN t.metadata ? 'issue' THEN 'linear' ELSE 'markdown' END, coalesce(t.metadata->>'issue', t.content), 'x', 'text/plain', encode(sha256('x'), 'hex')
+             FROM thoughts t WHERE t.metadata->>'kind' = 'race2267' AND t.content LIKE '[34] %'
+               AND NOT EXISTS (SELECT 1 FROM thought_sources o WHERE o.thought_id = t.id)`;
   await db`INSERT INTO thought_facets (thought_id, kind, payload)
            SELECT s.thought_id, 'link', jsonb_build_object('relation', 'blocked_by', 'system', 'linear', 'target', 'K-' || (1 + (substr(s.identity, 3)::int * 7) % 4000))
              FROM thought_sources s WHERE s.identity LIKE 'K-%' AND substr(s.identity, 3)::int % 2 = 0 AND (1 + (substr(s.identity, 3)::int * 7) % 4000) <> substr(s.identity, 3)::int`;

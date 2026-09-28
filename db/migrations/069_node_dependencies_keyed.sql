@@ -60,9 +60,11 @@
 --     row's posting per blocker (the bench's brain, most of whose links name a
 --     ticket it does not hold: the keyed read 47 ms and every thought's 5 s,
 --     on 068's reads as on these, then 2.2 ms and 27).
---   * node_dependencies() — same signature and rows; its gate a join to the
---     systems some mirror row gates, not a pass over every source row and its
---     thought (9.1 ms against 32.9 at 100,000 thoughts, bench-hybrid.ts).
+--   * node_dependencies() — same signature and rows; its gate a test against
+--     the systems some mirror row gates, read once per call, not a pass over
+--     every source row and its
+--     thought (read for its gates, 15.7 ms against 45.8 at 100,000 thoughts,
+--     bench-hybrid.ts).
 --   * ob1_system_gates(text) — one system's gate as one probe of the partial
 --     index, SET enable_seqscan = off so it is not inlined and its statement
 --     is planned on the index: inline, the planner hashed the whole mirror or
@@ -101,15 +103,29 @@
 --   So either the source writer waits for the status move to commit and then
 --   reads the new status (a locking read that waited reads the committed row,
 --   and a reconcile is a fresh statement), or the status move waits for the
---   source writer to commit and then finds its mirror row. No advisory lock: nothing here orders against
---   068's classes. REPEATABLE READ is refused for a statement that moves a
---   gate — its snapshot predates the lock, so the status move would miss a
---   mirror row committed meanwhile — and SERIALIZABLE is left to SSI (exact
---   only when every writer of source rows and statuses is serializable; after
---   a mix, rebuild under READ COMMITTED). A transaction that writes a source
---   row and then updates a thought another is updating can deadlock (40P01)
---   where before it waited: retry it; the repo's structured passes write one
---   ticket per transaction.
+--   source writer to commit and then finds its mirror row. A source row's
+--   delete locks its thought's row too, before its mirror row, so every path
+--   takes a thought's row before that thought's mirror row. No advisory lock:
+--   nothing here orders against 068's classes.
+--   REPEATABLE READ is refused for an insert of a source row, a move of one to
+--   another thought or system, and every status move between known and
+--   unknown — a thought with no source row too, which the check cannot tell
+--   apart from one whose source row a concurrent writer committed after the
+--   snapshot, the case it exists for; a source row's delete, a canonical-only
+--   re-record and an upsert that changes nothing run. SERIALIZABLE is left to
+--   SSI (exact only when every writer of source rows and statuses is
+--   serializable; after a mix, rebuild under READ COMMITTED).
+--   Two costs of the lock. A source writer holds FOR SHARE on its thoughts
+--   until it commits, so an edit of one of those thoughts — any edit, not only
+--   a status move — waits for it, where before it did not (the foreign key's
+--   own lock, FOR KEY SHARE, blocks no edit). And transactions that deadlock
+--   (40P01) where before they waited: one that writes a source row and then
+--   updates a thought another is updating; two single statements too — a
+--   multi-row UPDATE of thoughts, which locks in scan order, against a
+--   multi-row insert of their source rows, which locks in id order, or a
+--   source row moved to another thought against that thought's delete (first
+--   review pass). Retry it; the repo's structured passes write one ticket per
+--   transaction and never move a source row's thought.
 --
 -- UPGRADE
 --   Run `db/migrate.ts --grant <role>` again for every role granted before
@@ -118,8 +134,9 @@
 --
 -- SAFETY
 --   Additive: one table, one index, seven functions, five triggers; four
---   bodies redefined with their signatures, columns and rows unchanged
---   (source_thought, node_dependencies, node_state, drift). No
+--   bodies redefined with their signatures unchanged — source_thought,
+--   node_dependencies and node_state with their rows unchanged, drift with a
+--   third arm. No
 --   foreign keys, as 068's tables: the triggers own correctness and drift()
 --   checks them. SECURITY INVOKER throughout, so the triggers run as the
 --   writing role: db/config.mjs ROLE_GRANTS gives the capture group the four
@@ -127,9 +144,17 @@
 --   preflight's write-privileges check with the exact GRANT until
 --   `migrate.ts --grant` runs again — until then a write of a source row, a
 --   delete of a thought that has one, a status move on any thought between a
---   known and an unknown status_type, and every read of the dependency
---   columns (graph-centrality --startable and --decay-blocked,
---   node_dependencies()) is refused on the new table. Idempotent: IF NOT
+--   known and an unknown status_type, and a read of the dependency columns
+--   that reaches the gate (every whole-brain read — graph-centrality
+--   --startable and --decay-blocked, node_dependencies()' gates — and a keyed
+--   read whose ids carry a link) is refused on the new table; a delete of a
+--   thought with no source row, an edit that moves no status between those
+--   two, and every lifecycle read are not. Every source write takes FOR SHARE
+--   on its thoughts, which needs UPDATE on thoughts: the capture group holds
+--   it, and a role that writes source rows with SELECT alone there is refused
+--   on thoughts. A migration that changes node_lifecycle_types() changes what
+--   every mirror row should hold: it runs ob1_rebuild_source_gate() after
+--   itself. Idempotent: IF NOT
 --   EXISTS, DROP TRIGGER IF EXISTS, CREATE OR REPLACE, and the seed is a
 --   reconcile. The seed runs after the triggers exist; CREATE TRIGGER holds
 --   writers of both tables off until commit.
@@ -247,7 +272,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_rebuild_source_gate() IS
-  'Reconciles the whole of ob1_source_gate under SHARE locks on thoughts and thought_sources and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 069''s seed, and the repair after a write made with either table''s user triggers disabled (beside ob1_rebuild_node_projection(), 068''s). Migration 069 / SMD-2267.';
+  'Reconciles the whole of ob1_source_gate under SHARE locks on thoughts and thought_sources and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 069''s seed, the repair after a write made with either table''s user triggers disabled (beside ob1_rebuild_node_projection(), 068''s), and a step for any migration that changes node_lifecycle_types(), which every mirror row is computed from. Migration 069 / SMD-2267.';
 
 -- 068's two arms verbatim, and the mirror's: every stored row against its
 -- tables computed fresh.
@@ -302,14 +327,26 @@ DECLARE
   v_ids uuid[];   -- thoughts whose source row appeared, vanished or changed system
 BEGIN
   IF TG_OP = 'DELETE' THEN
+    -- Every thought's delete cascades here, and the cascade's statement fires
+    -- this trigger whether or not it deleted a row: one that deleted none
+    -- returns before touching the mirror, so a role without it deletes an
+    -- unsourced thought as before (first review pass: every delete was
+    -- refused). The cascade's trigger runs as the caller (its AFTER triggers
+    -- are queued to the outer statement).
+    IF NOT EXISTS (SELECT 1 FROM old_rows) THEN
+      RETURN NULL;
+    END IF;
     -- thought_id is thought_sources' key, so a thought whose source row this
     -- statement deleted has none: its mirror row goes by key, with no read of
-    -- thought_sources and no lock. A thought's delete cascades here and the
-    -- cascade's trigger runs as the caller (its AFTER triggers are queued to
-    -- the outer statement), so a capture role that deletes a sourced thought
-    -- needs this table alone, not thought_sources. A re-insert of the thought's
-    -- source row waits on the key until this commits, and its own trigger
-    -- recomputes the row afresh.
+    -- thought_sources, so a capture role that deletes a sourced thought needs
+    -- this table alone. The thoughts' rows are locked first, FOR SHARE in id
+    -- order, as every other path locks them before a mirror row: a take
+    -- (record_thought_source's p_take) that deleted one thought's source row
+    -- and then inserted another's deadlocked with one status update of both
+    -- (first review pass). A thought this statement deleted is gone and is
+    -- not locked. A re-insert of the thought's source row waits on the key
+    -- until this commits, and its own trigger recomputes the row afresh.
+    PERFORM 1 FROM thoughts t WHERE t.id = ANY(ARRAY(SELECT o.thought_id FROM old_rows o)) ORDER BY t.id FOR SHARE;
     DELETE FROM ob1_source_gate g WHERE g.thought_id = ANY(ARRAY(SELECT o.thought_id FROM old_rows o));
     RETURN NULL;
   ELSIF TG_OP = 'INSERT' THEN
@@ -452,10 +489,15 @@ ANALYZE ob1_source_gate;
 -- ---------------------------------------------------------------------------
 -- node_dependencies — 058's rows, the gate a join to the stored systems
 -- ---------------------------------------------------------------------------
--- A join, not a correlated EXISTS per facet: projected rather than filtered,
--- the planner ran the EXISTS once per link and, for a system with no gating
--- row, scanned the mirror each time (SMD-2267's probe: 56 ms against 24 for
--- node_state() at 10,000 thoughts) — 058's lesson, on the smaller table.
+-- The gating systems as one array, computed once per call (an initplan), and
+-- each link's system tested against it. Not a correlated EXISTS per facet:
+-- projected rather than filtered, the planner ran it once per link and, for a
+-- system with no gating row, scanned the mirror each time (SMD-2267's probe:
+-- 56 ms against 24 for node_state() at 10,000 thoughts) — 058's lesson, on the
+-- smaller table. Nor a join to the gating systems: under a row estimate of
+-- one for the links it became a nested loop re-reading every gating row per
+-- link, and graph-centrality's coverage read took 3.5 s at 30,000 thoughts
+-- against 21 ms before this file (first review pass).
 CREATE OR REPLACE FUNCTION node_dependencies()
 RETURNS TABLE (system text, blocked text, blocker text, active boolean, changed_at timestamptz, gates boolean)
 LANGUAGE sql
@@ -466,10 +508,9 @@ AS $$
          CASE WHEN f.payload->>'relation' = 'blocked_by' THEN f.payload->>'target' ELSE s.identity END,
          f.valid_until IS NULL,
          greatest(f.created_at, f.valid_until),
-         g.system IS NOT NULL
+         s.system = ANY(ARRAY(SELECT DISTINCT o.system FROM ob1_source_gate o WHERE o.gates))
     FROM thought_facets f
     JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = f.payload->>'system'
-    LEFT JOIN (SELECT DISTINCT o.system FROM ob1_source_gate o WHERE o.gates) g ON g.system = s.system
    WHERE f.kind = 'link' AND f.payload->>'relation' IN ('blocks', 'blocked_by')
 $$;
 COMMENT ON FUNCTION node_dependencies() IS
