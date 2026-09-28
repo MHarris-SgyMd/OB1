@@ -451,6 +451,27 @@ export const EXTRACT_MIN_WINDOW_TOKENS = 64;
 export const EXTRACT_MAX_WINDOWS = 24;
 
 /**
+ * When a run's malformed answers say the model, not the documents, is at fault
+ * (SMD-2266): more than EXTRACT_MALFORMED_ALARM_SHARE of at least
+ * EXTRACT_MALFORMED_ALARM_MIN answers — one per window sent, a one-window
+ * thought's one included — were not JSON of the expected shape. A windowed
+ * thought with any window parsed is recorded succeeded (SMD-2260), so the
+ * extraction worker watches the run's share instead, says so on stderr and
+ * exits 3. A fifth sits between the stable brain's reference-list papers as
+ * qwen2.5:7b reads them (9–11%) and the wrong model's windowed answers (28%); the
+ * floor keeps a lone paper at the default bound, or a few short thoughts, from
+ * reading as a broken model. The measurements, and why no per-thought floor,
+ * are in db/README.md.
+ */
+export const EXTRACT_MALFORMED_ALARM_SHARE = 1 / 5;
+export const EXTRACT_MALFORMED_ALARM_MIN = 48;
+
+/** Whether `malformed` of a run's `answers` pass the alarm above. */
+export function malformedAlarm(answers, malformed) {
+  return answers >= EXTRACT_MALFORMED_ALARM_MIN && malformed / answers > EXTRACT_MALFORMED_ALARM_SHARE;
+}
+
+/**
  * The window count one thought is extracted in at most: OB1_EXTRACT_MAX_WINDOWS
  * when it is a positive safe integer once floored, else EXTRACT_MAX_WINDOWS.
  * It sets the text bound a run chunk.ts cannot split meets too, so widening
