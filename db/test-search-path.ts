@@ -28,6 +28,10 @@
  *      the connection sets the path (SMD-2238) — which, run as printed, makes
  *      the type resolve and coexists with the hnsw.* walk bounds.
  *
+ * And, beside them, [7]: the path the migrator gives 021's transaction, with
+ * pg_temp taken out, names the schemas Postgres reads in the raw path
+ * (SMD-2247).
+ *
  * It restores pgvector to `public` on the way out, in a finally: ci-parity.sh
  * shares one Postgres across suites, so a relocated extension left behind would
  * break the next one.
@@ -39,7 +43,7 @@ import { SQL } from "bun";
 import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
+import { EMBEDDING_DIM, EMBEDDING_MODEL, setPathWithoutTemp } from "./config.mjs";
 import {
   applyMigrations,
   createAssert,
@@ -307,6 +311,33 @@ try {
     assert(roleCfg.some((c) => c.startsWith("search_path=")) && roleCfg.some((c) => c.startsWith("hnsw.max_scan_tuples=")),
            `the path and the hnsw bound are both the role's settings in the database, side by side (${roleCfg.join("; ")} | database: ${dbCfg.join("; ")})`);
   }
+
+  console.log("\n[7] The migrator's path without pg_temp keeps every other schema, as Postgres reads the path (SMD-2247)");
+  {
+    // What migrate.ts gives 021's transaction — setPathWithoutTemp, the step
+    // itself — run in a transaction on a session whose path is stored raw, as
+    // a connection string or set_config stores it. An NBSP before a name is
+    // part of it (no whitespace to Postgres, which trim() stripped, putting
+    // the real public on the path), a quoted "PG_TEMP" is a schema of that
+    // name (which a case-blind match dropped), a name may hold a quote, and an
+    // unquoted PG_TEMP and a quoted "pg_temp" are the temp schema.
+    await freshSession(async (sql) => {
+      await sql.unsafe(`CREATE SCHEMA "\u00a0public"; CREATE SCHEMA "PG_TEMP"; CREATE SCHEMA "a""b"`);
+      const raw = `"$user",\u00a0public, "PG_TEMP", PG_TEMP, "pg_temp", "a""b"`;
+      const [{ before }] = await sql`SELECT set_config('search_path', ${raw}, false), current_schemas(false)::text[] AS before`;
+      const within = await sql.begin(async (tx) => {
+        const read = await setPathWithoutTemp(tx);
+        const [{ path, after }] = await tx`SELECT current_setting('search_path') AS path, current_schemas(false)::text[] AS after`;
+        return { read, path: path as string, after: after as string[] };
+      });
+      const [{ outside }] = await sql`SELECT current_setting('search_path') AS outside`;
+      assert(within.read === raw && within.path === '"$user", "\u00a0public", "PG_TEMP", "a""b"',
+             `the NBSP-prefixed name, the quoted "PG_TEMP" and a name holding a quote are kept, PG_TEMP and "pg_temp" dropped (read ${JSON.stringify(within.read)}, set ${JSON.stringify(within.path)})`);
+      assert(JSON.stringify(within.after) === JSON.stringify(["\u00a0public", "PG_TEMP", 'a"b']) && JSON.stringify(within.after) === JSON.stringify(before),
+             `…and Postgres resolves the rewritten path to the raw one's schemas, the real public not among them (raw ${JSON.stringify(before)}, rewritten ${JSON.stringify(within.after)})`);
+      assert(outside === raw, `…and the rewrite ends with the transaction: the session's path is the raw one again (${JSON.stringify(outside)})`);
+    });
+  }
 } finally {
   // ci-parity.sh shares one Postgres: leave pgvector in public, this role's
   // path and hnsw bound in the database ([6]) cleared, and the role [5] mints —
@@ -318,6 +349,7 @@ try {
     EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET hnsw.max_scan_tuples', session_user, current_database());
   END $r$`));
   await freshSession((sql) => sql.unsafe(`DROP ROLE IF EXISTS ob1_nousage`));
+  await freshSession((sql) => sql.unsafe(`DROP SCHEMA IF EXISTS "\u00a0public", "PG_TEMP", "a""b"`));
   await restoreVectorToPublic(URL_);
   await dropSchema(URL_);
 }

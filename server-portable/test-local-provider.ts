@@ -626,6 +626,22 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
          && prefixForms.every((c) => caveatOf({ ...c, malformed: [0] }).includes(MALFORMED_WINDOWS_MARK) && caveatOf({ ...c, malformed: [0] }).includes(OVER_BOUND_MARK))
          && caveatOf({ windows: 24, of: 24, cut: false, malformed: [0] }).includes(MALFORMED_WINDOWS_MARK) && !caveatOf({ windows: 24, of: 24, cut: false, malformed: [0] }).includes(OVER_BOUND_MARK),
          "MALFORMED_WINDOWS_MARK is in every caveat with windows left out and in no prefix's, OVER_BOUND_MARK in every prefix's and in none of windows left out alone — the worker's partition holds");
+  // The run's signal that the model, not its documents, is at fault
+  // (SMD-2266): a share of the run's answers, over a floor of answers — not a
+  // floor on one thought's share, which is its text's.
+  const { malformedAlarm, EXTRACT_MALFORMED_ALARM_SHARE, EXTRACT_MALFORMED_ALARM_MIN } = await import("../db/config.mjs");
+  // Answers at or past the floor whose share is a whole count: the share
+  // itself, exactly, is not past it.
+  const den = Math.round(1 / EXTRACT_MALFORMED_ALARM_SHARE);
+  const evenly = Math.ceil(EXTRACT_MALFORMED_ALARM_MIN / den) * den;
+  const atShare = evenly / den;
+  assert(!malformedAlarm(1658, 11) && !malformedAlarm(136, 12) && !malformedAlarm(72, 8) && !malformedAlarm(24, 9),
+         "the stable pool's 11 of 1,658 answers left out, its six reference-list papers read again at 12 of 136, the ticket's three at 8 of 72, and one paper's 9 of 24 alone do not trip the alarm");
+  assert(malformedAlarm(61, 17) && malformedAlarm(72, 20),
+         "the wrong model's 17 of 61 over the pool's windowed thoughts trips it — and so would the three papers' reading before SMD-2260, 20 of 72, which no share tells from it");
+  assert(den === 1 / EXTRACT_MALFORMED_ALARM_SHARE && malformedAlarm(evenly, atShare + 1) && !malformedAlarm(evenly, atShare)
+         && malformedAlarm(EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_MIN) && !malformedAlarm(EXTRACT_MALFORMED_ALARM_MIN - 1, EXTRACT_MALFORMED_ALARM_MIN - 1),
+         `more than the share (${EXTRACT_MALFORMED_ALARM_SHARE.toFixed(3)}) of at least ${EXTRACT_MALFORMED_ALARM_MIN} answers trips it, the share itself does not, and fewer answers do not however many are malformed`);
 
   // A runaway — an answer cut at its budget — is the answer under the shipped
   // windowing, and is made once more with the frequency penalty when the

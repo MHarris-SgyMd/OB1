@@ -451,6 +451,14 @@ jobs:
         working-directory: db
         run: bun test-cli.ts
 
+      # SMD-2302. How every db/ script reaches its database, db/connect.ts: the
+      # one loopback rule as a truth table, the URL resolver, the close-then-exit
+      # door run with pools that record their close, and the census — no script
+      # resolves DATABASE_URL, builds a client or exits inside the door itself.
+      - name: Connection module (every db/ script, no database)
+        working-directory: db
+        run: bun test-connect.ts
+
   db-live:
     name: Schema against real Postgres
     runs-on: ubuntu-24.04

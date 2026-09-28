@@ -451,6 +451,27 @@ export const EXTRACT_MIN_WINDOW_TOKENS = 64;
 export const EXTRACT_MAX_WINDOWS = 24;
 
 /**
+ * When a run's malformed answers say the model, not the documents, is at fault
+ * (SMD-2266): more than EXTRACT_MALFORMED_ALARM_SHARE of at least
+ * EXTRACT_MALFORMED_ALARM_MIN answers — one per window sent, a one-window
+ * thought's one included — were not JSON of the expected shape. A windowed
+ * thought with any window parsed is recorded succeeded (SMD-2260), so the
+ * extraction worker watches the run's share instead, says so on stderr and
+ * exits 3. A fifth sits between the stable brain's reference-list papers as
+ * qwen2.5:7b reads them (9–11%) and the wrong model's windowed answers (28%); the
+ * floor keeps a lone paper at the default bound, or a few short thoughts, from
+ * reading as a broken model. The measurements, and why no per-thought floor,
+ * are in db/README.md.
+ */
+export const EXTRACT_MALFORMED_ALARM_SHARE = 1 / 5;
+export const EXTRACT_MALFORMED_ALARM_MIN = 48;
+
+/** Whether `malformed` of a run's `answers` pass the alarm above. */
+export function malformedAlarm(answers, malformed) {
+  return answers >= EXTRACT_MALFORMED_ALARM_MIN && malformed / answers > EXTRACT_MALFORMED_ALARM_SHARE;
+}
+
+/**
  * The window count one thought is extracted in at most: OB1_EXTRACT_MAX_WINDOWS
  * when it is a positive safe integer once floored, else EXTRACT_MAX_WINDOWS.
  * It sets the text bound a run chunk.ts cannot split meets too, so widening
@@ -1377,9 +1398,85 @@ export const HNSW_SEED_SCAN_MEM_MULTIPLIER = HNSW_SEEDS["hnsw.scan_mem_multiplie
  */
 export const HNSW_BOUNDS = Object.keys(HNSW_SEEDS);
 
-/** A database name as an SQL identifier — `open-brain` and `OpenBrain` both need the quotes. */
+/** A name as an SQL identifier, always quoted — a database's (`open-brain` and `OpenBrain` both need the quotes), a schema's or a tablespace's. */
 export function quoteIdent(name) {
   return name == null ? "<database>" : `"${String(name).replace(/"/g, '""')}"`;
+}
+
+/**
+ * A search_path setting's schemas, in order, as Postgres resolves them — its
+ * SplitIdentifierString (SMD-2242, fuzzed against Postgres there). Here, not in
+ * server-portable/search-path.ts, which re-exports it: the migrator's image
+ * copies db/ files alone, and the migrator (the path it gives 021's
+ * transaction) and tier.ts (a list setting a refresh copies) read a path as
+ * preflight does (SMD-2247).
+ *
+ * `current_setting('search_path')` is the session's own text, from the role,
+ * the database or the connection. `SET` and `ALTER ROLE … SET` store it
+ * re-quoted, but a connection string's `options`, `set_config` and `SET …
+ * FROM CURRENT` store it as written, so it is parsed, never echoed. Names are
+ * separated by commas; whitespace around each, as scanner_isspace sees it —
+ * space, tab, newline, carriage return and form feed, and from PostgreSQL 17
+ * vertical tab, nothing outside ASCII, so JavaScript's trim() is wrong here;
+ * a quoted name kept as written, `""` inside it a quote; an unquoted name
+ * folded A–Z only, as downcase_identifier does in a UTF-8 database. The empty
+ * name a `''` path reads back as is dropped — it names no schema — unless
+ * `keepEmpty`: in temp_tablespaces, the other quoted list setting Postgres reads this way,
+ * `""` is the database's default tablespace, a member of the list. Settings
+ * Postgres rejects (`a,,b`, `a b`, an unterminated quote) never reach here: its
+ * check hook refuses them on every route. `serverVersionNum` is the server's
+ * `server_version_num`.
+ */
+export function searchPathSchemas(setting, serverVersionNum, keepEmpty = false) {
+  const isSpace = (c) =>
+    c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || (c === "\v" && serverVersionNum >= 170000);
+  const names = [];
+  let i = 0;
+  while (i < setting.length) {
+    while (isSpace(setting[i])) i++;
+    let name = "";
+    if (setting[i] === '"') {
+      for (i++; i < setting.length; i++) {
+        if (setting[i] !== '"') name += setting[i];
+        else if (setting[i + 1] === '"') { name += '"'; i++; }
+        else { i++; break; }
+      }
+    } else {
+      while (i < setting.length && setting[i] !== "," && !isSpace(setting[i])) name += setting[i++];
+      name = name.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+    }
+    while (i < setting.length && setting[i] !== ",") i++;
+    i++;
+    if (name !== "" || keepEmpty) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * The setting without the temp schema, as a search_path value: each name
+ * quoted, `pg_temp` dropped by its parsed name — Postgres's own test, so an
+ * unquoted `PG_TEMP` and a quoted `"pg_temp"` go and a quoted `"PG_TEMP"`, a
+ * schema of that name, stays. `"$user"` quoted is still the role's schema. ""
+ * when nothing is left, which set_config takes as the empty path.
+ */
+function searchPathWithoutTemp(setting, serverVersionNum) {
+  return searchPathSchemas(setting, serverVersionNum).filter((s) => s !== "pg_temp").map(quoteIdent).join(", ");
+}
+
+/**
+ * Set the transaction's search_path to itself without the temp schema: what
+ * migrate.ts gives 021's transaction, so that a temp view shadows the claim
+ * table (applyShadowed, SMD-1421). The path is read as Postgres reads it,
+ * under the server's version (SMD-2247), and set LOCAL, so it ends with the
+ * transaction. Returns the path it read. Here rather than in the migrator so
+ * that the step itself, not a copy of it, is what db/test-search-path [7] runs
+ * against Postgres. Bun.sql only (a tagged-template client), inside a
+ * transaction.
+ */
+export async function setPathWithoutTemp(tx) {
+  const [{ path, version }] = await tx`SELECT current_setting('search_path') AS path, current_setting('server_version_num')::int AS version`;
+  await tx`SELECT set_config('search_path', ${searchPathWithoutTemp(path, version)}, true)`;
+  return path;
 }
 
 /**
