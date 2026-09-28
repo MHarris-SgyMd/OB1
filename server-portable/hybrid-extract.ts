@@ -55,6 +55,9 @@ function identifierVerdict(name: string): { drop: boolean; type: EntityType | nu
 
 export type HybridStats = { in: number; carved: number; decided: number; droppedRefused: number; droppedByDecider: number; noContext: number; deciderError: boolean; out: number; ms: number };
 
+/** The decider call, injectable so a unit test can stub it without a network. */
+export type DecideFn = (cfg: JevConfig, decisions: JevDecision[], subject: EgressSubject) => Promise<{ results: JevResult[]; ms: number }>;
+
 /**
  * Re-decide the generative extraction's entities. Identifier shapes (SMD-2300)
  * are typed by rule without a decide call; the rest are validity-gated and typed
@@ -69,9 +72,6 @@ export type HybridStats = { in: number; carved: number; decided: number; dropped
  * Returns the kept entities and a stats record. Relations are the caller's to
  * carry; record_thought_entities drops any naming an unlisted entity.
  */
-/** The decider call, injectable so a unit test can stub it without a network. */
-export type DecideFn = (cfg: JevConfig, decisions: JevDecision[], subject: EgressSubject) => Promise<{ results: JevResult[]; ms: number }>;
-
 export async function decideEntities(
   text: string,
   entities: readonly ExtractedEntity[],
