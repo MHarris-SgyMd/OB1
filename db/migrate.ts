@@ -72,6 +72,7 @@ import {
   migrationValues,
   parseSetConfig,
   quoteIdent,
+  setPathWithoutTemp,
   substituteMigration,
   validateEmbeddingConfig,
   versionAtLeast,
@@ -512,25 +513,6 @@ async function reportSeeds(m: Migration): Promise<void> {
   }
 }
 
-/** A search_path entry naming the temp schema, quoted or not. */
-const PG_TEMP_ENTRY = /^"?pg_temp"?$/i;
-
-/** search_path's entries: split on the commas outside double quotes, since a quoted schema name may hold one. */
-function searchPathEntries(path: string): string[] {
-  const out: string[] = [];
-  let entry = "";
-  let quoted = false;
-  for (const ch of path) {
-    if (ch === '"') quoted = !quoted;
-    if (ch === "," && !quoted) {
-      out.push(entry.trim());
-      entry = "";
-    } else entry += ch;
-  }
-  if (entry.trim()) out.push(entry.trim());
-  return out;
-}
-
 /**
  * Run one migration's SQL in the caller's transaction — and 021's with the
  * operator's acceptances out of its sight (SMD-1421). 021's evidence backfill
@@ -561,9 +543,9 @@ function searchPathEntries(path: string): string[] {
  * where listed, and listed first it is also where CREATE puts things,
  * functions included — 021's update_thought landed there and vanished with the
  * transaction when the fifth review pass tried naming it first — so a role's
- * path is set, for the transaction, to itself without pg_temp (a quoted name
- * may hold a comma, so the split minds quotes) — a no-op where it is absent,
- * and not restored: unlisted, pg_temp is still searched first and is never a
+ * path is set, for the transaction, to itself without pg_temp (read as
+ * Postgres reads it, rebuilt quoted: setPathWithoutTemp, SMD-2247) — a
+ * no-op where it is absent, and not restored: unlisted, pg_temp is still searched first and is never a
  * creation target, so nothing after 021 differs — and that the name resolves
  * to the view is checked before the file runs,
  * and the file is refused if not. Creation targets are then unaffected: 021's
@@ -599,11 +581,10 @@ async function applyShadowed(tx: SQL, m: Migration): Promise<string | null> {
     return null;
   }
   // Catalog reads only: no lock on thoughts before the file's own ADD COLUMN.
-  const [{ nsp, stale, path, counted }] = (await tx`
+  const [{ nsp, stale, counted }] = (await tx`
     SELECT (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass('thought_work_claims')) AS nsp,
            to_regclass('pg_temp.thought_work_claims') IS NOT NULL AS stale,
-           current_setting('search_path') AS path,
-           current_setting('track_counts') = 'on' AS counted`) as { nsp: string | null; stale: boolean; path: string; counted: boolean }[];
+           current_setting('track_counts') = 'on' AS counted`) as { nsp: string | null; stale: boolean; counted: boolean }[];
   if (stale) {
     // Not ours: nothing here creates one before this point, and a pooled
     // connection handed over with one is not a state to read the block from.
@@ -625,7 +606,7 @@ async function applyShadowed(tx: SQL, m: Migration): Promise<string | null> {
   // pg_temp first for relations exactly when unlisted: the path, for the
   // transaction, without it — a no-op where it is absent, never added first
   // (see above), not restored (nothing after 021 differs).
-  await tx`SELECT set_config('search_path', ${searchPathEntries(path).filter((e) => !PG_TEMP_ENTRY.test(e)).join(", ")}, true)`;
+  const path = await setPathWithoutTemp(tx);
   const [{ shadowed }] = (await tx`SELECT to_regclass('thought_work_claims') = 'pg_temp.thought_work_claims'::regclass AS shadowed`) as { shadowed: boolean }[];
   if (!shadowed) {
     throw new Error(`the view of thought_work_claims without the acceptances does not shadow the table for 021 (search_path: ${path}); its backfill would have read them`);

@@ -5194,6 +5194,41 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
         const [{ tuples }] = await fresh<{ tuples: string }[]>`SELECT current_setting('hnsw.max_scan_tuples') AS tuples FROM (SELECT '[1]'::vector) v`;
         assert(tuples === "100000", `a new session on the target runs with the source's HNSW bound (got ${tuples})`);
       } finally { await fresh.close(); }
+      // A path stored raw (SET … FROM CURRENT keeps the text as written) is
+      // read as Postgres reads it (SMD-2247): NoWhere folds to nowhere, a tab
+      // separates, a quoted name keeps its case. Kept literally it came back
+      // as "NoWhere" and "\tpublic", two other schemas. temp_tablespaces the
+      // same, keeping its empty entry — the database's default tablespace,
+      // one of the list's members — which the path's reading drops. The
+      // target's session runs with standard_conforming_strings off, as a
+      // second refresh's does when the source sets it: a name holding a
+      // backslash is copied as written, not read as an escape.
+      await sql.unsafe(`ALTER DATABASE ${setDst} SET standard_conforming_strings = off`);
+      const rawSrc = new SQL({ url: urlOf(setSrc), max: 1 }), rawDst = new SQL({ url: urlOf(setDst), max: 1 });
+      let read: Record<string, string> = {};
+      try {
+        await rawSrc`SELECT set_config('search_path', ${'NoWhere,\tpublic, "Kept", "a\\b"'}, false)`;
+        await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET search_path FROM CURRENT`);
+        await rawSrc`SELECT set_config('temp_tablespaces', ${'"", PG_DEFAULT'}, false)`;
+        await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET temp_tablespaces FROM CURRENT`);
+        await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET ob1.scalar_probe = 'C:\\temp'`);
+        read = await databaseSettings(rawSrc);
+        await applyDatabaseSettings(rawDst, await databaseSettings(rawSrc));
+      } finally { await rawSrc.close(); await rawDst.close(); }
+      const [rawSrcCfg, rawDstCfg] = [await rawOf(setSrc), await rawOf(setDst)];
+      assert(rawSrcCfg.search_path === 'NoWhere,\tpublic, "Kept", "a\\b"' && rawDstCfg.search_path === 'nowhere, public, "Kept", "a\\b"',
+             `a raw path on the source is copied as the schemas it names (source ${JSON.stringify(rawSrcCfg.search_path)}, target ${JSON.stringify(rawDstCfg.search_path)})`);
+      assert(read.search_path === '"nowhere", "public", "Kept", "a\\b"', `…read on the source, as its server reads it, each name quoted (${JSON.stringify(read.search_path)})`);
+      assert(rawSrcCfg.temp_tablespaces === '"", PG_DEFAULT' && read.temp_tablespaces === '"", "pg_default"' && rawDstCfg.temp_tablespaces === '"", pg_default',
+             `…and a raw temp_tablespaces keeps its empty entry, the default tablespace, and folds its name (source ${JSON.stringify(rawSrcCfg.temp_tablespaces)}, read ${JSON.stringify(read.temp_tablespaces)}, target ${JSON.stringify(rawDstCfg.temp_tablespaces)})`);
+      assert(rawSrcCfg["ob1.scalar_probe"] === "C:\\temp" && rawDstCfg["ob1.scalar_probe"] === "C:\\temp",
+             `…and a scalar holding a backslash is copied as written, not read as an escape (source ${JSON.stringify(rawSrcCfg["ob1.scalar_probe"])}, target ${JSON.stringify(rawDstCfg["ob1.scalar_probe"])})`);
+      // A path set to the empty list: no name to write, so the copy writes ''.
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET search_path = ''`);
+      const emptySrc = new SQL({ url: urlOf(setSrc), max: 1 }), emptyDst = new SQL({ url: urlOf(setDst), max: 1 });
+      try { await applyDatabaseSettings(emptyDst, await databaseSettings(emptySrc)); } finally { await emptySrc.close(); await emptyDst.close(); }
+      const emptied = (await rawOf(setDst)).search_path;
+      assert(emptied === '""', `…and a path set to the empty list is copied as the empty list (target ${JSON.stringify(emptied)})`);
     } finally {
       for (const db of [setSrc, setDst]) await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     }

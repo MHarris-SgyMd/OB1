@@ -74,7 +74,7 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
+import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig, quoteIdent, searchPathSchemas } from "./config.mjs";
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
@@ -357,6 +357,15 @@ async function refreshMark(sql: SQL): Promise<string | null> {
  * variable_is_guc_list_quote names the same six.
  */
 const LIST_SETTINGS = new Set(["local_preload_libraries", "search_path", "session_preload_libraries", "shared_preload_libraries", "temp_tablespaces", "unix_socket_directories"]);
+/**
+ * The two of them whose elements are identifiers, which Postgres reads with
+ * SplitIdentifierString: searchPathSchemas, so an unquoted name folds and only
+ * Postgres's whitespace separates (SMD-2247). A value stored by `SET … FROM
+ * CURRENT` is the text as written — `NoWhere` is the schema nowhere, never
+ * `"NoWhere"`. temp_tablespaces keeps an empty entry, the database's default
+ * tablespace, which search_path's reading drops.
+ */
+const IDENTIFIER_LISTS = new Set(["search_path", "temp_tablespaces"]);
 const SETTING_NAME = /^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)*$/i;
 
 /**
@@ -364,18 +373,35 @@ const SETTING_NAME = /^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)*$/i;
  * setrole 0) as name → value, the refresh mark left out. pg_dump without
  * --create carries none of them, so a refresh copies them from --from onto
  * --to itself (SMD-2037): migration 014 seeds the HNSW walk's bounds there
- * once, and a copy without them answers a broad filtered search short.
+ * once, and a copy without them answers a broad filtered search short. An
+ * identifier list comes back re-spelled, each name quoted: read as this
+ * server reads it (a vertical tab separates from PostgreSQL 17), so --to
+ * keeps --from's meaning whatever its version.
  */
 export async function databaseSettings(sql: SQL): Promise<Record<string, string>> {
   const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+  const [{ version }] = await sql<{ version: number }[]>`SELECT current_setting('server_version_num')::int AS version`;
   const { ["ob1.refresh_target"]: _mark, ...settings } = parseSetConfig(row?.cfg);
-  for (const name of Object.keys(settings)) {
+  for (const [name, value] of Object.entries(settings)) {
     if (!SETTING_NAME.test(name)) throw new Error(`database setting ${JSON.stringify(name)} is not a name this tool can write back`);
+    if (IDENTIFIER_LISTS.has(name)) settings[name] = searchPathSchemas(value, version, name === "temp_tablespaces").map(quoteIdent).join(", ");
   }
   return settings;
 }
 
-/** A list setting's stored value (`"$user", public`) as its elements. */
+/**
+ * A value as an E'' string literal, the same text whatever the session's
+ * standard_conforming_strings: a plain '…' literal reads a backslash as an
+ * escape with it off, and a refresh's target session may start with it off —
+ * a setting of the source's that an earlier refresh copied.
+ */
+const literal = (v: string) => `E'${v.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
+
+/**
+ * A list setting's stored value (`"$user", public`) as its elements. An
+ * identifier list reaches here as databaseSettings re-spelled it, every name
+ * quoted, so the split needs no case or whitespace rules of Postgres's.
+ */
 function listElements(value: string): string[] {
   const out: string[] = [];
   let cur = "", quoted = false, inQuotes = false;
@@ -394,8 +420,9 @@ function listElements(value: string): string[] {
 }
 
 /**
- * Make `dst`'s own settings equal `settings`, the refresh mark aside: each one
- * `dst` has that `settings` lacks is reset, and each in `settings` is set.
+ * Make `dst`'s own settings equal `settings` — as databaseSettings returns
+ * them — the refresh mark aside: each one `dst` has that `settings` lacks is
+ * reset, and each in `settings` is set.
  * pgvector is loaded first, as migration 014's remedy does, so `hnsw.*` are
  * the library's settings, which a database owner may set, rather than
  * placeholders only a superuser may.
@@ -411,10 +438,13 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
     if (!(name in settings)) await dst.unsafe(`ALTER DATABASE ${target} RESET ${name}`);
   }
   for (const [name, value] of Object.entries(settings)) {
+    // Each list element a string literal, never a quoted identifier: `""` is
+    // no identifier, and temp_tablespaces' empty entry must be written. For
+    // these settings Postgres stores a literal element as it would the
+    // identifier, quoted where the name needs it — except that a literal is
+    // not cut to 63 bytes, where a quoted identifier cut a library path.
     const elements = LIST_SETTINGS.has(name) ? listElements(value) : null;
-    const rhs = elements === null ? `'${value.replaceAll("'", "''")}'`
-      : elements.length === 0 || (elements.length === 1 && elements[0] === "") ? "''"
-      : elements.map((e) => `"${e.replaceAll('"', '""')}"`).join(", ");
+    const rhs = elements === null ? literal(value) : elements.length === 0 ? "''" : elements.map(literal).join(", ");
     await dst.unsafe(`ALTER DATABASE ${target} SET ${name} = ${rhs}`);
   }
 }
