@@ -124,7 +124,7 @@ import {
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
-import { isoTimestampOrNull } from "../server-portable/store.ts";
+import { isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
@@ -356,14 +356,10 @@ type Listed = {
 // would move the cursor or rewrite the ID: line a reviewer is about to paste.
 const snippet = (s: string, n = 160) => { const t = cleanForDisplay(s).replace(/\s+/g, " ").trim(); return t.slice(0, n) + (t.length > n ? "…" : ""); };
 // SMD-1803: the CLI twin of the server's proposal renderer. Through the store's
-// canonical rule (isoTimestampOrNull), not new Date().toISOString(), which
-// fabricated 1970-01-01 on a NULL created_at and THREW on an infinity-dated one,
-// taking the whole listing down. A sentinel ("infinity") or no-ISO-form value
-// has no "T", so it prints whole rather than being sliced to a stub.
-const day = (d: string | null) => {
-  const iso = isoTimestampOrNull(d);
-  return iso == null ? "undated" : iso.includes("T") ? iso.slice(0, 10) : iso;
-};
+// canonical rule (isoDay), not new Date().toISOString(), which fabricated
+// 1970-01-01 on a NULL created_at and THREW on an infinity-dated one, taking
+// the whole listing down.
+const day = (d: string | null) => isoDay(d) ?? "undated";
 const verdictPhrase = (v: string) =>
   v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
   : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"

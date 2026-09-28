@@ -25,7 +25,7 @@ import { SQL } from "bun";
 import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
-import { isoTimestamp, isoTimestampOrNull, normaliseMutation } from "./store.ts";
+import { isoDay, isoTimestamp, isoTimestampOrNull, normaliseMutation } from "./store.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -193,6 +193,15 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
   assert(isoTimestamp(-Infinity) === "-infinity" && isoTimestamp("-infinity") === "-infinity", "…and so does -infinity");
   assert(isoTimestamp("0044-03-15T00:00:00+00:00 BC") === "0044-03-15T00:00:00+00:00 BC", "a value with no ISO form keeps Postgres's text — one odd row, not a failed result");
   assert((() => { try { isoTimestamp(undefined); return false; } catch { return true; } })(), "a column missing from the row throws — a SELECT bug, not data");
+
+  // isoDay (SMD-1842): the day a tool prints from a raw driver row. Bun's Date
+  // is the case that printed "Wed Sep 09" through String(d).slice(0, 10).
+  assert(isoDay(new Date("2026-09-09T12:00:00Z")) === "2026-09-09", `a Date is its ISO day (${isoDay(new Date("2026-09-09T12:00:00Z"))})`);
+  assert(isoDay("2026-09-09 12:00:00+00") === "2026-09-09", "a timestamptz string is its ISO day too");
+  assert(isoDay(Infinity) === "infinity" && isoDay("infinity") === "infinity" && isoDay(-Infinity) === "-infinity",
+         "an infinite timestamp prints Postgres's spelling whole, not \"Infinity\" or a stub");
+  assert(isoDay(null) === null, "SQL NULL is null, for the caller to word, not \"null\" or the epoch");
+  assert((() => { try { isoDay(undefined); return false; } catch { return true; } })(), "a missing column still throws");
 }
 
 console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");

@@ -190,6 +190,20 @@ export function isoTimestampOrNull(v: unknown): string | null {
 }
 
 /**
+ * The day of a timestamp, `YYYY-MM-DD`, for a tool that prints a date from a
+ * raw driver row — Bun's `Date`, PostgREST's string, the number `Infinity` —
+ * where `String(d).slice(0, 10)` gave `"Wed Sep 09"` (SMD-1842). Through
+ * `isoTimestampOrNull`'s rule: NULL is null (the caller picks its word), and a
+ * sentinel ("infinity") or no-ISO-form value has no "T", so it comes out whole
+ * rather than sliced to a stub. `db/consolidate.ts`'s `day` (SMD-1803) and the
+ * grading report in `evals/eval-consolidate.ts` both print through it.
+ */
+export function isoDay(v: unknown): string | null {
+  const iso = isoTimestampOrNull(v);
+  return iso == null ? null : iso.includes("T") ? iso.slice(0, 10) : iso;
+}
+
+/**
  * `isoTimestamp` for a key an envelope may omit — `update_thought`'s jsonb
  * before 018 had no `updated_at`; `resolve_agent`'s has `revoked_at` only when
  * revoked. Absence is legitimate there, so `undefined` is `undefined`, not the
