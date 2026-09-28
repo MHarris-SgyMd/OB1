@@ -1419,6 +1419,34 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   assert(withSseKeepalive(plain, { onEnd: () => { ended = true; } }) === plain && ended, "a response that is not an event stream passes through untouched, complete at once");
 }
 
+console.log("\n[18] Async job routes: keyed GETs, no key shown nothing, an id required (SMD-2273)");
+{
+  const ID = "00000000-0000-4000-8000-000000000000";
+  // No key and a wrong key are shown "ok" and nothing else (parity with
+  // /worker-status and /health), before any store read — so this block, like the
+  // rest of test-server, needs no database. The keyed poll/stream, the ownership
+  // gate and the pending→running→succeeded walk are test-e2e-sql's [7] (real DB).
+  const rows: [string, string, RequestInit][] = [
+    ["GET /jobs/<id>, no key", `/jobs/${ID}`, { headers: H }],
+    ["GET /jobs/<id>, wrong key", `/jobs/${ID}`, { headers: { "x-brain-key": "wrong" } }],
+    ["GET /jobs/<id>/stream, no key", `/jobs/${ID}/stream`, { headers: H }],
+    ["HEAD /jobs/<id>/stream, no key", `/jobs/${ID}/stream`, { method: "HEAD", headers: H }],
+  ];
+  for (const [label, path, init] of rows) {
+    const p = await probe(path, init);
+    assert(p.status === 200, `${label} → 200 ok (${p.status})`);
+    assert(p.cors, `${label}: CORS present`);
+    assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
+  }
+  // The routes need an id: /jobs with none, and a bare /jobs/, match neither
+  // regex and land on notFound's 405 (POST at every path is the MCP endpoint) —
+  // so a typo does not silently read "ok".
+  for (const path of ["/jobs", "/jobs/"]) {
+    const p = await probe(path, { headers: H });
+    assert(p.status === 405, `GET ${path} (no id) → 405, not a match (${p.status})`);
+  }
+}
+
 server.stop();
 provider.stop(true);
 

@@ -15,6 +15,7 @@ import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
 import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
+import { startJob, readJob, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
 
 /**
  * Runtime-portable env access.
@@ -806,6 +807,10 @@ export function currentSearchHint(msg: string): string {
 const toolCalls = createCallCount();
 /** How many tool calls are running now, for test-server [13d]. */
 export const toolCallsRunning = (): number => toolCalls.running;
+
+/** The reference async job (scan_thoughts, SMD-2273): how many thoughts a scan walks by default and at most. Bounded so the demo job is finite; a larger corpus job is a follow-up. */
+const SCAN_DEFAULT = 1_000;
+const SCAN_MAX = 100_000;
 
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
@@ -2460,6 +2465,76 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 3b-v: poll an async job by its handle (SMD-2273). GET /jobs/<id> is the
+  // curl mirror; an MCP client cannot reach a REST route, so this tool is how a
+  // Claude Desktop / claude.ai client fetches the result of a job it started.
+  // Ownership-scoped: a job is visible only to the key that started it (the
+  // handle inherits that call's scope), so a wrong id or another key's job reads
+  // as not found. Read-only.
+  if (canRead(principal)) server.registerTool(
+    "job_status",
+    {
+      title: "Async Job Status",
+      description:
+        "Fetch the status and result of an async job by the `job_id` a long-running tool handed back (SMD-2273). Returns { jobId, kind, status: pending|running|succeeded|failed|lost, progress?, result?, error? }. A succeeded job carries its result; a failed one the error; `lost` means the server stopped before it finished (an in-memory job does not survive a restart — re-run it). Only the key that started the job can read it. Read-only.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        job_id: z.string().describe("The jobId from a long-running tool's handle (a uuid). Only the key that started the job can read it."),
+      },
+    },
+    async ({ job_id }) => {
+      const job = readJob(principal, job_id);
+      if (!job) return toolError(`No job ${JSON.stringify(job_id)} for this key — an unknown id, another key's job, or one aged out of the in-memory registry.`);
+      return { content: [{ type: "text" as const, text: JSON.stringify(job) }], structuredContent: job as unknown as Record<string, unknown> };
+    }
+  );
+
+  // Tool 3b-vi: the first async-job-backed tool (SMD-2273) — a bounded, paged
+  // scan of the corpus that returns a job HANDLE at once rather than blocking,
+  // exercising the handle/poll/stream pattern end to end. Real and safe
+  // (read-only) and long-capable on a large brain; the heavier consumers (a
+  // re-embed backfill, the run_worker drain SMD-2272) build on the same
+  // startJob. The work walks pageThoughtMeta in pages up to `limit`, tallying
+  // metadata coverage and a breakdown by type, reporting progress per page.
+  // Read-only, but it starts background work, so it is gated like the reads.
+  if (canRead(principal)) server.registerTool(
+    "scan_thoughts",
+    {
+      title: "Scan Thoughts (async)",
+      description:
+        "Start a background scan of the corpus and return a job HANDLE immediately (SMD-2273) — the caller does not wait for it. Walks the thoughts in pages (newest first) up to `limit`, tallying how many carry a created_at and a breakdown by metadata type, reporting progress as it goes. Returns { jobId, status: \"accepted\", poll, stream }: fetch the result with the job_status tool (an MCP client) or GET /jobs/<id> (curl), or subscribe to GET /jobs/<id>/stream. The reference consumer for the async-job pattern; the result is a small summary, not the thoughts themselves.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        limit: z.number().int().positive().max(SCAN_MAX).optional().describe(`How many thoughts to scan at most (newest first). Default ${SCAN_DEFAULT}, max ${SCAN_MAX}.`),
+      },
+    },
+    async ({ limit }) => {
+      const cap = Math.min(limit ?? SCAN_DEFAULT, SCAN_MAX);
+      const handle = startJob(principal, "scan_thoughts", async (ctx) => {
+        const store = await db();
+        const total = Math.min(await store.countThoughts(), cap);
+        let scanned = 0;
+        let withCreatedAt = 0;
+        const byType: Record<string, number> = {};
+        const PAGE = 200;
+        for (let offset = 0; offset < total; offset += PAGE) {
+          if (ctx.signal.aborted) break;
+          const page = await store.pageThoughtMeta(offset, Math.min(PAGE, total - offset));
+          if (page.length === 0) break;
+          for (const row of page) {
+            scanned++;
+            if (row.created_at !== null) withCreatedAt++;
+            const type = typeof row.metadata.type === "string" ? row.metadata.type : "(none)";
+            byType[type] = (byType[type] ?? 0) + 1;
+          }
+          ctx.progress(scanned, total);
+        }
+        return { scanned, total, withCreatedAt, byType };
+      }, { track: toolCalls.track });
+      return { content: [{ type: "text" as const, text: JSON.stringify(handle) }], structuredContent: handle as unknown as Record<string, unknown> };
+    }
+  );
+
   return server;
 }
 
@@ -2849,6 +2924,53 @@ app.post("*", async (c, next) => {
   }
 });
 
+// The async job handle's poll and stream, as keyed GETs (SMD-2273). A tool like
+// scan_thoughts returns { jobId, poll: "/jobs/<id>", stream: "/jobs/<id>/stream" }
+// at once; these routes serve the follow-up for a REST/curl client (an MCP
+// client cannot reach a REST route — it uses the job_status tool). Registered
+// BEFORE the MCP handler (POST at every path) like the worker mirrors, and
+// falling through with next() for any path they do not own; a GET that matches
+// neither lands on notFound's 405. Ownership rides the key: a job is visible to
+// the key that started it (its keyHash), so a valid key that is not the owner —
+// or an unknown/aged-out id — gets `not found`, and a no/again wrong/capture key
+// gets plain "ok" (parity with /worker-status). The stream path is tested first,
+// being the more specific of the two.
+const JOBS_STREAM_PATH = /(^|\/)jobs\/([^/]+)\/stream\/?$/;
+const JOBS_PATH = /(^|\/)jobs\/([^/]+)\/?$/;
+app.get("*", async (c, next) => {
+  const streamMatch = JOBS_STREAM_PATH.exec(c.req.path);
+  const pollMatch = streamMatch ? null : JOBS_PATH.exec(c.req.path);
+  if (!streamMatch && !pollMatch) return next();
+  const id = (streamMatch ?? pollMatch)![2];
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
+  }, { admit: SCOPES });
+  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  // HEAD carries no body for a job's state or stream: liveness, before the
+  // identity resolve, exactly as /health and the worker mirrors answer it.
+  if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+  // The same identity gate as the worker mirrors: a revoked or unresolved key is shown nothing.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const identity = await Promise.race([
+    agents().resolve(db(), principal),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
+  ]);
+  clearTimeout(timer);
+  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  if (streamMatch) {
+    const stream = subscribeJob(principal, id);
+    if (!stream) return c.json({ error: "not found" }, 404, corsHeaders);
+    const response = new Response(stream, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });
+    // Kept alive by the same wrapper as the MCP stream (SMD-1864): the job's
+    // events may be minutes apart, and a silent stream is reaped otherwise.
+    return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream` });
+  }
+  const job = readJob(principal, id);
+  if (!job) return c.json({ error: "not found" }, 404, corsHeaders);
+  return c.json(job, 200, corsHeaders);
+});
+
 // ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────
 //
 // The transport answers a POST with an SSE stream at once and writes the tool's
@@ -3161,7 +3283,17 @@ if (SERVES_ON_BUN) {
     // The pool only if a request opened one: a store that failed to build has
     // none, and the PostgREST store holds no pooled connection to close.
     close: async () => (_store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : false),
-    onCut: () => { cutByStop = true; },
+    onCut: () => {
+      cutByStop = true;
+      // In-memory jobs still running when the stop cuts what is in flight are
+      // marked lost, so a poll or stream in flight sees a terminal answer rather
+      // than hanging; after a restart the registry is empty and a poll for one
+      // gets `not found` (SMD-2273). The job bodies are tracked through
+      // toolCalls (startJob's `track`), so the drain above already waited on
+      // them up to its bound; this cuts what did not finish.
+      const lost = markRunningLost();
+      if (lost > 0) console.warn(`stop cut ${lost} running job${lost === 1 ? "" : "s"}: marked lost — an in-memory job does not survive a restart (SMD-2273)`);
+    },
   });
 }
 
