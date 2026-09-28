@@ -564,6 +564,60 @@ console.log("\n[6e] retry_failed and release_stale_leases over HTTP — tools, k
   }
 }
 
+console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll walks it to succeeded, job_status and the SSE stream mirror it, ownership holds (SMD-2273)");
+{
+  // scan_thoughts starts a background job and hands back a handle at once. The
+  // corpus already has the thoughts [2]/[3] wrote, so the scan succeeds with a
+  // real count. e2e-key is the owner (a write key → canRead); op-raw is another
+  // write key (a different keyHash → not the owner); CAPTURE_KEY is capture-only
+  // (not canRead). All three exercise the /jobs auth and ownership gates.
+  const handle = JSON.parse(await call("scan_thoughts", { limit: 5 })) as { jobId: string; status: string; poll: string; stream: string };
+  assert(handle.status === "accepted", `the tool returns an accepted handle, not a blocked result (${handle.status})`);
+  assert(handle.poll === `/jobs/${handle.jobId}` && handle.stream === `/jobs/${handle.jobId}/stream`, `the handle carries the poll and stream routes (${handle.poll}, ${handle.stream})`);
+
+  // Poll the keyed REST route until the job reaches a terminal state.
+  const pollJob = async (id: string, key = "e2e-key"): Promise<{ httpStatus: number; job: Record<string, unknown> }> => {
+    for (let i = 0; i < 100; i++) {
+      const r = await fetch(`${BASE}/jobs/${id}`, { headers: { "x-brain-key": key } });
+      const job = (await r.json()) as Record<string, unknown>;
+      if (["succeeded", "failed", "lost"].includes(String(job.status))) return { httpStatus: r.status, job };
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    throw new Error(`job ${id} did not reach a terminal state`);
+  };
+  const { httpStatus, job } = await pollJob(handle.jobId);
+  assert(httpStatus === 200 && job.status === "succeeded", `GET /jobs/<id> walks the job to succeeded (${httpStatus}, ${job.status})`);
+  const result = job.result as { scanned: number; total: number } | undefined;
+  assert(result !== undefined && result.scanned >= 1 && typeof result.total === "number", `the succeeded job carries a result (${JSON.stringify(result)})`);
+  assert(typeof job.actor === "string" && (job.actor as string).length > 0, `the job records its actor (${job.actor})`);
+
+  // The job_status tool is the MCP-client mirror of the poll (a client cannot
+  // reach a REST route). It sees the same terminal state, ownership-scoped.
+  const mirror = JSON.parse(await call("job_status", { job_id: handle.jobId })) as Record<string, unknown>;
+  assert(mirror.status === "succeeded" && JSON.stringify(mirror.result) === JSON.stringify(job.result), "the job_status tool mirrors the poll for the owner");
+
+  // The SSE stream replays the status and the terminal event, carrying the result.
+  const sse = await fetch(`${BASE}/jobs/${handle.jobId}/stream`, { headers: { "x-brain-key": "e2e-key" }, signal: AbortSignal.timeout(5_000) });
+  assert(/^text\/event-stream\b/.test(sse.headers.get("content-type") ?? ""), `the stream is text/event-stream (${sse.headers.get("content-type")})`);
+  const streamText = await sse.text();
+  assert(/event: done\b/.test(streamText) && /"scanned"/.test(streamText), "the SSE stream ends with a done event carrying the result");
+
+  // Ownership and auth parity on the poll route.
+  const otherOwner = await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "op-raw" } });
+  assert(otherOwner.status === 404 && ((await otherOwner.json()) as { error?: string }).error === "not found", `another key's poll gets 404 not found (${otherOwner.status})`);
+  const noKey = await fetch(`${BASE}/jobs/${handle.jobId}`);
+  assert(noKey.status === 200 && (await noKey.text()) === "ok", "a no-key poll gets plain ok, nothing about the job");
+  const captureKey = await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": CAPTURE_KEY } });
+  assert(captureKey.status === 200 && (await captureKey.text()) === "ok", "a capture-only key (not canRead) gets plain ok");
+  const unknown = await fetch(`${BASE}/jobs/00000000-0000-4000-8000-000000000000`, { headers: { "x-brain-key": "e2e-key" } });
+  assert(unknown.status === 404, `an unknown id gets 404 for the owner (${unknown.status})`);
+
+  // The job_status tool is ownership-scoped too: another key is told there is no such job.
+  let mirrorRefusal = "";
+  try { await call("job_status", { job_id: handle.jobId }, "op-raw"); } catch (e) { mirrorRefusal = (e as Error).message; }
+  assert(/No job/.test(mirrorRefusal), `job_status for another key is a tool error, not another key's job (${mirrorRefusal.slice(0, 60)})`);
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");

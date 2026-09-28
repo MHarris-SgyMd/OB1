@@ -1146,7 +1146,7 @@ else {
   const olderWriter = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
   assert(olderWriter.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 extraction\\(s\\) \\(${tid} under extract:old@p2\\) — written by a producer from before 061`).test(olderWriter.out) && /Apply db\/migrations\/061_derivations\.sql\. Its backfill records every artifact standing, at the thought's current text, marked legacy\./.test(olderWriter.out) && !/Every producer is 061's/.test(olderWriter.out),
          `an extraction written by 056's writer — a producer from before 061 — does not start, the pair named, the file the remedy and not the raw writer (exit ${olderWriter.code}: ${olderWriter.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") || f.startsWith("063") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") || f.startsWith("063") || f.startsWith("066") || f.startsWith("067") });
   assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\): 1 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and 061 re-applied records the pair as legacy and leaves the one writer: ok again");
   await ctx.unsafe(`UPDATE thought_chunks SET context = 'Situating blurb.' WHERE context IS NULL`);
   const allCtxOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -1378,8 +1378,8 @@ else {
   // the clause had no tooth).
   await claims`UPDATE supersession_proposals SET status = 'stale' WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[1]}::uuid`;
   const consStale = await run(SQL_ENV);
-  assert(/consolidate pass\s+none unfinished; 1 stale \(a text moved under the verdict; the next pass replaces one it finds in conflict again, a reviewer settles one it does not\) — cd db && bun consolidate\.ts --url \$DATABASE_URL --list stale\s*$/m.test(consStale.out),
-         `a stale proposal alone is counted with the reviewer's command (${consStale.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim().slice(0, 240)})`);
+  assert(/consolidate pass\s+none unfinished; 1 stale \(a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not\) — cd db && bun consolidate\.ts --url \$DATABASE_URL --list stale\s*$/m.test(consStale.out),
+         `a stale proposal alone is counted with the pass's rule (067) and the reviewer's command (${consStale.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim().slice(0, 240)})`);
   await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, ${CONS}, NULL)`;
   const consBoth = await run(SQL_ENV);
   assert(/consolidate pass\s+none unfinished; 1 proposal\(s\) pending review — cd db && bun consolidate\.ts --url \$DATABASE_URL --list; 1 stale \(/.test(consBoth.out),
@@ -1546,7 +1546,7 @@ else {
   const fortyTwoBody = await run(SQL_ENV);
   assert(/!  delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone, but its body is from before migration 060 \(migration 060 not yet applied, or 042 re-applied by hand\): the row is deleted first and the trigger derives the tombstone after it/.test(fortyTwoBody.out) && /Apply db\/migrations\/060_append_then_project\.sql\./.test(fortyTwoBody.out),
          "…which 042 re-applied performs, leaving 042's body: one form, and a warning naming 060 for the body (SMD-2116)");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") || f.startsWith("066") || f.startsWith("067") });
   assert(/✓  delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone, with 060's body/.test((await run(SQL_ENV)).out), "…and 060 after it is the shipped body, said as such");
   // A brain that stopped at 036 — a server deployed ahead of the migration:
   // the two-argument form alone. Every delete the server sends would fail at
@@ -1558,18 +1558,27 @@ else {
          "a brain at 036 does not start: every delete the server sends would fail, and the check says so before a user finds out, naming 042 then 060");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") || f.startsWith("060") || f.startsWith("061") });
   // The isolation level every lock-order argument assumes, read from the
-  // connection's default: ok at read committed, a warning naming the guarantees
-  // at any other, with the ALTER ROLE that puts it back. Set on the database,
-  // so a fresh session (preflight's) inherits it; reset after. Not on the role,
-  // which test-upgrade.ts shares beside this suite (the header), nor on the
-  // role in this database, which would outrank the ALTER ROLE the warning names.
+  // connection's default: ok at read committed; since 068 a fail at repeatable
+  // read and a warning at serializable, each with the statement that puts it
+  // back where pg_settings says it was set (third review pass). Set on the
+  // database, so a fresh session (preflight's) inherits it — the fix line then
+  // names ALTER DATABASE; reset after. Not on the role, which test-upgrade.ts
+  // shares beside this suite (the header).
   assert(/transaction isolation\s+default_transaction_isolation is read committed/.test((await run(SQL_ENV)).out), "the connection's default isolation is read committed, and the check says which guarantees rest on it");
   const onThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER DATABASE %I ${setting}', current_database()); END $i$`);
   await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
     const rr = await run(SQL_ENV);
-    assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a connection defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+    // Since 068 a fail: the projection's triggers refuse every ticket or
+    // pointer write under repeatable read (SMD-2256, second review pass).
+    assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
+             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
+           `a connection defaulting to repeatable read is refused, naming 068's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
+    await onThisDatabase("SET default_transaction_isolation = ''serializable''");
+    const ser = await run(SQL_ENV);
+    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable/.test(ser.out),
+           `a connection defaulting to serializable starts with a warning that names 068's condition (exit ${ser.code})`);
+    await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
     // …and nowhere else: a session as the same role in `postgres` is still at
     // read committed. The suite's own database is asked of the server, not
     // read from the URL; a role that may not connect there skips, and any
@@ -1636,7 +1645,7 @@ else {
   const pre060 = await run(SQL_ENV);
   assert(/!  audit events\s+046's event shape present and every key classified, 055's payload in the capture event, but the audit trigger's body is from before 060 \(migration 060 not yet applied, or 055 re-applied by hand\): it derives the event after the write and checks no projected row against its event/.test(pre060.out) && /Apply db\/migrations\/060_append_then_project\.sql\./.test(pre060.out),
          "…055 re-applied over 060 puts a trigger back that checks nothing: the event check warns, naming 060 (SMD-2116)");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("063") || f.startsWith("066") || f.startsWith("067") });
   const shippedPair = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped — the 3-argument body \(061's\) carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event \(046\) and append it first, projecting the row from it \(060\); the 3-argument body records the tags' lineage with the write \(061\); the 2-argument body \(060's\) refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
          "…and 060 then 061 re-applied is the shipped pair again, said as such");
@@ -1676,6 +1685,23 @@ else {
   assert(pre063.code === 0 && /!  lineage\s+every derived row has its lineage row, but ob1_record_derivation and record_supersession_proposal are from before 063 \(061 or 029 re-applied by hand over it\): a rebuild's mark is never cleared/.test(pre063.out) && /Apply db\/migrations\/063_rebuild_derived\.sql\./.test(fix(pre063.out, "lineage")),
          `061 re-applied over 063 is a warning on the two bodies 061 puts back, naming 063 as the remedy (${(pre063.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("063") });
+  // 063 alone over 066 (SMD-2292): 063's candidate body has no lineage
+  // exclusion, so the pass would judge a page against its own evidence; the
+  // check reads 066's sentinel and warns naming 066 — before the orphan
+  // WARN this ladder's older bodies left (the sweep below clears those).
+  const pre066 = await run(SQL_ENV);
+  assert(pre066.code === 0 && /!  lineage\s+every derived row has its lineage row, but consolidation_candidates is from before 066 \(migration 066 not yet applied, or 063 re-applied by hand over it\): the judge is asked whether a page supersedes its own evidence, and a digest its sources \(SMD-2292\)/.test(pre066.out) && /Apply db\/migrations\/066_lineage_excludes_candidates\.sql\./.test(fix(pre066.out, "lineage")),
+         `063 re-applied over 066 is a warning on the candidate body, naming 066 as the remedy (${(pre066.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("066") });
+  // 063 re-applied by hand over 067 (SMD-2297): 063's rebuild_derived keeps
+  // every rejected row, so a proposal the pass settled is never judged again
+  // when a text moves under it. The check reads the reopen sentinel where
+  // 067's settle function stands and warns naming 067 — 063's own lesson
+  // about 061 over 063, applied to the file after it.
+  const pre067 = await run(SQL_ENV);
+  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql\./.test(fix(pre067.out, "lineage")),
+         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 as the remedy (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") });
   // The older bodies this ladder ran by hand (056's and 060's extraction
   // writer) replaced mention rows without sweeping their lineage rows, and
   // 061's backfill recorded pairs that later passes replaced — lineage rows
@@ -1917,6 +1943,9 @@ else {
       await claims.unsafe("GRANT USAGE ON SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
+      // 068's projection writes, held from the start so the steps below name
+      // only what they revoke; its own step follows the base set (SMD-2256).
+      await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
 
       // thoughts satisfied, but no INSERT/DELETE on thought_chunks, no INSERT
       // on thought_audit and no UPDATE on thought_facets (042's delete guard
@@ -1972,6 +2001,34 @@ else {
       const baseOk = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);
+
+      // 068's triggers reconcile the node_state projection as the caller on a
+      // write that moves a key, a status, a watermark or a pointer, and the
+      // lifecycle reads read it. Split by privilege (first review pass): with
+      // SELECT held and the writes missing, the check names those writes and
+      // not the reads (which still work), nor a plain capture or every delete;
+      // with SELECT missing too, it names the reads as well.
+      await claims.unsafe("REVOKE INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
+      const projectionWrites = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(projectionWrites.code === 1 &&
+             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included \(068's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionWrites.out)) &&
+             !/windowed capture|every delete|lifecycle read/.test(writeLine(projectionWrites.out)) &&
+             /GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;\s+GRANT INSERT, UPDATE, DELETE ON ob1_superseded_by TO ob1_pf_capture;/.test(projectionWrites.out),
+             `without 068's projection writes the check names the writes that move a key or a pointer — not lifecycle reads, not a plain capture, not every delete — each table with its GRANT (exit ${projectionWrites.code})`);
+      await claims.unsafe("REVOKE SELECT ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
+      const projectionAll = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(projectionAll.code === 1 &&
+             /every lifecycle read \(node_lifecycle, node_state, search_thoughts' prefer_current\) and a write that moves an issue key/.test(writeLine(projectionAll.out)) &&
+             /GRANT SELECT, INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;/.test(projectionAll.out),
+             `with SELECT missing as well it names every lifecycle read beside those writes, and the GRANT carries SELECT (exit ${projectionAll.code})`);
+      // SELECT alone missing: the triggers read the tables, so the writes are
+      // named as well as the reads (second review pass).
+      await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
+      const projectionSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(projectionSelect.code === 1 &&
+             /SELECT on ob1_ticket_head; SELECT on ob1_superseded_by — so every lifecycle read \(node_lifecycle, node_state, search_thoughts' prefer_current\) and a write that moves an issue key/.test(writeLine(projectionSelect.out)),
+             `with only SELECT missing it names the reads and the writes, since the triggers read the tables (exit ${projectionSelect.code})`);
+      await claims.unsafe("GRANT SELECT ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
 
       // 016's trigger reads ob1_config as the caller on EVERY capture (before it
       // checks the key), so with the trigger present — the schema is fully
