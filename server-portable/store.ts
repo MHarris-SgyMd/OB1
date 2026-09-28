@@ -193,14 +193,20 @@ export function isoTimestampOrNull(v: unknown): string | null {
  * The day of a timestamp, `YYYY-MM-DD`, for a tool that prints a date from a
  * raw driver row — Bun's `Date`, PostgREST's string, the number `Infinity` —
  * where `String(d).slice(0, 10)` gave `"Wed Sep 09"` (SMD-1842). Through
- * `isoTimestampOrNull`'s rule: NULL is null (the caller picks its word), and a
- * sentinel ("infinity") or no-ISO-form value has no "T", so it comes out whole
- * rather than sliced to a stub. `db/consolidate.ts`'s `day` (SMD-1803) and the
- * grading report in `evals/eval-consolidate.ts` both print through it.
+ * `isoTimestampOrNull`'s rule: NULL is null (the caller picks its word). Only
+ * `toISOString`'s own form is cut to its date, an extended year's
+ * (`+275760-09-13`) included; anything else — a sentinel ("infinity"), a
+ * no-ISO-form text such as PostgREST's `0044-03-15T00:00:00+00:00 BC` —
+ * comes out whole, not sliced to a stub or a BC date read as AD. The day is
+ * UTC's. `db/consolidate.ts`'s `day` (SMD-1803), the judge prompt's `dateOf`
+ * (`consolidate.ts`) and the grading report in `evals/eval-consolidate.ts`
+ * print through it.
  */
 export function isoDay(v: unknown): string | null {
   const iso = isoTimestampOrNull(v);
-  return iso == null ? null : iso.includes("T") ? iso.slice(0, 10) : iso;
+  if (iso == null) return null;
+  const day = /^(?:[+-]\d{6}|\d{4})-\d{2}-\d{2}(?=T\d{2}:\d{2}:\d{2}\.\d{3}Z$)/.exec(iso);
+  return day ? day[0] : iso;
 }
 
 /**

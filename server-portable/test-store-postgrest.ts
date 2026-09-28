@@ -200,6 +200,11 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
   assert(isoDay("2026-09-09 12:00:00+00") === "2026-09-09", "a timestamptz string is its ISO day too");
   assert(isoDay(Infinity) === "infinity" && isoDay("infinity") === "infinity" && isoDay(-Infinity) === "-infinity",
          "an infinite timestamp prints Postgres's spelling whole, not \"Infinity\" or a stub");
+  assert(isoDay("0044-03-15T00:00:00+00:00 BC") === "0044-03-15T00:00:00+00:00 BC",
+         `PostgREST's BC text comes out whole, not cut at its "T" to an AD day (${isoDay("0044-03-15T00:00:00+00:00 BC")})`);
+  assert(isoDay(new Date("+275760-09-13T00:00:00Z")) === "+275760-09-13",
+         `an extended year is its whole day, not sliced to a year-month stub (${isoDay(new Date("+275760-09-13T00:00:00Z"))})`);
+  assert(isoDay(new Date(NaN)) === "Invalid Date", "Bun's BC Date(NaN) keeps isoTimestamp's text");
   assert(isoDay(null) === null, "SQL NULL is null, for the caller to word, not \"null\" or the epoch");
   assert((() => { try { isoDay(undefined); return false; } catch { return true; } })(), "a missing column still throws");
 }
