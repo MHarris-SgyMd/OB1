@@ -1054,7 +1054,11 @@ commercial product built on OB1 that competes with it is outside OB1's.
 - **Entity extraction.** `db/extract-entities.ts --follow` is a long-running
   worker with a per-thought model cost; it is not a service here. Run it from a
   checkout, with `OB1_WORKER_KEY` set to a key whose hash is in
-  `MCP_ACCESS_KEYS`, when you have decided to pay that cost. The same goes for
+  `MCP_ACCESS_KEYS`, when you have decided to pay that cost. A follower exits 0
+  when stopped, so watch its stderr: it says there when the model looks at
+  fault, after each pass drains the pool — a follower started on a backlog says
+  nothing until the backlog is done, so try a new model with `--limit 48` first
+  (SMD-2266, `db/README.md`). The same goes for
   `db/consolidate.ts`, the pass that proposes supersessions from the entities
   that worker extracts (a per-pair cost; `db/README.md`), and for reviewing
   what it proposes.

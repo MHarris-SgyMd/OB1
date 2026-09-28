@@ -22,6 +22,7 @@ import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, parseJudgement, wrapSide } from "./consolidate.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
+import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
 import { extractMetadata } from "./metadata.ts";
 
 const { assert, report } = createAssert();
@@ -628,6 +629,35 @@ console.log("\n[10] The entity name gate (SMD-1935): a number or a type word is 
   } finally {
     stub.stop(true);
   }
+}
+
+console.log("\n[11] Hybrid decide (SMD-2321): identifiers carved by rule, the decider validates+types the rest, a number refused, a name absent from the text kept uncided, a decider outage falls back");
+{
+  const E = (name: string, type = "topic"): any => ({ name, type, confidence: 1, aliases: [] });
+  const cfg = {} as any;
+  const subj = { kind: "capture" } as any;
+  const text = "Anita fixed worker_status and SMD-1549; see db/x.ts. The widget is generic. openrouter.ai is a host.";
+  const verdicts: Record<string, [boolean, string]> = { "Anita": [true, "person"], "openrouter.ai": [true, "organization"], "the widget": [false, "tool"] };
+  const stub: DecideFn = async (_c, decisions) => ({
+    ms: 1,
+    results: decisions.map((d: any) => {
+      const name = /"([^"]+)"/.exec(d.proposition ?? d.question ?? "")?.[1] ?? "";
+      const [valid, type] = verdicts[name] ?? [false, "tool"];
+      if (d.kind === "binary") return { id: d.id, kind: "binary", probabilities: { true: valid ? 0.9 : 0.1, false: valid ? 0.1 : 0.9 }, selected: valid ? "true" : "false", abstained: false, p_insufficient: 0, p_true: valid ? 0.9 : 0.1, logits: [], temperature: 1, tokens: 1, truncated: false };
+      return { id: d.id, kind: "choice", probabilities: { [type]: 0.9 }, selected: type, abstained: false, p_insufficient: 0, logits: [], temperature: 1, tokens: 1, truncated: false };
+    }),
+  });
+  const ents = [E("worker_status"), E("SMD-1549"), E("db/x.ts"), E("021", "person"), E("Anita", "organization"), E("the widget", "tool"), E("openrouter.ai", "place"), E("Ghost Name", "tool")];
+  const { entities, stats } = await decideEntities(text, ents, cfg, subj, stub);
+  const by = new Map(entities.map((e) => [e.name, e]));
+  assert(by.get("worker_status")?.type === "tool" && by.get("SMD-1549")?.type === "project" && by.get("db/x.ts")?.type === "tool" && stats.carved === 3, `identifier shapes are carved by rule, not decided (carved ${stats.carved})`);
+  assert(!by.has("021") && stats.droppedRefused === 1, "a number is refused before any decide call is spent");
+  assert(by.get("Anita")?.type === "person" && Math.abs((by.get("Anita")?.confidence ?? 0) - 0.9) < 1e-9 && by.get("openrouter.ai")?.type === "organization", "the decider validates and types the rest, its p_true is the confidence");
+  assert(!by.has("the widget") && stats.droppedByDecider === 1, "the decider drops a candidate it calls not-an-entity");
+  assert(by.get("Ghost Name")?.type === "tool" && stats.noContext === 1, "a name absent from the text keeps the model's type, uncided");
+  const boom: DecideFn = async () => { throw new Error("decider down"); };
+  const fb = await decideEntities(text, [E("Anita", "organization")], cfg, subj, boom);
+  assert(fb.stats.deciderError === true && fb.entities.length === 1 && fb.entities[0].type === "organization", "a decider outage falls back to the model's entities, flagged");
 }
 
 report();

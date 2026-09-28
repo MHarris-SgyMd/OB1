@@ -17,45 +17,12 @@
  * (which reads back as `""`) and for a raw `$user`, and pasted a stored
  * `x;drop …;--` into the remedy an operator runs.
  *
- * The parse is Postgres's SplitIdentifierString: names separated by commas;
- * whitespace around each, as scanner_isspace sees it — space, tab, newline,
- * carriage return and form feed, and from PostgreSQL 17 vertical tab, nothing
- * outside ASCII; a quoted name kept as written, `""` inside it a quote; an
- * unquoted name folded A–Z only, as downcase_identifier does in a UTF-8
- * database. The empty name a `''` path reads back as is dropped. Settings
- * Postgres rejects (`a,,b`, `a b`, an unterminated quote) never reach here: its
- * check hook refuses them on every route.
+ * The parse is Postgres's SplitIdentifierString, `searchPathSchemas`, which
+ * lives in db/config.mjs so the migrator's image — db/ files alone — reads a
+ * path the same way (SMD-2247); it is re-exported here for preflight.
  */
 
-/**
- * A search_path setting's schemas, in order, as Postgres resolves them.
- * `serverVersionNum` is the server's `server_version_num`: 17 counts a
- * vertical tab as whitespace, 16 reads it as part of a name.
- */
-export function searchPathSchemas(setting: string, serverVersionNum: number): string[] {
-  const isSpace = (c: string | undefined) =>
-    c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || (c === "\v" && serverVersionNum >= 170000);
-  const names: string[] = [];
-  let i = 0;
-  while (i < setting.length) {
-    while (isSpace(setting[i])) i++;
-    let name = "";
-    if (setting[i] === '"') {
-      for (i++; i < setting.length; i++) {
-        if (setting[i] !== '"') name += setting[i];
-        else if (setting[i + 1] === '"') { name += '"'; i++; }
-        else { i++; break; }
-      }
-    } else {
-      while (i < setting.length && setting[i] !== "," && !isSpace(setting[i])) name += setting[i++];
-      name = name.replace(/[A-Z]+/g, (m) => m.toLowerCase());
-    }
-    while (i < setting.length && setting[i] !== ",") i++;
-    i++;
-    if (name !== "") names.push(name);
-  }
-  return names;
-}
+export { searchPathSchemas } from "../db/config.mjs";
 
 /** An identifier, always double-quoted: valid for any name, `$user` among them, which a search_path needs quoted. */
 export const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`;

@@ -116,6 +116,7 @@ import type { Derived } from "./ingest-contract.ts";
 // server-portable/).
 import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
 import { commandLine, readNumber } from "./cli.ts";
+import { databaseUrl, openSql } from "./connect.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
 // the markup strip moved to db/ingest-linear.ts (SMD-1867) so the sync and
@@ -1581,8 +1582,7 @@ async function main(): Promise<void> {
     console.error(`LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  Read: ${describeEnv(envSources)}`);
     process.exit(2);
   }
-  const url = cli.value("url") ?? process.env.DATABASE_URL;
-  if (!url) { console.error("No database URL. Pass --url or set DATABASE_URL."); process.exit(2); }
+  const url = databaseUrl(cli.value("url"));
   const initiative = cli.value("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
   const intervalRaw = cli.value("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
   // Seconds as decimal digits, by the scanner's rule: Number() read "0x10" as 16 and "1e3" as 1000.
@@ -1595,7 +1595,7 @@ async function main(): Promise<void> {
 
   const gql = linearClient(key);
   // One connection each: the reader and the store, serial by construction.
-  const sql = new SQL({ url, max: 1 });
+  const sql = openSql(url);
   const store = new SqlStore(url, { max: 1 });
   let stopping = false;
   let noFingerprintSaid = false;

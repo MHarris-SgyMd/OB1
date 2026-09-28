@@ -30,6 +30,7 @@
  */
 import { SQL } from "bun";
 import { commandLine } from "./cli.ts";
+import { closeThenExit, databaseUrl, openSql } from "./connect.ts";
 
 /** A `(blkno,offno)` index TID as text — the key every map here uses. */
 export type Tid = string;
@@ -330,14 +331,15 @@ export const SHIPPED_INDEXES: { index: string; table: string }[] = [
 
 if (import.meta.main) {
   const cli = commandLine("hnsw-graph.ts", { url: "one", index: "one", table: "one", json: "none" }, { hints: { url: "<postgres://…>", index: "<name>", table: "<name>" } });
-  const url = cli.value("url") ?? process.env.DATABASE_URL;
-  if (!url) { console.error("usage: bun hnsw-graph.ts --url postgres://… [--index name --table name] [--json]"); process.exit(2); }
+  const url = databaseUrl(cli.value("url"));
   const only = cli.value("index");
   // Read only beside --index: alone it would be dropped and both shipped indexes checked (SMD-2015's kind).
   if (cli.has("table") && !only) { console.error("--table goes with --index: it names the table that index is on."); process.exit(2); }
   const targets = only ? [{ index: only, table: cli.value("table") ?? (SHIPPED_INDEXES.find((s) => s.index === only)?.table ?? "thoughts") }] : SHIPPED_INDEXES;
-  const sql = new SQL({ url, max: 1 });
-  try {
+  const sql = openSql(url);
+  // 1 when a visible row is unreachable or has no element, 0 when none is;
+  // applied after the pool has closed (an exit inside it skipped the close).
+  await closeThenExit(sql, async () => {
     await sql`CREATE EXTENSION IF NOT EXISTS pageinspect`;
     const reports: ReachabilityReport[] = [];
     for (const t of targets) reports.push(await reachabilityReport(sql, t.index, t.table));
@@ -350,8 +352,6 @@ if (import.meta.main) {
         for (const u of r.unreachableVisible) console.log(`    ${u.tid} level ${u.level}: ${u.inbound} inbound, ${u.outbound} outbound; heap ${u.heaptids.join(" ")}`);
       }
     }
-    process.exit(reports.some((r) => r.unreachableVisible.length > 0 || r.rowsWithoutElement > 0) ? 1 : 0);
-  } finally {
-    await sql.close();
-  }
+    return reports.some((r) => r.unreachableVisible.length > 0 || r.rowsWithoutElement > 0) ? 1 : 0;
+  });
 }
