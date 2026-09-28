@@ -627,6 +627,16 @@ export class PostgrestStore implements ThoughtStore {
     if (error) throw new Error(error.message);
   }
 
+  /**
+   * No durable job store on the PostgREST/Workers path (SMD-2318): there is no
+   * long-lived process to persist a running job or resume a detached body, so the
+   * registry stays pure in-memory. index.ts sets no sink, and the async-job
+   * routes still answer — they just never hold a running job (SMD-2273).
+   */
+  jobSink(): null {
+    return null;
+  }
+
   async close(): Promise<void> {
     // supabase-js holds no pooled connection; nothing to release.
   }

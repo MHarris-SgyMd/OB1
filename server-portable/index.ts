@@ -15,7 +15,7 @@ import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
 import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
-import { startJob, readJob, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
+import { startJob, readJob, subscribe as subscribeJob, markRunningLost, setJobSink } from "./jobs.ts";
 
 /**
  * Runtime-portable env access.
@@ -226,11 +226,35 @@ function env(): Env {
 // moment the selection takes effect (change 97); preflight says it at the
 // entrypoint as well, so a container sees it before the first request.
 let _store: Promise<ThoughtStore> | null = null;
+let jobStoreWired = false;
 function db(): Promise<ThoughtStore> {
   if (!_store) {
     const notice = postgrestOnBunNotice(storeKind(env()));
     if (notice) console.warn(notice);
     _store = createStore(env());
+    // Once, on the Bun server and the moment the store is first built (env() is
+    // seeded by then): wire the durable job store (SMD-2318) and reconcile jobs a
+    // prior process left running — a clean stop's `lost` write that did not land,
+    // or a hard crash — so a poll after the restart sees a terminal answer, not a
+    // live job with no runner. Detached and best-effort: the handle routes never
+    // gate on it, the SQL store returns a sink, the PostgREST store returns null
+    // (the registry stays in-memory), and a store that fails to build leaves it
+    // in-memory too. A suite drives the sink itself (it holds the store).
+    if (SERVES_ON_BUN && !jobStoreWired) {
+      jobStoreWired = true;
+      void _store.then(async (store) => {
+        const s = store.jobSink();
+        if (!s) return;
+        // Reconcile BEFORE wiring the sink: only after setJobSink does a job of
+        // this process get persisted as running, so running the reconcile first
+        // means it can only touch a prior process's rows — never a job this
+        // process just started (which would race the reconcile's UPDATE and be
+        // wrongly cut to lost).
+        const lost = await s.reconcileRunningLost();
+        setJobSink(s);
+        if (lost > 0) console.warn(`startup reconciled ${lost} job${lost === 1 ? "" : "s"} left running by a prior process: marked lost (SMD-2318)`);
+      }).catch(() => { /* no durable store: the registry stays in-memory */ });
+    }
   }
   return _store;
 }
@@ -2476,15 +2500,15 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Async Job Status",
       description:
-        "Fetch the status and result of an async job by the `job_id` a long-running tool handed back (SMD-2273). Returns { jobId, kind, status: pending|running|succeeded|failed|lost, progress?, result?, error? }. A succeeded job carries its result; a failed one the error; `lost` means the server stopped before it finished (an in-memory job does not survive a restart — re-run it). Only the key that started the job can read it. Read-only.",
+        "Fetch the status and result of an async job by the `job_id` a long-running tool handed back (SMD-2273). Returns { jobId, kind, status: pending|running|succeeded|failed|lost, progress?, result?, error? }. A succeeded job carries its result; a failed one the error; `lost` means the server stopped before it finished — re-run it. Only the key that started the job can read it. Read-only.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         job_id: z.string().describe("The jobId from a long-running tool's handle (a uuid). Only the key that started the job can read it."),
       },
     },
     async ({ job_id }) => {
-      const job = readJob(principal, job_id);
-      if (!job) return toolError(`No job ${JSON.stringify(job_id)} for this key — an unknown id, another key's job, or one aged out of the in-memory registry.`);
+      const job = await readJob(principal, job_id);
+      if (!job) return toolError(`No job ${JSON.stringify(job_id)} for this key — an unknown id, another key's job, or one pruned from the registry.`);
       return { content: [{ type: "text" as const, text: JSON.stringify(job) }], structuredContent: job as unknown as Record<string, unknown> };
     }
   );
@@ -2959,14 +2983,14 @@ app.get("*", async (c, next) => {
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
   if (streamMatch) {
-    const stream = subscribeJob(principal, id);
+    const stream = await subscribeJob(principal, id);
     if (!stream) return c.json({ error: "not found" }, 404, corsHeaders);
     const response = new Response(stream, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });
     // Kept alive by the same wrapper as the MCP stream (SMD-1864): the job's
     // events may be minutes apart, and a silent stream is reaped otherwise.
     return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream` });
   }
-  const job = readJob(principal, id);
+  const job = await readJob(principal, id);
   if (!job) return c.json({ error: "not found" }, 404, corsHeaders);
   return c.json(job, 200, corsHeaders);
 });
@@ -3285,14 +3309,16 @@ if (SERVES_ON_BUN) {
     close: async () => (_store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : false),
     onCut: () => {
       cutByStop = true;
-      // In-memory jobs still running when the stop cuts what is in flight are
-      // marked lost, so a poll or stream in flight sees a terminal answer rather
-      // than hanging; after a restart the registry is empty and a poll for one
-      // gets `not found` (SMD-2273). The job bodies are tracked through
-      // toolCalls (startJob's `track`), so the drain above already waited on
-      // them up to its bound; this cuts what did not finish.
+      // Jobs still running when the stop cuts what is in flight are marked lost,
+      // so a poll or stream in flight sees a terminal answer rather than hanging.
+      // The job bodies are tracked through toolCalls (startJob's `track`), so the
+      // drain above already waited on them up to its bound; this cuts what did
+      // not finish. With a durable store (SMD-2318) the `lost` is written through
+      // and survives the restart; without one it is in-memory and a poll after a
+      // restart gets `not found` (SMD-2273). Either way the startup reconcile is
+      // the backstop for a write cut off before it landed.
       const lost = markRunningLost();
-      if (lost > 0) console.warn(`stop cut ${lost} running job${lost === 1 ? "" : "s"}: marked lost — an in-memory job does not survive a restart (SMD-2273)`);
+      if (lost > 0) console.warn(`stop cut ${lost} running job${lost === 1 ? "" : "s"}: marked lost (SMD-2273)`);
     },
   });
 }
