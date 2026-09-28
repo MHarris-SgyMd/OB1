@@ -131,6 +131,13 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   ok(allowed.code === 0 && allowed.out.trim() === "dropped", `…and ${REMOTE_DB_FLAG}=1 lets it through (exit ${allowed.code})`);
   const local = child(guard("postgres://u@127.0.0.1:1/x"));
   ok(local.code === 0 && local.out.trim() === "dropped", `…and a loopback host passes (exit ${local.code})`);
+  // The drop itself asks: dropSchema, and resetSchema through it, refuse a
+  // remote host before they connect — the one call between every suite and a
+  // DROP TABLE … CASCADE of a real database (review pass 5).
+  for (const fn of ["dropSchema", "resetSchema"] as const) {
+    const r = child(`import { ${fn} } from "./test-support.ts"; await ${fn}("postgres://u:${MARK}@db.example.invalid:5432/x", {} as never); console.log("dropped");`);
+    ok(r.code === 2 && /Refusing to drop the schema: db\.example\.invalid is not a loopback host/.test(r.err) && !/connect/i.test(r.err) && !r.err.includes(MARK) && !r.out.includes("dropped"), `${fn} refuses a remote host itself, before connecting, never its password (exit ${r.code}: ${r.err.trim().split("\n")[0]})`);
+  }
 
   // tier.ts --refresh refuses before it connects to either side.
   const FROM = `postgres://u:${MARK}@127.0.0.1:1/a`;
