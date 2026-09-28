@@ -415,6 +415,7 @@ import { maskUrl, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
+import { databaseUrl, openSql } from "./connect.ts";
 
 // Every argument accounted for (db/cli.ts): an id after another flag, a flag
 // this tool does not have, a flag given twice or one that takes a value
@@ -428,11 +429,7 @@ const cli = commandLine("reembed.ts", {
   status: "none", "dry-run": "none", "switch-model": "none", "retry-failed": "none", "retry-fallbacks": "none", all: "none",
 }, { hints: { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", retire: "<reembed:model@dim[:suffix] — preflight prints it>", "accept-failed": "<thought-id …> (right after it, before any other flag)", all: "(with --accept-failed)" } });
 
-const url = cli.value("url") ?? process.env.DATABASE_URL;
-if (!url) {
-  console.error("No database URL. Pass --url or set DATABASE_URL.");
-  process.exit(2);
-}
+const url = databaseUrl(cli.value("url"));
 
 const WORKERS = cli.int("workers", { absent: 2, min: 1 });
 const BATCH = cli.int("batch", { absent: 8, min: 1 });
@@ -540,7 +537,7 @@ console.log(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embed
 // through the pool, and a worker parked on a lock or a long statement holds
 // its own connection, so the spare is what keeps every worker's leases alive
 // then. Tightening this to WORKERS would recreate the lapse 031 removed.
-const sql = new SQL({ url, max: WORKERS + 1 });
+const sql = openSql(url, { max: WORKERS + 1 });
 
 // ── The database's side of the contract ─────────────────────────────────────
 
