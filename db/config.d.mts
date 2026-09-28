@@ -104,6 +104,12 @@ export function resolveExtractWindow(
 export const EXTRACT_MIN_WINDOW_TOKENS: number;
 /** The most windows one thought is extracted in by default, 24; over it the thought is extracted over its first windows, succeeded with a caveat (SMD-2240). */
 export const EXTRACT_MAX_WINDOWS: number;
+/** The share of a run's extraction answers, one a window, past which malformed ones read as the model at fault, a fifth (SMD-2266). */
+export const EXTRACT_MALFORMED_ALARM_SHARE: number;
+/** The fewest answers a run judges that share over, 48. */
+export const EXTRACT_MALFORMED_ALARM_MIN: number;
+/** Whether `malformed` of a run's `answers` are more than EXTRACT_MALFORMED_ALARM_SHARE of at least EXTRACT_MALFORMED_ALARM_MIN. */
+export function malformedAlarm(answers: number, malformed: number): boolean;
 /** OB1_EXTRACT_MAX_WINDOWS when a positive safe integer once floored, else EXTRACT_MAX_WINDOWS; `from` says which. */
 export function resolveExtractMaxWindows(raw: string | undefined): { windows: number; from: "OB1_EXTRACT_MAX_WINDOWS" | "default" };
 

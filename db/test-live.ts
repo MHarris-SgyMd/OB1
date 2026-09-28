@@ -3430,6 +3430,87 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          && (await claimOf(tome)).last_error === null,
          `…and --retry-partial then takes the tome alone, a prefix, and reads it whole (${prefixRun.out.split("\n").find((l) => /--retry-partial:/.test(l))?.slice(0, 200)})`);
 
+  // A run whose model, not its documents, is at fault says so and exits 3
+  // (SMD-2266): partial rows succeed, so the exit code alone passed a model
+  // answering many windows in prose. The stable brain's three reference-list
+  // papers as qwen2.5:7b reads them — 4, 3 and 1 of 24 windows left out, 8 of
+  // 72 answers — are the control, and do not trip it; the mixed run above,
+  // 4 of 8, is under the fewest answers it judges. The garbled note's failure
+  // goes first, so each run's exit code is its own.
+  await sql`DELETE FROM thoughts WHERE id = ${garbled}::uuid`;
+  const paper = (name: string, bad: number) => seed(Array.from({ length: 24 }, (_, p) => chapter(p >= 24 - bad ? `The ${name} reference-list page.` : `The ${name} chapter.`, "Ada", p)).join("\n\n"));
+  proseKeys.add("reference-list page");
+  const papers = [await paper("alpha", 4), await paper("beta", 3), await paper("gamma", 1)];
+  const refsRun = await extract();
+  assert(refsRun.code === 0 && /\n  3 extracted \(3 with 8 window\(s\) left out, [^\n]*\), 0 failed/.test(refsRun.out) && !/answers this run were/.test(refsRun.out),
+         `three papers with 8 of their 72 windows left out, as the stable brain's read: written, exit 0, no alarm (exit ${refsRun.code}: ${refsRun.out.split("\n").find((l) => /answers this run/.test(l)) ?? refsRun.out.split("\n").find((l) => /^  \d+ extracted/.test(l))?.trim()})`);
+  assert((await Promise.all(papers.map(claimOf))).every((c) => c.status === "succeeded" && c.last_error?.startsWith("partial: ")), "…each paper's claim succeeded, its windows left out named");
+  const book = (name: string) => seed(Array.from({ length: 12 }, (_, p) => chapter(p >= 7 ? `The ${name} reference-list page.` : `The ${name} chapter.`, "Ada", p)).join("\n\n"));
+  // The ticket's case: partial rows alone, nothing failed — 20 of 48 answers
+  // left out across four papers, which exited 0 and now exit 3, the advice
+  // naming the partial rows' retry and not the failed rows' (review pass 3).
+  for (const name of ["eta", "theta", "iota", "kappa"]) await book(name);
+  const partialRun = await extract();
+  assert(partialRun.code === 3 && /\n  4 extracted \(4 with 20 window\(s\) left out, [^\n]*\), 0 failed/.test(partialRun.out)
+         && partialRun.out.includes("  20 of the 48 answers this run were not JSON of the expected shape")
+         && partialRun.out.includes("The rows written stand, each partial one naming its windows left out; once the model is right, --retry-left-out re-reads the partial rows, with --job")
+         && !partialRun.out.includes("--retry-failed re-reads") && /Exiting 3\./.test(partialRun.out),
+         `four papers with 20 of their 48 windows left out and no row failed exit 3, not 0, naming --retry-left-out alone (exit ${partialRun.code}: ${partialRun.out.split("\n").find((l) => /answers this run/.test(l))?.trim().slice(0, 160)})`);
+  // A broken model: three papers of 12 windows with 5 of each in prose, and 12
+  // short notes wholly so, one answer each — 48 answers, 27 malformed, and
+  // under the fewest without the notes' answers. The notes fail, and the
+  // alarm's exit 3 comes before the failures' 1.
+  const books = [await book("delta"), await book("epsilon"), await book("zeta")];
+  for (let i = 0; i < 12; i++) await seed(`A short reference-list page, number ${i}.`);
+  const brokenRun = await extract();
+  assert(brokenRun.code === 3 && /\n  3 extracted \(3 with 15 window\(s\) left out, [^\n]*\), 12 failed/.test(brokenRun.out)
+         && brokenRun.out.includes(`  27 of the 48 answers this run were not JSON of the expected shape — more than 20% of at least 48 (db/config.mjs, EXTRACT_MALFORMED_ALARM_SHARE): the model, not the documents, is likely at fault`)
+         && /Check OB1_METADATA_MODEL \(stub-meta\)[^\n]*Exiting 3\./.test(brokenRun.out),
+         `a run with 27 of its 48 answers malformed — the one-window notes' answers counted — says the model is likely at fault, naming it, and exits 3 before the failures' 1 (exit ${brokenRun.code}: ${brokenRun.out.split("\n").find((l) => /answers this run/.test(l))?.trim().slice(0, 200)})`);
+  assert((await Promise.all(books.map(claimOf))).every((c) => c.status === "succeeded" && c.last_error?.startsWith("partial: 7 of 12 windows extracted; the model's answers for windows 8–12 were")),
+         "…and the rows it wrote stand, each partial one naming its windows left out");
+  // A follower judges its answers as it polls, in blocks of the floor or
+  // more, and says so while it runs — where a run that exits is judged at its
+  // end — and stopped it exits 0 (review pass 1: it said nothing until SIGINT,
+  // then "Exiting 3." and exit 0). 48 notes in prose, captured while it
+  // polls in two halves a poll apart: under the floor each, they are judged
+  // together, not dropped one poll at a time.
+  const alarmFollower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
+  await Bun.sleep(1500);
+  const failedNow = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed'`)[0].c);
+  for (const half of [0, 24]) {
+    for (let i = half; i < half + 24; i++) await seed(`A followed reference-list page, number ${i}.`);
+    for (let i = 0; i < 100 && (await failedNow()) < 36 + half; i++) await Bun.sleep(200);
+    await Bun.sleep(1500);
+  }
+  await Bun.sleep(2500);
+  alarmFollower.kill("SIGINT");
+  const alarmFollowErr = await new Response(alarmFollower.stderr).text();
+  const alarmFollowOut = (await new Response(alarmFollower.stdout).text()) + alarmFollowErr;
+  const alarmFollowCode = await alarmFollower.exited;
+  // Printed before the signal's own line: while it polled, not at its stop (review pass 2).
+  const alarmAt = alarmFollowErr.indexOf("  48 of the follower's last 48 answers were not JSON of the expected shape — more than 20% of at least 48");
+  assert(alarmFollowCode === 0 && alarmAt >= 0 && alarmAt < alarmFollowErr.indexOf("stopping after the current thought")
+         && alarmFollowOut.split("The follower keeps polling; stopped by a signal, it exits 0.").length === 2 && !/Exiting \d/.test(alarmFollowOut),
+         `a follower says the model is likely at fault while it polls, once, not at its stop, and exits 0 on SIGINT (exit ${alarmFollowCode}: ${alarmFollowOut.split("\n").find((l) => /answers were/.test(l))?.trim().slice(-120)})`);
+  // A retry chose its rows for failing: the 60 notes back, still in prose,
+  // trip the alarm, which does not clear their documents (review pass 1).
+  const retriedNotes = await extract("--retry-failed");
+  assert(retriedNotes.code === 3 && retriedNotes.out.includes("  60 of the 60 answers this run were not JSON of the expected shape")
+         && retriedNotes.out.includes("the 60 row(s) this run returned were chosen for failing or leaving windows out, so their documents may be at fault; if not, the model is.")
+         && !retriedNotes.out.includes("the model, not the documents") && retriedNotes.out.includes("No row was written; once the model is right, --retry-failed re-reads the failed ones, with --job")
+         && !retriedNotes.out.includes("--retry-left-out re-reads"),
+         `--retry-failed over rows that fail again says their documents may be at fault, gives the retry for the failed rows it left and not one for partial rows it did not, and exits 3 (exit ${retriedNotes.code}: ${retriedNotes.out.split("\n").find((l) => /answers this run/.test(l))?.trim().slice(0, 200)})`);
+  // A follower that ends at its --limit with the last block tripped: the
+  // final judgement's line, saying the exit it takes, not "keeps polling …
+  // exits 0" (review pass 2, caught by running it).
+  for (let i = 0; i < 48; i++) await seed(`A limited reference-list page, number ${i}.`);
+  const limitedFollow = await extract("--follow", "1", "--limit", "48");
+  assert(limitedFollow.code === 3 && limitedFollow.out.includes("  48 of the follower's last 48 answers were not JSON") && /\n    Check OB1_METADATA_MODEL \(stub-meta\)[^\n]*\. Exiting 3\./.test(limitedFollow.out)
+         && !limitedFollow.out.includes("keeps polling"),
+         `a follower that trips the alarm on the pass that reaches its --limit says it exits 3, and exits 3 (exit ${limitedFollow.code}: ${limitedFollow.out.split("\n").find((l) => /Exiting|keeps polling/.test(l))?.trim().slice(-120)})`);
+  proseKeys.delete("reference-list page");
+
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;
