@@ -346,10 +346,13 @@ const staleClause = (st: ReturnType<typeof staleStandings>): string =>
 
 // ── Review: --list, --accept, --reject, --stale ─────────────────────────────
 
+// A timestamptz as Bun's driver hands it over on these raw reads: a Date, the
+// number ±Infinity for infinity, null — not the store's ISO string (SMD-1842).
+type Stamp = Date | number | string | null;
 type Listed = {
   id: string; status: string; verdict: string; confidence: string; reason: string | null; similarity: number | null;
-  judge_key: string; judged_at: string; reviewed_at: string | null; review_note: string | null; superseding_id: string | null;
-  older_id: string; older_content: string; older_created_at: string | null; newer_id: string; newer_content: string; newer_created_at: string | null;
+  judge_key: string; judged_at: Stamp; reviewed_at: Stamp; review_note: string | null; superseding_id: string | null;
+  older_id: string; older_content: string; older_created_at: Stamp; newer_id: string; newer_content: string; newer_created_at: Stamp;
   older_edited: boolean; newer_edited: boolean;
 };
 // Thought content and entity names are untrusted; cleanForDisplay strips what
@@ -359,7 +362,7 @@ const snippet = (s: string, n = 160) => { const t = cleanForDisplay(s).replace(/
 // canonical rule (isoDay), not new Date().toISOString(), which fabricated
 // 1970-01-01 on a NULL created_at and THREW on an infinity-dated one, taking
 // the whole listing down.
-const day = (d: string | Date | number | null) => isoDay(d) ?? "undated";
+const day = (d: Stamp) => isoDay(d) ?? "undated";
 const verdictPhrase = (v: string) =>
   v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
   : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
@@ -398,7 +401,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
 
 async function printStale(days: number): Promise<void> {
   const rows = (await sql`SELECT * FROM stale_entities(make_interval(days => ${days}), 50)`) as
-    { entity_id: string; entity_type: string; name: string; thoughts: number; newest_at: string }[];
+    { entity_id: string; entity_type: string; name: string; thoughts: number; newest_at: Stamp }[];
   if (rows.length === 0) {
     console.log(`  stale: no entity has gone ${days} days without a mention`);
     return;
