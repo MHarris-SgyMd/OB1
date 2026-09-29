@@ -974,7 +974,31 @@ this.)
 `db/config.mjs`'s `ROLE_GRANTS` is the machine-readable list; this table is the
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
-issues every group at once.
+issues every group at once, or with `--groups capture,worker,…` those alone
+(SMD-2289). `--groups` grants less and revokes nothing; `--exact` adds the
+revoke, in the grant's own transaction: a member of another role or an owner
+of anything is refused, then what an ACL grants the role on a
+table or column, a sequence or a routine, and CREATE on a schema or the
+database, go (schema USAGE, CONNECT and TEMP stay); it is refused if it still
+holds anything else (named by catalog and database); then the groups are
+granted, so what it holds here is theirs. Every `--grant`, and `login-role.ts`,
+holds one advisory lock, so two at once in one database queue. `db/login-role.ts --role <name> --password-env <VAR>`
+creates or updates the LOGIN role itself (not a superuser, owning nothing,
+a member of no role, its settings in every database cleared; refused if one
+survives, as a setting only a superuser may reset does a migrator that is not),
+its password sent as a SCRAM verifier, for a compose service that connects as
+a role of its own: the orchestration runner's `ob1_orchestration_runner`
+holds capture, worker, structure and extraction, what its ingester
+and reembed run (measured), and not the server group, whose writes to
+`ob1_agent_keys` could clear a key's revocation. `login-role.ts` refuses a
+role that is a superuser, a member of another role or the owner of anything,
+or whose name a schema here bears (first on its search_path), and `--exact` one still holding a privilege it cannot revoke (a default
+privilege naming it, a grant in another database). Under that role the `ANALYZE
+thought_work_claims` that reembed and 015's `enqueue_thoughts` run (the
+owner's to run) is skipped: Postgres warns, the client does not print it, and
+autovacuum keeps the claim table's statistics. The worker group's `UPDATE` on
+`ob1_config` covers the whole table, the event log's ordering key among its
+rows, as it does for every worker; narrowing it would take row-level policy.
 
 | Group | Object (migration, or `schemas/` file) | Privileges |
 | --- | --- | --- |
@@ -994,9 +1018,10 @@ issues every group at once.
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `ob1_config` (006) | `INSERT, UPDATE` |
+| | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
+| | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks; without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
@@ -1057,7 +1082,7 @@ granted. Functions are executable by `PUBLIC` by default, so only the community
 functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones — are
 listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,
 readwise and CRM RPCs) need nothing. `ob1_config` appears twice — `SELECT` for
-the server's own read, `INSERT, UPDATE` for a worker's job key — as does
+the server's own read, `SELECT, INSERT, UPDATE` for a worker's job key — as does
 `thought_audit` (`INSERT` for the capture path, upstream's `SELECT` beside it),
 and `--grant` merges each into one `GRANT`. A view is granted as a table is,
 and needs it: a role's `SELECT` on `thoughts` does not reach a view over it.
@@ -1076,7 +1101,9 @@ a privilege without grant option "grants" it with only a warning and no effect;
 if anything is not held it rolls back, names the privileges, and says to connect
 as the objects' owner or a superuser; it never creates the role or sets a password, so
 create the role first. `--grant --dry-run` prints the statements without running
-them, so a locked-down deployment can grant a subset by hand. A role that only
+them, so a locked-down deployment can grant a subset by hand; with `--exact` it
+runs the revokes, the check and the grants in a transaction it rolls back, so it
+needs the privileges a real run does and shows what that run would refuse. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, and **pages**
