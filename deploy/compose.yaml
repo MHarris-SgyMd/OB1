@@ -610,11 +610,13 @@ services:
   # run (capture, worker, structure and extraction, measured) and no
   # more: not the server group, whose writes to ob1_agent_keys could clear a
   # key's revocation. It is a member of no role. A one-shot on the migrator's
-  # image, which connects as the migrator
-  # does: db/login-role.ts creates the role or resets its password to
-  # OB1_RUNNER_DB_PASSWORD (`provision.ts --init` writes it), then
-  # `migrate.ts --grant --groups` grants. Every `up` runs it, so a rotated
-  # password, and the grants a new migration adds, land before the runner
+  # image, which connects as the migrator does: db/login-role.ts creates the
+  # role or resets its password to OB1_RUNNER_DB_PASSWORD (`provision.ts
+  # --init` writes it) and its settings, then `migrate.ts --grant --groups …
+  # --exact` replaces its privileges with the groups' in one transaction, so a
+  # runner in flight never meets a moment without them. Every `up` runs it,
+  # the runner left running when its config is unchanged, so a rotated
+  # password and the grants a new migration adds land before the runner
   # starts.
   orchestration-runner-role:
     build:
@@ -627,7 +629,7 @@ services:
       # it and says to run --init. `up` then fails naming this service, and the
       # runner, which waits on it, is not started.
       OB1_RUNNER_DB_PASSWORD: ${OB1_RUNNER_DB_PASSWORD:-}
-    command: ["sh", "-c", "bun login-role.ts --role ob1_orchestration_runner --password-env OB1_RUNNER_DB_PASSWORD && bun migrate.ts --grant ob1_orchestration_runner --groups capture,worker,structure,extraction"]
+    command: ["sh", "-c", "bun login-role.ts --role ob1_orchestration_runner --password-env OB1_RUNNER_DB_PASSWORD && bun migrate.ts --grant ob1_orchestration_runner --groups capture,worker,structure,extraction --exact"]
     depends_on:
       postgres:
         condition: service_healthy

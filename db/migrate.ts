@@ -63,6 +63,7 @@ import {
   EMBEDDING_MODEL,
   HNSW_SEEDS,
   ROLE_GRANT_GROUPS,
+  ROLE_LOCK_PREFIX,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
   grantPresenceSql,
@@ -91,13 +92,14 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations
 // a silent plain run that exits 0. The refusal names the flag or the
 // argument's position, never the argument: a URL carries a password.
 const cli = commandLine("migrate.ts", {
-  url: "one", grant: "one", groups: "one", "dry-run": "none", baseline: "none", reapply: "none", force: "none",
-}, { hints: { url: "<postgres://…>", grant: "<role>", groups: "<group,group…> (with --grant)", force: "(with --baseline)" } });
+  url: "one", grant: "one", groups: "one", exact: "none", "dry-run": "none", baseline: "none", reapply: "none", force: "none",
+}, { hints: { url: "<postgres://…>", grant: "<role>", groups: "<group,group…> (with --grant)", exact: "(with --grant)", force: "(with --baseline)" } });
 
-// Refused before the URL is read, so a stray --groups says so rather than "no database URL".
+// Refused before the URL is read, so a stray --groups or --exact says so rather than "no database URL".
 const groupsArg = cli.value("groups");
-if (groupsArg !== undefined && cli.value("grant") === undefined) {
-  console.error("--groups narrows --grant to some of its groups; it does nothing on its own. Pass it with --grant <role>.");
+const exact = cli.has("exact");
+if ((groupsArg !== undefined || exact) && cli.value("grant") === undefined) {
+  console.error(`${groupsArg !== undefined ? "--groups narrows" : "--exact makes"} --grant ${groupsArg !== undefined ? "to some of its groups" : "all a role holds"}; it does nothing on its own. Pass it with --grant <role>.`);
   process.exit(2);
 }
 const url = databaseUrl(cli.value("url"));
@@ -118,6 +120,38 @@ if (force && !baseline) {
   process.exit(2);
 }
 
+/** A refusal inside --grant's transaction: exit 2, nothing committed. */
+class GrantRefusal extends Error {}
+
+/** --exact's revokes: the role's privileges on every schema's tables, sequences and routines (procedures and aggregates with the functions), on the schemas, and CREATE on this database. */
+async function exactRevokes(sql: any, role: string): Promise<string[]> {
+  const r = quoteIdent(role);
+  const schemas = (await sql`SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY 1`) as { nspname: string }[];
+  const [{ db }] = (await sql`SELECT current_database() AS db`) as { db: string }[];
+  return [
+    ...schemas.flatMap(({ nspname }) => {
+      const s = quoteIdent(nspname);
+      return [...["TABLES", "SEQUENCES", "ROUTINES"].map((k) => `REVOKE ALL ON ALL ${k} IN SCHEMA ${s} FROM ${r};`), `REVOKE ALL ON SCHEMA ${s} FROM ${r};`];
+    }),
+    `REVOKE CREATE ON DATABASE ${quoteIdent(db)} FROM ${r};`,
+  ];
+}
+
+/** What the role holds that --exact's revokes did not reach, by catalog and database: every privilege row pg_shdepend keeps for it but CONNECT and TEMP on this database. */
+async function heldBeyond(sql: any, role: string): Promise<string[]> {
+  const rows = (await sql`
+    SELECT d.classid::regclass::text AS catalog,
+           CASE WHEN d.dbid = 0 THEN 'the cluster' ELSE coalesce(db.datname, d.dbid::text) END AS db,
+           count(*)::int AS n
+      FROM pg_shdepend d LEFT JOIN pg_database db ON db.oid = d.dbid
+     WHERE d.refclassid = 'pg_authid'::regclass AND d.deptype = 'a'
+       AND d.refobjid = (SELECT oid FROM pg_roles WHERE rolname = ${role})
+       AND NOT (d.classid = 'pg_database'::regclass AND d.objid = (SELECT oid FROM pg_database WHERE datname = current_database()))
+     GROUP BY 1, 2 ORDER BY 2, 1`) as { catalog: string; db: string; n: number }[];
+  return rows.map((x) => `${x.n} in ${x.catalog} (${x.db})`);
+}
+
+
 // --grant <role>: issue exactly the privileges db/config.mjs's ROLE_GRANTS
 // documents — the one executable spelling of db/README.md's "Grants for a
 // capturing role". A standalone mode: it records nothing in the ledger and runs
@@ -135,8 +169,19 @@ if (force && !baseline) {
 // which the driver does not surface (SMD-1796, third review pass).
 // --groups a,b narrows it to those groups of ROLE_GRANTS (SMD-2289: the
 // orchestration runner's role gets what its ingester and reembed run, not the
-// whole list). It grants less; it revokes nothing, so a role granted more
-// before keeps what it has.
+// whole list). It grants less; alone it revokes nothing, so a role granted more
+// before keeps what it has. --exact makes the grant all the role holds in this
+// database: in the grant's own transaction it first revokes the role's
+// privileges on every schema's tables, sequences and routines, on the schemas,
+// and CREATE on the database (CONNECT and TEMP stay: an operator may have
+// granted CONNECT to a hardened brain), then refuses, rolling back, if it
+// still holds any other (a default privilege naming it, a grant in another
+// database or on a tablespace or parameter, one made by a grantor other than
+// the object's owner), and only then grants. One transaction, so a run in
+// flight as the role never meets a moment without its privileges, and a
+// failure leaves what it had (SMD-2289 review pass 3: the revoke was a commit
+// of its own, and each `up` took them away for ~60 ms). The role's advisory
+// lock serialises two at once, and db/login-role.ts takes the same.
 const grantRole = cli.value("grant");
 const grantGroups = groupsArg === undefined ? ROLE_GRANT_GROUPS : [...new Set(groupsArg.split(",").map((g) => g.trim()).filter(Boolean))];
 {
@@ -171,15 +216,22 @@ if (grantRole !== undefined) {
     // "; " between names: a function's name carries ", " inside its argument list.
     const skippedHint = `not yet present, skipped (run --grant again after applying the migration, community schema or extension/recipe schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach${missing.includes("schema_migrations") ? "; schema_migrations is this migrator's own ledger, which its first run makes" : ""}): ${missing.join("; ")}`;
     const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { groups: grantGroups, present })];
+    const revokes = exact ? await exactRevokes(gsql, grantRole) : [];
     if (dryRun) {
-      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`}  (--dry-run: nothing run)\n`);
-      for (const s of statements) console.log(`  ${s}`);
+      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`}${exact ? " --exact" : ""}  (--dry-run: nothing run)\n`);
+      for (const s of [...revokes, ...statements]) console.log(`  ${s}`);
       if (missing.length) console.log(`\n  ${skippedHint}`);
       await gsql.close();
       process.exit(0);
     }
     const merged = mergedGrants(grantGroups, present);
     await gsql.begin(async (tx) => {
+      if (exact) {
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${ROLE_LOCK_PREFIX + grantRole}))`;
+        for (const s of await exactRevokes(tx, grantRole)) await tx.unsafe(s);
+        const left = await heldBeyond(tx, grantRole);
+        if (left.length) throw new GrantRefusal(`--exact: ${grantRole} still holds privileges a revoke here does not reach — ${left.join("; ")} — a default privilege naming it, a grant in another database, on a tablespace or parameter, or one made by a grantor other than the object's owner. Revoke them (as their grantor), or name another role. Nothing changed.`);
+      }
       for (const s of statements) await tx.unsafe(s);
       const notHeld = ((await tx.unsafe(grantVerifySql(grantRole, merged))) as { kind: string; name: string; privilege: string; held: boolean }[]).filter((r) => !r.held);
       if (notHeld.length) {
@@ -190,13 +242,18 @@ if (grantRole !== undefined) {
         );
       }
     });
-    console.log(`\nGranted ${grantRole} ${groupsArg === undefined ? "the capturing-role privileges" : `the privileges of ${grantGroups.join(", ")}`} over ${present.size} object(s):\n`);
+    console.log(`\nGranted ${grantRole} ${groupsArg === undefined ? "the capturing-role privileges" : `the privileges of ${grantGroups.join(", ")}`} over ${present.size} object(s)${exact ? ", and nothing else in this database" : ""}:\n`);
     for (const s of statements) console.log(`  ${s}`);
     if (missing.length) console.log(`\n  ${skippedHint}`);
     await gsql.close();
     process.exit(0);
   } catch (err) {
     const message = (err as Error).message;
+    if (err instanceof GrantRefusal) {
+      console.error(message);
+      await gsql.close();
+      process.exit(2);
+    }
     // 42501 here is the grantor's, not the grantee's: it holds nothing on the
     // object at all, so it cannot grant it.
     const hint = /permission denied/.test(message) ? "\n  This connection's role may not grant that object: connect as its owner (the role that ran the migrations or applied the community schema) or a superuser." : "";

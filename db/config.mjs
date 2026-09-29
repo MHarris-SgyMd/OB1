@@ -2112,6 +2112,8 @@ export const ROLE_GRANTS = Object.freeze({
 });
 
 /** The order groups are issued and documented in. */
+/** The advisory lock (`pg_advisory_xact_lock(hashtext(prefix || role))`) that `migrate.ts --grant --exact` and `db/login-role.ts` take for a role, so two role steps at once queue rather than collide on "tuple concurrently updated" (SMD-2289). */
+export const ROLE_LOCK_PREFIX = "ob1:role:";
 export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
 
 /**

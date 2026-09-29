@@ -234,6 +234,8 @@ const entries = sources.filter((f) => {
   ok(lone.code === 2 && /^--groups narrows --grant to some of its groups; it does nothing on its own/m.test(lone.err), `migrate.ts --groups without --grant is refused as that, not as a missing URL (exit ${lone.code}: ${lone.err.split("\n")[0]})`);
   const unknownGroup = run("migrate.ts", "--grant", "r", "--groups", "capture,bogus", "--url", "postgres://u:s3cret@127.0.0.1:1/db");
   ok(unknownGroup.code === 2 && /not a group: "bogus"/.test(unknownGroup.err) && /capture, server, worker/.test(unknownGroup.err) && !unknownGroup.err.includes("s3cret"), `migrate.ts --groups names an unknown group and the list, before connecting (exit ${unknownGroup.code})`);
+  const loneExact = run("migrate.ts", "--exact");
+  ok(loneExact.code === 2 && /^--exact makes --grant all a role holds; it does nothing on its own/m.test(loneExact.err), `migrate.ts --exact without --grant is refused as that, not as a missing URL (exit ${loneExact.code}: ${loneExact.err.split("\n")[0]})`);
   const noGroups = run("migrate.ts", "--grant", "r", "--groups", ",", "--url", "postgres://u@127.0.0.1:1/db");
   ok(noGroups.code === 2 && /none was given/.test(noGroups.err), `migrate.ts --groups with no group in it is refused (exit ${noGroups.code})`);
   // SMD-2289: login-role.ts refuses what it would not make, before connecting, and never echoes the password.

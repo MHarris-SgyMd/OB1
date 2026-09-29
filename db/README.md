@@ -915,12 +915,14 @@ this.)
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once, or with `--groups capture,worker,…` those alone
-(SMD-2289). `--groups` grants less; it revokes nothing, so a role granted
-more before keeps it. `db/login-role.ts --role <name> --password-env <VAR>`
+(SMD-2289). `--groups` grants less and revokes nothing; `--exact` adds the
+revoke, in the grant's own transaction: the role's privileges on every
+schema's tables, sequences and routines, on the schemas and CREATE on the
+database (CONNECT and TEMP stay) go, it is refused if it still holds another
+(named by catalog and database), and then the groups are granted, so what it
+holds here is theirs. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
-a member of no role; an existing one has its settings in every database and
-its privileges in this one cleared first, so the `--grant` after it is all it
-holds),
+a member of no role, its settings in every database cleared),
 its password sent as a SCRAM verifier, for a compose service that connects as
 a role of its own: the orchestration runner's `ob1_orchestration_runner`
 holds capture, worker, structure and extraction, what its ingester
