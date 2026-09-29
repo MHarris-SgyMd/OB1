@@ -16,7 +16,12 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   provider pre-installs pgvector into a schema off the connection's `search_path`
   (Supabase uses `extensions`), the runner adds it to its own session so the
   migrations apply, and preflight names the persistent fix for the server — see
-  the `test-search-path.ts` note under Testing.
+  the `test-search-path.ts` note under Testing. The runner also puts `public`
+  first on its own session's path, the rest after it, so the brain is built in
+  `public` whatever the role's or the connection string's path puts first. It
+  refuses, changing nothing, where the path reaches a brain's ledger in another
+  schema and `public` holds no brain, or `public` cannot come first
+  (test-upgrade [23]).
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
