@@ -2048,7 +2048,7 @@ else {
       await claims.unsafe("REVOKE SELECT ON ob1_source_gate FROM ob1_pf_capture");
       const gateAll = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(gateAll.code === 1 &&
-             /the reads of node_state's dependency columns that reach the gate \(graph-centrality --startable and --decay-blocked, node_dependencies\(\)' gates, a keyed read whose ids carry a link\) and the writes that keep the gate/.test(writeLine(gateAll.out)) &&
+             /the reads of node_state's dependency columns that reach the gate \(graph-centrality --startable and --decay-blocked, node_dependencies\(\)' gates, a keyed read of sourced or linked thoughts\) and the writes that keep the gate/.test(writeLine(gateAll.out)) &&
              /GRANT SELECT, INSERT, UPDATE, DELETE ON ob1_source_gate TO ob1_pf_capture;/.test(gateAll.out),
              `with SELECT missing as well it names the dependency reads beside those writes, and the GRANT carries SELECT (exit ${gateAll.code})`);
       await claims.unsafe("GRANT SELECT, INSERT, UPDATE, DELETE ON ob1_source_gate TO ob1_pf_capture");

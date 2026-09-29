@@ -7167,7 +7167,7 @@ console.log("\n[33] Migration 068's projection under two connections: writers of
   await db.close();
 }
 
-console.log("\n[34] Migration 069's gate under two connections: a status move and a source write of one thought meet on its row, either way round, and the mirror reads the later commit; node_state(<ids>) reads its links by index on a brain of twenty thousand; the suite leaves no drift (SMD-2267)");
+console.log("\n[34] Migration 069's gate under two connections: a status move and a source write of one thought take turns on its bucket, either way round, and the mirror reads the later commit; a take and a status move of both its thoughts, and a thought's delete and its source row's, commit without a deadlock; node_state(<ids>) reads its links by index on a brain of twenty thousand; the suite leaves no drift (SMD-2267)");
 {
   // test-schema [63] holds the rules on one connection; what it cannot hold is
   // a second writer's uncommitted row. drift()'s source_gate arm is the check.
@@ -7182,10 +7182,11 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   const mirror = async (id: string) => (await db`SELECT gates FROM ob1_source_gate WHERE thought_id = ${id}::uuid`)[0]?.gates as boolean | undefined;
 
   // The status move first. A moves X's status from known to unknown and holds
-  // its transaction open; B records X's source row, and its trigger's FOR
-  // SHARE on X waits for A. Once A commits, B's recompute — a fresh statement —
-  // reads X's new status: the mirror row does not gate. Without the lock B
-  // read the status A had not committed yet (started) and its row gated.
+  // its transaction open, and X's bucket (class 22563) with it; B records X's
+  // source row, and its trigger waits on the bucket. Once A commits, B's
+  // upsert — a fresh statement — reads X's new status: the mirror row does not
+  // gate. Without the lock B read the status A had not committed yet
+  // (started) and its row gated.
   const x = await row("[34] X, a github issue", { kind: "race2267", status_type: "started" });
   {
     const connA = racer(), connB = racer();
@@ -7209,15 +7210,15 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
     await connA.close(); await connB.close();
     const g = await mirror(x);
     assert(aHolding && bWaited && errors === "" && g === false && (await drift()) === 0,
-      `a source write of a thought whose status is moving waits on the thought's row until the move commits, then reads its new status: the mirror row does not gate, and no drift (${g}; ${errors || "clean"})`);
+      `a source write of a thought whose status is moving waits on the thought's bucket until the move commits, then reads its new status: the mirror row does not gate, and no drift (${g}; ${errors || "clean"})`);
   }
 
   // The status move first again, against a source row that moves system (the
-  // UPDATE path, which locks and then reconciles in two statements): A moves
-  // X's status back to known and holds; B moves X's source row to jira and
-  // waits on its FOR SHARE; once A commits, B reads started and the mirror
-  // row gates. Without the lock B read weird, and its upsert, queued behind
-  // A's update of the row, wrote it back not gating.
+  // UPDATE path, which locks and then reconciles): A moves X's status back to
+  // known and holds; B moves X's source row to jira and waits on X's bucket;
+  // once A commits, B reads started and the mirror row gates. Without the
+  // lock B read weird, and its upsert, queued behind A's update of the row,
+  // wrote it back not gating.
   {
     const connA = racer(), connB = racer();
     const { p: doneP, open: done } = gate();
@@ -7240,17 +7241,19 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
     await connA.close(); await connB.close();
     const [g] = await db`SELECT system, gates FROM ob1_source_gate WHERE thought_id = ${x}::uuid`;
     assert(aHolding && bWaited && errors === "" && g?.system === "jira" && g?.gates === true && (await drift()) === 0,
-      `a source row moving system while its thought's status moves waits on the thought's row, then reads the committed status: the mirror row is jira's and gates, and no drift (${JSON.stringify(g)}; ${errors || "clean"})`);
+      `a source row moving system while its thought's status moves waits on the thought's bucket, then reads the committed status: the mirror row is jira's and gates, and no drift (${JSON.stringify(g)}; ${errors || "clean"})`);
   }
 
-  // A take against one status update of both thoughts (first review pass).
-  // B holds linear L-TK; one statement moves A's and B's statuses and sleeps
-  // before its trigger runs, holding both rows; meanwhile T1 takes L-TK for A —
-  // the take deletes B's source row, then inserts A's. The delete's trigger
-  // locks B's row before it touches B's mirror row, so it waits for the
-  // statement, whose trigger then updates both mirror rows and commits; T1
-  // goes on. Before, the delete took B's mirror row first, T1's insert waited
-  // for A's row and the statement's trigger for B's mirror row: a deadlock.
+  // A take against one status update of both thoughts (first and second
+  // review passes), two ways round. First: B holds linear L-TK; one statement
+  // moves A's and B's statuses and sleeps before its trigger runs, holding
+  // both rows; meanwhile T1 takes L-TK for A — B's source row out, A's in,
+  // taking A's bucket — and commits; the statement's trigger then takes the
+  // buckets and sets A's mirror row. With pass 1's FOR SHARE on the delete,
+  // the take waited on B's row while holding A's: fine here, but a deadlock
+  // with a thought's delete (below). The window left — the update's trigger
+  // holding A's bucket as it reaches B's mirror row mid-take — is the
+  // header's named case, not raced here.
   {
     const a = await row("[34] TK A", { kind: "race2267", status_type: "started" });
     const b = await row("[34] TK B", { kind: "race2267", status_type: "started" });
@@ -7274,12 +7277,72 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
     await connA.close(); await connB.close();
     const [held] = await db`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = 'L-TK'`;
     assert(bSlept && errors === "" && held?.id === a && (await mirror(a)) === false && (await mirror(b)) === undefined && (await drift()) === 0,
-      `a take of a source row against one status update of both thoughts waits and commits after it — no deadlock: A holds L-TK, its mirror row reads the committed status, B's is gone, and no drift (${errors || "clean"})`);
+      `a take of a source row against one status update of both thoughts, whose trigger has not run: both commit, no deadlock — A holds L-TK, its mirror row reads the status committed last, B's is gone, and no drift (${errors || "clean"})`);
+  }
+  // Second: the status update has run its trigger — it holds both buckets and
+  // B's mirror row — and holds its transaction; the take waits on B's mirror
+  // row, then on nothing, and reads the committed statuses.
+  {
+    const a = await row("[34] TK2 A", { kind: "race2267", status_type: "started" });
+    const b = await row("[34] TK2 B", { kind: "race2267", status_type: "started" });
+    await db`SELECT record_thought_source(${b}::uuid, 'linear', 'L-TK2', 'x', 'text/plain')`;
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let bHolding = false, aPid = -1, errors = "";
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx.unsafe(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${a}', '${b}')`);
+      bHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(() => bHolding || errors !== "");
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`SELECT record_thought_source(${a}::uuid, 'linear', 'L-TK2', 'x2', 'text/plain', NULL, true)`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(async () => aPid > 0 && (await blocked(aPid)));
+    const aWaited = aPid > 0 && (await blocked(aPid));
+    done();
+    await bDone; await aDone;
+    await connA.close(); await connB.close();
+    assert(bHolding && aWaited && errors === "" && (await mirror(a)) === false && (await mirror(b)) === undefined && (await drift()) === 0,
+      `a take against a status update of both thoughts that holds their buckets waits for it, then commits: A's mirror row reads the committed status, B's is gone, no deadlock and no drift (${errors || "clean"})`);
+  }
+
+  // A thought's delete against a delete of its source row (second review
+  // pass). One statement deletes T and sleeps before its cascade, holding T's
+  // row; meanwhile another deletes T's source row, whose trigger drops the
+  // mirror row by key and takes no lock — so it commits, and the cascade then
+  // finds the source row gone. With pass 1's FOR SHARE on T there, the source
+  // delete waited for T's row while the cascade waited for the source row: a
+  // deadlock.
+  {
+    const t = await row("[34] DL T", { kind: "race2267", status_type: "started" });
+    await db`SELECT record_thought_source(${t}::uuid, 'github', 'G-DL', 'x', 'text/plain')`;
+    const connA = racer(), connB = racer();
+    let errors = "", bPid = -1;
+    const bDone = (async () => {
+      bPid = Number((await connB`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await connB.unsafe(`SET statement_timeout = '15s'`);
+      await connB.unsafe(`WITH d AS (DELETE FROM thoughts WHERE id = '${t}' RETURNING 1) SELECT pg_sleep(1.5) FROM (SELECT count(*) FROM d) x`);
+    })().catch((e: Error) => { errors += `B: ${e.message}; `; });
+    const sleeping = async () => bPid > 0 && Number((await db`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${bPid} AND wait_event = 'PgSleep'`)[0].n) === 1;
+    await waitFor(sleeping);
+    const bSlept = await sleeping();
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`DELETE FROM thought_sources WHERE thought_id = ${t}::uuid`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [{ left }] = await db`SELECT count(*)::int AS left FROM thoughts WHERE id = ${t}::uuid`;
+    assert(bSlept && errors === "" && left === 0 && (await mirror(t)) === undefined && (await drift()) === 0,
+      `a delete of a thought's source row while the thought's own delete holds its row commits, and the delete after it — no deadlock, no mirror row left, no drift (${errors || "clean"})`);
   }
 
   // The source write first. A records Y's source row and holds its
   // transaction open (its mirror row gates: Y states started); B moves Y's
-  // status to unknown and waits on A's FOR SHARE. Once A commits, B's update
+  // status to unknown and its trigger waits on Y's bucket. Once A commits, B's update
   // finds the mirror row and sets it not to gate.
   const y = await row("[34] Y, a github issue", { kind: "race2267", status_type: "started" });
   {

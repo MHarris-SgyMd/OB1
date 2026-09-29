@@ -70,6 +70,8 @@
 --     is planned on the index: inline, the planner hashed the whole mirror or
 --     scanned it to the first gating row, which for a system that never gates
 --     is all of it, per link (70 ms for forty markdown ids at 100,000).
+--   * ob1_source_gate_lock(uuid[]) — the gate's advisory locks for a set of
+--     thoughts (below, Concurrency).
 --   * ob1_node_dependencies_of(uuid[]) — each named thought's open blockers,
 --     unknown blockers and whether some gating active link names its ticket,
 --     every thought when NULL. Two branches under one GROUP BY thought_id,
@@ -95,18 +97,22 @@
 --   to a set of ids and read for its dependency columns computes every thought
 --   (the one-time filter keeps NULL's branch), as it did before this file.
 --
---   Concurrency. A source write and a status move of the same thought meet on
---   the thought's row. The thoughts trigger runs inside the UPDATE that holds
---   the row's lock; the thought_sources trigger takes FOR SHARE on the rows of
---   the thoughts it recomputes, in id order — in the insert's own read, or in
---   a statement before an update's reconcile — which conflicts with that lock.
---   So either the source writer waits for the status move to commit and then
---   reads the new status (a locking read that waited reads the committed row,
---   and a reconcile is a fresh statement), or the status move waits for the
---   source writer to commit and then finds its mirror row. A source row's
---   delete locks its thought's row too, before its mirror row, so every path
---   takes a thought's row before that thought's mirror row. No advisory lock:
---   nothing here orders against 068's classes.
+--   Concurrency. A source write and a status move of the same thought take
+--   turns on an advisory transaction lock: a bucket of the thought's id, 256
+--   buckets in class 22563 (ob1_source_gate_lock), taken in bucket order by
+--   the thought_sources triggers' insert and update paths and by the thoughts
+--   status trigger, each before it reads a status or writes a mirror row, and
+--   each read a statement after the lock — so whichever goes second reads
+--   what the first committed. A source row's delete takes none: it
+--   drops the mirror row by key, and a status move meets it on that row. So a
+--   transaction holds at most 256 of these locks; two thoughts sharing a
+--   bucket only serialise more than they must. The status trigger sorts after
+--   068's on thoughts, so a statement takes 068's classes before 22563.
+--   Not the thought's row (FOR SHARE, until the second review pass): a source
+--   writer's share lock crossed every lock taken in another order — a
+--   multi-row UPDATE of thoughts in scan order, a delete's cascade, a take's
+--   second thought — and deadlocked where main waited; it held off every edit
+--   of the thought until commit; and it needed UPDATE on thoughts.
 --   REPEATABLE READ is refused for an insert of a source row, a move of one to
 --   another thought or system, and every status move between known and
 --   unknown — a thought with no source row too, which the check cannot tell
@@ -115,25 +121,27 @@
 --   re-record and an upsert that changes nothing run. SERIALIZABLE is left to
 --   SSI (exact only when every writer of source rows and statuses is
 --   serializable; after a mix, rebuild under READ COMMITTED).
---   Two costs of the lock. A source writer holds FOR SHARE on its thoughts
---   until it commits, so an edit of one of those thoughts — any edit, not only
---   a status move — waits for it, where before it did not (the foreign key's
---   own lock, FOR KEY SHARE, blocks no edit). And transactions that deadlock
---   (40P01) where before they waited: one that writes a source row and then
---   updates a thought another is updating; two single statements too — a
---   multi-row UPDATE of thoughts, which locks in scan order, against a
---   multi-row insert of their source rows, which locks in id order, or a
---   source row moved to another thought against that thought's delete (first
---   review pass). Retry it; the repo's structured passes write one ticket per
---   transaction and never move a source row's thought.
---
+--   What can still deadlock (40P01), retryable: a transaction that takes these
+--   buckets in one statement and 068's in a later one (a source write, then a
+--   ticket row's write) against one that takes them the other way; a take
+--   (record_thought_source's p_take, two statements) against one status update
+--   of both its thoughts, when the update's trigger has taken the new
+--   thought's bucket and reaches the old one's mirror row as the take deletes
+--   it; and a multi-row delete of source rows against a multi-row insert or
+--   status move over the same thoughts, when the plans lock the mirror's rows
+--   in different orders. A stress run of three connections writing source
+--   rows, thoughts and statuses at random (six seeds of 3,600 statements
+--   each) gave 0 and 4 deadlocks in two runs under READ COMMITTED, and 2 under
+--   SERIALIZABLE, against main's 1 and 1. The repo's structured passes write
+--   one ticket per transaction.
+
 -- UPGRADE
 --   Run `db/migrate.ts --grant <role>` again for every role granted before
 --   this file (the capture group gains SELECT, INSERT, UPDATE and DELETE on
 --   ob1_source_gate).
 --
 -- SAFETY
---   Additive: one table, one index, seven functions, five triggers; four
+--   Additive: one table, one index, eight functions, five triggers; four
 --   bodies redefined with their signatures unchanged — source_thought,
 --   node_dependencies and node_state with their rows unchanged, drift with a
 --   third arm. No
@@ -147,12 +155,10 @@
 --   known and an unknown status_type, and a read of the dependency columns
 --   that reaches the gate (every whole-brain read — graph-centrality
 --   --startable and --decay-blocked, node_dependencies()' gates — and a keyed
---   read whose ids carry a link) is refused on the new table; a delete of a
+--   read of sourced or linked thoughts) is refused on the new table; a delete of a
 --   thought with no source row, an edit that moves no status between those
---   two, and every lifecycle read are not. Every source write takes FOR SHARE
---   on its thoughts, which needs UPDATE on thoughts: the capture group holds
---   it, and a role that writes source rows with SELECT alone there is refused
---   on thoughts. A migration that changes node_lifecycle_types() changes what
+--   two, and every lifecycle read are not. The locks are advisory and need no
+--   privilege. A migration that changes node_lifecycle_types() changes what
 --   every mirror row should hold: it runs ob1_rebuild_source_gate() after
 --   itself. Idempotent: IF NOT
 --   EXISTS, DROP TRIGGER IF EXISTS, CREATE OR REPLACE, and the seed is a
@@ -318,6 +324,39 @@ COMMENT ON FUNCTION ob1_node_projection_drift() IS
 -- ---------------------------------------------------------------------------
 -- The triggers
 -- ---------------------------------------------------------------------------
+-- The lock: an advisory transaction lock per bucket of the thought's id, 256
+-- buckets in class 22563, taken in bucket order by every writer that reads a
+-- thought's status for the mirror or moves it — so a source write and a status
+-- move of one thought take turns, and whichever comes second reads what the
+-- first committed. Not the thought's row (FOR SHARE, until the second review
+-- pass): a source writer's share lock on the thoughts it wrote crossed every
+-- lock taken in another order — a multi-row UPDATE of thoughts in scan order,
+-- a delete's cascade, a take's second thought — and deadlocked where main
+-- waited (fifteen 40P01 in a stress run of mixed writers, against one on
+-- main); and it held off every edit of those thoughts until commit, and needed
+-- UPDATE on thoughts. A bucket is held by nothing but these writers, and each
+-- takes its buckets after its own row writes and before it touches a mirror
+-- row. A take (record_thought_source's p_take) is two statements, the old
+-- holder's source row out and then the new one's in, and takes the second
+-- thought's bucket in the second: locking both buckets up front, as pass 2
+-- first did, put a bucket before a source row's lock where every trigger puts
+-- the row first, and a stress run of mixed writers gave 23 deadlocks against 4
+-- without it (six seeds of 3,600 statements; main, none or one).
+CREATE OR REPLACE FUNCTION ob1_source_gate_lock(p_ids uuid[])
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  b int;
+BEGIN
+  FOR b IN SELECT DISTINCT hashtext(x::text) & 255 FROM unnest(p_ids) x WHERE x IS NOT NULL ORDER BY 1 LOOP
+    PERFORM pg_advisory_xact_lock(22563, b);
+  END LOOP;
+END
+$$;
+COMMENT ON FUNCTION ob1_source_gate_lock(uuid[]) IS
+  'Takes the gate''s advisory transaction locks for the thoughts given — class 22563, a bucket of 256 per thought id, in bucket order — so a transaction holds at most 256 of them. The thought_sources triggers'' insert and update paths and the thoughts status trigger take them before they read a thought''s status or write a mirror row. Migration 069 / SMD-2267.';
+
 CREATE OR REPLACE FUNCTION ob1_source_gate_sync()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -338,25 +377,22 @@ BEGIN
     END IF;
     -- thought_id is thought_sources' key, so a thought whose source row this
     -- statement deleted has none: its mirror row goes by key, with no read of
-    -- thought_sources, so a capture role that deletes a sourced thought needs
-    -- this table alone. The thoughts' rows are locked first, FOR SHARE in id
-    -- order, as every other path locks them before a mirror row: a take
-    -- (record_thought_source's p_take) that deleted one thought's source row
-    -- and then inserted another's deadlocked with one status update of both
-    -- (first review pass). A thought this statement deleted is gone and is
-    -- not locked. A re-insert of the thought's source row waits on the key
-    -- until this commits, and its own trigger recomputes the row afresh.
-    PERFORM 1 FROM thoughts t WHERE t.id = ANY(ARRAY(SELECT o.thought_id FROM old_rows o)) ORDER BY t.id FOR SHARE;
+    -- thought_sources or thoughts and no lock — a status move of the thought
+    -- meets the delete on the mirror row itself, and whichever goes second
+    -- finds the row as the first left it. A re-insert of the thought's source
+    -- row waits on the key until this commits, and its own trigger recomputes
+    -- the row afresh. (A lock here, pass 1's, deadlocked a thought's delete
+    -- with a delete of its source row, and a take with a delete of the old
+    -- holder — second review pass.)
     DELETE FROM ob1_source_gate g WHERE g.thought_id = ANY(ARRAY(SELECT o.thought_id FROM old_rows o));
     RETURN NULL;
   ELSIF TG_OP = 'INSERT' THEN
-    -- A new source row adds a mirror row and removes none, so one statement:
-    -- the upsert reads each thought's status under FOR SHARE, in id order —
-    -- a locking read that waits for a status move re-reads the row that move
-    -- committed — so the lock and the read are the one step the UPDATE path
-    -- below takes in two (a reconcile per insert cost 0.26 ms a
-    -- record_thought_source; SMD-2267's paired timing). An INSERT that
-    -- inserted nothing (an upsert that took its conflict branch) returns.
+    -- A new source row adds a mirror row and removes none: the buckets, then
+    -- one upsert — a fresh statement, so it reads the status a move that held
+    -- the bucket committed. An INSERT that inserted nothing (an upsert that
+    -- took its conflict branch) returns. One upsert rather than a reconcile per
+    -- insert: that cost 0.26 ms a record_thought_source (SMD-2267's paired
+    -- timing).
     IF NOT EXISTS (SELECT 1 FROM new_rows) THEN
       RETURN NULL;
     END IF;
@@ -366,11 +402,10 @@ BEGIN
         HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of source rows and statuses is serializable.',
         ERRCODE = 'feature_not_supported';
     END IF;
+    PERFORM ob1_source_gate_lock(ARRAY(SELECT n.thought_id FROM new_rows n));
     INSERT INTO ob1_source_gate AS g (thought_id, system, gates)
     SELECT n.thought_id, n.system, coalesce(t.metadata->>'status_type' = ANY(node_lifecycle_types()), false)
       FROM new_rows n JOIN thoughts t ON t.id = n.thought_id
-     ORDER BY t.id
-       FOR SHARE OF t
     ON CONFLICT (thought_id) DO UPDATE SET system = EXCLUDED.system, gates = EXCLUDED.gates
      WHERE (g.system, g.gates) IS DISTINCT FROM (EXCLUDED.system, EXCLUDED.gates);
     RETURN NULL;
@@ -393,17 +428,16 @@ BEGIN
       HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of source rows and statuses is serializable.',
       ERRCODE = 'feature_not_supported';
   END IF;
-  -- The thoughts' rows, in id order: a status move holds its row until it
-  -- commits, so this waits for it and the recompute below — a fresh statement
-  -- — reads its status; a status move arriving later waits for this and finds
-  -- the mirror row.
-  PERFORM 1 FROM thoughts t WHERE t.id = ANY(v_ids) ORDER BY t.id FOR SHARE;
+  -- The buckets, then the reconcile — a fresh statement, which reads the
+  -- status a move that held the bucket committed; a move arriving later waits
+  -- for this and finds the mirror row.
+  PERFORM ob1_source_gate_lock(v_ids);
   PERFORM ob1_source_gate_reconcile(v_ids);
   RETURN NULL;
 END
 $$;
 COMMENT ON FUNCTION ob1_source_gate_sync() IS
-  'The thought_sources_node_gate_* row-change triggers'' body. A DELETE drops the deleted rows'' mirror rows by key (thought_id is the source row''s key), reading nothing else. An INSERT upserts the new rows'' mirror rows in one statement, reading each thought''s status under FOR SHARE in id order. An UPDATE takes, from the transition tables, the thoughts whose source row vanished, appeared or changed system; returns at once when there are none; otherwise locks those thoughts'' rows FOR SHARE in id order and reconciles their mirror rows. Both refuse under REPEATABLE READ. Migration 069 / SMD-2267.';
+  'The thought_sources_node_gate_* row-change triggers'' body. A DELETE returns when it deleted nothing, and otherwise drops the deleted rows'' mirror rows by key (thought_id is the source row''s key), reading nothing else and taking no lock. An INSERT takes the new rows'' buckets (ob1_source_gate_lock) and upserts their mirror rows in one statement. An UPDATE takes, from the transition tables, the thoughts whose source row vanished, appeared or changed system; returns at once when there are none; otherwise takes their buckets and reconciles their mirror rows. The INSERT and UPDATE paths refuse under REPEATABLE READ. Migration 069 / SMD-2267.';
 
 CREATE OR REPLACE FUNCTION ob1_source_gate_status()
 RETURNS trigger
@@ -432,9 +466,12 @@ BEGIN
       HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of source rows and statuses is serializable.',
       ERRCODE = 'feature_not_supported';
   END IF;
-  -- This statement holds the rows' locks, so a source writer of one of them
-  -- waits on its FOR SHARE until this commits; one that committed first left
-  -- its mirror row for this to find.
+  -- The buckets, then the update — a fresh statement: a source writer that
+  -- held a bucket first has committed its mirror row, and this finds it; one
+  -- arriving later waits for this and reads the status it commits. This
+  -- trigger sorts after 068's on thoughts, so a statement takes 068's classes
+  -- before this one.
+  PERFORM ob1_source_gate_lock(v_ids);
   UPDATE ob1_source_gate g
      SET gates = coalesce(t.metadata->>'status_type' = ANY(node_lifecycle_types()), false)
     FROM thoughts t
@@ -444,7 +481,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_source_gate_status() IS
-  'thoughts_node_source_gate_update''s body: from an UPDATE''s transition tables, the thoughts whose status_type moved between one node_lifecycle_types() knows and any other; returns at once when there are none; refuses under REPEATABLE READ; otherwise sets their mirror rows'' gates from the rows as they stand. Migration 069 / SMD-2267.';
+  'thoughts_node_source_gate_update''s body: from an UPDATE''s transition tables, the thoughts whose status_type moved between one node_lifecycle_types() knows and any other; returns at once when there are none; refuses under REPEATABLE READ; otherwise takes their buckets (ob1_source_gate_lock) and sets their mirror rows'' gates from the rows as they stand. Migration 069 / SMD-2267.';
 
 CREATE OR REPLACE FUNCTION ob1_source_gate_truncate()
 RETURNS trigger

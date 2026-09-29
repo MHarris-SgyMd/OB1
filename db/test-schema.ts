@@ -10982,6 +10982,19 @@ console.log("\n[63] Migration 069: node_state's dependency columns read the ids 
       && /One-Time Filter: \(\$1 IS NULL\)/.test(generic),
     `node_state(<ids>) read for every column: for a constant list no whole-brain branch is planned, and with sequential scans off every table is reached by index; for a parameter the whole-brain branch sits behind a one-time filter (${seqs.join(", ") || "no sequential scan"})`);
 
+  // The gate's locks are buckets of the thought's id, 256 in class 22563
+  // (second review pass: row locks on thoughts until then): six hundred source
+  // rows written in one transaction hold at most 256 of them, and more than
+  // one bucket's worth.
+  let gateLocks = -1;
+  await db.transaction(async (tx) => {
+    const many = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) SELECT '[63] lock bound ' || g, '{}'::jsonb FROM generate_series(1, 600) g RETURNING id::text AS id`)).rows;
+    for (const [k, m] of many.entries()) await tx.query(`SELECT record_thought_source($1::uuid, 'github', $2, 'x', 'text/plain')`, [m.id, `LB-${k}`]);
+    gateLocks = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND classid = 22563`)).rows[0].n;  // one session: PGlite's pg_locks does not carry pg_backend_pid()
+    await tx.rollback();
+  });
+  assert(gateLocks > 128 && gateLocks <= 256, `six hundred source rows written in one transaction hold ${gateLocks} of the gate's locks — buckets of the thought's id, never more than 256`);
+
   // The grant. A structured pass's role (capture, server, structure) records
   // a source row and its links, moves its status and reads the dependency
   // columns; a capture role alone moves a sourced thought's status and
@@ -11016,6 +11029,13 @@ console.log("\n[63] Migration 069: node_state's dependency columns read the ids 
     await q(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = $1`, [sourced.id]);
     await q(`DELETE FROM thoughts WHERE id = $1`, [sourced.id]);
   }, "SELECT ON thought_sources");
+  // The locks are advisory: a structured pass's role without UPDATE on
+  // thoughts writes and deletes a source row as it did before this file.
+  const noUpdate = await asRole("ob1_gate_no_update", ["capture", "server", "structure"], false, async () => {
+    const [c] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[63] a source without UPDATE', '{"status_type": "started"}') RETURNING id::text AS id`);
+    await q(`SELECT record_thought_source($1::uuid, 'github', 'G-no-update', 'x', 'text/plain')`, [c.id]);
+    await q(`DELETE FROM thought_sources WHERE thought_id = $1`, [c.id]);
+  }, "UPDATE ON thoughts");
   const [bareRow] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[63] a bare sourced row', '{"status_type": "started"}') RETURNING id::text AS id`);
   await q(`SELECT record_thought_source($1::uuid, 'github', 'G-bare', 'x', 'text/plain')`, [bareRow.id]);
   const bareCapture = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`INSERT INTO thoughts (content, metadata) VALUES ('[63] a plain capture', '{"status_type": "started"}')`));
@@ -11033,10 +11053,10 @@ console.log("\n[63] Migration 069: node_state's dependency columns read the ids 
   });
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[63] a %'`);
   const [gone] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_source_gate WHERE thought_id = $1`, [sourced.id]);
-  assert(structured === "ok" && captureOnly === "ok" && gone.n === 0 && bareCapture === "ok" && bareEdit === "ok" && bareDelete === "ok"
+  assert(structured === "ok" && captureOnly === "ok" && noUpdate === "ok" && gone.n === 0 && bareCapture === "ok" && bareEdit === "ok" && bareDelete === "ok"
       && /permission denied for table ob1_source_gate\b/.test(bareStatus) && /permission denied for table ob1_source_gate\b/.test(bareSource)
       && ROLE_GRANTS.capture.some((r) => (r as { table?: string }).table === "ob1_source_gate"),
-    `a structured pass's role records a source row and its links, moves its status and reads the dependency columns; a capture role without SELECT on the source rows moves a sourced thought's status and deletes it, its mirror row going with it; without the mirror a plain capture, an edit that keeps its status known and a delete of an unsourced thought succeed, and a status move and a source write are refused on it (${structured}; ${captureOnly}; ${bareEdit}; ${bareDelete}; ${bareStatus}; ${bareSource})`);
+    `a structured pass's role records a source row and its links, moves its status and reads the dependency columns; a capture role without SELECT on the source rows moves a sourced thought's status and deletes it, its mirror row going with it; a role without UPDATE on thoughts writes and deletes a source row (the gate's locks are advisory); without the mirror a plain capture, an edit that keeps its status known and a delete of an unsourced thought succeed, and a status move and a source write are refused on it (${structured}; ${captureOnly}; ${noUpdate}; ${bareEdit}; ${bareDelete}; ${bareStatus}; ${bareSource})`);
 
   // Replays: 069 over itself writes nothing; 058 alone puts back its grouped
   // gate and its whole-brain node_state, and the triggers keep the mirror

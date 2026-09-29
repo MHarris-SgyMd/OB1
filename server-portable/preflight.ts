@@ -1692,7 +1692,7 @@ if (configFailed) {
             // no status between those two return before touching it (SMD-2267).
             const gateMiss = missingByTable.get(GATE) ?? [];
             if (gateMiss.length) {
-              fails.push((gateMiss.includes("SELECT") ? "the reads of node_state's dependency columns that reach the gate (graph-centrality --startable and --decay-blocked, node_dependencies()' gates, a keyed read whose ids carry a link) and " : "")
+              fails.push((gateMiss.includes("SELECT") ? "the reads of node_state's dependency columns that reach the gate (graph-centrality --startable and --decay-blocked, node_dependencies()' gates, a keyed read of sourced or linked thoughts) and " : "")
                 + "the writes that keep the gate — a source row's insert, move or delete (a structured pass, and a delete of a thought that has one) and a status_type moving between a known and an unknown one, each needing some of these"
                 + " (069's triggers keep node_state's gate as the caller)");
             }
