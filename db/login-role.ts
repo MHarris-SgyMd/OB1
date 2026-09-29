@@ -10,10 +10,13 @@
  * credential passes through it. This is the one step that does, for a role a
  * compose file names; the privileges are still --grant's (`--groups`).
  * - The role is LOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOREPLICATION
- *   and NOBYPASSRLS, whether it is created or already there.
- * - It refuses a role that is a superuser or owns a relation in this
- *   database: that is a migrator's role, and making it a runner's would take
- *   what the migrator needs.
+ *   and NOBYPASSRLS, with no connection limit, no expiry and no settings of
+ *   its own, whether it is created or already there.
+ * - It refuses a role that is a superuser, a member of any other role (it
+ *   would hold that role's privileges, and a member of postgres can SET ROLE
+ *   to it), or the owner of anything in any database — a relation, schema,
+ *   function, type or the database itself (a schema's owner can drop the
+ *   tables in it). Such a role is a migrator's, not one to give a service.
  * - The password, read from the named variable, must be 24 or more of
  *   [A-Za-z0-9_-] (`provision.ts --init` writes 64 hex). It is sent as a
  *   SCRAM-SHA-256 verifier computed here, so the password itself is never in
@@ -73,19 +76,31 @@ if (import.meta.main) {
   const sql = openSql(databaseUrl(cli.value("url")), { max: 1 });
   await closeThenExit(sql, async () => {
     try {
-      const [found] = (await sql`SELECT rolsuper FROM pg_roles WHERE rolname = ${role}`) as { rolsuper: boolean }[];
+      const [found] = (await sql`SELECT oid, rolsuper FROM pg_roles WHERE rolname = ${role}`) as { oid: number; rolsuper: boolean }[];
       if (found?.rolsuper) {
         console.error(`login-role.ts: ${role} is a superuser; this step makes a role that is not one, and will not take one that is. Name another role. Nothing changed.`);
         return 2;
       }
-      const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname = ${role}`) as { n: number }[];
-      if (n > 0) {
-        console.error(`login-role.ts: ${role} owns ${n} relation(s) in this database, so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
-        return 2;
+      if (found) {
+        // A role in another role holds what that one holds, and can SET ROLE into it (a member of postgres is a superuser in all but name); one that owns anything in any database can drop or replace it (a schema's owner drops the tables in it; the database's owns public). Both refused (review pass 1: each was taken).
+        const memberOf = ((await sql`SELECT g.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = ${found.oid} ORDER BY 1`) as { rolname: string }[]).map((r) => r.rolname);
+        if (memberOf.length) {
+          console.error(`login-role.ts: ${role} is a member of ${memberOf.join(", ")}, whose privileges it holds; this step gives a service a role that is a member of none. Name another role, or revoke the membership. Nothing changed.`);
+          return 2;
+        }
+        const [{ owned }] = (await sql`SELECT (SELECT count(*) FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = ${found.oid} AND deptype = 'o') + (SELECT count(*) FROM pg_class WHERE relowner = ${found.oid}) AS owned`) as { owned: number }[];
+        if (Number(owned) > 0) {
+          console.error(`login-role.ts: ${role} owns ${owned} object(s) (a relation, schema, function, type or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
+          return 2;
+        }
       }
       // The verifier holds only base64 and `$:`, so it quotes as it stands; the doubled quote is the rule all the same.
       const verifier = scramVerifier(process.env[passwordEnv]!).replaceAll("'", "''");
-      await sql.unsafe(`${found ? "ALTER" : "CREATE"} ROLE ${quoteIdent(role)} ${ROLE_ATTRIBUTES} PASSWORD '${verifier}'`);
+      await sql.begin(async (tx) => {
+        await tx.unsafe(`${found ? "ALTER" : "CREATE"} ROLE ${quoteIdent(role)} ${ROLE_ATTRIBUTES} CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD '${verifier}'`);
+        // A setting made on the role by hand (a search_path, a statement timeout) goes with the rest of what this step does not make.
+        if (found) await tx.unsafe(`ALTER ROLE ${quoteIdent(role)} RESET ALL`);
+      });
       console.log(`login-role.ts: ${role} ${found ? "updated" : "created"} (${ROLE_ATTRIBUTES}; password from ${passwordEnv}, stored as a SCRAM verifier)`);
       return 0;
     } catch (e) {

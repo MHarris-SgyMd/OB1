@@ -710,6 +710,7 @@ async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promi
   if (stray.length) return { pipeline: p.name, ok: false, stage: "one-source", why: `${stray.length} line(s) are not ${p.name}'s source — the batch is refused whole; nothing written`, emitted, notes: stray.slice(0, 20) };
   if (emitted === 0) return { pipeline: p.name, ok: true, emitted, counts: null, report: [`${p.name}: the emitter printed nothing — no export under ${input}?`] };
   const ing = await step([...c.asPipeline, ...c.commands.ingest(p)], { cwd: c.cwd, env: c.env, stdin: e.bytes, deadline });
+  if (ing.code !== 0 && passwordRefused(ing.err)) return { pipeline: p.name, ok: false, stage: "ingest", exit: ing.code, emitted, why: RUNNER_PASSWORD_WHY };
   // The ingester's own "next: bun db/reembed.ts" is the runner's next step, not the reader's.
   const base = { pipeline: p.name, emitted, counts: parseTally(ing.out), report: redactAll(lines(ing.out).filter((l) => !/^\s*next: /.test(l))), notes: shownTail(ing.err, 8000) };
   if (ing.timedOut || ing.code !== 0) return { ...base, ok: false, stage: "ingest", exit: ing.timedOut ? null : ing.code, why: ing.timedOut ? `the ingester ${past}` : `the ingester exited ${ing.code}${ing.code === 2 ? " (it refused the batch or its configuration; nothing written — the notes say which)" : ""}` };
@@ -881,6 +882,11 @@ function canRead(dir: string): boolean {
 
 /** What a missing emitter needs, said the same way at build and at start (review pass 4: "rebuild" was the advice at both, and a rebuild can never add it). */
 const missingEmitterHelp = (missing: string[]) => `pipelines.json names an emitter the image does not hold (${missing.join("; ")}). Copy it into the image: a COPY line in deploy/orchestration/runner.Dockerfile, and a \`!<its path>\` line in the repo root's .dockerignore (which keeps recipes/ and evals/ out); then rebuild the runner: compose --profile orchestration up -d --build orchestration-runner`;
+
+/** Whether a step's stderr is Postgres refusing the runner's password: its role's was changed and the runner not recreated (review pass 1: a bare stack trace). */
+const passwordRefused = (stderr: string) => /password authentication failed for user/.test(stderr);
+/** What the runner says then. */
+const RUNNER_PASSWORD_WHY = "Postgres refused the runner's database password: OB1_RUNNER_DB_PASSWORD was changed and the runner not recreated with it. Start the profile again (compose --profile orchestration up -d), which resets the role's password and recreates the runner; nothing was written";
 
 /** A postgres URL's password, "" when it has none; null when there is no URL to read. */
 export function databasePassword(url: string | undefined): string | null {
@@ -1299,6 +1305,18 @@ async function selfCheck(): Promise<number> {
   expect("with no networked pipeline, the rules open nothing", !/ accept$/m.test(egressRules(parsePipelines(one({})))));
   expect("every emitter uid is inside the range the rules close", [uOn, uOff, emitterUid("x"), emitterUid("fixture")].every((u) => u >= EMITTER_UIDS[0] && u <= EMITTER_UIDS[1]));
   expect("the capabilities the image's command drops are read from CapEff", heldEgressCaps("CapEff:\t00000000000000e0\n").length === 0 && JSON.stringify(heldEgressCaps("CapPrm:\t0\nCapEff:\t00000000000011e0\n")) === JSON.stringify(["NET_ADMIN", "SETPCAP"]) && heldEgressCaps("") .length === 0);
+
+  // SMD-2289 part 2: an ingester Postgres refused on the password is said as that, with the fix, not as a bare exit.
+  const pwFail = await serve(config({
+    pipelines: [parsePipelines(one({ name: "pwfail", emitter: emit(`console.log(${JSON.stringify(item("fixture"))})`) }))[0]], env: process.env,
+    commands: { ...commands, ingest: () => ["bun", "-e", `console.error('PostgresError: password authentication failed for user "ob1_orchestration_runner"'); process.exit(1)`] },
+  }), 0);
+  try {
+    const pr = await (await fetch(`http://127.0.0.1:${pwFail.port}/run/pwfail`, { method: "POST", headers: { "x-runner-key": key } })).json() as Report;
+    expect(`an ingester refused on the database password says so and how to fix it (${pr.why})`, pr.stage === "ingest" && /refused the runner's database password/.test(pr.why ?? "") && /up -d/.test(pr.why ?? ""));
+  } finally {
+    pwFail.stop(true);
+  }
 
   // The proxy. Its upstream stand-in echoes what it gets, and says BYE when
   // the client has shut its write side, so a tunnel that drops a half-closed

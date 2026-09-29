@@ -1852,7 +1852,8 @@ export const ROLE_GRANTS = Object.freeze({
   // record/accept functions run as the caller).
   worker: Object.freeze([
     Object.freeze({ table: "thought_work_claims",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
-    Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["INSERT", "UPDATE"]),                     since: "006" }),
+    // SELECT too: reembed reads the model and its job keys before it writes them, which the server group's SELECT used to cover — and a role given the worker group for that alone would take the server group's key writes with it (SMD-2289 review pass 1).
+    Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),           since: "006" }),
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
     // 063's rebuild_derived (SMD-1732), run by db/rebuild.ts or by SMD-1723's
     // forget: the forget arm removes the snapshot rows at a leaving thought's

@@ -607,8 +607,10 @@ services:
   #
   # The runner's database role (SMD-2289): a LOGIN role that is not a
   # superuser and owns nothing, granted what the runner's ingester and reembed
-  # run (capture, server, worker, structure and extraction, measured) and no
-  # more. A one-shot on the migrator's image, which connects as the migrator
+  # run (capture, worker, structure and extraction, measured) and no
+  # more: not the server group, whose writes to ob1_agent_keys could clear a
+  # key's revocation. It is a member of no role. A one-shot on the migrator's
+  # image, which connects as the migrator
   # does: db/login-role.ts creates the role or resets its password to
   # OB1_RUNNER_DB_PASSWORD (`provision.ts --init` writes it), then
   # `migrate.ts --grant --groups` grants. Every `up` runs it, so a rotated
@@ -622,9 +624,10 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
       # No `:?`, for the reason n8n's block gives: login-role.ts refuses without
-      # it, and says to run --init.
+      # it and says to run --init. `up` then fails naming this service, and the
+      # runner, which waits on it, is not started.
       OB1_RUNNER_DB_PASSWORD: ${OB1_RUNNER_DB_PASSWORD:-}
-    command: ["sh", "-c", "bun login-role.ts --role ob1_orchestration_runner --password-env OB1_RUNNER_DB_PASSWORD && bun migrate.ts --grant ob1_orchestration_runner --groups capture,server,worker,structure,extraction"]
+    command: ["sh", "-c", "bun login-role.ts --role ob1_orchestration_runner --password-env OB1_RUNNER_DB_PASSWORD && bun migrate.ts --grant ob1_orchestration_runner --groups capture,worker,structure,extraction"]
     depends_on:
       postgres:
         condition: service_healthy

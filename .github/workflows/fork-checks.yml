@@ -1056,28 +1056,40 @@ jobs:
 
       # SMD-2289: the runner's database role, as compose makes it. The
       # one-shot runs twice against this job's Postgres: the role created,
-      # then updated, as a rotated password would be. Then, over TCP with its
-      # password, the role is not a superuser, reads thoughts (its groups'
-      # privileges), and cannot create a table (it owns nothing and holds no
-      # CREATE).
+      # then updated, as a rotated password would be. Then it is asked over the
+      # compose network, as the runner connects (inside the postgres container
+      # localhost is trusted, so the password would never be checked there):
+      # with its password it is itself, not a superuser, reads thoughts, and
+      # cannot create a table; with a wrong one it is refused. Last, the step
+      # refuses a superuser that owns nothing, and a member of another role,
+      # each by name (review pass 1).
       - name: The import runner's database role is made and granted
         working-directory: deploy
         env:
           OB1_RUNNER_DB_PASSWORD: ci-stand-in-runner-db-password-0123456789
         run: |
-          docker compose -f compose.yaml --profile orchestration run --rm --no-deps orchestration-runner-role
-          docker compose -f compose.yaml --profile orchestration run --rm --no-deps orchestration-runner-role | tee /tmp/role-again.log
+          # run's own flags, then the service, then a command in its image.
+          oneshot() { docker compose -f compose.yaml --profile orchestration run --rm --no-deps "$@"; }
+          oneshot orchestration-runner-role
+          oneshot orchestration-runner-role | tee /tmp/role-again.log
           grep -q "ob1_orchestration_runner updated" /tmp/role-again.log
-          url="postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD}@localhost:5432/openbrain"
-          [ "$(docker compose -f compose.yaml exec -T postgres psql "$url" -Atc "SELECT rolsuper FROM pg_roles WHERE rolname = current_user")" = "f" ]
-          docker compose -f compose.yaml exec -T postgres psql "$url" -Atc "SELECT count(*) FROM thoughts"
-          if docker compose -f compose.yaml exec -T postgres psql "$url" -Atc "CREATE TABLE ob1_runner_role_probe (x int)"; then
-            echo "the runner's role created a table"; exit 1
+          good="postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD}@postgres:5432/openbrain"
+          # shellcheck disable=SC2016 # JavaScript, whose template literals stay unexpanded
+          ask='const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); const [r] = await s`SELECT current_user::text AS u, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS su, (SELECT count(*)::int FROM thoughts) AS n`; let created = true; try { await s`CREATE TABLE ob1_runner_role_probe (x int)`; } catch { created = false; } await s.close(); console.log(JSON.stringify({ ...r, created })); process.exit(r.u === "ob1_orchestration_runner" && r.su === false && !created ? 0 : 1);'
+          oneshot -e ROLE_URL="$good" orchestration-runner-role bun -e "$ask"
+          # shellcheck disable=SC2016 # JavaScript, as above
+          if oneshot -e ROLE_URL="${good/@postgres/x@postgres}" orchestration-runner-role bun -e 'const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); await s`SELECT 1`;'; then
+            echo "a wrong password was accepted"; exit 1
           fi
-          # The step will not take the superuser for a runner's role.
-          if docker compose -f compose.yaml --profile orchestration run --rm --no-deps orchestration-runner-role bun login-role.ts --role postgres --password-env OB1_RUNNER_DB_PASSWORD; then
-            echo "login-role.ts took the superuser"; exit 1
-          fi
+          docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qc "CREATE ROLE ci_super SUPERUSER; CREATE ROLE ci_member; GRANT pg_read_all_data TO ci_member;"
+          for probe in "ci_super is a superuser" "ci_member is a member of pg_read_all_data"; do
+            set +e
+            out=$(oneshot orchestration-runner-role bun login-role.ts --role "${probe%% *}" --password-env OB1_RUNNER_DB_PASSWORD 2>&1)
+            code=$?
+            set -e
+            echo "$out" | tail -1
+            [ "$code" = 2 ] && grep -q "$probe" <<<"$out"
+          done
 
       # SMD-2289: the image's own start, as compose runs the service but
       # without its dependencies (starting opens no database connection).

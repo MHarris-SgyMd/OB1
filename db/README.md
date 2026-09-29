@@ -920,8 +920,13 @@ more before keeps it. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing),
 its password sent as a SCRAM verifier, for a compose service that connects as
 a role of its own: the orchestration runner's `ob1_orchestration_runner`
-holds capture, server, worker, structure and extraction, what its ingester
-and reembed run (measured).
+holds capture, worker, structure and extraction, what its ingester
+and reembed run (measured), and not the server group, whose writes to
+`ob1_agent_keys` could clear a key's revocation. `login-role.ts` refuses a
+role that is a superuser, a member of another role, or the owner of
+anything. Under that role, reembed's `ANALYZE thought_work_claims` (the
+owner's to run) is skipped with a warning, and autovacuum keeps the
+claim table's statistics.
 
 | Group | Object (migration, or `schemas/` file) | Privileges |
 | --- | --- | --- |
@@ -940,7 +945,7 @@ and reembed run (measured).
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `ob1_config` (006) | `INSERT, UPDATE` |
+| | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
 | | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks; without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |

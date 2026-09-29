@@ -138,7 +138,7 @@ if (force && !baseline) {
 // whole list). It grants less; it revokes nothing, so a role granted more
 // before keeps what it has.
 const grantRole = cli.value("grant");
-const grantGroups = groupsArg === undefined ? ROLE_GRANT_GROUPS : groupsArg.split(",").map((g) => g.trim()).filter(Boolean);
+const grantGroups = groupsArg === undefined ? ROLE_GRANT_GROUPS : [...new Set(groupsArg.split(",").map((g) => g.trim()).filter(Boolean))];
 {
   const unknown = grantGroups.filter((g) => !(ROLE_GRANT_GROUPS as readonly string[]).includes(g));
   if (groupsArg !== undefined && (unknown.length || !grantGroups.length)) {
@@ -169,7 +169,7 @@ if (grantRole !== undefined) {
     );
     const missing = wanted.filter((o) => !present.has(o.name)).map((o) => o.name);
     // "; " between names: a function's name carries ", " inside its argument list.
-    const skippedHint = `not yet present, skipped (run --grant again after applying the migration, community schema or extension/recipe schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach): ${missing.join("; ")}`;
+    const skippedHint = `not yet present, skipped (run --grant again after applying the migration, community schema or extension/recipe schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach${missing.includes("schema_migrations") ? "; schema_migrations is this migrator's own ledger, which its first run makes" : ""}): ${missing.join("; ")}`;
     const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { groups: grantGroups, present })];
     if (dryRun) {
       console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`}  (--dry-run: nothing run)\n`);

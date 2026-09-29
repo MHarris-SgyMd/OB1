@@ -706,7 +706,10 @@ hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
 `$`s as variables), `N8N_MCP_KEY`, `N8N_WEBHOOK_KEY`, the import runner's
 `OB1_RUNNER_KEY`, and `OB1_RUNNER_DB_PASSWORD`, its database role's (SMD-2289),
 where the file has none. A stack provisioned before SMD-2289 runs `--init`
-once more to gain the password, or the runner refuses to start and says so. n8n sets its owner from the email and the hash at every start
+once more to gain the password. Without it, `compose --profile orchestration
+up -d` fails naming `orchestration-runner-role`, whose log (`compose logs
+orchestration-runner-role`) says to run `--init`, and the runner is not
+started, the one already running included. n8n sets its owner from the email and the hash at every start
 (`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
 boot, and nobody who reaches the port before provisioning can claim the
 instance. To change the password, edit it, run `--init` again, and recreate
@@ -940,8 +943,10 @@ and provision, which patches n8n's copy.
 **The runner's database role** (SMD-2289). The runner reaches Postgres as
 `ob1_orchestration_runner`, not the superuser. It is a LOGIN role that is not
 a superuser and owns nothing. It holds the grant groups its ingester and
-reembed run, and no more: capture, server, worker, structure and extraction
-(db/README.md, "Grants for a capturing role").
+reembed run, and no more: capture, worker, structure and extraction
+(db/README.md, "Grants for a capturing role"). Not the server group, whose
+writes to `ob1_agent_keys` could clear a key's revocation. It is a member of
+no other role.
 - The `orchestration-runner-role` step makes it, on the migrator's image and
   as the migrator connects, before the runner starts, on every `up`:
   `db/login-role.ts` creates the role or resets its password to

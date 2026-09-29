@@ -8051,16 +8051,15 @@ console.log("\n[53] A role migrate.ts --grant set up runs the entity writer (an 
   // thought_sources was the one (053). A migrations' group is one whose rows
   // are all dated by a migration number — not the community, extension and
   // recipe groups (dated by their files), whose table names a migration table
-  // could share (`entities`). OWNER_ONLY is what no role is granted on
-  // purpose: migrate.ts's ledger, which this suite's brain lacks (it applies
-  // the files itself) and a migrated one has.
-  const OWNER_ONLY = new Set(["schema_migrations"]);
+  // could share (`entities`). migrate.ts's ledger, which this suite's brain
+  // lacks (it applies the files itself), is named too since SMD-2289: the
+  // worker group reads it.
   const migrationGroups = ROLE_GRANT_GROUPS.filter((g) => ROLE_GRANTS[g].every((r) => /^\d{3}$/.test(r.since)));
   const namedTables = new Set(grantedTables(migrationGroups));
   assert(migrationGroups.includes("structure") && migrationGroups.includes("capture") && !migrationGroups.includes("community") && !namedTables.has("entities"),
     `the migrations' groups are the ones dated by migration number (${migrationGroups.join(", ")}), so a community-only table (entities) is not counted as named`);
-  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t) && !OWNER_ONLY.has(t));
-  assert(ungranted.length === 0, `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, migrate.ts's ledger aside (unnamed: ${ungranted.join(", ") || "none"})`);
+  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t));
+  assert(ungranted.length === 0 && namedTables.has("schema_migrations"), `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, and so is migrate.ts's ledger (unnamed: ${ungranted.join(", ") || "none"})`);
   // The community row for 016's mention table is issued on every migrated
   // brain, so it is held to the extraction row's privileges, no wider and now
   // no narrower (config.mjs, the schemas/entity-extraction comment).
