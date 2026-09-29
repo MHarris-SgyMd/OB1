@@ -35,6 +35,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
@@ -5295,7 +5296,7 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
         writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
         chmodSync(join(shimDir, name), 0o755);
       };
-      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; [ -n "$t" ] && echo "CREATE TABLE $t ();"; exit 0`);
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
       shim("pg_restore", "exit 1");
       process.env.PATH = `${shimDir}:${savedPath}`;
       let failed: string | null = null;
@@ -7478,7 +7479,7 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
       chmodSync(join(shimDir, name), 0o755);
     };
-    shim("pg_dump", `: > "${started}"; i=0; while [ ! -e "${go}" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; [ -n "$t" ] && echo "CREATE TABLE $t ();"; exit 0`);
+    shim("pg_dump", `: > "${started}"; i=0; while [ ! -e "${go}" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
     shim("pg_restore", "exit 1");
     process.env.PATH = `${shimDir}:${savedPath}`;
     let midRefused: string | null = null;
@@ -7520,7 +7521,7 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       await plant();
       const rec = (name: string) => join(shimDir, `${name}.rec`);
       const recorder = (name: string, rest: string) => shim(name, `{ echo "--- argv"; printf '%s\\n' "$@"; echo "--- env"; env; } >> "${rec(name)}"\n${rest}`);
-      recorder("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; [ -n "$t" ] && echo "CREATE TABLE $t ();"; exit 0`);
+      recorder("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
       recorder("pg_restore", "exit 1");
       const redirects = { PGHOSTADDR: "10.9.9.9", PGSERVICE: "ob1-nosuch", PGOPTIONS: "-csearch_path=elsewhere", PGHOST: "prod.invalid", PGUSER: "nobody", PGSERVICEFILE: "/nonexistent/pg_service.conf" };
       // A role of its own, so the password is a string no database name holds
@@ -7536,7 +7537,13 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       for (const [k, v] of Object.entries(redirects)) { saved[k] = process.env[k]; process.env[k] = v; }
       let recRun: string | null = null;
       const sourceDb = new URL(URL_!).pathname.slice(1);
-      try { await refresh(asRec(sourceDb), asRec(A) + "?options=-c%20role%3Dob1_nologin", "working"); } catch (e) { recRun = (e as Error).message; }
+      // --from through another loopback name than --to, so the dump's host is
+      // asserted too, not only its database (review pass 2: a dump built on
+      // --to's host survived).
+      // connect.ts's loopback set, not a spelling of its own (test-connect's census).
+      const otherLoopback = [...LOOPBACK_HOSTS].find((h) => h !== new URL(URL_!).hostname && /^[\d.]+$/.test(h))!;
+      const fromUrl = (() => { const x = new URL(asRec(sourceDb)); x.hostname = otherLoopback; return x.toString(); })();
+      try { await refresh(fromUrl, asRec(A) + "?options=-c%20role%3Dob1_nologin", "working"); } catch (e) { recRun = (e as Error).message; }
       finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
       const u = new URL(asRec(A));
       const dumpRec = existsSync(rec("pg_dump")) ? readFileSync(rec("pg_dump"), "utf8") : "";
@@ -7545,7 +7552,7 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       const argvOf = (r: string) => calls(r).join("");
       const envOf = (r: string) => r.split("--- env").slice(1).join("");
       const conninfoTo = `host='${u.hostname}' port='${u.port}' dbname='${A}' user='ob1_rec'`;
-      const conninfoFrom = `host='${u.hostname}' port='${u.port}' dbname='${sourceDb}' user='ob1_rec'`;
+      const conninfoFrom = `host='${otherLoopback}' port='${u.port}' dbname='${sourceDb}' user='ob1_rec'`;
       const dumpCalls = calls(dumpRec);
       assert(/did not produce the thoughts table/.test(recRun ?? "") && argvOf(restoreRec).includes(conninfoTo) && dumpCalls.some((c) => c.includes(conninfoFrom) && c.includes("-Fc")) && dumpCalls.some((c) => c.includes(conninfoTo) && c.includes("--schema-only")),
         `the dump is handed --from's connection string, the probe and pg_restore --to's: the URL's host and port and the server's database and user, not the URL (${(recRun ?? "no error").slice(0, 60)}; restore argv ${JSON.stringify(argvOf(restoreRec).split("\n").filter((l) => l.startsWith("host=")))})`);
@@ -7562,11 +7569,12 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
     }
 
     // The probe: pg_dump is asked, on the connection string pg_restore will
-    // get, for a table made through the connection that drops. A tool that
-    // reaches anywhere else finds nothing, and --to is left as it was.
+    // get, for a table made through the connection that drops. A pg_dump that
+    // reaches another database finds no such table and says so, as the real
+    // one does ("no matching tables were found", exit 1), and --to is left as it was.
     {
       await plant();
-      shim("pg_dump", `while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
       let probeRun: string | null = null;
       try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { probeRun = (e as Error).message; }
       const a = new SQL({ url: urlOf(A), max: 1 });
@@ -7576,13 +7584,47 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
         `a pg_dump that does not find the probe's table stops the refresh before the mark and the drop: ${A} keeps its thoughts and no probe schema or table (${(probeRun ?? "no refusal").slice(0, 120)}; ${leftovers} left)`);
     }
 
+    // A probe that cannot create its schema refuses before the mark: main
+    // dropped public and then failed to create it. An event trigger in A
+    // refuses the probe's CREATE SCHEMA, as a role without CREATE on the
+    // database would be (review pass 2: a catch returning null survived).
+    {
+      await plant();
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
+      const a = new SQL({ url: urlOf(A), max: 1 });
+      try {
+        await a.unsafe(`CREATE OR REPLACE FUNCTION ob1_block_schemas() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'schemas are closed here'; END $$; CREATE EVENT TRIGGER ob1_block_schemas ON ddl_command_start WHEN TAG IN ('CREATE SCHEMA') EXECUTE FUNCTION ob1_block_schemas()`);
+      } finally { await a.close(); }
+      let blocked: string | null = null;
+      try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { blocked = (e as Error).message; }
+      const b = new SQL({ url: urlOf(A), max: 1 });
+      let probes = -1;
+      try {
+        probes = Number((await b`SELECT count(*)::int AS n FROM pg_namespace WHERE nspname LIKE 'ob1_refresh_probe_%'`)[0].n);
+        await b.unsafe("DROP EVENT TRIGGER ob1_block_schemas; DROP FUNCTION ob1_block_schemas()");
+      } finally { await b.close(); }
+      assert(/^--to: the probe could not create a schema through the connection that drops \(.*schemas are closed here/.test(blocked ?? "") && /--to is untouched/.test(blocked ?? "") && (await markers())[A] && probes === 0,
+        `a probe that cannot create its schema refuses before the mark: ${A} keeps its thoughts, no probe schema (${(blocked ?? "no refusal").slice(0, 110)}; ${probes} left)`);
+      // A probe schema a killed run left behind is swept once the target is
+      // marked: the reset drops public only.
+      const c = new SQL({ url: urlOf(A), max: 1 });
+      try { await c.unsafe("CREATE SCHEMA ob1_refresh_probe_leftover; CREATE TABLE ob1_refresh_probe_leftover.t ()"); } finally { await c.close(); }
+      let swept: string | null = null;
+      try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { swept = (e as Error).message; }
+      const d = new SQL({ url: urlOf(A), max: 1 });
+      let left = -1;
+      try { left = Number((await d`SELECT count(*)::int AS n FROM pg_namespace WHERE nspname LIKE 'ob1_refresh_probe_%'`)[0].n); } finally { await d.close(); }
+      assert(/did not produce the thoughts table/.test(swept ?? "") && left === 0,
+        `a probe schema a killed run left on --to is swept after the mark, beside the reset of public (${(swept ?? "no error").slice(0, 80)}; ${left} left)`);
+    }
+
     // A refresh killed between its DROP SCHEMA public and CREATE SCHEMA
     // leaves a marked target with no public schema, which the next run must
     // still reset: the mark exists for that re-run. The probe lives in a schema
     // of its own, so it does not need public (review pass 1: in public, the
     // re-run stopped on "schema public does not exist").
     {
-      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; [ -n "$t" ] && echo "CREATE TABLE $t ();"; exit 0`);
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
       const a = new SQL({ url: urlOf(A), max: 1 });
       try { await a.unsafe("DROP SCHEMA public CASCADE"); } finally { await a.close(); }
       let rerun: string | null = null;

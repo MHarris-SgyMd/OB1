@@ -39,18 +39,22 @@
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
  * migration might touch), copies the source's database-level settings the dump
  * leaves out (SMD-2037), then runs migrate.ts against the target. It needs a
- * pg_dump / pg_restore whose major version is at least the source server's, AND
- * Bun: no image the stack runs has both, so deploy/tier.sh runs this file in one
+ * pg_restore, a pg_dump whose major version is at least both servers' (the
+ * source's for the dump, --to's for the probe that reads it), AND Bun: no
+ * image the stack runs has all three, so deploy/tier.sh runs this file in one
  * that does (db/tier.Dockerfile, SMD-2036); a host that runs it directly needs
- * postgresql-client >= the server. It is destructive to --to, so it refuses a
+ * postgresql-client >= both servers. It is destructive to --to, so it refuses a
  * --to that is the --from database (sameDatabase, whatever else is true); a
  * --to stamped tier=stable, holding thoughts under no canary/working stamp, or
  * holding some other application's schema, unless an earlier refresh marked it
  * (targetRefusal); and a non-loopback --to unless OB1_ALLOW_REMOTE_DB=1, the
  * same guard test-support's dropSchema uses. No override lifts the refusal of
- * a URL that Bun and libpq read as different targets, or that names no
- * database, or whose connection reached a database other than the one it
- * names (an exported PGDATABASE beats the URL's in Bun; SMD-2317).
+ * a URL that Bun and libpq read as different targets, or that names no host,
+ * no database, or no port while PGPORT is exported, or whose connection
+ * reached a database other than the one it names (an exported PGDATABASE
+ * beats the URL's in Bun; SMD-2317). pg_dump and pg_restore get a connection
+ * built from the URL's parts (connect.ts toolTarget), never the URL, and
+ * pg_dump must find a table made through the dropping connection first.
  *
  * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
  * is the offline, model-free, fixture-vector half in CI). For each search row
@@ -553,18 +557,28 @@ export async function toolReachRefusal(dst: SQL, tool: ToolTarget): Promise<stri
   try {
     await dst.unsafe(`CREATE SCHEMA ${probe}; CREATE TABLE ${probe}.${probe} ()`);
   } catch (e) {
-    return `the probe could not create a schema through the connection that drops (${(e as Error).message}) — the reset needs a role that may`;
+    // One implicit transaction: a refused CREATE TABLE leaves no schema.
+    return `the probe could not create a schema through the connection that drops (${(e as Error).message}), and the reset would need to create one`;
   }
+  let refusal: string | null;
   try {
     const r = await run(["pg_dump", "--schema-only", "--no-owner", "--no-privileges", "--no-password", "-t", `${probe}.${probe}`, "-d", tool.conninfo], { env: tool.env });
-    if (r.code === 0 && r.out.includes(probe)) return null;
     const why = r.err.trim() ? `: ${r.err.trim().split("\n")[0]}` : "";
-    return r.code !== 0
-      ? `pg_dump, given the connection the guards judged, failed (exit ${r.code}${why})`
-      : `pg_dump, given the connection the guards judged, did not find a table just created there — it reaches another database or server`;
+    // A pg_dump that reached a database without the table says so and exits 1
+    // (measured, pg_dump 16: "no matching tables were found").
+    if (r.code === 0 && r.out.includes(probe)) refusal = null;
+    else if (r.code === 0 || /no matching tables were found/.test(r.err)) refusal = "pg_dump, given the connection the guards judged, did not find a table just created there: it reaches another database or server, where pg_restore would write";
+    else refusal = `pg_dump, given the connection the guards judged, failed (exit ${r.code}${why}), so it cannot be shown to reach --to`;
   } finally {
-    await dst.unsafe(`DROP SCHEMA IF EXISTS ${probe} CASCADE`);
+    // A failed drop must not replace the answer; the sweep after the mark
+    // takes a probe schema this run (or a killed one) left behind.
+    try {
+      await dst.unsafe(`DROP SCHEMA IF EXISTS ${probe} CASCADE`);
+    } catch {
+      /* swept after the mark */
+    }
   }
+  return refusal;
 }
 
 /**
@@ -661,7 +675,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
       // on that same connection string, to find a table made on this one.
       toTool = toolTarget(toUrl, await reachedAs(dst));
       const unreached = await toolReachRefusal(dst, toTool);
-      if (unreached !== null) throw new Error(`--to: ${unreached}. Refusing: pg_restore would write there. --to is untouched.`);
+      if (unreached !== null) throw new Error(`--to: ${unreached}. Refusing before the reset: --to is untouched.`);
       try {
         // pg_catalog's, not the path's: a URL's options= may set search_path,
         // and a planted current_database() would put the mark on another
@@ -674,6 +688,11 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
         // the default install too, so a role that cannot mark could rarely finish.
         throw new Error(`--refresh marks --to before resetting it (ALTER DATABASE … SET ob1.refresh_target) and could not: ${(e as Error).message}. That needs a superuser on --to, or GRANT SET ON PARAMETER ob1.refresh_target (PG15+); restoring pgvector needs a superuser in the default install anyway. --to is untouched.`);
       }
+      // A probe schema a killed run left (Ctrl-C during the probe's pg_dump, or
+      // a drop that failed) sits outside public, so the reset below would
+      // never take it: sweep them here, on the target that is being reset.
+      const leftovers = await dst<{ n: string }[]>`SELECT nspname AS n FROM pg_catalog.pg_namespace WHERE pg_catalog.starts_with(nspname, 'ob1_refresh_probe_')`;
+      for (const { n } of leftovers) await dst.unsafe(`DROP SCHEMA IF EXISTS "${n.replaceAll('"', '""')}" CASCADE`);
       await dst`DROP SCHEMA IF EXISTS public CASCADE`;
       await dst`CREATE SCHEMA public`;
     } finally {
