@@ -36,5 +36,19 @@
       "--snoop"
     ],
     "everyHours": 24
+  },
+  {
+    "name": "vendor",
+    "system": "orch-vendor",
+    "scope": "orch-vendor:export",
+    "emitter": [
+      "python3",
+      "evals/orchestration/runner/emit-fixture.py",
+      "--vendor"
+    ],
+    "everyHours": 24,
+    "network": [
+      "server:8000"
+    ]
   }
 ]

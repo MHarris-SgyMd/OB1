@@ -6260,6 +6260,37 @@ though that path is unchanged by SMD-2212. An earlier attempt met a wedged
 Ollama. The runner then reported its rows written and reembed failed, which
 is its answer to a provider outage.
 
+**Emitter egress (SMD-2289).** The kit's allowlist gains a fourth pipeline,
+`vendor`, whose line names `server:8000`, and I two more demands:
+- `snoop` must also reach nothing: no DNS answer, not the host alias's
+  Ollama, Postgres, n8n, 1.1.1.1 or the runner's own port. Its run takes
+  about 15 s, most of it the lookups that get no answer;
+- `vendor` must reach `server:8000` through its proxy with TLS naming it:
+  the brain answers the ClientHello in plain HTTP, which Python reports as a
+  wrong TLS version, and that is proof it arrived. TLS naming `other.example`
+  through the same tunnel must be cut off before it reaches anything (review
+  pass 1: the tunnel carried any bytes, so a vendor behind a CDN was a way to
+  every site on it). A CONNECT to Postgres must be refused, and no direct
+  connection open, the runner's own port included. Its report must name the
+  two refusals. It also stands in for `snoop` as the runner-down leg's "is
+  it back" probe, since it answers at once.
+
+Every check passed on the change's code, plain (C1s after 301 s) and
+sealed, on review pass 1's and 2's, plain and sealed, on pass 3's, plain and
+sealed, and on pass 4's merged with main, plain (C1s after 60 s) (2026-09-27
+and 28). With the rules deleted inside the running container, `snoop`
+reported every target reached (a DNS answer, the host alias's `:11434`,
+`postgres:5432`, `n8n:5678`, `1.1.1.1:443`, `127.0.0.1:8090`) and `vendor`
+a direct connection, and a restart set the rules again. The runner, started with a
+stand-in key on its own image:
+- by its plain command, holding NET_ADMIN and SETPCAP: refused, naming both;
+- by its plain command without them, so with no rules: refused before it
+  listens, an emitter uid having reached a listener of its on 127.0.0.1;
+- by the image's command without NET_ADMIN, or without SETPCAP: refused
+  before any rule is set;
+- as compose starts it: up, the runner's own process at CapEff `e0` (KILL,
+  SETGID, SETUID).
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
