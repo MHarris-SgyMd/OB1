@@ -496,13 +496,20 @@ export async function targetRefusal(target: SQL): Promise<string | null> {
   return `${why} (database ${db}, no refresh mark)`;
 }
 
-/** Whether pg_dump AND pg_restore exist and are new enough to read `serverMaj` — refresh needs both. */
-export async function refreshToolsReady(serverMaj: number): Promise<{ ready: boolean; why?: string }> {
+/**
+ * Whether pg_dump AND pg_restore exist and pg_dump is new enough to read both
+ * servers: the source's major `serverMaj` (the dump), and --to's `targetMaj`
+ * (the probe asks pg_dump to read --to before it is reset; SMD-2317 review
+ * pass 1 — before the probe a newer --to was restored into by an older
+ * pg_restore, and now it is refused here, in words).
+ */
+export async function refreshToolsReady(serverMaj: number, targetMaj: number = serverMaj): Promise<{ ready: boolean; why?: string }> {
   const dump = await toolMajor("pg_dump");
   if (dump === null) return { ready: false, why: "pg_dump is not on PATH" };
   const restore = await toolMajor("pg_restore");
   if (restore === null) return { ready: false, why: "pg_restore is not on PATH" };
   if (dump < serverMaj) return { ready: false, why: `pg_dump is major ${dump} but the source server is major ${serverMaj} (pg_dump cannot read a newer server)` };
+  if (dump < targetMaj) return { ready: false, why: `pg_dump is major ${dump} but --to's server is major ${targetMaj} (pg_dump reads --to before the reset, to show it reaches it, and cannot read a newer server)` };
   return { ready: true };
 }
 
@@ -517,9 +524,16 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe"; env?: Reco
   return { code: await proc.exited, out, err };
 }
 
-/** The database and user the server says `sql` is connected as: what a tool's connection names (toolTarget). */
+/**
+ * The database and login the server says `sql` is connected as: what a tool's
+ * connection names (toolTarget). session_user, not current_user: a role set
+ * after login (`ALTER ROLE … SET role`, or `options=-c role=…`) is
+ * current_user, and a tool logging in as it was refused, or with a matching
+ * PGPASSFILE line got in as someone the URL does not name (review pass 1,
+ * run). The URL's options still set that role inside the tool's session.
+ */
 async function reachedAs(sql: SQL): Promise<{ database: string; user: string }> {
-  const [row] = await sql<{ db: string; u: string }[]>`SELECT pg_catalog.current_database() AS db, current_user AS u`;
+  const [row] = await sql<{ db: string; u: string }[]>`SELECT pg_catalog.current_database() AS db, session_user AS u`;
   return { database: row.db, user: row.u };
 }
 
@@ -529,18 +543,27 @@ async function reachedAs(sql: SQL): Promise<{ database: string; user: string }> 
  * (behind a published port its address is the container's), so the tool is
  * asked directly: a table only this run knows is created through `dst`, and
  * pg_dump's schema of that one table must name it. A tool that went anywhere
- * else finds nothing (SMD-2317). The table is dropped either way; on success
- * the reset that follows would drop it anyway.
+ * else finds nothing (SMD-2317). The table sits in a schema of its own, not
+ * public: a refresh killed between its DROP SCHEMA public and CREATE SCHEMA
+ * leaves a marked target with no public, which the next run must still reset
+ * (review pass 1, run). The schema is dropped either way.
  */
 export async function toolReachRefusal(dst: SQL, tool: ToolTarget): Promise<string | null> {
   const probe = `ob1_refresh_probe_${crypto.randomUUID().replaceAll("-", "")}`;
-  await dst.unsafe(`CREATE TABLE public.${probe} ()`);
   try {
-    const r = await run(["pg_dump", "--schema-only", "--no-owner", "--no-privileges", "--no-password", "-t", `public.${probe}`, "-d", tool.conninfo], { env: tool.env });
+    await dst.unsafe(`CREATE SCHEMA ${probe}; CREATE TABLE ${probe}.${probe} ()`);
+  } catch (e) {
+    return `the probe could not create a schema through the connection that drops (${(e as Error).message}) — the reset needs a role that may`;
+  }
+  try {
+    const r = await run(["pg_dump", "--schema-only", "--no-owner", "--no-privileges", "--no-password", "-t", `${probe}.${probe}`, "-d", tool.conninfo], { env: tool.env });
     if (r.code === 0 && r.out.includes(probe)) return null;
-    return `pg_dump, given the connection the guards judged, did not find a table just created there (exit ${r.code}${r.err.trim() ? `: ${r.err.trim().split("\n")[0]}` : ""}) — it reaches another database or server`;
+    const why = r.err.trim() ? `: ${r.err.trim().split("\n")[0]}` : "";
+    return r.code !== 0
+      ? `pg_dump, given the connection the guards judged, failed (exit ${r.code}${why})`
+      : `pg_dump, given the connection the guards judged, did not find a table just created there — it reaches another database or server`;
   } finally {
-    await dst.unsafe(`DROP TABLE IF EXISTS public.${probe}`);
+    await dst.unsafe(`DROP SCHEMA IF EXISTS ${probe} CASCADE`);
   }
 }
 
@@ -577,6 +600,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   const src = openSql(fromUrl);
   const target = openSql(toUrl);
   let serverMaj: number;
+  let targetMaj: number;
   let settings: Record<string, string>;
   let fromAs: { database: string; user: string };
   try {
@@ -591,6 +615,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     if (toReached !== null) throw new Error(`--to: ${toReached}. Refusing: --refresh drops the target's schema.`);
     fromAs = await reachedAs(src);
     serverMaj = await serverMajor(src);
+    targetMaj = await serverMajor(target);
     settings = await databaseSettings(src);
     // The reset below drops --to's schema, so --to must be neither the source
     // nor the record. The loopback guard covers neither — deploy/tier.sh sets
@@ -604,8 +629,8 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     await src.close();
     await target.close();
   }
-  const ready = await refreshToolsReady(serverMaj);
-  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. deploy/tier.sh runs this in an image with both (db/tier.Dockerfile, postgresql16-client); on a host install postgresql-client >= ${serverMaj}.`);
+  const ready = await refreshToolsReady(serverMaj, targetMaj);
+  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. deploy/tier.sh runs this in an image with both (db/tier.Dockerfile, postgresql16-client); on a host install postgresql-client >= ${Math.max(serverMaj, targetMaj)}.`);
 
   const dir = await mkdtemp(join(tmpdir(), "ob1-tier-"));
   const dumpFile = join(dir, "stable.dump");

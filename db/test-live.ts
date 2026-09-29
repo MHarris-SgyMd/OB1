@@ -7527,23 +7527,34 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       // (the throwaway server's is its database's name).
       const password = "rec-SECRET-2317";
       await admin.unsafe(`DROP ROLE IF EXISTS ob1_rec; CREATE ROLE ob1_rec LOGIN SUPERUSER PASSWORD '${password}'`);
+      // --to's session also takes a role after login, through options=: the
+      // tools must log in as the session's user, not that role (review pass 1:
+      // current_user sent the tools in as a NOLOGIN role, refused).
+      await admin.unsafe("DROP ROLE IF EXISTS ob1_nologin; CREATE ROLE ob1_nologin NOLOGIN SUPERUSER");
       const asRec = (db: string) => { const x = new URL(urlOf(db)); x.username = "ob1_rec"; x.password = password; return x.toString(); };
       const saved: Record<string, string | undefined> = {};
       for (const [k, v] of Object.entries(redirects)) { saved[k] = process.env[k]; process.env[k] = v; }
       let recRun: string | null = null;
-      try { await refresh(asRec(new URL(URL_!).pathname.slice(1)), asRec(A), "working"); } catch (e) { recRun = (e as Error).message; }
+      const sourceDb = new URL(URL_!).pathname.slice(1);
+      try { await refresh(asRec(sourceDb), asRec(A) + "?options=-c%20role%3Dob1_nologin", "working"); } catch (e) { recRun = (e as Error).message; }
       finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
       const u = new URL(asRec(A));
       const dumpRec = existsSync(rec("pg_dump")) ? readFileSync(rec("pg_dump"), "utf8") : "";
       const restoreRec = existsSync(rec("pg_restore")) ? readFileSync(rec("pg_restore"), "utf8") : "";
-      const argvOf = (r: string) => r.split("--- argv").slice(1).map((s) => s.split("--- env")[0]).join("");
+      const calls = (r: string) => r.split("--- argv").slice(1).map((s) => s.split("--- env")[0]);
+      const argvOf = (r: string) => calls(r).join("");
       const envOf = (r: string) => r.split("--- env").slice(1).join("");
-      const conninfoTo = `host='${u.hostname}' port='${u.port}' dbname='${A}' user='${u.username}'`;
-      const dbName = u.pathname.slice(1);
-      assert(/did not produce the thoughts table/.test(recRun ?? "") && argvOf(restoreRec).includes(conninfoTo) && argvOf(dumpRec).includes(`host='${u.hostname}' port='${u.port}' dbname='${dbName}' user='${u.username}'`) && argvOf(dumpRec).includes(conninfoTo),
-        `pg_dump (the dump and the probe) and pg_restore are handed a connection string of the URL's host and port and the server's database and user, not the URL (${(recRun ?? "no error").slice(0, 60)}; restore argv ${JSON.stringify(argvOf(restoreRec).split("\n").filter((l) => l.startsWith("host=")))})`);
+      const conninfoTo = `host='${u.hostname}' port='${u.port}' dbname='${A}' user='ob1_rec'`;
+      const conninfoFrom = `host='${u.hostname}' port='${u.port}' dbname='${sourceDb}' user='ob1_rec'`;
+      const dumpCalls = calls(dumpRec);
+      assert(/did not produce the thoughts table/.test(recRun ?? "") && argvOf(restoreRec).includes(conninfoTo) && dumpCalls.some((c) => c.includes(conninfoFrom) && c.includes("-Fc")) && dumpCalls.some((c) => c.includes(conninfoTo) && c.includes("--schema-only")),
+        `the dump is handed --from's connection string, the probe and pg_restore --to's: the URL's host and port and the server's database and user, not the URL (${(recRun ?? "no error").slice(0, 60)}; restore argv ${JSON.stringify(argvOf(restoreRec).split("\n").filter((l) => l.startsWith("host=")))})`);
+      assert(!argvOf(dumpRec + restoreRec).includes("user='ob1_nologin'") && argvOf(restoreRec).includes("options='-c role=ob1_nologin'"),
+        "…logged in as the session's user, with the role the URL sets left to its options (session_user, not current_user)");
       assert(!argvOf(dumpRec + restoreRec).includes(password) && !argvOf(dumpRec + restoreRec).includes("postgres://") && envOf(restoreRec).includes(`PGPASSWORD=${password}`),
         "…with the password in PGPASSWORD and no URL or password on any argv");
+      assert(dumpCalls.length === 2 && [...dumpCalls, ...calls(restoreRec)].every((c) => c.includes("--no-password")),
+        `…and every call (the dump, the probe, the restore) with --no-password, so a missing password fails rather than waits (${dumpCalls.length} pg_dump calls)`);
       const leaked = Object.keys(redirects).filter((k) => new RegExp(`^${k}=`, "m").test(envOf(dumpRec + restoreRec)));
       assert(leaked.length === 0, `…and none of PGHOSTADDR, PGSERVICE, PGSERVICEFILE, PGOPTIONS, PGHOST, PGUSER in either tool's environment (${leaked.join(", ") || "none"})`);
       rmSync(rec("pg_dump"), { force: true });
@@ -7560,9 +7571,38 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { probeRun = (e as Error).message; }
       const a = new SQL({ url: urlOf(A), max: 1 });
       let leftovers = -1;
-      try { leftovers = Number((await a`SELECT count(*)::int AS n FROM pg_class WHERE relname LIKE 'ob1_refresh_probe_%'`)[0].n); } finally { await a.close(); }
+      try { leftovers = Number((await a`SELECT (SELECT count(*) FROM pg_class WHERE relname LIKE 'ob1_refresh_probe_%') + (SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'ob1_refresh_probe_%') AS n`)[0].n); } finally { await a.close(); }
       assert(/^--to: pg_dump, given the connection the guards judged, did not find a table just created there/.test(probeRun ?? "") && /--to is untouched/.test(probeRun ?? "") && (await markers())[A] && leftovers === 0,
-        `a pg_dump that does not find the probe's table stops the refresh before the mark and the drop: ${A} keeps its thoughts and no probe table (${(probeRun ?? "no refusal").slice(0, 120)}; ${leftovers} left)`);
+        `a pg_dump that does not find the probe's table stops the refresh before the mark and the drop: ${A} keeps its thoughts and no probe schema or table (${(probeRun ?? "no refusal").slice(0, 120)}; ${leftovers} left)`);
+    }
+
+    // A refresh killed between its DROP SCHEMA public and CREATE SCHEMA
+    // leaves a marked target with no public schema, which the next run must
+    // still reset: the mark exists for that re-run. The probe lives in a schema
+    // of its own, so it does not need public (review pass 1: in public, the
+    // re-run stopped on "schema public does not exist").
+    {
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; [ -n "$t" ] && echo "CREATE TABLE $t ();"; exit 0`);
+      const a = new SQL({ url: urlOf(A), max: 1 });
+      try { await a.unsafe("DROP SCHEMA public CASCADE"); } finally { await a.close(); }
+      let rerun: string | null = null;
+      try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { rerun = (e as Error).message; }
+      const again = new SQL({ url: urlOf(A), max: 1 });
+      let publicBack = false;
+      try { publicBack = (await again`SELECT to_regnamespace('public') IS NOT NULL AS p`)[0].p; } finally { await again.close(); }
+      assert(/did not produce the thoughts table/.test(rerun ?? "") && publicBack,
+        `a marked target with no public schema (a refresh killed mid-reset) is reset again: the re-run reaches its restore and public is back (${(rerun ?? "no error").slice(0, 100)})`);
+    }
+
+    // The probe asks pg_dump to read --to, so pg_dump must be as new as --to's
+    // server as well as the source's; refreshToolsReady says so before anything
+    // runs, rather than the probe misreading a version mismatch as another
+    // server (review pass 1, run).
+    {
+      const newer = await refreshToolsReady(major, major + 1);
+      const same = await refreshToolsReady(major, major);
+      assert(!newer.ready && /--to's server is major \d+/.test(newer.why ?? "") && same.ready,
+        `a --to on a newer major than pg_dump is refused up front, in words; the same major is ready (${newer.why ?? "ready"})`);
     }
   } finally {
     process.env.PATH = savedPath;
@@ -7570,6 +7610,7 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
     rmSync(shimDir, { recursive: true, force: true });
     for (const db of [A, B]) await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     await admin.unsafe("DROP ROLE IF EXISTS ob1_rec");
+    await admin.unsafe("DROP ROLE IF EXISTS ob1_nologin");
     await admin.close();
   }
 }

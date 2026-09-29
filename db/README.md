@@ -2768,16 +2768,17 @@ guards the target three ways.
   again on the connection that marks and drops. No override lifts these.
 - **The tools parse no URL.** `pg_dump` and `pg_restore` get a keyword
   connection string (`connect.ts` `toolTarget`): the URL's host and port, the
-  database and user the server reported, and only `sslmode`,
-  `application_name` and `options`. The password is in `PGPASSWORD`, off
-  their argv. Their environment keeps only the `PG*` variables that
-  authenticate, so `PGHOSTADDR`, `PGSERVICE`, `PGOPTIONS` and the rest cannot
-  send them elsewhere. Before the mark, `pg_dump` on that same string must
-  find a table just created through the connection that drops, or `--to` is
-  left untouched.
+  database and login (`session_user`) the server reported, and only
+  `sslmode`, `application_name` and `options`. The password is in
+  `PGPASSWORD`, off their argv. Their environment keeps only the `PG*`
+  variables that authenticate, so `PGHOSTADDR`, `PGSERVICE`, `PGOPTIONS` and
+  the rest cannot send them elsewhere. Before the mark, `pg_dump` on that same
+  string must find a table just created, in a schema of its own, through the
+  connection that drops, or `--to` is left untouched.
 
 It needs Bun
-and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
+and a `pg_dump`/`pg_restore` whose major version is at least both servers'
+(the source's for the dump, `--to`'s for the probe), and
 no image the stack runs has both — the pgvector image has the client and no Bun,
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
 builds `db/tier.Dockerfile` (`oven/bun:1.4.0-alpine` + `postgresql16-client`, the
@@ -3048,7 +3049,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 948 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 952 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
