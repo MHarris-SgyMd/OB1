@@ -103,6 +103,13 @@ services:
   # bytes. Root context, as server's: migrate.ts imports db/config.mjs, and the
   # root .dockerignore keeps the context to what the two images need.
   migrate:
+    # Named, so orchestration-runner-role finds it by one name under every
+    # compose (the Python podman-compose and --compatibility name a build
+    # <project>_migrate); never pulled, so `pull` and `up --pull …` build it
+    # rather than ask a registry for a name no registry holds (SMD-2289 review
+    # pass 8). The release overlay pulls its pinned migrator instead.
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-migrate
+    pull_policy: never
     build:
       context: ..
       dockerfile: db/Dockerfile
@@ -619,12 +626,11 @@ services:
   # password and the grants a new migration adds land before the runner
   # starts.
   orchestration-runner-role:
-    # migrate's own image, by the name compose gives it, never pulled or built
-    # here: an image of its own kept an old config.mjs's grants after `up
-    # --build server` rebuilt migrate (review pass 5); building it on every
-    # `up` made an offline `up` wait ~16 min on the registry (pass 6); naming
-    # migrate's image made `compose pull` fail on the registry (pass 7). The
-    # release overlay pins it to the release's migrator.
+    # migrate's image, by migrate's name, never pulled or built here: an image
+    # of its own kept an old config.mjs's grants after `up --build server`
+    # rebuilt migrate (review pass 5), and building it on every `up` made an
+    # offline `up` wait ~16 min on the registry (pass 6). The release overlay
+    # pins it to the release's migrator.
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-migrate
     pull_policy: never
     profiles: ["orchestration"]

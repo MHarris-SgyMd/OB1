@@ -110,10 +110,10 @@ if (import.meta.main) {
         }
         found = row;
         if (row) {
-          // Clearing REPLICATION or BYPASSRLS takes a superuser, and on Postgres 16 CREATEDB takes CREATEDB (15 lets CREATEROLE clear it); the driver shows only "permission denied to alter role", not which (review passes 6 and 7).
-          const [me] = (await tx`SELECT rolsuper, rolcreatedb, current_setting('server_version_num')::int AS version FROM pg_roles WHERE rolname = current_user`) as { rolsuper: boolean; rolcreatedb: boolean; version: number }[];
-          const cannot = [row.rolcreatedb && !me.rolsuper && !me.rolcreatedb && me.version >= 160000 && "CREATEDB", row.rolreplication && !me.rolsuper && "REPLICATION", row.rolbypassrls && !me.rolsuper && "BYPASSRLS"].filter(Boolean);
-          if (cannot.length) throw new Refusal(`${role} holds ${cannot.join(", ")}, which this connection's role may not clear (REPLICATION and BYPASSRLS take a superuser, CREATEDB on Postgres 16 CREATEDB). Clear it as a superuser, or name another role. Nothing changed.`);
+          // Who may clear an attribute: on Postgres 16 a role holding it (with ADMIN OPTION on the role); on 15 CREATEROLE clears CREATEDB, and REPLICATION or BYPASSRLS take a superuser. The driver shows only "permission denied to alter role", not which (review passes 6-8).
+          const [me] = (await tx`SELECT rolsuper, rolcreatedb, rolreplication, rolbypassrls, current_setting('server_version_num')::int >= 160000 AS pg16 FROM pg_roles WHERE rolname = current_user`) as { rolsuper: boolean; rolcreatedb: boolean; rolreplication: boolean; rolbypassrls: boolean; pg16: boolean }[];
+          const cannot = me.rolsuper ? [] : [row.rolcreatedb && me.pg16 && !me.rolcreatedb && "CREATEDB", row.rolreplication && !(me.pg16 && me.rolreplication) && "REPLICATION", row.rolbypassrls && !(me.pg16 && me.rolbypassrls) && "BYPASSRLS"].filter(Boolean);
+          if (cannot.length) throw new Refusal(`${role} holds ${cannot.join(", ")}, which this connection's role may not clear (${me.pg16 ? "on Postgres 16 and later only a role holding the attribute may" : "on Postgres 15 REPLICATION and BYPASSRLS take a superuser"}). Clear it as a superuser, or name another role. Nothing changed.`);
         }
         // ALTER names only the attributes to clear: Postgres refuses NOCREATEDB, NOREPLICATION and NOBYPASSRLS from a migrator that is not a superuser even when nothing would change (review pass 5: every re-run on a managed Postgres failed "permission denied to alter role").
         const attributes = row ? ["LOGIN NOCREATEROLE", row.rolcreatedb && "NOCREATEDB", row.rolreplication && "NOREPLICATION", row.rolbypassrls && "NOBYPASSRLS"].filter(Boolean).join(" ") : ROLE_ATTRIBUTES;

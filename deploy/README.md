@@ -706,8 +706,9 @@ hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
 `$`s as variables), `N8N_MCP_KEY`, `N8N_WEBHOOK_KEY`, the import runner's
 `OB1_RUNNER_KEY`, and `OB1_RUNNER_DB_PASSWORD`, its database role's (SMD-2289),
 where the file has none. A stack provisioned before SMD-2289 runs `--init`
-once more to gain the password. Without it, `compose --profile orchestration
-up -d` fails naming `orchestration-runner-role`, whose log (`compose logs
+once more to gain the password, then `compose --profile orchestration up -d
+--build`, so the migrator's image carries `login-role.ts`. Without the
+password, `compose --profile orchestration up -d` fails naming `orchestration-runner-role`, whose log (`compose logs
 orchestration-runner-role`) says to run `--init`, and the runner is not
 started, the one already running included. n8n sets its owner from the email and the hash at every start
 (`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
@@ -960,8 +961,8 @@ no other role.
   privilege naming it, a grant in another database). `login-role.ts` commits
   first, so when `--exact` refuses, the new password is already set and the
   runner, if its config changed, is left created and not started.
-- The step runs `migrate`'s image, by the name Compose v2 gives it, and never
-  pulls or builds its own, so the build that brings a new migration (`up
+- The step runs `migrate`'s image, by the name `migrate` gives it
+  (`<project>-migrate`, never pulled), and never pulls or builds its own, so the build that brings a new migration (`up
   --build server` included) brings its grants to the step's next run; a
   release overlay pins it to the release's migrator. To rotate the password,
   edit `OB1_RUNNER_DB_PASSWORD` and start the profile again
