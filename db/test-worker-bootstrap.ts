@@ -13,7 +13,7 @@
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, egressDescription, egressRefusal, regateMessage, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, egressDescription, egressRefusal, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -93,6 +93,29 @@ const deny = resolveEgressPolicy({});
   const line = egressDescription(remote, deny, "OB1_CHAT_LOCAL");
   ok(/deny/.test(line) && /api\.openai\.com/.test(line), "the banner line says what the gate does for the endpoint");
   ok(/is declared local \(OB1_LLM_LOCAL\)/.test(egressDescription(local, deny, "OB1_LLM_LOCAL")), "a local endpoint's banner says the gate does not apply");
+}
+
+// ---------------------------------------------------------------------------
+// classifyError — the claim workers' provider-error classifier (SMD-2303). The
+// shared rules, and the one rule extract adds behind maxTokensFatal.
+// ---------------------------------------------------------------------------
+{
+  ok(classifyError({ name: "TimeoutError" }) === "thought", "a timeout is the thought's — retried later");
+  ok(classifyError({ message: "the request timed out" }) === "thought", "a 'timed out' message is the thought's too");
+  ok(classifyError({ status: 429 }) === "transient", "a 429 is transient");
+  ok(classifyError({ status: 503 }) === "transient", "a 5xx is transient");
+  ok(classifyError({ message: "connect ECONNREFUSED 127.0.0.1" }) === "transient", "a dropped connection is transient");
+  ok(classifyError({ status: 401 }) === "fatal", "a 401 (the key) is fatal");
+  ok(classifyError({ status: 404 }) === "fatal", "a 404 (the model) is fatal");
+  ok(classifyError({ status: 400, message: "bad request shape" }) === "fatal", "a 400 that is not about length is fatal");
+  ok(classifyError({}) === "thought", "an error the rules do not recognise is the thought's");
+  // The one rule extract adds: a 400 about the answer budget. Without the option
+  // it reads as this thought's length (refusesLength matches "tokens") and is the
+  // thought's; with it, it names the request and is fatal — stop the whole pass.
+  const budget = { status: 400, message: "max_tokens must be at most 4096" };
+  ok(classifyError(budget) === "thought", "a max_tokens 400 is the thought's by default (consolidate)");
+  ok(classifyError(budget, { maxTokensFatal: true }) === "fatal", "…and fatal under maxTokensFatal (extract) — the same request fails every thought");
+  ok(TRANSIENT_PAUSES_MS.length === 3 && TRANSIENT_PAUSES_MS[0] === 5_000, "the transient back-off is three pauses starting at 5 s");
 }
 
 // ---------------------------------------------------------------------------

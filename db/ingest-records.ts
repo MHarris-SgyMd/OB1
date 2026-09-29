@@ -89,6 +89,7 @@ import { loadLinearCorpus, linearThoughtId, type LinearDoc } from "../evals/line
 import { parseFragment, fragmentSection } from "../scripts/fragments.ts";
 import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
 import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
+import { actorPayload } from "../server-portable/store.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { ItemsRefusal, parseItems, PIPELINE_META_KEYS, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
@@ -530,7 +531,7 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
   const asOf = doc.watermark?.asOf ?? null;
   try {
     return await sql.begin(async (tx) => {
-      await tx`SELECT set_config('ob1.actor', ${JSON.stringify(actor)}, true)`;
+      await tx`SELECT set_config('ob1.actor', ${JSON.stringify(actorPayload(actor))}, true)`;
       // Another thought already IS this item — the board sync's row for a
       // ticket, found by identity (thought_sources; on a brain the sync filled
       // before 053, its metadata.issue claim). Asked BEFORE the write: with one

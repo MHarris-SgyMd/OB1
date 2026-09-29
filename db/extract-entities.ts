@@ -123,9 +123,9 @@
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, egressDescription, egressRefusal, regateMessage, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, egressDescription, egressRefusal, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
@@ -665,45 +665,6 @@ async function processRow(row: Row): Promise<Outcome> {
   return { outcome: "failed", error: `record_thought_entities: ${res.error}` };
 }
 
-/**
- * What an error from the provider is about.
- *
- *   thought   — a fact about this thought: a timeout (the corpus run showed the
- *               same long documents exceed the limit every time), a 400 naming
- *               the input's length, a body that was not JSON. Recorded failed;
- *               --retry-failed revisits it.
- *   transient — says nothing about the thought: 429, 5xx, a dropped connection.
- *               Paused and retried; if it persists, THIS row is recorded failed
- *               with the error (so a thought that reliably draws a 500 becomes
- *               visible rather than cycling through the pool for ever) and the
- *               worker stops, leaving its other leases to the pool.
- *   fatal     — the request itself is wrong for this provider: 401/403 (the
- *               key), 404 (the model), or a 400 about the request's shape. The
- *               next thought would fail the same way, so every worker stops at
- *               once and the run exits 2, with nothing marked failed.
- */
-type ErrorKind = "thought" | "transient" | "fatal";
-function classifyError(e: unknown): ErrorKind {
-  const status = (e as { status?: number }).status;
-  const msg = (e as Error).message ?? "";
-  const name = (e as Error).name ?? "";
-  if (name === "TimeoutError" || /timed out/i.test(msg)) return "thought";
-  if (status === 429 || (status !== undefined && status >= 500)) return "transient";
-  // The one rule for "this 400 is about the input's length", shared with
-  // embed.ts so the two tools cannot drift. A 413 stays fatal below, as it
-  // was: the extraction request is the same shape for every thought, so a
-  // provider refusing its size would refuse the next one too.
-  // A 400 about the answer budget names the REQUEST — the same max_tokens
-  // shape goes to every thought — and would otherwise read as this thought's
-  // length (refusesLength matches "tokens") and fail the pool one row at a
-  // time (fifth review pass). Fatal: stop every worker, mark nothing.
-  if (status === 400 && /max_tokens|max_completion_tokens|completion tokens/i.test(msg)) return "fatal";
-  if (status === 400 && refusesLength(status, msg)) return "thought";
-  if (status !== undefined && status >= 400 && status < 500) return "fatal";
-  if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
-  return "thought";
-}
-const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
 // Written inside the worker closures below, which control-flow analysis does
 // not follow: declared `: string | null = null`, the read at the end of the
 // run is narrowed to `never`. The cast keeps the declared type as the initial
@@ -774,7 +735,7 @@ async function worker(n: number): Promise<void> {
               // The calls a thrown thought made — its fourth window timing out
               // is four calls — count too (second review pass).
               calls += callsMadeBy(e);
-              const kind = classifyError(e);
+              const kind = classifyError(e, { maxTokensFatal: true });
               const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
               if (kind === "thought") {
                 outcome = { outcome: "failed", error: msg };
