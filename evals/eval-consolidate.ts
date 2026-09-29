@@ -266,7 +266,7 @@ if (FULL || REPLAY) {
   console.log(`  cost: ${lines.length} judge calls for ${loaded.size} thoughts (${withEntities} with entities) = ${Math.round((1000 * lines.length) / loaded.size)} calls per thousand thoughts; ~${promptTokens.toLocaleString()} estimated prompt tokens, ~${Math.round(promptTokens / lines.length || 0)} per call, ~${Math.round((promptTokens / loaded.size) * 1000).toLocaleString()} per thousand thoughts` +
     (wall ? `; ${(wall / 60).toFixed(1)} min wall on ${cfg.judgeModel}` : ""));
 
-  const proposals = (await sql`SELECT * FROM list_supersession_proposals(NULL::text, 200)`) as Record<string, unknown>[];
+  const proposals = (await sql`SELECT * FROM list_supersession_proposals(NULL::text, 200, NULL::boolean)`) as Record<string, unknown>[];
   // Every proposal's two issue ids in one read, not two queries per proposal.
   const proposalIds = proposals.flatMap((p) => [String(p.older_id), String(p.newer_id)]);
   const issueById = new Map(((await sql`SELECT id::text AS id, metadata->>'issue' AS i FROM thoughts WHERE id = ANY(${sql.array(proposalIds, "TEXT")}::uuid[])`) as { id: string; i: string | null }[])
