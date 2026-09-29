@@ -105,9 +105,13 @@
 --   each read a statement after the lock — so whichever goes second reads
 --   what the first committed. A source row's delete takes none: it
 --   drops the mirror row by key, and a status move meets it on that row. So a
---   transaction holds at most 256 of these locks; two thoughts sharing a
---   bucket only serialise more than they must. The status trigger sorts after
---   068's on thoughts, so a statement takes 068's classes before 22563.
+--   transaction holds at most 256 of these locks — 769 with 068's 513, so ten
+--   such wide transactions at once, not 068's fifteen, fill a default server's
+--   shared lock table (max_locks_per_transaction 64, some 7,800 slots). The
+--   status trigger sorts after 068's on thoughts, so a statement takes 068's
+--   classes before 22563. A bucket is held until commit, so a transaction
+--   that has written a source row holds up a status move of any thought in
+--   that bucket, not only its own, until it commits.
 --   Not the thought's row (FOR SHARE, until the second review pass): a source
 --   writer's share lock crossed every lock taken in another order — a
 --   multi-row UPDATE of thoughts in scan order, a delete's cascade, a take's
@@ -118,22 +122,30 @@
 --   unknown — a thought with no source row too, which the check cannot tell
 --   apart from one whose source row a concurrent writer committed after the
 --   snapshot, the case it exists for; a source row's delete, a canonical-only
---   re-record and an upsert that changes nothing run. SERIALIZABLE is left to
+--   re-record and an upsert that changes nothing run (the delete raises 40001
+--   if its thought's status moved since the snapshot, on the mirror row the
+--   move updated). SERIALIZABLE is left to
 --   SSI (exact only when every writer of source rows and statuses is
 --   serializable; after a mix, rebuild under READ COMMITTED).
---   What can still deadlock (40P01), retryable: a transaction that takes these
---   buckets in one statement and 068's in a later one (a source write, then a
---   ticket row's write) against one that takes them the other way; a take
---   (record_thought_source's p_take, two statements) against one status update
---   of both its thoughts, when the update's trigger has taken the new
---   thought's bucket and reaches the old one's mirror row as the take deletes
---   it; and a multi-row delete of source rows against a multi-row insert or
---   status move over the same thoughts, when the plans lock the mirror's rows
---   in different orders. A stress run of three connections writing source
---   rows, thoughts and statuses at random (six seeds of 3,600 statements
---   each) gave 0 and 4 deadlocks in two runs under READ COMMITTED, and 2 under
---   SERIALIZABLE, against main's 1 and 1. The repo's structured passes write
---   one ticket per transaction.
+--   What can still deadlock (40P01), retryable. Across statements, as 068's
+--   ticket writes can: a transaction that takes a bucket in one statement and
+--   later waits on a lock a status mover holds while that mover waits for the
+--   bucket — the thought's row (a source write, then an edit of the thought),
+--   a bucket-mate's row (then an edit of another thought in the bucket), 068's
+--   classes (then a ticket row's write), or two such transactions each writing
+--   source rows whose buckets the other already holds (two bulk writers of
+--   thirty source rows each deadlocked five times in ten, where 068's own
+--   ticket writes do the same). Write a thought before its source row, one
+--   thought per transaction, as the repo's writers do. Within one statement: a
+--   take (record_thought_source's p_take, two statements in one call) against
+--   one status update of both its thoughts, when the update's trigger has taken
+--   the new thought's bucket and reaches the old one's mirror row as the take
+--   deletes it; and a multi-row delete of source rows against a multi-row
+--   status move over the same thoughts, when the plans lock the mirror's rows in
+--   different orders. A stress run of three connections writing source rows,
+--   thoughts and statuses one statement at a time, at random (six seeds of
+--   3,600 statements each), gave 0 and 4 deadlocks in two runs under READ
+--   COMMITTED and 2 under SERIALIZABLE, against main's 1 and 1.
 
 -- UPGRADE
 --   Run `db/migrate.ts --grant <role>` again for every role granted before
@@ -154,10 +166,13 @@
 --   delete of a thought that has one, a status move on any thought between a
 --   known and an unknown status_type, and a read of the dependency columns
 --   that reaches the gate (every whole-brain read — graph-centrality
---   --startable and --decay-blocked, node_dependencies()' gates — and a keyed
---   read of sourced or linked thoughts) is refused on the new table; a delete of a
---   thought with no source row, an edit that moves no status between those
---   two, and every lifecycle read are not. The locks are advisory and need no
+--   --startable and --decay-blocked, node_dependencies()' gates — a keyed read
+--   of sourced or linked thoughts, and any read of node_state that is planned
+--   with the whole-brain branch in it: a generic plan, or a call whose argument
+--   is a subquery and so is not inlined) is refused on the new table; a delete
+--   of a thought with no source row, an edit that moves no status between
+--   those two, and a lifecycle read of node_state(<ids>) inlined with its ids
+--   are not. The locks are advisory and need no
 --   privilege. A migration that changes node_lifecycle_types() changes what
 --   every mirror row should hold: it runs ob1_rebuild_source_gate() after
 --   itself. Idempotent: IF NOT

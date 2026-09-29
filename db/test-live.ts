@@ -7244,6 +7244,55 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
       `a source row moving system while its thought's status moves waits on the thought's bucket, then reads the committed status: the mirror row is jira's and gates, and no drift (${JSON.stringify(g)}; ${errors || "clean"})`);
   }
 
+  // Multi-row statements lock every thought they touch (third review pass: a
+  // two-row statement that locked one of its thoughts survived every test and
+  // left the other's mirror row stale). Each holder below is held open while
+  // a single-row writer of ONE of its thoughts — the first, then the second —
+  // must wait on that thought's bucket, and after the holder commits reads what
+  // it committed.
+  const holdThenWrite = async (label: string, hold: string, write: string, check: () => Promise<boolean>) => {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx.unsafe(hold);
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx.unsafe(write);
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    return { label, ok: aHolding && bWaited && errors === "" && (await check()) && (await drift()) === 0, detail: `${label}: waited ${bWaited}, ${errors || "clean"}` };
+  };
+  const multi: { label: string; ok: boolean; detail: string }[] = [];
+  for (const which of [0, 1]) {
+    // A status move of one thought held open; a two-row source insert of both
+    // then waits on that thought's bucket and reads its committed status.
+    const pair = [await row(`[34] MI ${which} a`, { kind: "race2267", status_type: "started" }), await row(`[34] MI ${which} b`, { kind: "race2267", status_type: "started" })];
+    multi.push(await holdThenWrite(`two-row insert, thought ${which + 1} moving`,
+      `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = '${pair[which]}'`,
+      `INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+       VALUES ('${pair[0]}', 'github', 'G-MI-${which}-a', 'x', 'text/plain', repeat('0', 64)), ('${pair[1]}', 'github', 'G-MI-${which}-b', 'x', 'text/plain', repeat('0', 64))`,
+      async () => (await mirror(pair[which])) === false && (await mirror(pair[1 - which])) === true));
+    // A two-row status move held open; a source write of one of its thoughts
+    // then waits on that thought's bucket and reads the committed status.
+    const moved = [await row(`[34] MS ${which} a`, { kind: "race2267", status_type: "started" }), await row(`[34] MS ${which} b`, { kind: "race2267", status_type: "started" })];
+    multi.push(await holdThenWrite(`source write, thought ${which + 1} of a two-row move`,
+      `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${moved[0]}', '${moved[1]}')`,
+      `SELECT record_thought_source('${moved[which]}'::uuid, 'github', 'G-MS-${which}', 'x', 'text/plain')`,
+      async () => (await mirror(moved[which])) === false));
+  }
+  assert(multi.every((m) => m.ok),
+    `a two-row source insert waits on the bucket of whichever of its thoughts a status move holds, and a source write waits on the bucket of whichever thought a two-row status move holds — each then reads the committed status, and no drift (${multi.map((m) => m.detail).join("; ")})`);
+
   // A take against one status update of both thoughts (first and second
   // review passes), two ways round. First: B holds linear L-TK; one statement
   // moves A's and B's statuses and sleeps before its trigger runs, holding

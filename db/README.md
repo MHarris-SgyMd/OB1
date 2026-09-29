@@ -850,7 +850,10 @@ first committed; a source row's delete takes none (it drops the mirror row by
 key).
 Not the thought's row: a source writer's share lock there, until the second
 review pass, deadlocked with multi-row updates, cascades and takes where main
-waited. REPEATABLE READ is refused for a source row's insert or move and for
+waited. A bucket is held until commit, so a transaction that writes source rows
+holds up status moves of any thought in its buckets, and bulk writers can
+deadlock across statements, as 068's ticket writes can: write a thought before
+its source row, one thought per transaction. REPEATABLE READ is refused for a source row's insert or move and for
 every status move between known and unknown (a source row's delete and a
 re-record that changes nothing run). `ob1_rebuild_source_gate()` repairs the mirror after a write made with
 triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm.
@@ -2992,7 +2995,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2275 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 914 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 915 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
