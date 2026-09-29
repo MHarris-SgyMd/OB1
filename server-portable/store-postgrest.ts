@@ -37,6 +37,7 @@ import type {
   RetryFailedResult,
   ReleaseLeasesOpts,
   ReleaseLeasesResult,
+  DryRunClaimResult,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -251,6 +252,13 @@ export class PostgrestStore implements ThoughtStore {
 
   async releaseStaleLeases(_opts: ReleaseLeasesOpts): Promise<ReleaseLeasesResult> {
     throw new Error("release_stale_leases requires the SQL backend — thought_work_claims is not published to PostgREST (a container or Bun deployment on the SQL store controls the work queues; migration 015)");
+  }
+
+  async dryRunClaim(_workType: string, _limit?: number): Promise<DryRunClaimResult> {
+    // run_worker's dry_run preview counts thought_work_claims, unpublished to
+    // PostgREST like the rest of the worker surface (migration 015). Same reason,
+    // same shape as workerStatus/retryFailed: say so rather than a bare error.
+    throw new Error("run_worker requires the SQL backend — thought_work_claims is not published to PostgREST (a container or Bun deployment on the SQL store controls the work queues; migration 015)");
   }
 
   async pageThoughtMeta(offset: number, limit: number): Promise<ThoughtMeta[]> {
