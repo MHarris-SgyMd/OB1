@@ -117,13 +117,12 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, egressDescription, egressRefusal, regateMessage } from "./worker-bootstrap.ts";
+import { blanketGate, egressDescription, egressRefusal, regateMessage, workerIdentity } from "./worker-bootstrap.ts";
 import {
   actorKindOf, cleanForDisplay, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
-import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
@@ -286,42 +285,19 @@ let keyName: string | undefined;
 // A run, or a review: both write and are attributed. --status, --dry-run, --list and --stale only read.
 const WRITES = ACCEPT !== undefined || REJECT !== undefined || !(STATUS_ONLY || DRY_RUN || REVIEW_ONLY);
 if (WRITES) {
-  const rawKey = process.env.OB1_WORKER_KEY;
-  if (rawKey) {
-    if (!process.env.MCP_ACCESS_KEYS) {
-      console.error("\n  OB1_WORKER_KEY is set but MCP_ACCESS_KEYS is not, so the key cannot be checked or named. Set both, as the server has them.");
-      await sql.close();
-      process.exit(2);
-    }
-    const hash = hashKey(rawKey);
-    const record = parseKeyRecords(process.env.MCP_ACCESS_KEYS).keys.find((k) => k.sha256 === hash);
-    if (!record) {
-      console.error("\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this.");
-      await sql.close();
-      process.exit(2);
-    }
-    try {
-      const [{ r }] = await sql`SELECT resolve_agent(${hash}::text, ${record.name}::text, ${record.scope}::text) AS r`;
-      const res = r as { ok: boolean; error?: string; agent_id?: string; revoked_at?: string; reason?: string | null };
-      if (!res.ok && res.error === "REVOKED") {
-        console.error(`\n  The worker's key was revoked at ${res.revoked_at}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.`);
-        await sql.close();
-        process.exit(2);
-      }
-      if (res.ok && res.agent_id) {
-        agentId = res.agent_id;
-        actorName = record.name;
-        keyName = record.name;
-        console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
-      } else {
-        console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
-      }
-    } catch (e) {
-      console.error(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
-    }
-  } else {
-    console.error(`  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`);
+  const id = await workerIdentity(url, process.env, {
+    noKeyWarning: `  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`,
+  });
+  if (!id.ok) {
+    console.error(id.message);
+    await sql.close();
+    process.exit(2);
   }
+  agentId = id.identity.agentId;
+  keyName = id.identity.keyName;
+  // The audit label above is not an actor; the resolved key's name, when there
+  // is one, is (third review pass).
+  if (keyName) actorName = keyName;
   // A key that was set but did not resolve to a name is no actor: the blanket
   // check above credited one, so it is asked again without (third review pass).
   if (process.env.OB1_WORKER_KEY && keyName === undefined && !REVIEW_ONLY) {

@@ -12,7 +12,8 @@
 
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, egressDescription, egressRefusal, regateMessage } from "./worker-bootstrap.ts";
+import { hashKey } from "../server-portable/auth.ts";
+import { blanketGate, egressDescription, egressRefusal, regateMessage, workerIdentity } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -92,6 +93,25 @@ const deny = resolveEgressPolicy({});
   const line = egressDescription(remote, deny, "OB1_CHAT_LOCAL");
   ok(/deny/.test(line) && /api\.openai\.com/.test(line), "the banner line says what the gate does for the endpoint");
   ok(/is declared local \(OB1_LLM_LOCAL\)/.test(egressDescription(local, deny, "OB1_LLM_LOCAL")), "a local endpoint's banner says the gate does not apply");
+}
+
+// ---------------------------------------------------------------------------
+// workerIdentity — the cases that refuse or warn before a store is opened, so no
+// database is needed (the URL is never dialled). The resolve cases (a valid key,
+// a REVOKED one) need resolve_agent and live in test-live.ts.
+// ---------------------------------------------------------------------------
+const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
+{
+  const warned: string[] = [];
+  const noKey = await workerIdentity(UNUSED_URL, {}, { noKeyWarning: "  ⚠  no key here", warn: (l) => warned.push(l) });
+  ok(noKey.ok && noKey.identity.agentId === null && noKey.identity.keyName === undefined, "no worker key: the identity is empty — the pass carries no agent");
+  ok(warned.length === 1 && warned[0] === "  ⚠  no key here", "no worker key: the caller's own warning is printed");
+
+  const noAccessKeys = await workerIdentity(UNUSED_URL, { OB1_WORKER_KEY: "raw" }, { noKeyWarning: "unused" });
+  ok(!noAccessKeys.ok && /OB1_WORKER_KEY is set but MCP_ACCESS_KEYS is not/.test(noAccessKeys.message), "a key set with no MCP_ACCESS_KEYS is refused, and the message says why");
+
+  const notListed = await workerIdentity(UNUSED_URL, { OB1_WORKER_KEY: "raw", MCP_ACCESS_KEYS: `someone:write:${hashKey("a-different-key")}` }, { noKeyWarning: "unused" });
+  ok(!notListed.ok && /OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS/.test(notListed.message), "a key absent from MCP_ACCESS_KEYS is refused — the server would refuse it too");
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);

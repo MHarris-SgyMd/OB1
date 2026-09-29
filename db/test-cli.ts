@@ -166,17 +166,18 @@ const entries = sources.filter((f) => {
 }
 
 // ---------------------------------------------------------------------------
-// SMD-2303. The db/ claim workers bootstrap their provider egress through one
-// module, db/worker-bootstrap.ts: no other db/ file reaches egress.ts's
-// `refusesEverything` or `describeEgress` directly, so the blanket-gate wording
-// cannot drift back into per-worker copies.
+// SMD-2303. The db/ claim workers bootstrap their provider egress and identity
+// through one module, db/worker-bootstrap.ts: no other db/ file reaches
+// egress.ts's `refusesEverything`/`describeEgress` or resolves a worker key
+// (`resolve_agent(`, `parseKeyRecords`) directly, so the blanket-gate wording
+// and the capped resolve cannot drift back into per-worker copies.
 // ---------------------------------------------------------------------------
 {
   const MODULE = "worker-bootstrap.ts";
   for (const f of sources.filter((s) => s !== MODULE)) {
     const text = readFileSync(join(HERE, f), "utf8");
-    for (const banned of ["refusesEverything", "describeEgress"])
-      ok(!text.includes(banned), `${f} does not reach egress.ts's ${banned} directly — the egress bootstrap goes through ${MODULE} (SMD-2303)`);
+    for (const banned of ["refusesEverything", "describeEgress", "resolve_agent(", "parseKeyRecords"])
+      ok(!text.includes(banned), `${f} does not reach ${banned} directly — the worker bootstrap goes through ${MODULE} (SMD-2303)`);
   }
 }
 
