@@ -410,8 +410,9 @@ import {
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { describeEgress, localKnob, mayLeaveBox, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
-import { maskUrl, UUID_RE } from "../server-portable/store.ts";
+import { localKnob, mayLeaveBox, ROW_UNITS } from "../server-portable/egress.ts";
+import { blanketGate, egressDescription, egressRefusal } from "./worker-bootstrap.ts";
+import { actorPayload, maskUrl, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
@@ -511,24 +512,24 @@ console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddin
 // What may leave the box (SMD-1903): a row the gate refuses is a failed claim
 // naming the rule, retried by --retry-failed once the policy or the endpoint
 // changes; the text never went anywhere.
-console.log(`  egress:    ${describeEgress(embedConfig.embeddings, embedConfig.egress, localKnob(embedConfig, "embeddings"))}${embedConfig.chunkContext ? `; blurbs: ${describeEgress(embedConfig.chat, embedConfig.egress, localKnob(embedConfig, "chat"))}` : ""}`);
+console.log(`  egress:    ${egressDescription(embedConfig.embeddings, embedConfig.egress, localKnob(embedConfig, "embeddings"))}${embedConfig.chunkContext ? `; blurbs: ${egressDescription(embedConfig.chat, embedConfig.egress, localKnob(embedConfig, "chat"))}` : ""}`);
 {
   // A policy that refuses whatever the row (SMD-1903): stop before claiming,
   // rather than fail every row in the pool one at a time. A dry run and
   // --status still report — the banner's egress line says why a run would not.
   // Units a re-embed carries: the row's own metadata and text, never an
   // actor — this pass has no worker key (second review pass).
-  const blanket = refusesEverything(embedConfig.embeddings, embedConfig.egress, ROW_UNITS);
+  const blanket = blanketGate({ endpoint: embedConfig.embeddings, policy: embedConfig.egress, units: ROW_UNITS, verb: "re-embedded", localKnobKey: localKnob(embedConfig, "embeddings") });
   // --retire and --accept-failed write claim rows, not vectors, and dial
   // nothing: bookkeeping the gate has no say over (second review pass).
   if (blanket && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) {
-    console.error(`\n  Nothing would be re-embedded: ${blanket}. Declare the endpoint local (${localKnob(embedConfig, "embeddings")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    console.error(`\n  ${blanket}`);
     process.exit(2);
   }
   // The blurbs are chat calls: refused, every long row's claim fails on them
   // (a bare window is a failure here, since no caller is told) and
   // --retry-failed would revisit each uselessly. Said before the pass.
-  const blurbs = embedConfig.chunkContext ? refusesEverything(embedConfig.chat, embedConfig.egress, ROW_UNITS) : null;
+  const blurbs = embedConfig.chunkContext ? egressRefusal(embedConfig.chat, embedConfig.egress, ROW_UNITS) : null;
   if (blurbs) console.error(`  ⚠  OB1_CHUNK_CONTEXT is on and every blurb call would be refused (${blurbs}) — every long row's claim will fail on its blurbs; turn the context off for this pass, or declare the chat endpoint local (${localKnob(embedConfig, "chat")}=1)`);
 }
 console.log(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${embedConfig.chat.base})` : "off"}`);
@@ -1430,7 +1431,7 @@ if (total === 0) {
 const toVector = (v: number[]) => `[${v.join(",")}]`;
 // `via`, the door (046's origin column) — `source` until SMD-1730, when the
 // trigger stopped reading an actor's source; the row's own stays the column.
-const actor = { name: "reembed", via: "db/reembed.ts", session: JOB };
+const actor = actorPayload({ name: "reembed", via: "db/reembed.ts", session: JOB });
 
 let stopping = false;
 let done = 0;

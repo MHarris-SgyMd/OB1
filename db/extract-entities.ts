@@ -123,10 +123,10 @@
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
+import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
+import { blanketGate, classifyError, egressDescription, egressRefusal, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
-import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
@@ -210,16 +210,16 @@ console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${
 console.log(`  window: ${describeExtractWindow(cfg)}`);
 // What may leave the box (SMD-1903): a row the gate refuses is a failed claim
 // naming the rule; its text never went anywhere, and --retry-failed revisits it.
-console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+console.log(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
 {
   // A policy that refuses whatever the row (SMD-1903): stop before claiming,
   // rather than fail every row in the pool one at a time. A dry run and
   // --status still report — the banner's egress line says why a run would not.
   // The units a row of this pass carries: its metadata and text, and the
   // worker key's name as the actor when one is set (second review pass).
-  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS);
+  const blanket = blanketGate({ endpoint: cfg.chat, policy: cfg.egress, units: process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "extracted", localKnobKey: localKnob(cfg, "chat") });
   if (blanket && !STATUS_ONLY && !DRY_RUN) {
-    console.error(`\n  Nothing would be extracted: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    console.error(`\n  ${blanket}`);
     process.exit(2);
   }
 }
@@ -257,47 +257,22 @@ let agentId: string | null = null;
 /** The worker key's name, for the egress gate's `actor:` unit (SMD-1903); undefined without a key. */
 let actorName: string | undefined;
 if (!STATUS_ONLY && !DRY_RUN) {
-  const rawKey = process.env.OB1_WORKER_KEY;
-  if (rawKey) {
-    if (!process.env.MCP_ACCESS_KEYS) {
-      console.error("\n  OB1_WORKER_KEY is set but MCP_ACCESS_KEYS is not, so the key cannot be checked or named. Set both, as the server has them.");
-      await sql.close();
-      process.exit(2);
-    }
-    const hash = hashKey(rawKey);
-    const record = parseKeyRecords(process.env.MCP_ACCESS_KEYS).keys.find((k) => k.sha256 === hash);
-    if (!record) {
-      console.error("\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this.");
-      await sql.close();
-      process.exit(2);
-    }
-    try {
-      const [{ r }] = await sql`SELECT resolve_agent(${hash}::text, ${record.name}::text, ${record.scope}::text) AS r`;
-      const res = r as { ok: boolean; error?: string; agent_id?: string; revoked_at?: string; reason?: string | null };
-      if (!res.ok && res.error === "REVOKED") {
-        console.error(`\n  The worker's key was revoked at ${res.revoked_at}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.`);
-        await sql.close();
-        process.exit(2);
-      }
-      if (res.ok && res.agent_id) {
-        agentId = res.agent_id;
-        actorName = record.name;
-        console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
-      } else {
-        console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
-      }
-    } catch (e) {
-      console.error(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
-    }
-  } else {
-    console.error("  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.");
+  const id = await workerIdentity(url, process.env, {
+    noKeyWarning: "  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
+  });
+  if (!id.ok) {
+    console.error(id.message);
+    await sql.close();
+    process.exit(2);
   }
+  agentId = id.identity.agentId;
+  actorName = id.identity.keyName;
   // A key that was set but did not resolve to a name is no actor: the blanket
   // check above credited one, so it is asked again without (third review pass).
-  if (process.env.OB1_WORKER_KEY && actorName === undefined) {
-    const again = refusesEverything(cfg.chat, cfg.egress, ROW_UNITS);
+  if (process.env.OB1_WORKER_KEY && id.identity.keyName === undefined) {
+    const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
     if (again) {
-      console.error(`\n  Nothing would be extracted: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
+      console.error(`\n  ${regateMessage("extracted", again)}`);
       await sql.close();
       process.exit(2);
     }
@@ -690,45 +665,6 @@ async function processRow(row: Row): Promise<Outcome> {
   return { outcome: "failed", error: `record_thought_entities: ${res.error}` };
 }
 
-/**
- * What an error from the provider is about.
- *
- *   thought   — a fact about this thought: a timeout (the corpus run showed the
- *               same long documents exceed the limit every time), a 400 naming
- *               the input's length, a body that was not JSON. Recorded failed;
- *               --retry-failed revisits it.
- *   transient — says nothing about the thought: 429, 5xx, a dropped connection.
- *               Paused and retried; if it persists, THIS row is recorded failed
- *               with the error (so a thought that reliably draws a 500 becomes
- *               visible rather than cycling through the pool for ever) and the
- *               worker stops, leaving its other leases to the pool.
- *   fatal     — the request itself is wrong for this provider: 401/403 (the
- *               key), 404 (the model), or a 400 about the request's shape. The
- *               next thought would fail the same way, so every worker stops at
- *               once and the run exits 2, with nothing marked failed.
- */
-type ErrorKind = "thought" | "transient" | "fatal";
-function classifyError(e: unknown): ErrorKind {
-  const status = (e as { status?: number }).status;
-  const msg = (e as Error).message ?? "";
-  const name = (e as Error).name ?? "";
-  if (name === "TimeoutError" || /timed out/i.test(msg)) return "thought";
-  if (status === 429 || (status !== undefined && status >= 500)) return "transient";
-  // The one rule for "this 400 is about the input's length", shared with
-  // embed.ts so the two tools cannot drift. A 413 stays fatal below, as it
-  // was: the extraction request is the same shape for every thought, so a
-  // provider refusing its size would refuse the next one too.
-  // A 400 about the answer budget names the REQUEST — the same max_tokens
-  // shape goes to every thought — and would otherwise read as this thought's
-  // length (refusesLength matches "tokens") and fail the pool one row at a
-  // time (fifth review pass). Fatal: stop every worker, mark nothing.
-  if (status === 400 && /max_tokens|max_completion_tokens|completion tokens/i.test(msg)) return "fatal";
-  if (status === 400 && refusesLength(status, msg)) return "thought";
-  if (status !== undefined && status >= 400 && status < 500) return "fatal";
-  if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
-  return "thought";
-}
-const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
 // Written inside the worker closures below, which control-flow analysis does
 // not follow: declared `: string | null = null`, the read at the end of the
 // run is narrowed to `never`. The cast keeps the declared type as the initial
@@ -799,7 +735,7 @@ async function worker(n: number): Promise<void> {
               // The calls a thrown thought made — its fourth window timing out
               // is four calls — count too (second review pass).
               calls += callsMadeBy(e);
-              const kind = classifyError(e);
+              const kind = classifyError(e, { maxTokensFatal: true });
               const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
               if (kind === "thought") {
                 outcome = { outcome: "failed", error: msg };

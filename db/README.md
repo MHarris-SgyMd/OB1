@@ -16,7 +16,12 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   provider pre-installs pgvector into a schema off the connection's `search_path`
   (Supabase uses `extensions`), the runner adds it to its own session so the
   migrations apply, and preflight names the persistent fix for the server — see
-  the `test-search-path.ts` note under Testing.
+  the `test-search-path.ts` note under Testing. The runner also puts `public`
+  first on its own session's path, the rest after it, so the brain is built in
+  `public` whatever the role's or the connection string's path puts first. It
+  refuses, changing nothing, where the path reaches a brain's ledger in another
+  schema and `public` holds no brain, or `public` cannot come first
+  (test-upgrade [23]).
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
@@ -2786,6 +2791,13 @@ guards the target three ways.
   `ALTER DATABASE … RESET ob1.refresh_target`. `deploy/README.md`, "Refreshing
   a tier", has both statements.
 - **It is loopback,** unless `OB1_ALLOW_REMOTE_DB=1`.
+- **Each side's URL names one database every client reaches** (SMD-2317).
+  Bun runs the guards and the drop, and libpq runs `pg_dump` and `pg_restore`,
+  so a URL they read differently (a query key such as `?host=`, a fragment, a
+  first-`@` host list) is refused on either side, as is one naming no host or no
+  database. After connecting, each side's server must report the URL's
+  database: an exported `PGDATABASE` beats the URL's in Bun. `--to` is asked
+  again on the connection that marks and drops. No override lifts these.
 
 It needs Bun
 and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
@@ -3059,10 +3071,12 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 934 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 954 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
+bun test-engines.ts                         # the engines (migrate.ts) import with no side effect, refuse through run() — no database
+bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -3081,12 +3095,32 @@ and runs each entry point with a flag it does not have and with `--help`.
 Every script reaches its database through `connect.ts` (SMD-2302): `--url`, else
 `DATABASE_URL`, else exit 2 with one refusal (a URL that does not parse is
 refused too, and never printed); one client constructor; and one answer to
-"may this database be reset?" — a loopback host by name (`localhost`,
-`127.0.0.1`, `[::1]`, `0.0.0.0`), not an empty host (it resolves through
-`PGHOST`), or `OB1_ALLOW_REMOTE_DB=1`. `tier.ts --refresh` and the suites'
-`dropSchema` both ask it, and print why not. The rule reads the URL's
-hostname; where a client actually connects can differ (Bun's `?path=` socket,
-libpq's `?host=`), which is SMD-2317. `hnsw-graph.ts`,
+"may this database be reset?". `tier.ts --refresh` and the suites'
+`dropSchema` both ask it, and print why not.
+
+The resolver refuses a URL that Bun and libpq would take to different places
+(SMD-2317): a query key other than `sslmode`, `application_name` and `options` (Bun sends
+`database=` and `user=` to the server, which keeps them; libpq follows `host=`,
+`port=`, `dbname=` and `service=`), a `+` in the query (a space to Bun), a
+query part libpq refuses (empty, no `=`, a second raw `=`, an `sslmode` in
+capitals), a fragment, an `@` other than the one ending the user, a `,` or
+`%2C` in the host, or a `.`/`..` path segment (Bun resolves it, libpq does
+not). Put the
+database in the URL's path. The reset rule then has three parts:
+- **The URL must name its host and its database.** With no host, Bun
+  connects to localhost over TCP and libpq to the unix socket; with no
+  database, the shell's `PGDATABASE` would choose what is dropped.
+- **Its host must be loopback by name** (`localhost`, `127.0.0.1`, `[::1]`,
+  `0.0.0.0`), or `OB1_ALLOW_REMOTE_DB=1` must be set.
+- **Once connected, the server must report the database the URL names**
+  (`pg_catalog.current_database()`), over TCP. Bun lets an exported
+  `PGDATABASE` beat the URL's database, so this is asked on the connection
+  that drops.
+
+`OB1_ALLOW_REMOTE_DB` lifts the loopback host and the TCP requirement, and
+nothing else: the other refusals say which database would be dropped. The
+server's address is not compared with loopback, because through a container's
+published port it is the container's. `hnsw-graph.ts`,
 `graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
 after connecting and return it from `closeThenExit`, which closes the pool and
 flushes their output first (the claim workers still close before each exit
@@ -3094,6 +3128,45 @@ themselves, SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks
 that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.
+
+`migrate.ts` is also an engine (SMD-2304): `import { run } from "./migrate.ts"`
+defines it and does nothing else, and `run({ url, dryRun, baseline, reapply,
+force, grant, sql, writer })` is the CLI's run, returning the exit code — its
+lines go to the `Writer` it is given (`cli.ts`; the CLI passes the console),
+the migration files are read per call, and a client passed in is used in
+place of the URL and never closed. It must be one connection (the `max: 1`
+option), and it keeps the session state the run sets — lock_timeout, pgvector's
+schema on search_path when it is off the path, the `ob1.acl_*` settings — so
+pass one dedicated to the run, not a pooled connection another caller gets
+next. The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
+holds each engine to that: an import opens no connection, prints nothing and
+installs no process listener; the engine's code holds no exit, handler, argv
+scan or console call; and `run()` refuses in the CLI's words before
+connecting. Extraction, consolidation and re-embedding become engines next,
+one PR each, over the bootstrap below.
+
+The claim workers bootstrap their egress, identity and error handling through
+`worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket
+gate that stops a pass before it claims when the policy would refuse the call
+whatever the row — its wording one text per case, the pass's verb ("extracted" /
+"judged" / "re-embedded") the only difference — plus the identity re-gate.
+`reembed.ts` gates its embeddings endpoint (and, with `OB1_CHUNK_CONTEXT`, warns
+on the blurbs endpoint); `sync-linear.ts` wraps the bare reason in its own
+sentence. **Identity** (`extract-entities.ts` and `consolidate.ts`):
+`workerIdentity` checks `OB1_WORKER_KEY` against `MCP_ACCESS_KEYS` and resolves
+it through the store's capped path (`SqlStore.resolveAgent`, which bounds
+`lock_timeout` — the raw call the workers ran did not), refusing a revoked key
+and warning when none is set. **Errors and actors:** one `classifyError`
+classifies a provider error into thought / transient / fatal for both workers
+(extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
+`reembed.ts` and `ingest-records.ts` build their audit actors through
+`actorPayload` rather than by hand. The module returns its outcome rather than
+exiting, so SMD-2304's importable `run()` will turn it into a return code.
+`test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
+the `classifyError` rules and the identity cases that refuse before connecting;
+`test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that
+no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
+`resolve_agent(` or `parseKeyRecords`.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`

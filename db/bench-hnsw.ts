@@ -1295,7 +1295,7 @@ const bounds: BoundsRow[] = [];
 // Every destructive statement below used to sit behind resetSchema's loopback
 // guard; the kept-corpus paths drop a marker table and run the migrator
 // without it, so the guard is asked once here, for the whole run (review pass).
-assertThrowawayDatabase(URL_);
+await assertThrowawayDatabase(URL_);
 
 // The after arm asserts the bounds 014 seeds are in force. A role that does not
 // own the database cannot seed them, and finding that out after a 100,000-row

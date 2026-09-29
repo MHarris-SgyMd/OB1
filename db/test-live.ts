@@ -36,6 +36,9 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
+import { workerIdentity } from "./worker-bootstrap.ts";
+import { hashKey } from "../server-portable/auth.ts";
+import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
@@ -65,8 +68,30 @@ if (!URL_) {
 const { assert, skip, total, skipped, docCheck, report } = createAssert();
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
-function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
+function migrate(...extra: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
   return runMigrator(URL_!, undefined, ...extra);
+}
+
+/**
+ * migrate.ts's run() in this process — the engine the CLI wraps (SMD-2304) —
+ * its lines captured per stream as a child's are, a newline after each. The
+ * same shell as migrate()'s spawn (this process's environment), so the two
+ * print the same. `same` compares it with a spawned run stream by stream, so
+ * a Writer that routes a line to the other stream than the CLI's console does
+ * is a difference (review pass 4); a line moved in migrate.ts itself moves in
+ * both, and [2] pins the drift report's streams for that.
+ */
+async function migrateInProcess(opts: Omit<MigrateOptions, "writer"> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+  const outs: string[] = [], errs: string[] = [];
+  // A caller's client in place of the URL, not beside it: the run must be the client's.
+  const code = await runMigrate({ ...(opts.sql ? {} : { url: URL_! }), ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+  const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+  return { code, stdout: lines(outs), stderr: lines(errs) };
+}
+
+/** An in-process run and a spawned one agree: exit code, stdout and stderr, each byte for byte. */
+function same(a: { code: number; stdout: string; stderr: string }, b: { code: number; stdout: string; stderr: string }): boolean {
+  return a.code === b.code && a.stdout === b.stdout && a.stderr === b.stderr;
 }
 
 const unit = (i: number) => {
@@ -88,6 +113,18 @@ console.log("[1] migrate.ts against a real server");
   const dry = await migrate("--dry-run");
   assert(dry.code === 0, "--dry-run exits 0");
   assert(/would apply \d+, skipped 0/.test(dry.out), "--dry-run reports everything pending");
+  // The client backends on this database before and after an in-process run
+  // on a URL, by pid: run() opens its own and closes it. A backend that was not
+  // there before — the run's — must be gone once things settle; a backend
+  // still closing from the spawned run above is in the "before" set, so it
+  // can neither hide a leak nor fail the check by leaving.
+  const clientPids = async () => new Set(((await sql`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`) as { pid: number }[]).map((r) => r.pid));
+  const pidsBefore = await clientPids();
+  const dryIn = await migrateInProcess({ dryRun: true });
+  assert(dryIn.code === 0 && same(dryIn, dry), "run() in-process dry-runs the same, byte for byte on each stream (SMD-2304)");
+  let newPids = [...(await clientPids())].filter((p) => !pidsBefore.has(p));
+  for (let i = 0; i < 20 && newPids.length > 0; i++) { await Bun.sleep(100); newPids = [...(await clientPids())].filter((p) => !pidsBefore.has(p)); }
+  assert(newPids.length === 0, `…and closes the connection it opened (${newPids.length} backend(s) of its left)`);
   const none = await sql`SELECT to_regclass('public.thoughts') IS NULL AS absent`;
   assert(none[0].absent === true, "--dry-run created nothing");
 
@@ -107,6 +144,17 @@ console.log("[1] migrate.ts against a real server");
   const again = await migrate();
   assert(again.code === 0, "re-run exits 0");
   assert(/applied 0, skipped \d+/.test(again.out), "re-run is a no-op — the ledger holds");
+  // In-process on a client the caller owns: the same no-op, and the client is
+  // still open after — run() closes only a client it opened (SMD-2304).
+  const caller = new SQL({ url: URL_, max: 1 });
+  try {
+    const againIn = await migrateInProcess({ sql: caller, url: "postgres://u@127.0.0.1:1/none" });
+    assert(againIn.code === 0 && same(againIn, again), "run() in-process on a caller's client re-runs the same no-op, byte for byte on each stream — the client, not the dead URL beside it");
+    const [{ one }] = await caller`SELECT 1 AS one`;
+    assert(one === 1, "…and leaves the caller's client open");
+  } finally {
+    await caller.close();
+  }
 
   const ledger = await sql`SELECT count(*)::int AS c FROM schema_migrations`;
   assert(ledger[0].c > 0, `schema_migrations records ${ledger[0].c} migrations`);
@@ -122,6 +170,17 @@ console.log("\n[2] Append-only enforcement");
     assert(drifted.code === 1, "editing an applied migration exits 1");
     assert(/DRIFTED 1/.test(drifted.out), "…and reports which one drifted");
     assert(/append-only/.test(drifted.out), "…and explains the rule");
+    // Which stream each goes to, as main's migrator wrote them: the warning and
+    // the rule to stderr, the summary to stdout. The in-process comparison
+    // below cannot see this — both runs are this migrate.ts (review pass 4).
+    assert(/ALREADY APPLIED BUT FILE CHANGED/.test(drifted.stderr) && /append-only/.test(drifted.stderr) && /DRIFTED 1/.test(drifted.stdout) && !/ALREADY APPLIED BUT|append-only/.test(drifted.stdout), "…the drift warning and the rule on stderr, the summary on stdout");
+    // migrate.ts was imported before the edit: run() reads the files when it
+    // runs, not when the module loaded (SMD-2304).
+    const driftedIn = await migrateInProcess();
+    // The drift report is the one run here that writes to both streams: the
+    // ⚠ line and the append-only rule to stderr, the skipped lines and the
+    // summary to stdout.
+    assert(driftedIn.stderr.length > 0 && driftedIn.stdout.length > 0 && same(driftedIn, drifted), "run() in-process, imported before the edit, sees the drift the same, byte for byte on each stream");
   } finally {
     writeFileSync(target, original);
   }
@@ -5422,11 +5481,11 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   let refusedRemote: string, refusedEmptyHost: string;
   try {
     refusedRemote = await refreshRefusal("postgres://u@example.com:5432/b");
-    // tier.ts's own rule trusted an empty host, which resolves through PGHOST (SMD-2302).
+    // tier.ts's own rule trusted an empty host (SMD-2302); Bun and libpq take it to two servers, so no override lifts the refusal (SMD-2317).
     refusedEmptyHost = await refreshRefusal("postgres:///b");
   } finally { if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow; }
   assert(/^--to is not plainly this machine — example\.com is not a loopback host — and OB1_ALLOW_REMOTE_DB is not 1/.test(refusedRemote), `refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema) — got: ${refusedRemote}`);
-  assert(/^--to is not plainly this machine — the URL has no host/.test(refusedEmptyHost), `…and a target with no host, which resolves through PGHOST — got: ${refusedEmptyHost}`);
+  assert(/^--to: the URL has no host \(Bun would connect to localhost over TCP and libpq to the unix socket/.test(refusedEmptyHost), `…and a target with no host, which Bun and libpq read as two servers — got: ${refusedEmptyHost}`);
   // And a --to that is the --from database under another spelling (SMD-2036):
   // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
   // under. The second URL differs as a string (a parameter only), so string
@@ -7370,6 +7429,181 @@ console.log("\n[33] Migration 068's projection under two connections: writers of
   assert(suiteDrift === 0 && left.drift === 0 && left.heads === 0,
     `every section before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
   await db.close();
+}
+
+console.log("\n[34] The reset guards ask the server where the connection went: an exported PGDATABASE that beats the URL's database refuses dropSchema and tier.ts --refresh, override or not, and the refresh asks again on the connection that drops (SMD-2317)");
+{
+  // Bun 1.4.0 lets an exported PGDATABASE beat the URL's database, and
+  // dropSchema(".../canary") with PGDATABASE=stable dropped stable's tables in
+  // SMD-2302's review. Two scratch databases, each with a `thoughts` table as
+  // its marker (dropSchema drops that name): whatever drops the wrong one is seen.
+  const admin = new SQL({ url: URL_!, max: 1 });
+  const A = "ob1_reset_a", B = "ob1_reset_b";
+  const urlOf = (db: string) => { const u = new URL(URL_!); u.pathname = `/${db}`; return u.toString(); };
+  const markers = async () => {
+    const out: Record<string, boolean> = {};
+    for (const db of [A, B]) {
+      const s = new SQL({ url: urlOf(db), max: 1 });
+      try { out[db] = (await s`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`)[0].present; } finally { await s.close(); }
+    }
+    return out;
+  };
+  const plant = async () => {
+    for (const db of [A, B]) {
+      const s = new SQL({ url: urlOf(db), max: 1 });
+      try { await s`CREATE TABLE IF NOT EXISTS thoughts (id int)`; } finally { await s.close(); }
+    }
+  };
+  const shell: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("PG") && k !== REMOTE_DB_FLAG) shell[k] = v;
+  const drop = (url: string, env: Record<string, string>) =>
+    runScript(["bun", "-e", `import { dropSchema } from "./test-support.ts"; await dropSchema(${JSON.stringify(url)}); console.log("SCHEMA-DROP-DONE");`], { cwd: HERE, env: { ...shell, ...env } });
+  for (const db of [A, B]) { await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`); await admin.unsafe(`CREATE DATABASE ${db}`); }
+  const savedPath = process.env.PATH, savedPgDatabase = process.env.PGDATABASE;
+  const shimDir = join(tmpdir(), `ob1-reset-shim-${process.pid}`);
+  try {
+    await plant();
+    const diverted = await drop(urlOf(A), { PGDATABASE: B });
+    const after = await markers();
+    assert(diverted.code === 2 && diverted.out.includes(`the connection reached database "${B}", not "${A}", the one the URL names — PGDATABASE is exported`) && /OB1_ALLOW_REMOTE_DB does not lift this/.test(diverted.out) && !diverted.out.includes("SCHEMA-DROP-DONE") && after[A] && after[B],
+      `dropSchema(${A}) with PGDATABASE=${B} exported refuses, naming both databases and the variable, and drops neither (exit ${diverted.code}; markers ${JSON.stringify(after)}; ${diverted.out.trim().split("\n")[0]})`);
+    const overridden = await drop(urlOf(A), { PGDATABASE: B, [REMOTE_DB_FLAG]: "1" });
+    assert(overridden.code === 2 && overridden.out.includes(`reached database "${B}"`) && (await markers())[B],
+      `…and ${REMOTE_DB_FLAG}=1 does not lift it: it says which database is dropped, not whether a remote one may be (exit ${overridden.code})`);
+    // assertThrowawayDatabase asks on a probe of its own, and eval-quant.ts and
+    // test-bench-reuse.ts rely on it alone before their drops (review pass 2:
+    // replacing the probe's question survived every suite).
+    const guardOnly = (url: string, env: Record<string, string>) =>
+      runScript(["bun", "-e", `import { assertThrowawayDatabase } from "./test-support.ts"; await assertThrowawayDatabase(${JSON.stringify(url)}); console.log("GUARD-PASSED");`], { cwd: HERE, env: { ...shell, ...env } });
+    const guardDiverted = await guardOnly(urlOf(A), { PGDATABASE: B });
+    const guardPlain = await guardOnly(urlOf(A), {});
+    assert(guardDiverted.code === 2 && guardDiverted.out.includes(`reached database "${B}", not "${A}"`) && !guardDiverted.out.includes("GUARD-PASSED") && guardPlain.code === 0 && guardPlain.out.includes("GUARD-PASSED"),
+      `assertThrowawayDatabase on ${A} with PGDATABASE=${B} refuses on its own probe, and passes with none (exit ${guardDiverted.code}, then ${guardPlain.code})`);
+    // The check asks pg_catalog's current_database(), not whatever the session's
+    // path finds first: options= may set search_path, and a function of that
+    // name in the reached database answered the URL's name and let the drop
+    // through (review pass 1, run). The control shows the stand-in does answer
+    // an unqualified call on that path.
+    {
+      const b = new SQL({ url: urlOf(B), max: 1 });
+      try { await b.unsafe(`CREATE SCHEMA IF NOT EXISTS evil; CREATE OR REPLACE FUNCTION evil.current_database() RETURNS name LANGUAGE sql AS $$ SELECT '${A}'::name $$`); } finally { await b.close(); }
+      const spoofQuery = "?options=-c%20search_path%3Devil%2Cpg_catalog%2Cpublic";
+      const probe = new SQL({ url: urlOf(B) + spoofQuery, max: 1 });
+      let answered = "";
+      try { answered = String((await probe.unsafe("SELECT current_database() AS db"))[0].db); } finally { await probe.close(); }
+      const spoofed = await drop(urlOf(A) + spoofQuery, { PGDATABASE: B });
+      const afterSpoof = await markers();
+      assert(answered === A && spoofed.code === 2 && spoofed.out.includes(`reached database "${B}"`) && afterSpoof[B],
+        `a current_database() planted on the path ahead of pg_catalog does not answer the check: refused, ${B} kept (the stand-in answers "${answered}" unqualified; exit ${spoofed.code})`);
+      const clean = new SQL({ url: urlOf(B), max: 1 });
+      try { await clean.unsafe("DROP SCHEMA evil CASCADE"); } finally { await clean.close(); }
+    }
+    // The controls: the harness sees a drop, and a PGDATABASE that agrees is no refusal.
+    const agreed = await drop(urlOf(A), { PGDATABASE: A });
+    const afterAgreed = await markers();
+    assert(agreed.code === 0 && agreed.out.includes("SCHEMA-DROP-DONE") && !afterAgreed[A] && afterAgreed[B],
+      `the control: PGDATABASE=${A}, the URL's own, drops ${A} and leaves ${B} (exit ${agreed.code}; markers ${JSON.stringify(afterAgreed)})`);
+    await plant();
+    const plain = await drop(urlOf(A), {});
+    const afterPlain = await markers();
+    assert(plain.code === 0 && !afterPlain[A] && afterPlain[B], `…and with no PGDATABASE, the URL's database is the one dropped (exit ${plain.code}; markers ${JSON.stringify(afterPlain)})`);
+    await plant();
+
+    // tier.ts --refresh: the guards ran through Bun and the tools through
+    // libpq, which keeps the URL's database, so a diverted guard judged one
+    // database while pg_restore wrote another. Now each side is asked.
+    process.env.PGDATABASE = B;
+    let fromRefused: string | null = null;
+    try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { fromRefused = (e as Error).message; }
+    let toRefused: string | null = null;
+    try { await refresh(urlOf(B), urlOf(A), "working"); } catch (e) { toRefused = (e as Error).message; }
+    if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
+    const dbName = new URL(URL_!).pathname.slice(1);
+    assert((fromRefused ?? "").startsWith(`--from: the connection reached database "${B}", not "${dbName}"`) && /pg_dump would read the URL's database/.test(fromRefused ?? ""),
+      `--refresh with PGDATABASE=${B}: a diverted --from is refused before anything is dumped (${fromRefused ?? "no refusal"})`);
+    assert((toRefused ?? "").startsWith(`--to: the connection reached database "${B}", not "${A}"`) && JSON.stringify(await markers()) === JSON.stringify({ [A]: true, [B]: true }),
+      `…and a diverted --to, with --from reaching its own, is refused, nothing dropped (${toRefused ?? "no refusal"})`);
+
+    // The connection that drops is a new resolution: the guard's is closed
+    // before pg_dump runs. A stand-in pg_dump waits while PGDATABASE changes
+    // under the refresh, and the drop's own check refuses. Without it, the
+    // mark and the DROP SCHEMA land on B.
+    await admin.unsafe(`ALTER DATABASE ${A} SET ob1.refresh_target = 'working'`);
+    const [{ n }] = await admin<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+    const major = Math.floor(Number(n) / 10000);
+    mkdirSync(shimDir, { recursive: true });
+    const started = join(shimDir, "started"), go = join(shimDir, "go");
+    const shim = (name: string, rest: string) => {
+      writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
+      chmodSync(join(shimDir, name), 0o755);
+    };
+    shim("pg_dump", `: > "${started}"; i=0; while [ ! -e "${go}" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+    shim("pg_restore", "exit 1");
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    let midRefused: string | null = null;
+    const running = refresh(URL_!, urlOf(A), "working").catch((e) => { midRefused = (e as Error).message; });
+    for (let i = 0; i < 200 && !existsSync(started); i++) await Bun.sleep(25);
+    const dumpStarted = existsSync(started);
+    process.env.PGDATABASE = B;
+    writeFileSync(go, "");
+    await running;
+    if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
+    const bMark = (await admin<{ cfg: string[] | null }[]>`SELECT setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = ${B} AND s.setrole = 0`)[0]?.cfg ?? null;
+    assert(dumpStarted && (midRefused ?? "").startsWith(`--to: the connection reached database "${B}", not "${A}"`) && /--to is untouched/.test(midRefused ?? "") && JSON.stringify(await markers()) === JSON.stringify({ [A]: true, [B]: true }) && bMark === null,
+      `PGDATABASE exported mid-refresh, after the guard and before the drop: the drop's own connection refuses, and ${B} is neither marked nor dropped (dump started: ${dumpStarted}; ${midRefused ?? "no refusal"}; ${B}'s settings ${JSON.stringify(bMark)})`);
+
+    // The mark names its database through pg_catalog: --to's options= may set
+    // search_path, and a current_database() planted in --to answering B would
+    // put the mark on B, where it disarms targetRefusal for a later refresh
+    // (review pass 2). --to really is A here, so every guard passes and the
+    // refresh runs to the stand-in restore, which fails.
+    {
+      const a = new SQL({ url: urlOf(A), max: 1 });
+      try { await a.unsafe(`CREATE SCHEMA IF NOT EXISTS evil; CREATE OR REPLACE FUNCTION evil.current_database() RETURNS name LANGUAGE sql AS $$ SELECT '${B}'::name $$`); } finally { await a.close(); }
+      let markRun: string | null = null;
+      try { await refresh(URL_!, urlOf(A) + "?options=-c%20search_path%3Devil%2Cpg_catalog%2Cpublic", "working"); } catch (e) { markRun = (e as Error).message; }
+      const bAfter = (await admin<{ cfg: string[] | null }[]>`SELECT setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = ${B} AND s.setrole = 0`)[0]?.cfg ?? null;
+      const after = await markers();
+      assert(/did not produce the thoughts table/.test(markRun ?? "") && bAfter === null && after[B] && !after[A],
+        `a current_database() planted in --to ahead of pg_catalog does not move the mark: the refresh reached its restore on ${A}, and ${B} is neither marked nor dropped (${(markRun ?? "no error").slice(0, 80)}; ${B}'s settings ${JSON.stringify(bAfter)}; markers ${JSON.stringify(after)})`);
+    }
+  } finally {
+    process.env.PATH = savedPath;
+    if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
+    rmSync(shimDir, { recursive: true, force: true });
+    for (const db of [A, B]) await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+    await admin.close();
+  }
+}
+
+// ── 24b. workerIdentity through the store's capped path (SMD-2303) ───────────
+//
+// The db/ claim workers' identity bootstrap (db/worker-bootstrap.ts). The
+// refuse-before-connect cases are DB-free and live in test-worker-bootstrap.ts;
+// this is the resolve half, which needs resolve_agent: a valid key gets an agent
+// id and its name through SqlStore.resolveAgent (the lock_timeout cap the raw
+// call the workers ran did not have), and a revoked one is refused.
+console.log("\n[24b] workerIdentity: a valid worker key resolves to an agent id and its name through the capped path; a revoked key is refused (SMD-2303)");
+{
+  const raw = "live-2303-worker-key";
+  const hash = hashKey(raw);
+  const spec = `extract-worker:write:${hash}`;
+  const lines: string[] = [];
+  const first = await workerIdentity(URL_, { OB1_WORKER_KEY: raw, MCP_ACCESS_KEYS: spec }, { noKeyWarning: "unused", write: (l) => lines.push(l) });
+  assert(first.ok && first.identity.keyName === "extract-worker" && typeof first.identity.agentId === "string" && first.identity.agentId.length > 0,
+    "a valid worker key resolves to an agent id and carries the key's name");
+  assert(first.ok && lines.some((l) => l.startsWith("  agent:  extract-worker (write, ")), "…and the agent line names it");
+  const second = await workerIdentity(URL_, { OB1_WORKER_KEY: raw, MCP_ACCESS_KEYS: spec }, { noKeyWarning: "unused", write: () => {} });
+  assert(first.ok && second.ok && second.identity.agentId === first.identity.agentId, "…and a second resolve returns the same agent id (registration is idempotent)");
+  const revoker = new SQL({ url: URL_, max: 1 });
+  try {
+    await revoker`SELECT revoke_agent_key(${hash}, 'SMD-2303 live')`;
+  } finally {
+    await revoker.close();
+  }
+  const revoked = await workerIdentity(URL_, { OB1_WORKER_KEY: raw, MCP_ACCESS_KEYS: spec }, { noKeyWarning: "unused" });
+  assert(!revoked.ok && /The worker's key was revoked at .+ \(SMD-2303 live\)\. Refusing to run\./.test(revoked.message),
+    "a revoked key is refused with its revocation time and reason, and never runs");
 }
 
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
