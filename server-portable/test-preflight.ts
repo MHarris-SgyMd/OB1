@@ -1377,6 +1377,33 @@ else {
   const consDone = await run(SQL_ENV);
   assert(/consolidate pass\s+none unfinished; 1 proposal\(s\) pending review — cd db && bun consolidate\.ts --url \$DATABASE_URL --list\s*$/m.test(consDone.out) && !/consolidate pass\s+consolidate:/.test(consDone.out),
          "a finished pass with a proposal waiting is ok — the queue is a reviewer's, not a defect — and the thought never pooled is not a signal");
+  // 070 (SMD-2313): the pending proposal set on a lineage pair — the newer
+  // thought's derived_from naming the older, raw, as a page names its
+  // evidence — is counted by the lineage check with its id, and the remedy is
+  // the listing's selector and the reject (the listing is 070's here, so no
+  // apply precedes it); a stale row is unreviewed too; a reviewer's reject
+  // clears the census. The row is put back for the fixtures below.
+  const [{ id: lpId }] = await claims`SELECT id FROM supersession_proposals WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[1]}::uuid`;
+  await claims`UPDATE thoughts SET derived_from = jsonb_build_array(${ids[0]}::text) WHERE id = ${ids[1]}::uuid`;
+  // A second pending proposal NOT on a lineage pair stands beside it: the
+  // census counts lineage pairs, not unreviewed rows (adversarial re-run,
+  // third review pass: counting every unreviewed row read 1 here too).
+  await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.6, 'stub reason', 0.9, ${CONS}, NULL)`;
+  const lpWarn = await run(SQL_ENV);
+  await claims`DELETE FROM supersession_proposals WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[2]}::uuid`;
+  const lpLine = (out: string) => (out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim();
+  assert(lpWarn.code === 0 && new RegExp(`!  lineage\\s+every derived row has its lineage row, but 1 unreviewed proposal\\(s\\) stand on a lineage pair \\(${lpId}\\): one side's derived_from names the other, so the pair would never be proposed today \\(066\\), and an accept would archive a derivation's input while the derivation still names it; the pass never replaces a pending one \\(SMD-2313\\)\\. \\d+ lineage row`).test(lpWarn.out)
+      && /^\s*→ Review them: cd db && bun consolidate\.ts --url <url> --list lineage shows them with both texts; reject each: bun consolidate\.ts --url <url> --reject <id> --note "lineage pair \(066\)"\.\s*$/.test(fix(lpWarn.out, "lineage")),
+         `a pending proposal on a lineage pair is a WARN naming the row, with the coverage, and the listing's selector and the reject as the fix line (exit ${lpWarn.code}: ${lpLine(lpWarn.out).slice(0, 240)} / ${fix(lpWarn.out, "lineage").trim().slice(0, 160)})`);
+  await claims`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${lpId}::uuid`;
+  assert(/!  lineage\s+every derived row has its lineage row, but 1 unreviewed proposal\(s\) stand on a lineage pair/.test((await run(SQL_ENV)).out), "…a stale row is unreviewed too, and counted");
+  await claims`UPDATE supersession_proposals SET status = 'pending' WHERE id = ${lpId}::uuid`;
+  await claims`SELECT review_supersession_proposal(${lpId}::uuid, 'reject', 'lineage pair (066)', NULL, NULL)`;
+  const lpClean = await run(SQL_ENV);
+  assert(lpClean.code === 0 && !/stand on a lineage pair/.test(lpClean.out) && /^✓  lineage\s+every derived row has its lineage row/.test(lpLine(lpClean.out)),
+         `…and rejected — the reviewer's verdict — the census is clean (${lpLine(lpClean.out).slice(0, 160)})`);
+  await claims`UPDATE supersession_proposals SET status = 'pending', reviewed_at = NULL, review_note = NULL WHERE id = ${lpId}::uuid`;
+  await claims`UPDATE thoughts SET derived_from = NULL WHERE id = ${ids[1]}::uuid`;
   // 063 (SMD-1732): a stale proposal — a text moved under a pending verdict
   // — is counted beside the pending ones, with the reviewer's command; both
   // clauses join with "; " when both stand (fourth review pass, cold read:
@@ -1707,6 +1734,35 @@ else {
   assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql\./.test(fix(pre067.out, "lineage")),
          `063 re-applied over 067 is a warning on rebuild_derived, naming 067 as the remedy (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") });
+  // 029 re-applied by hand over 070 (SMD-2313) — this ladder's own state
+  // since the queue section re-applied 029 alone: 029's two-argument listing
+  // stands BESIDE 070's, and a call short of three arguments is ambiguous
+  // (not unique) and fails, while the fork's callers pass three (measured on
+  // Postgres, run-it, first review pass: the arm had said the older body
+  // answered). The check counts the forms and warns naming 070, whose DROP
+  // takes the older form; then the body dropped by hand — a brain at 068
+  // under this server — is 029's alone, every listing fails, and the check
+  // warns the same way.
+  const beside029 = await run(SQL_ENV);
+  assert(beside029.code === 0 && /!  lineage\s+every derived row has its lineage row, but 029's two-argument list_supersession_proposals stands beside 070's \(029 re-applied by hand over it\): a call passing fewer than three arguments is ambiguous \(not unique\) and fails, so every reader outside the fork's callers — which pass three — errors on the queue \(SMD-2313\)/.test(beside029.out) && /Apply db\/migrations\/070_listing_flags_lineage_pair\.sql\./.test(fix(beside029.out, "lineage")),
+         `029 re-applied over 070 leaves its two-argument listing beside 070's: a warning naming 070 (${lpLine(beside029.out).slice(0, 200)})`);
+  // …and with a lineage pair standing in that state the census speaks first,
+  // its fix line the file THEN the review — the combined remedy and the arm
+  // order, which no state of this ladder had exercised (run-it, first review
+  // pass: the arms swapped and the remedy flattened both passed).
+  const [{ id: lpBesideId }] = await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, 'consolidate:other-judge@p1', NULL) AS id`;
+  await claims`UPDATE thoughts SET derived_from = jsonb_build_array(${ids[0]}::text) WHERE id = ${ids[1]}::uuid`;
+  const lpBeside = await run(SQL_ENV);
+  assert(lpBeside.code === 0 && /!  lineage\s+every derived row has its lineage row, but 1 unreviewed proposal\(s\) stand on a lineage pair/.test(lpBeside.out) && /^\s*→ Apply db\/migrations\/070_listing_flags_lineage_pair\.sql\. Then review them: cd db && bun consolidate\.ts --url <url> --list lineage shows them/.test(fix(lpBeside.out, "lineage")),
+         `a lineage pair standing while the listing is older: the census speaks, and its fix line applies 070 before the review (${lpLine(lpBeside.out).slice(0, 120)} / ${fix(lpBeside.out, "lineage").trim().slice(0, 140)})`);
+  await claims`UPDATE thoughts SET derived_from = NULL WHERE id = ${ids[1]}::uuid`;
+  await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`; // 061's trigger takes the proposal's lineage row with it
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+  await claims.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
+  const pre070 = await run(SQL_ENV);
+  assert(pre070.code === 0 && /!  lineage\s+every derived row has its lineage row, but list_supersession_proposals is from before 070 \(migration 070 not yet applied, or its form dropped by hand\): every listing fails — the CLI's --list, the stores and the MCP tool pass 070's third argument, which this form does not take — and no proposal standing on a lineage pair can be flagged \(SMD-2313\)/.test(pre070.out) && /Apply db\/migrations\/070_listing_flags_lineage_pair\.sql\./.test(fix(pre070.out, "lineage")),
+         `070's listing gone is a warning naming 070 and the failing readers (${lpLine(pre070.out).slice(0, 200)})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
   // The older bodies this ladder ran by hand (056's and 060's extraction
   // writer) replaced mention rows without sweeping their lineage rows, and
   // 061's backfill recorded pairs that later passes replaced — lineage rows
