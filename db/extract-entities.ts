@@ -24,6 +24,7 @@
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
  *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought)
+ *   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
  *
  * ── The cost, and the switch ────────────────────────────────────────────────
  * One LLM call per thought — per window of a thought over the extraction
@@ -93,7 +94,18 @@
  * parsed are written and the claim is released succeeded with a caveat naming
  * the windows left out, a second kind of partial row, counted and listed
  * apart from a prefix, whenever at least one other window parsed; a thought
- * none of whose windows parsed is failed as malformed. A
+ * none of whose windows parsed is failed as malformed. So a model that
+ * answers a large share of windows malformed writes partial rows, not failed
+ * ones, and the run watches the share instead (SMD-2266, db/config.mjs's
+ * malformedAlarm): when more than a fifth of at least 48 answers — one per
+ * window of each thought that returned — were malformed, it says on stderr
+ * that the model is likely at fault and exits 3, ahead of the 1 of rows
+ * failed, leased or pending. A --follow process judges blocks of 48 or more
+ * after each pass drains the pool, so one started on a backlog says nothing
+ * until the backlog is done (try a new model with --limit 48 first); stopped
+ * by a signal it exits 0, and at its --limit with a block tripped, 3. A
+ * thought's own share is not judged: a reference list is its text's fault,
+ * not the model's. A
  * rate limit, a server error or a lost connection is neither: the worker
  * pauses and retries, and stops if the provider stays down, leaving its leases
  * to return to the pool rather than marking thoughts failed for it. A content
@@ -121,6 +133,7 @@ import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
 import { databaseUrl, openSql } from "./connect.ts";
+import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
 
 /**
  * Every argument accounted for (db/cli.ts): a flag this worker does not have,
@@ -454,12 +467,15 @@ if (recordedKey !== JOB) {
   console.log(`  ob1_config.entity_extraction_key = ${JOB} — new and edited thoughts now enqueue for extraction`);
 }
 
+/** Rows a --retry-* flag returned to the pool: the run's first judgement is of rows chosen for failing (SMD-2266, review pass 2). */
+let returned = 0;
 if (RETRY_FAILED) {
   const [{ n }] = await sql`
     WITH retried AS (
       UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
       WHERE work_type = ${JOB} AND status = 'failed' RETURNING 1)
     SELECT count(*)::int AS n FROM retried`;
+  returned += n;
   console.log(`  --retry-failed: ${n} failed row(s) returned to the pool`);
 }
 
@@ -489,6 +505,7 @@ if (RETRY_PARTIAL || RETRY_LEFT_OUT) {
   const again = leftOut > 0 ? `; a row with windows left out is sent again to ${cfg.metadataModel}, and a window it answers malformed again is left out again` : "";
   // Any row, a prefix too: a failure writes nothing (review pass 4).
   const fails = n > 0 ? `; a reading that fails (a window timing out, or none parsing) records its row failed, the earlier reading's entities left in the graph until a later one succeeds` : "";
+  returned += n;
   const what = RETRY_PARTIAL ? `--retry-partial: ${n} row(s) extracted in part` : `--retry-left-out: ${n} row(s) with windows left out`;
   console.log(`  ${what} returned to the pool${n ? ` (${partialKinds(n, leftOut, both)})` : ""}${prefix}${again}${fails}`);
 }
@@ -514,6 +531,23 @@ let escalated = 0;
 /** Thoughts a runaway was aborted on the stream for, before its budget (SMD-1960). */
 let aborted = 0;
 let calls = 0;
+/**
+ * The answers the model gave this run — one a window sent, a one-window
+ * thought's one — and how many were not JSON of the expected shape, in a
+ * thought failed as malformed or left out of a partial one: the run's signal
+ * that the model, not the documents, is at fault (SMD-2266, malformedAlarm).
+ */
+let answers = 0;
+let answersMalformed = 0;
+/**
+ * The answers judged so far, and how many judgements tripped. A run that
+ * exits is judged once, at its end; a follower judges its answers in blocks of
+ * at least EXTRACT_MALFORMED_ALARM_MIN after each poll, so it says so while it
+ * runs — a stopped follower exits 0 — and a breakage that starts late is not
+ * diluted by the good polls before it (review pass 1).
+ */
+const judged = { answers: 0, malformed: 0, escalated: 0 };
+let alarms = 0;
 const totals = { entities: 0, newEntities: 0, mentions: 0, edges: 0, dropped: 0, ambiguous: 0, refused: 0, retyped: 0, gated: false };
 const activeWorkers = new Set<string>();
 const started = Date.now();
@@ -559,6 +593,10 @@ async function processRow(row: Row): Promise<Outcome> {
   // Every call the thought cost: one per window, and one more per window
   // that was retried (first review pass: the retries went uncounted).
   calls += callsOf(extraction);
+  // Every answer counts, whatever the write then does: the signal is the
+  // model's, not the rows'.
+  answers += extraction.windows;
+  answersMalformed += extraction.malformed ? extraction.windows : extraction.coverage?.malformed?.length ?? 0;
   // A per-window record, not a count over one: a prefix of one window of a
   // longer thought is windowed — sent "Part 1 of N" (review pass 2).
   if (extraction.parts) windowed++;
@@ -889,6 +927,39 @@ const stop = () => {
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
+/**
+ * The alarm's lines for the answers since the last judgement, when there are
+ * at least EXTRACT_MALFORMED_ALARM_MIN of them and more than the share were
+ * malformed (SMD-2266, db/config.mjs's malformedAlarm): the verdict, then what
+ * to check and retry. Undefined otherwise. Either way they are judged, and the
+ * next judgement starts after them. The first judgement of a run that returned
+ * rows for failing (--retry-*) is of documents chosen for it, so it is not told
+ * they are not at fault, and a follower's later blocks, new captures, are
+ * (review passes 1 and 2). The models named are those that answered the
+ * block, the escalation's when it took a runaway (SMD-2000); the retries named
+ * are for the kinds of row the run left.
+ */
+function judge(): string | undefined {
+  const n = answers - judged.answers;
+  const bad = answersMalformed - judged.malformed;
+  if (n < EXTRACT_MALFORMED_ALARM_MIN) return undefined;
+  const chosen = returned > 0 && judged.answers === 0;
+  const esc = escalated - judged.escalated;
+  judged.answers = answers;
+  judged.malformed = answersMalformed;
+  judged.escalated = escalated;
+  if (!malformedAlarm(n, bad)) return undefined;
+  alarms++;
+  const models = esc ? `OB1_METADATA_MODEL (${cfg.metadataModel}) and OB1_EXTRACT_ESCALATE_MODEL (${WINDOWING.escalateModel}), which answered the runaways of ${esc} thought(s)` : `OB1_METADATA_MODEL (${cfg.metadataModel})`;
+  const retries = [leftOut ? "--retry-left-out re-reads the partial rows" : "", failed ? "--retry-failed re-reads the failed ones" : ""].filter(Boolean).join(" and ");
+  return `  ${bad} of ${FOLLOW ? `the follower's last ${n} answers` : `the ${n} answers this run`} were ${MALFORMED_WINDOWS_MARK} — more than ${Math.round(EXTRACT_MALFORMED_ALARM_SHARE * 100)}% of at least ${EXTRACT_MALFORMED_ALARM_MIN} (db/config.mjs, EXTRACT_MALFORMED_ALARM_SHARE): ` +
+    (chosen
+      ? `the ${returned} row(s) this run returned were chosen for failing or leaving windows out, so their documents may be at fault; if not, the model is.`
+      : "the model, not the documents, is likely at fault — documents it can answer only in part, such as reference lists, leave out far fewer.") +
+    `\n    Check ${models}, the endpoint and the prompt. ${done ? `The rows written stand${leftOut ? ", each partial one naming its windows left out" : ""}` : "No row was written"}` +
+    `${retries ? `; once the model is right, ${retries}, with --job ${JOB} if OB1_METADATA_MODEL changes` : ""}.`;
+}
+
 let firstPass = true;
 async function pass(): Promise<Counts> {
   // The backlog is pooled once. While following, the trigger enqueues every
@@ -912,11 +983,21 @@ console.log(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renew
 
 let after = await pass();
 if (FOLLOW) {
+  // Only a block it will poll after: the last pass's — the limit reached, or
+  // stopped — is the final judgement's, which says the exit the run takes
+  // (review pass 2: a follower at its --limit said "exits 0" and exited 3).
+  const say = () => {
+    if (stopping || limitReached()) return;
+    const line = judge();
+    if (line) console.error(`${line} The follower keeps polling; stopped by a signal, it exits 0${LIMIT ? ", and at its --limit, 3" : ""}.`);
+  };
+  say();
   // "This many thoughts, then stop" holds while following too.
   while (!stopping && !limitReached()) {
     await Bun.sleep(FOLLOW * 1000);
     if (stopping) break;
     after = await pass();
+    say();
   }
 }
 
@@ -942,6 +1023,18 @@ console.log(
 // Thoughts none of whose windows parsed; a window left out beside parsed ones
 // is in the summary's partial clause instead (SMD-2260, review pass 2).
 if (malformed > 0) console.error(`  ${malformed} thought(s) whose every answer was not JSON of the expected shape — recorded failed`);
+// A run whose model answers a large share of windows malformed writes partial
+// rows, each succeeded, where one malformed window used to fail its thought:
+// say so, and exit 3 below, rather than let the exit code pass it (SMD-2266).
+// The exit code is settled first, so the line says the one the run exits with
+// (review pass 1: a signal or the provider's refusal exits otherwise).
+const alarmLine = judge();
+const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
+// The alarm before the failures: a model at fault explains them, and
+// --retry-failed under it would fail them again. Leased and pending rows keep
+// their own lines below.
+const exitCode = configError ? 2 : stopping ? (FOLLOW ? 0 : 130) : alarms > 0 ? 3 : incomplete ? 1 : 0;
+if (alarmLine) console.error(`${alarmLine} ${exitCode === 3 ? "Exiting 3." : `Exiting ${exitCode}, not 3: ${exitCode === 2 ? "the provider refused the request itself (below)" : "stopped by a signal"}.`}`);
 printCounts(after, "after");
 await printGraph();
 if (after.partial > 0) await printPartials(after);
@@ -965,5 +1058,4 @@ if (configError) {
   await Promise.resolve();
   process.exit(2);
 }
-const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
-process.exit(stopping ? (FOLLOW ? 0 : 130) : incomplete ? 1 : 0);
+process.exit(exitCode);

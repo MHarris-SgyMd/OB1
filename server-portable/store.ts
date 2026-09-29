@@ -519,6 +519,37 @@ export type ReleaseLeasesResult = {
   workers: string[];
 };
 
+/**
+ * A pure-SELECT preview of what a `run_worker` drain over one pool would process
+ * (SMD-2272) — the census is exactly a `workerStatus` row for `workType` (so a dry
+ * run and the read surface agree by construction), with `backlog`/`wouldClaim`
+ * added on top. Claims nothing: no `claim_thoughts`, no `enqueue_thoughts`, no
+ * lease. The executing drain is deferred (SMD-2304's callable core); this is the
+ * `dry_run: true` half, buildable now over pure SQL.
+ */
+export type DryRunClaimResult = {
+  /** The pool previewed, echoed back. */
+  workType: string;
+  /** Claim rows currently `pending` for this pool — the rows a `claim_thoughts()` would lease now. */
+  pending: number;
+  /** `status='claimed'` — in flight, INCLUDING stale leases (as the workers count it). */
+  claimed: number;
+  succeeded: number;
+  failed: number;
+  /** Of `claimed`, how many are past `ttl_expires_at` (a dead worker's lease). */
+  stale: number;
+  /** Thoughts with no claim row for this work_type — what a pass would enqueue first. Same generic definition as `workerStatus` (exact for extraction; reembed/consolidate pool by model-aware rules, so this is an upper bound for them). */
+  unpooled: number;
+  /** The whole corpus's thought count. */
+  thoughts: number;
+  /** What a full pass would draw into processing now = `pending + stale + unpooled` (the three disjoint drainable sets, before any `limit`). `stale` is in it because `claim_thoughts` reaps expired leases back to the pool before it claims (migration 015); a live `claimed` lease is held by a live worker and skipped. An UPPER BOUND: exact for an extraction pool, but for reembed/consolidate `unpooled` counts every un-pooled thought (model-aware eligibility), and a stale row at max attempts fails rather than re-claims. */
+  backlog: number;
+  /** The backlog bounded by `limit`. Equals `backlog` when no `limit` is given — so it carries the same extraction-exact / model-aware-upper-bound caveat as `backlog`. */
+  wouldClaim: number;
+  /** The `limit` the caller passed, echoed back, or null. */
+  limit: number | null;
+};
+
 export type ListFilters = {
   limit: number;
   type?: string;
@@ -632,6 +663,8 @@ export type SupersessionProposal = {
   /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). `created_at` is `string | null` for the same reason the read path is (SMD-1803). */
   older: { id: string; content: string; created_at: string | null; edited: boolean };
   newer: { id: string; content: string; created_at: string | null; edited: boolean };
+  /** Since migration 070 (SMD-2313): one side's `derived_from` names the other — a derivation and its input (a page and its evidence), a pair 066's candidate filter never proposes; a standing one is a reviewer's to reject; false when the column is absent from a row. */
+  lineage: boolean;
 };
 
 /** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
@@ -654,6 +687,7 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     supersedingId: r.superseding_id == null ? null : String(r.superseding_id),
     older: { id: String(r.older_id), content: String(r.older_content), created_at: isoTimestampOrNull(r.older_created_at), edited: r.older_edited === true },
     newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: isoTimestampOrNull(r.newer_created_at), edited: r.newer_edited === true },
+    lineage: r.lineage === true,
   };
 }
 
@@ -1139,6 +1173,17 @@ export interface ThoughtStore {
   releaseStaleLeases(opts: ReleaseLeasesOpts): Promise<ReleaseLeasesResult>;
 
   /**
+   * Preview what a `run_worker` drain over one pool would process, claiming
+   * nothing (SMD-2272) — the `dry_run: true` half of `run_worker`. A pure SELECT:
+   * the same per-work_type census `workerStatus` reports (so the two agree), plus
+   * the drainable `backlog` (`pending + unpooled`) and `wouldClaim` (that backlog
+   * bounded by `limit`). No claim, no enqueue, no lease — the guard's "claims
+   * nothing (pure SQL)". SQL-backend only, like the sibling worker methods; the
+   * shim throws. The executing drain is deferred to SMD-2304's callable core.
+   */
+  dryRunClaim(workType: string, limit?: number): Promise<DryRunClaimResult>;
+
+  /**
    * Everything thought_stats needs, aggregated by the store. The two backends
    * differ, and this is one of the places the interface says so:
    *   - SQL (store-sql.ts) runs migration 024's thought_stats_summary() — the
@@ -1336,7 +1381,8 @@ export interface ThoughtStore {
    * write to thoughts.supersedes has one path. Throws on a schema before 029;
    * the tool names the migration.
    */
-  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number }): Promise<SupersessionProposal[]>;
+  /** `lineage` true selects the proposals standing on a lineage pair, false the rest, absent every pair (migration 070, SMD-2313). */
+  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean }): Promise<SupersessionProposal[]>;
 
   /**
    * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest

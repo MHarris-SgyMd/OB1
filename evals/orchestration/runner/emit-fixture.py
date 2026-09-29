@@ -16,7 +16,16 @@ a run with nothing emitted. Before exiting it leaves a detached child
 (`sleep 900`), which the runner must stop (review pass 2: leftovers were
 abandoned, never killed). It also fails if its HOME is writable or Python's
 user site is on: a shared writable HOME let one emitter plant code another
-ran (review pass 3).
+ran (review pass 3). And it fails if it can reach anything on the network
+(SMD-2289): a DNS answer, the host's Ollama through the host alias, Postgres,
+n8n, the internet, or the runner's own port.
+`--vendor` is a live-API emitter whose pipeline names one host, server:8000
+(SMD-2289). Through the proxy the runner puts in HTTPS_PROXY, TLS naming that
+host must reach it (the brain answers a ClientHello with plain HTTP, which is
+proof enough); TLS naming another server through the same tunnel must be
+cut off before it reaches anything, and a CONNECT to Postgres refused, both
+named in the run's report; a direct connection must fail. It prints nothing
+either way, and exits 3 naming what went wrong.
 Standard library only, as a recipe's emitter should be where it can.
 """
 import json
@@ -40,6 +49,7 @@ def snoop() -> int:
         except OSError:
             continue
         found += [f"pid {pid}: {n}" for n in names if n in ("DATABASE_URL", "OB1_RUNNER_KEY")]
+    found += reachable()
     home = os.environ.get("HOME", "/")
     import site
     if os.access(home, os.W_OK):
@@ -47,7 +57,7 @@ def snoop() -> int:
     if site.ENABLE_USER_SITE:
         found.append("the Python user site is on")
     if found:
-        print("READABLE: " + ", ".join(found), file=sys.stderr)
+        print("SNOOP found: " + ", ".join(found), file=sys.stderr)
         return 3
     if os.path.exists("/usr/bin/env") and hasattr(os, "fork"):
         import subprocess
@@ -55,9 +65,103 @@ def snoop() -> int:
     return 0
 
 
+def connects(host: str, port: int) -> str | None:
+    """Whether a TCP connection opens: None when it does not (refused, reset, no route, a name that does not resolve)."""
+    import socket
+    try:
+        socket.create_connection((host, port), timeout=3).close()
+        return f"reached {host}:{port}"
+    except OSError:
+        return None
+
+
+def reachable() -> list:
+    """What an emitter with no network must not reach (SMD-2289). The host
+    alias is in /etc/hosts, and 1.1.1.1 and the runner's port are addresses,
+    so those three are refused by address, not by a failed lookup."""
+    import socket
+    found = []
+    try:
+        socket.getaddrinfo("postgres", 5432)
+        found.append("resolved postgres: DNS answered")
+    except OSError:
+        pass
+    for host, port in (("host.docker.internal", 11434), ("postgres", 5432), ("n8n", 5678), ("1.1.1.1", 443), ("127.0.0.1", 8090)):
+        hit = connects(host, port)
+        if hit:
+            found.append(hit)
+    return found
+
+
+def tunnel(proxy: str, target: str):
+    """A CONNECT through the proxy: the socket, and the proxy's answer line."""
+    import socket
+    import urllib.parse
+    u = urllib.parse.urlsplit(proxy)
+    s = socket.create_connection((u.hostname, u.port), timeout=10)
+    s.sendall(f"CONNECT {target} HTTP/1.1\r\nhost: {target}\r\n\r\n".encode())
+    head = b""
+    while not head.endswith(b"\r\n\r\n"):
+        c = s.recv(1)
+        if not c:
+            break
+        head += c
+    return s, head.split(b"\r\n")[0]
+
+
+def tls_through(proxy: str, target: str, server_name: str) -> str:
+    """TLS naming server_name through a tunnel to target: "answered" when the far end
+    answered (the brain answers in plain HTTP, which fails the handshake as a wrong
+    version), "cut" when the tunnel closed first, else the proxy's refusal line."""
+    import ssl
+    s, line = tunnel(proxy, target)
+    if not line.startswith(b"HTTP/1.1 200"):
+        s.close()
+        return line.decode(errors="replace")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.wrap_socket(s, server_hostname=server_name).close()
+        return "answered"
+    except (ssl.SSLEOFError, ssl.SSLZeroReturnError, ConnectionError):
+        return "cut"
+    except ssl.SSLError as e:
+        return "answered" if "WRONG_VERSION_NUMBER" in str(e) else f"cut ({e})"
+    finally:
+        s.close()
+
+
+def vendor() -> int:
+    proxy = os.environ.get("HTTPS_PROXY")
+    wrong = []
+    if not proxy:
+        wrong.append("no HTTPS_PROXY in the environment")
+    else:
+        named = tls_through(proxy, "server:8000", "server")
+        if named != "answered":
+            wrong.append(f"TLS naming the named host did not reach it: {named}")
+        fronted = tls_through(proxy, "server:8000", "other.example")
+        if fronted != "cut":
+            wrong.append(f"TLS naming another server through the named host's tunnel was not cut off: {fronted}")
+        s, other = tunnel(proxy, "postgres:5432")
+        s.close()
+        if not other.startswith(b"HTTP/1.1 403"):
+            wrong.append(f"a CONNECT to a host it does not name was not refused: {other[:120]!r}")
+    hit = connects("host.docker.internal", 11434) or connects("1.1.1.1", 443) or connects("127.0.0.1", 8090)
+    if hit:
+        wrong.append(f"a direct connection opened: {hit}")
+    if wrong:
+        print("VENDOR: " + "; ".join(wrong), file=sys.stderr)
+        return 3
+    return 0
+
+
 def main() -> int:
     if "--snoop" in sys.argv:
         return snoop()
+    if "--vendor" in sys.argv:
+        return vendor()
     argv = sys.argv[1:]
     def option(name: str, default: str) -> str:
         return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else default

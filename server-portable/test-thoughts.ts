@@ -23,6 +23,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VE
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
+import { classifyGenre, presignalGenre, type ChooseFn } from "./genre.ts";
 import { extractMetadata } from "./metadata.ts";
 
 const { assert, report } = createAssert();
@@ -658,6 +659,46 @@ console.log("\n[11] Hybrid decide (SMD-2321): identifiers carved by rule, the de
   const boom: DecideFn = async () => { throw new Error("decider down"); };
   const fb = await decideEntities(text, [E("Anita", "organization")], cfg, subj, boom);
   assert(fb.stats.deciderError === true && fb.entities.length === 1 && fb.entities[0].type === "organization", "a decider outage falls back to the model's entities, flagged");
+}
+
+console.log("\n[12] Genre classify (SMD-2323): a metadata pre-signal decides without a call, the tier decides the rest, an abstain/outage/tier-unset fall back to other");
+{
+  const cfg = {} as any;
+  const subj = { kind: "capture" } as any;
+  let calls = 0;
+  let lastD: Parameters<ChooseFn>[1] | undefined;
+  const choose =
+    (selected: string, abstained = false): ChooseFn =>
+    async (_cfg, d) => {
+      calls++;
+      lastD = d;
+      return { result: { id: "g", kind: "choice", probabilities: { [selected]: 0.9 }, selected, abstained, p_insufficient: abstained ? 0.9 : 0, logits: [], temperature: 1, tokens: 1, truncated: false } as any };
+    };
+
+  // Pure pre-signal, no tier, no call.
+  assert(presignalGenre({ source: "linear" }) === "project-issue", "a source:linear row is a project-issue by rule");
+  assert(presignalGenre({ arxiv_id: "2301.00001" }) === "research-paper" && presignalGenre({ authors: ["A. Turing"] }) === "research-paper", "an arXiv id or an author list is a research paper");
+  assert(presignalGenre({ genre: "recipe" }) === "recipe" && presignalGenre({ genre: "nonsense" }) === null && presignalGenre({}) === null, "a valid existing genre is kept, a bogus one and an empty metadata say nothing");
+
+  const boom: ChooseFn = async () => { throw new Error("tier down"); };
+  const linear = await classifyGenre("anything", { source: "linear" }, cfg, subj, { decide: boom });
+  assert(linear.genre === "project-issue" && linear.source === "presignal", "the pre-signal short-circuits before any decide call, even with a tier configured");
+
+  const unset = await classifyGenre("A blog post about widgets.", { source: "mcp" }, null, subj, { decide: choose("blog-article") });
+  assert(unset.genre === "other" && unset.source === "fallback" && calls === 0, "no tier: pre-signal-only, fall back to other, no call made");
+
+  const decided = await classifyGenre("Combine flour and water, then bake at 200C.", { source: "mcp" }, cfg, subj, { decide: choose("recipe") });
+  assert(decided.genre === "recipe" && decided.source === "decider" && calls === 1, "the tier decides a genre the pre-signal cannot");
+  assert(lastD?.context.includes("Combine flour and water") && lastD.options.length === 7 && lastD.options.some((o) => o.id === "recipe") && lastD.question.trim() !== "", "the decider is handed the content as context and the full genre vocabulary — not an empty window or bare options (SMD-2017's starved-decider failure)");
+
+  const abstained = await classifyGenre("hm.", { source: "mcp" }, cfg, subj, { decide: choose("__insufficient_evidence__", true) });
+  assert(abstained.genre === "other" && abstained.source === "decider", "an abstain lands on other, credited to the decider");
+
+  const bogus = await classifyGenre("x", { source: "mcp" }, cfg, subj, { decide: choose("not-a-genre") });
+  assert(bogus.genre === "other" && bogus.source === "decider", "a selection outside the vocabulary lands on other");
+
+  const outage = await classifyGenre("x", { source: "mcp" }, cfg, subj, { decide: boom });
+  assert(outage.genre === "other" && outage.source === "fallback", "a tier outage falls back to other and never throws");
 }
 
 report();
