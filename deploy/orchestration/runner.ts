@@ -246,8 +246,8 @@ export function missingEmitters(pipelines: Pipeline[], root: string): string[] {
     const scripts = args
       .filter((_, i) => !(at >= 0 && i === at + 1 && !/^-m./.test(args[at])))
       .map((a) => (a.startsWith("/app/") ? a.slice(5) : a))
-      // A script file (.py .ts .tsx .js .jsx .mjs .cjs), or any relative path with a directory in it (a script with no extension).
-      .filter((a) => (/^[^-/][^\s]*\.(py|ts|tsx|js|jsx|mjs|cjs)$/.test(a) || /^[^-/{][^\s]*\/[^\s]+$/.test(a)) && !a.includes("{input}") && !existsSync(resolve(root, a)));
+      // A script file (.py .ts .tsx .js .jsx .mjs .cjs), or any relative path with a directory in it (a script with no extension); a URL is neither, and is the natural argument of a networked pipeline's emitter (review pass 5: `https://…` was named a missing script, and the runner refused to start).
+      .filter((a) => (/^[^-/][^\s]*\.(py|ts|tsx|js|jsx|mjs|cjs)$/.test(a) || /^[^-/{][^\s]*\/[^\s]+$/.test(a)) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(a) && !a.includes("{input}") && !existsSync(resolve(root, a)));
     // A module of the repository (its top package a directory here, e.g. recipes.x.emit); the standard library and installed packages are not checked.
     const missingModule = mod && /^[a-z_][\w.]*$/i.test(mod) && (mod.startsWith("recipes.") || existsSync(resolve(root, mod.split(".")[0]))) && ![`${mod.replaceAll(".", "/")}.py`, `${mod.replaceAll(".", "/")}/__main__.py`].some((x) => existsSync(resolve(root, x)));
     return [...scripts, ...(missingModule ? [`-m ${mod}`] : [])].map((a) => `${p.name}: ${a}`);
@@ -1061,7 +1061,7 @@ async function selfCheck(): Promise<number> {
   }
   expect("a missing emitter is told to go into the image by runner.Dockerfile and .dockerignore, not only to rebuild", /runner\.Dockerfile/.test(missingEmitterHelp(["x: y.py"])) && /\.dockerignore/.test(missingEmitterHelp(["x: y.py"])));
   expect("the ingester and reembed get the database, not the runner's own key", shipped.env.OB1_RUNNER_KEY === undefined && shipped.env.DATABASE_URL === "postgres://x" && shipped.asEmitter(parsePipelines(one({}))[0]).length === 0 && shipped.sweep(parsePipelines(one({}))[0]) === null);
-  expect("an emitter script the image lacks is named, after a flag, after `bun run`, or bare; an inline one, a module and a present one are not", JSON.stringify(missingEmitters(each([
+  expect("an emitter script the image lacks is named, after a flag, after `bun run`, or bare; an inline one, a module, a present one and a URL argument are not", JSON.stringify(missingEmitters(each([
     { ...good, name: "gone", emitter: ["python3", "recipes/nowhere/emit.py", "{input}"] },
     { ...good, name: "flagged", emitter: ["python3", "-u", "recipes/nowhere/emit.py"] },
     { ...good, name: "run", emitter: ["bun", "run", "nowhere.ts"] },
@@ -1079,6 +1079,7 @@ async function selfCheck(): Promise<number> {
     { ...good, name: "noext", emitter: ["python3", "recipes/nowhere/emit"] },
     { ...good, name: "tsx", emitter: ["bun", "recipes/nowhere/emit.tsx"] },
     { ...good, name: "absinput", emitter: ["bun", "deploy/orchestration/runner.ts", "/imports/fixture"] },
+    { ...good, name: "url", emitter: ["python3", "deploy/orchestration/runner.ts", "https://api.example.com/v1/export.json"] },
   ]), REPO)) === JSON.stringify(["gone: recipes/nowhere/emit.py", "flagged: recipes/nowhere/emit.py", "run: nowhere.ts", "bare: emit.py", "xflag: recipes/nowhere/x.py", "absolute: recipes/nowhere/a.py", "repomod: -m recipes.nowhere.emit", "cluster: -m recipes.nowhere.clustered", "inline: -m recipes.nowhere.inline", "noext: recipes/nowhere/emit", "tsx: recipes/nowhere/emit.tsx"]));
   const item = (system: string, scope = "fixture:export") => JSON.stringify({ identity: { system, key: "k" }, scope, text: "t" });
   const p = parsePipelines(one({}))[0];
@@ -1547,7 +1548,8 @@ if (import.meta.main) {
     const held = heldEgressCaps();
     if (held.length) await refuseStart(`started holding ${held.join(" and ")}, which the image's command drops once it has closed emitters' network: start the runner with its image's command (runner.Dockerfile), not another`);
     const reach = await emittersReach();
-    if (reach instanceof Error) await refuseStart(`could not ask whether an emitter uid has network: ${reach.message}`);
+    // An engine whose user namespace does not map the emitter uids fails here, as su-exec: setgroups(59999): Invalid argument (review pass 5), so the refusal names the range.
+    if (reach instanceof Error) await refuseStart(`could not ask whether an emitter uid has network: ${reach.message}. Emitters run as uids ${EMITTER_UIDS[0]}–${EMITTER_UIDS[1]}, which the engine's user namespace must map (a 65536-uid range does)`);
     if (reach === "reached") await refuseStart(`an emitter uid reached a port of the runner's on 127.0.0.1: the egress rules that close emitters' network are not in place. The image's command sets them (runner.Dockerfile); start the runner with it`);
   }
   if (!existsSync(c.importsDir)) console.error(`runner: ${c.importsDir} does not exist; every emitter will find no export`);

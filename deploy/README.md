@@ -833,11 +833,24 @@ lines naming the same one are refused.
          as the container starts, keyed on the emitter uids (nft), and then
          drops the capability to change them. The runner refuses to start
          if an emitter uid can reach a port of its on loopback (asked before
-         it listens), or if it still holds that capability. The engine's
-         kernel needs nf_tables (Docker, Docker Desktop and podman have it);
-         without it the runner refuses to start, and says why, every 30 s.
+         it listens), or if it still holds that capability. A connect
+         fails at once; a name lookup waits out the resolver's timeout
+         (about 5 s) before it fails. The engine's kernel needs nf_tables
+         (measured on podman, and in CI on Docker); without it the runner
+         refuses to start, and says why, every 30 s. So does an engine whose
+         user namespace does not map uids 20000–59999.
+       - Never run the runner on the host's network (`--network host`, or a
+         pod sharing the host's): its rules would go into the host's own
+         ruleset and outlive the container, and its port and proxies would
+         be open to every process on the host. compose.yaml never does.
        - A live-API emitter's pipeline names the hosts it needs:
          `"network": ["api.readwise.io"]` (port 443), or `"host:port"`.
+         How the vendor's credential reaches the emitter is not decided
+         yet (it is, with the first live-API recipe converted: SMD-2149,
+         SMD-2021): the emitter's environment holds none. Do not put one in
+         the emitter's argv (every uid in the container can read another's
+         command line) or in a file under the imports directory (every
+         emitter can read a world-readable one).
          The emitter reaches them only through a proxy the runner keeps
          for that pipeline, at `HTTPS_PROXY` in its environment, which
          Python's urllib and requests and Bun's fetch read. The proxy
