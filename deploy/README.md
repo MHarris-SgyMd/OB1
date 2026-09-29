@@ -951,9 +951,10 @@ no other role.
   as the migrator connects, before the runner starts, on every `up`:
   `db/login-role.ts` creates the role or resets its password to
   `OB1_RUNNER_DB_PASSWORD` and clears an existing one's settings in every
-  database, then `migrate.ts --grant --groups … --exact` replaces its
-  privileges with the groups' in one transaction, so a runner already
-  running never meets a moment without them. A role neither will take is
+  database, then `migrate.ts --grant --groups … --exact` replaces what its
+  grants hold here with the groups' privileges (schema USAGE, CONNECT and
+  TEMP stay) in one transaction, so a runner already running never meets a
+  moment without them. A role neither will take is
   refused by name: a superuser, a member of another role, an owner, or one
   holding a privilege a revoke there does not reach (a default privilege
   naming it, a grant in another database).

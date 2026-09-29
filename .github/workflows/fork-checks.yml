@@ -1055,19 +1055,20 @@ jobs:
         run: docker compose -f compose.yaml --profile orchestration build orchestration-runner
 
       # SMD-2289: the runner's database role, as compose makes it. The
-      # one-shot runs twice against this job's Postgres: the role created,
-      # then updated, as a rotated password would be. Then it is asked over the
-      # compose network, as the runner connects (inside the postgres container
-      # localhost is trusted, so the password would never be checked there):
-      # with its password it is itself, not a superuser, a member of no role,
-      # reads the ledger and ob1_config, may not write ob1_agent_keys (where a
-      # key's revocation lives), and cannot create a table; with a wrong one
-      # it is refused as that. Then login-role.ts refuses, by name, a
-      # superuser, a member of another role and an owner; --grant --exact
-      # refuses a default privilege's grantee; and the two together clear a
-      # role's leftover privilege and per-database setting (review passes 1-3).
-      # The probe roles go at the end. Each check is an `if` or an `||`: bash
-      # -e does not stop on a failure inside an `&&` list.
+      # one-shot runs; the role is given, by hand, what it should not keep (an
+      # UPDATE on ob1_agent_keys, CREATE on public and on the database, a
+      # procedure's EXECUTE) and a CONNECT it should; the one-shot runs again, as a rotated password
+      # would. Then, as the superuser, the role's privileges must be exactly
+      # the four groups' as config.mjs lists them, with CONNECT kept and
+      # nothing else. Then it is asked over the compose network, as the runner
+      # connects (localhost inside the postgres container is trusted): itself,
+      # not a superuser, a member of no role, cannot create a table; a wrong
+      # password refused as that. Then login-role.ts refuses a superuser, a
+      # member and an owner by name, --grant --exact a default privilege's
+      # grantee, and the two together clear a role's leftover privilege and
+      # per-database setting (review passes 1-4). The probe roles go at the
+      # end. Each check is an `if` or an `||`: bash -e does not stop on a
+      # failure inside an `&&` list.
       - name: The import runner's database role is made and granted
         working-directory: deploy
         env:
@@ -1077,11 +1078,15 @@ jobs:
           oneshot() { docker compose -f compose.yaml --profile orchestration run --rm --no-deps "$@"; }
           superuser() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc "$1"; }
           oneshot orchestration-runner-role
+          superuser "GRANT UPDATE ON ob1_agent_keys TO ob1_orchestration_runner; GRANT CREATE ON SCHEMA public TO ob1_orchestration_runner; GRANT CONNECT, CREATE ON DATABASE openbrain TO ob1_orchestration_runner; CREATE PROCEDURE ci_proc() LANGUAGE sql AS 'SELECT 1'; GRANT EXECUTE ON PROCEDURE ci_proc() TO ob1_orchestration_runner;"
           oneshot orchestration-runner-role | tee /tmp/role-again.log
           grep -q "ob1_orchestration_runner updated" /tmp/role-again.log
-          good="postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD}@postgres:5432/openbrain"
           # shellcheck disable=SC2016 # JavaScript, whose template literals stay unexpanded
-          ask='const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); const [r] = await s`SELECT current_user::text AS u, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS su, (SELECT count(*)::int FROM pg_auth_members m JOIN pg_roles x ON x.oid = m.member WHERE x.rolname = current_user) AS memberships, has_table_privilege(${"schema_migrations"}, ${"SELECT"}) AS ledger, has_table_privilege(${"ob1_config"}, ${"SELECT"}) AS config, has_table_privilege(${"ob1_agent_keys"}, ${"UPDATE"}) AS keys, (SELECT count(*)::int FROM thoughts) AS n`; let created = true; try { await s`CREATE TABLE ob1_runner_role_probe (x int)`; } catch { created = false; } await s.close(); console.log(JSON.stringify({ ...r, created })); process.exit(r.u === "ob1_orchestration_runner" && r.su === false && r.memberships === 0 && r.ledger && r.config && !r.keys && !created ? 0 : 1);'
+          exactly='import { grantedObjects, grantPresenceSql, mergedGrants } from "./config.mjs"; const s = new Bun.SQL(process.env.DATABASE_URL, { max: 1 }); const role = "ob1_orchestration_runner"; const groups = ["capture", "worker", "structure", "extraction"]; const present = new Set((await s.unsafe(grantPresenceSql(grantedObjects(groups)))).filter((r) => r.present).map((r) => r.name)); const want = mergedGrants(groups, present).flatMap((g) => g.privileges.map((p) => `${g.name} ${p}`)).sort(); const rel = (await s`SELECT c.relname AS n, a.privilege_type AS p FROM pg_class c, aclexplode(c.relacl) a WHERE a.grantee = ${role}::regrole`).map((r) => `${r.n} ${r.p}`).sort(); const other = (await s`SELECT format(${"routine %s %s"}, p.oid::regprocedure, a.privilege_type) AS x FROM pg_proc p, aclexplode(p.proacl) a WHERE a.grantee = ${role}::regrole UNION ALL SELECT format(${"schema %s %s"}, n.nspname, a.privilege_type) FROM pg_namespace n, aclexplode(n.nspacl) a WHERE a.grantee = ${role}::regrole UNION ALL SELECT format(${"database %s"}, a.privilege_type) FROM pg_database d, aclexplode(d.datacl) a WHERE d.datname = current_database() AND a.grantee = ${role}::regrole`).map((r) => r.x).sort(); await s.close(); const ok = JSON.stringify(rel) === JSON.stringify(want) && JSON.stringify(other) === JSON.stringify(["database CONNECT", "schema public USAGE"]); console.log(ok ? `exactly the ${want.length} privileges of the four groups, CONNECT kept` : JSON.stringify({ missing: want.filter((x) => !rel.includes(x)), extra: rel.filter((x) => !want.includes(x)), other })); process.exit(ok ? 0 : 1);'
+          oneshot orchestration-runner-role bun -e "$exactly"
+          good="postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD}@postgres:5432/openbrain"
+          # shellcheck disable=SC2016 # JavaScript, as above
+          ask='const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); const [r] = await s`SELECT current_user::text AS u, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS su, (SELECT count(*)::int FROM pg_auth_members m JOIN pg_roles x ON x.oid = m.member WHERE x.rolname = current_user) AS memberships, (SELECT count(*)::int FROM thoughts) AS n`; let created = true; try { await s`CREATE TABLE ob1_runner_role_probe (x int)`; } catch { created = false; } await s.close(); console.log(JSON.stringify({ ...r, created })); process.exit(r.u === "ob1_orchestration_runner" && r.su === false && r.memberships === 0 && !created ? 0 : 1);'
           oneshot -e ROLE_URL="$good" orchestration-runner-role bun -e "$ask"
           # shellcheck disable=SC2016 # JavaScript, as above
           if wrong=$(oneshot -e ROLE_URL="${good/@postgres/x@postgres}" orchestration-runner-role bun -e 'const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); await s`SELECT 1`;' 2>&1); then
@@ -1104,7 +1109,7 @@ jobs:
           refused "ci_defacl still holds" bun migrate.ts --grant ci_defacl --groups capture --exact
           oneshot orchestration-runner-role sh -c "bun login-role.ts --role ci_prior --password-env OB1_RUNNER_DB_PASSWORD && bun migrate.ts --grant ci_prior --groups capture --exact"
           [ "$(superuser "SELECT has_table_privilege('ci_prior', 'ob1_agent_keys', 'UPDATE') OR EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE r.rolname = 'ci_prior')")" = "f" ] || { echo "ci_prior kept a privilege or a setting"; exit 1; }
-          superuser "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE SELECT ON TABLES FROM ci_defacl; DROP SCHEMA ci_owned; DROP OWNED BY ci_prior; DROP ROLE ci_super, ci_member, ci_owner, ci_defacl, ci_prior;"
+          superuser "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE SELECT ON TABLES FROM ci_defacl; DROP SCHEMA ci_owned; DROP OWNED BY ci_prior; DROP ROLE ci_super, ci_member, ci_owner, ci_defacl, ci_prior; DROP PROCEDURE ci_proc();"
 
       # SMD-2289: the image's own start, as compose runs the service but
       # without its dependencies (starting opens no database connection).

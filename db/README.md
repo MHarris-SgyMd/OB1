@@ -916,11 +916,11 @@ same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once, or with `--groups capture,worker,…` those alone
 (SMD-2289). `--groups` grants less and revokes nothing; `--exact` adds the
-revoke, in the grant's own transaction: the role's privileges on every
-schema's tables, sequences and routines, on the schemas and CREATE on the
-database (CONNECT and TEMP stay) go, it is refused if it still holds another
-(named by catalog and database), and then the groups are granted, so what it
-holds here is theirs. `db/login-role.ts --role <name> --password-env <VAR>`
+revoke, in the grant's own transaction: what an ACL grants the role on a
+table or column, a sequence or a routine, and CREATE on a schema or the
+database, go (schema USAGE, CONNECT and TEMP stay); it is refused if it still
+holds anything else (named by catalog and database); then the groups are
+granted, so what it holds here is theirs. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
 a member of no role, its settings in every database cleared),
 its password sent as a SCRAM verifier, for a compose service that connects as
@@ -928,9 +928,9 @@ a role of its own: the orchestration runner's `ob1_orchestration_runner`
 holds capture, worker, structure and extraction, what its ingester
 and reembed run (measured), and not the server group, whose writes to
 `ob1_agent_keys` could clear a key's revocation. `login-role.ts` refuses a
-role that is a superuser, a member of another role, the owner of anything, or
-one still holding a privilege it cannot revoke (a default privilege naming
-it, a grant in another database). Under that role the `ANALYZE
+role that is a superuser, a member of another role or the owner of anything,
+and `--exact` one still holding a privilege it cannot revoke (a default
+privilege naming it, a grant in another database). Under that role the `ANALYZE
 thought_work_claims` that reembed and 015's `enqueue_thoughts` run (the
 owner's to run) is skipped: Postgres warns, the client does not print it, and
 autovacuum keeps the claim table's statistics. The worker group's `UPDATE` on
@@ -1018,7 +1018,7 @@ granted. Functions are executable by `PUBLIC` by default, so only the community
 functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones — are
 listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,
 readwise and CRM RPCs) need nothing. `ob1_config` appears twice — `SELECT` for
-the server's own read, `INSERT, UPDATE` for a worker's job key — as does
+the server's own read, `SELECT, INSERT, UPDATE` for a worker's job key — as does
 `thought_audit` (`INSERT` for the capture path, upstream's `SELECT` beside it),
 and `--grant` merges each into one `GRANT`. A view is granted as a table is,
 and needs it: a role's `SELECT` on `thoughts` does not reach a view over it.

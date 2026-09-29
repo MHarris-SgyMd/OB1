@@ -63,7 +63,7 @@ import {
   EMBEDDING_MODEL,
   HNSW_SEEDS,
   ROLE_GRANT_GROUPS,
-  ROLE_LOCK_PREFIX,
+  GRANT_LOCK,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
   grantPresenceSql,
@@ -122,35 +122,95 @@ if (force && !baseline) {
 
 /** A refusal inside --grant's transaction: exit 2, nothing committed. */
 class GrantRefusal extends Error {}
+/** Thrown to roll a --dry-run's transaction back. */
+class RolledBack extends Error {}
 
-/** --exact's revokes: the role's privileges on every schema's tables, sequences and routines (procedures and aggregates with the functions), on the schemas, and CREATE on this database. */
+/**
+ * --exact's revokes, one per object whose ACL names the role (review pass 4:
+ * a blanket REVOKE over every schema rewrote every ACL in the brain, took
+ * schema USAGE that --grant never gives back, and fails outright for a
+ * grantor that is not a superuser): a table, view or foreign table with a
+ * grant to it (a column's included), a sequence, a routine (procedures and
+ * aggregates with the functions), CREATE on a schema, CREATE on this database.
+ * Schema USAGE and CONNECT and TEMP on the database stay: an operator may have
+ * granted USAGE on pgvector's own schema, or CONNECT to a hardened brain.
+ */
 async function exactRevokes(sql: any, role: string): Promise<string[]> {
-  const r = quoteIdent(role);
-  const schemas = (await sql`SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY 1`) as { nspname: string }[];
-  const [{ db }] = (await sql`SELECT current_database() AS db`) as { db: string }[];
-  return [
-    ...schemas.flatMap(({ nspname }) => {
-      const s = quoteIdent(nspname);
-      return [...["TABLES", "SEQUENCES", "ROUTINES"].map((k) => `REVOKE ALL ON ALL ${k} IN SCHEMA ${s} FROM ${r};`), `REVOKE ALL ON SCHEMA ${s} FROM ${r};`];
-    }),
-    `REVOKE CREATE ON DATABASE ${quoteIdent(db)} FROM ${r};`,
-  ];
+  const rows = (await sql`
+    WITH me AS (SELECT oid FROM pg_roles WHERE rolname = ${role})
+    SELECT stmt FROM (
+      SELECT 1 AS ord, format('REVOKE ALL ON TABLE %s FROM %I;', c.oid::regclass, ${role}::text) AS stmt
+        FROM pg_class c, me
+       WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+         AND (EXISTS (SELECT 1 FROM aclexplode(c.relacl) a WHERE a.grantee = me.oid)
+           OR EXISTS (SELECT 1 FROM pg_attribute t, aclexplode(t.attacl) a WHERE t.attrelid = c.oid AND a.grantee = me.oid))
+      UNION ALL
+      SELECT 1, format('REVOKE ALL ON SEQUENCE %s FROM %I;', c.oid::regclass, ${role}::text)
+        FROM pg_class c, me
+       WHERE c.relkind = 'S' AND EXISTS (SELECT 1 FROM aclexplode(c.relacl) a WHERE a.grantee = me.oid)
+      UNION ALL
+      SELECT 1, format('REVOKE ALL ON ROUTINE %s FROM %I;', p.oid::regprocedure, ${role}::text)
+        FROM pg_proc p, me
+       WHERE EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = me.oid)
+      UNION ALL
+      SELECT 2, format('REVOKE CREATE ON SCHEMA %I FROM %I;', n.nspname, ${role}::text)
+        FROM pg_namespace n, me
+       WHERE EXISTS (SELECT 1 FROM aclexplode(n.nspacl) a WHERE a.grantee = me.oid AND a.privilege_type = 'CREATE')
+      UNION ALL
+      SELECT 2, format('REVOKE CREATE ON DATABASE %I FROM %I;', d.datname, ${role}::text)
+        FROM pg_database d, me
+       WHERE d.datname = current_database() AND EXISTS (SELECT 1 FROM aclexplode(d.datacl) a WHERE a.grantee = me.oid AND a.privilege_type = 'CREATE')
+    ) s ORDER BY ord, stmt`) as { stmt: string }[];
+  return rows.map((r) => r.stmt);
 }
 
-/** What the role holds that --exact's revokes did not reach, by catalog and database: every privilege row pg_shdepend keeps for it but CONNECT and TEMP on this database. */
+/**
+ * What the role holds that --exact's revokes did not reach, named: a
+ * privilege row pg_shdepend keeps for it anywhere (a default privilege naming
+ * it, another database's objects, a type, a parameter, a large object, one
+ * made by a grantor other than the object's owner) but its USAGE on this
+ * database's schemas and CONNECT or TEMP on this database; CREATE on any
+ * schema; and any other privilege on this database, whoever granted it
+ * (review pass 4: a non-owner's CREATE on the database survived, and the run
+ * said "nothing else").
+ */
 async function heldBeyond(sql: any, role: string): Promise<string[]> {
   const rows = (await sql`
-    SELECT d.classid::regclass::text AS catalog,
-           CASE WHEN d.dbid = 0 THEN 'the cluster' ELSE coalesce(db.datname, d.dbid::text) END AS db,
-           count(*)::int AS n
-      FROM pg_shdepend d LEFT JOIN pg_database db ON db.oid = d.dbid
-     WHERE d.refclassid = 'pg_authid'::regclass AND d.deptype = 'a'
-       AND d.refobjid = (SELECT oid FROM pg_roles WHERE rolname = ${role})
-       AND NOT (d.classid = 'pg_database'::regclass AND d.objid = (SELECT oid FROM pg_database WHERE datname = current_database()))
-     GROUP BY 1, 2 ORDER BY 2, 1`) as { catalog: string; db: string; n: number }[];
-  return rows.map((x) => `${x.n} in ${x.catalog} (${x.db})`);
+    WITH me AS (SELECT oid FROM pg_roles WHERE rolname = ${role}),
+         here AS (SELECT oid FROM pg_database WHERE datname = current_database())
+    SELECT what, n FROM (
+      SELECT format('%s in %s (%s)', count(*), d.classid::regclass,
+                    CASE WHEN d.dbid = 0 THEN 'the cluster' ELSE coalesce(db.datname, d.dbid::text) END) AS what, count(*) AS n
+        FROM pg_shdepend d LEFT JOIN pg_database db ON db.oid = d.dbid, me, here
+       WHERE d.refclassid = 'pg_authid'::regclass AND d.deptype = 'a' AND d.refobjid = me.oid
+         AND NOT (d.classid = 'pg_database'::regclass AND d.objid = here.oid)
+         AND NOT (d.classid = 'pg_namespace'::regclass AND d.dbid = here.oid)
+       GROUP BY d.classid, d.dbid, db.datname
+      UNION ALL
+      SELECT format('CREATE on schema %I', n.nspname), 1
+        FROM pg_namespace n, me WHERE EXISTS (SELECT 1 FROM aclexplode(n.nspacl) a WHERE a.grantee = me.oid AND a.privilege_type = 'CREATE')
+      UNION ALL
+      SELECT format('%s on this database', a.privilege_type), 1
+        FROM pg_database d, aclexplode(d.datacl) a, me
+       WHERE d.datname = current_database() AND a.grantee = me.oid AND a.privilege_type NOT IN ('CONNECT', 'TEMPORARY')
+    ) s ORDER BY 1`) as { what: string }[];
+  return rows.map((r) => r.what);
 }
 
+/** --exact's work inside a transaction: the revokes, then what is left refused. Returns the revokes it ran. */
+async function exactTransaction(tx: any, role: string): Promise<string[]> {
+  const revokes = await exactRevokes(tx, role);
+  try {
+    for (const s of revokes) await tx.unsafe(s);
+  } catch (e) {
+    // The role handed on a privilege it held WITH GRANT OPTION: revoking it needs the grants made from it gone first (review pass 4: exit 1, unnamed).
+    if (/dependent privileges exist/.test((e as Error).message)) throw new GrantRefusal(`--exact: ${role} has granted to others a privilege it held WITH GRANT OPTION, so it cannot be revoked here without theirs. Revoke those grants first, or name another role. Nothing changed.`);
+    throw e;
+  }
+  const left = await heldBeyond(tx, role);
+  if (left.length) throw new GrantRefusal(`--exact: ${role} still holds what a revoke here does not reach — ${left.join("; ")}. Revoke it as its grantor, or name another role. Nothing changed.`);
+  return revokes;
+}
 
 // --grant <role>: issue exactly the privileges db/config.mjs's ROLE_GRANTS
 // documents — the one executable spelling of db/README.md's "Grants for a
@@ -171,17 +231,20 @@ async function heldBeyond(sql: any, role: string): Promise<string[]> {
 // orchestration runner's role gets what its ingester and reembed run, not the
 // whole list). It grants less; alone it revokes nothing, so a role granted more
 // before keeps what it has. --exact makes the grant all the role holds in this
-// database: in the grant's own transaction it first revokes the role's
-// privileges on every schema's tables, sequences and routines, on the schemas,
-// and CREATE on the database (CONNECT and TEMP stay: an operator may have
-// granted CONNECT to a hardened brain), then refuses, rolling back, if it
-// still holds any other (a default privilege naming it, a grant in another
-// database or on a tablespace or parameter, one made by a grantor other than
-// the object's owner), and only then grants. One transaction, so a run in
-// flight as the role never meets a moment without its privileges, and a
-// failure leaves what it had (SMD-2289 review pass 3: the revoke was a commit
-// of its own, and each `up` took them away for ~60 ms). The role's advisory
-// lock serialises two at once, and db/login-role.ts takes the same.
+// database: in the grant's own transaction it first revokes, object by object,
+// what an ACL grants the role (a table's or column's, a sequence's, a
+// routine's, CREATE on a schema or on the database; schema USAGE, CONNECT and
+// TEMP stay, which an operator may have granted on pgvector's schema or a
+// hardened brain), then refuses, rolling back, if it still holds anything
+// else (a default privilege naming it, a grant in another database, on a
+// type, tablespace or parameter, one a grantor other than the owner made, any
+// database privilege but CONNECT and TEMP), and only then grants. One
+// transaction, so a run in flight as the role never meets a moment without
+// its privileges, and a failure leaves what it had (SMD-2289 review passes 3
+// and 4). Every --grant, and db/login-role.ts, holds one advisory lock
+// (GRANT_LOCK), so two at once queue rather than deadlock. --dry-run --exact
+// runs the revokes and the check in a transaction it rolls back, so it shows
+// a refusal to come.
 const grantRole = cli.value("grant");
 const grantGroups = groupsArg === undefined ? ROLE_GRANT_GROUPS : [...new Set(groupsArg.split(",").map((g) => g.trim()).filter(Boolean))];
 {
@@ -216,22 +279,35 @@ if (grantRole !== undefined) {
     // "; " between names: a function's name carries ", " inside its argument list.
     const skippedHint = `not yet present, skipped (run --grant again after applying the migration, community schema or extension/recipe schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach${missing.includes("schema_migrations") ? "; schema_migrations is this migrator's own ledger, which its first run makes" : ""}): ${missing.join("; ")}`;
     const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { groups: grantGroups, present })];
-    const revokes = exact ? await exactRevokes(gsql, grantRole) : [];
+    if (dryRun && exact) {
+      // A preview in a transaction that is rolled back: the revokes it would run, and a refusal it would meet (review pass 4).
+      let preview: string[] = [];
+      let refusal: string | null = null;
+      await gsql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${GRANT_LOCK}))`;
+        try { preview = await exactTransaction(tx, grantRole); } catch (e) { if (e instanceof GrantRefusal) refusal = e.message; else throw e; }
+        throw new RolledBack();
+      }).catch((e) => { if (!(e instanceof RolledBack)) throw e; });
+      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`} --exact  (--dry-run: nothing kept)\n`);
+      for (const st of [...preview, ...statements]) console.log(`  ${st}`);
+      if (refusal) console.log(`\n  ${refusal}`);
+      if (missing.length) console.log(`\n  ${skippedHint}`);
+      await gsql.close();
+      process.exit(refusal ? 2 : 0);
+    }
     if (dryRun) {
-      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`}${exact ? " --exact" : ""}  (--dry-run: nothing run)\n`);
-      for (const s of [...revokes, ...statements]) console.log(`  ${s}`);
+      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`}  (--dry-run: nothing run)\n`);
+      for (const s of statements) console.log(`  ${s}`);
       if (missing.length) console.log(`\n  ${skippedHint}`);
       await gsql.close();
       process.exit(0);
     }
     const merged = mergedGrants(grantGroups, present);
+    let revoked: string[] = [];
     await gsql.begin(async (tx) => {
-      if (exact) {
-        await tx`SELECT pg_advisory_xact_lock(hashtext(${ROLE_LOCK_PREFIX + grantRole}))`;
-        for (const s of await exactRevokes(tx, grantRole)) await tx.unsafe(s);
-        const left = await heldBeyond(tx, grantRole);
-        if (left.length) throw new GrantRefusal(`--exact: ${grantRole} still holds privileges a revoke here does not reach — ${left.join("; ")} — a default privilege naming it, a grant in another database, on a tablespace or parameter, or one made by a grantor other than the object's owner. Revoke them (as their grantor), or name another role. Nothing changed.`);
-      }
+      // Every --grant, and login-role.ts, holds one lock: two at once queue rather than deadlock on the same catalog rows (review pass 4: a plain --grant for another role deadlocked with --exact).
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${GRANT_LOCK}))`;
+      if (exact) revoked = await exactTransaction(tx, grantRole);
       for (const s of statements) await tx.unsafe(s);
       const notHeld = ((await tx.unsafe(grantVerifySql(grantRole, merged))) as { kind: string; name: string; privilege: string; held: boolean }[]).filter((r) => !r.held);
       if (notHeld.length) {
@@ -243,7 +319,7 @@ if (grantRole !== undefined) {
       }
     });
     console.log(`\nGranted ${grantRole} ${groupsArg === undefined ? "the capturing-role privileges" : `the privileges of ${grantGroups.join(", ")}`} over ${present.size} object(s)${exact ? ", and nothing else in this database" : ""}:\n`);
-    for (const s of statements) console.log(`  ${s}`);
+    for (const s of [...revoked, ...statements]) console.log(`  ${s}`);
     if (missing.length) console.log(`\n  ${skippedHint}`);
     await gsql.close();
     process.exit(0);

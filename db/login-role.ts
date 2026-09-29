@@ -18,9 +18,9 @@
  *   function, type, large object or the database itself (a schema's owner can
  *   drop the tables in it). Such a role is not one to give a service.
  * - Its privileges are not this step's: `migrate.ts --grant --groups …
- *   --exact`, run after it, replaces whatever the role held in this database
- *   with the groups' privileges in one transaction, and refuses one holding a
- *   privilege it cannot revoke.
+ *   --exact`, run after it, replaces what the role's grants hold in this
+ *   database (schema USAGE, CONNECT and TEMP stay) with the groups' privileges
+ *   in one transaction, and refuses one holding a privilege it cannot revoke.
  * - The password, read from the named variable, must be 24 or more of
  *   [A-Za-z0-9_-] (`provision.ts --init` writes 64 hex). It is sent as a
  *   SCRAM-SHA-256 verifier computed here, so the password itself is never in
@@ -31,8 +31,11 @@
  */
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
 import { commandLine } from "./cli.ts";
-import { quoteIdent, ROLE_LOCK_PREFIX } from "./config.mjs";
+import { GRANT_LOCK, quoteIdent } from "./config.mjs";
 import { closeThenExit, databaseUrl, openSql } from "./connect.ts";
+
+/** A refusal inside the transaction: exit 2, nothing changed. */
+class Refusal extends Error {}
 
 /** A role name this step takes: a plain lower-case identifier, so it is quoted the one way. */
 export const ROLE_NAME_RE = /^[a-z_][a-z0-9_]{0,62}$/;
@@ -79,44 +82,37 @@ if (import.meta.main) {
   }
   const sql = openSql(databaseUrl(cli.value("url")), { max: 1 });
   await closeThenExit(sql, async () => {
+    // The verifier holds only base64 and `$:`, so it quotes as it stands; the doubled quote is the rule all the same.
+    const verifier = scramVerifier(process.env[passwordEnv]!).replaceAll("'", "''");
+    const ident = quoteIdent(role);
+    let found: { oid: number } | undefined;
     try {
-      const [found] = (await sql`SELECT oid, rolsuper FROM pg_roles WHERE rolname = ${role}`) as { oid: number; rolsuper: boolean }[];
-      if (found?.rolsuper) {
-        console.error(`login-role.ts: ${role} is a superuser; this step makes a role that is not one, and will not take one that is. Name another role. Nothing changed.`);
-        return 2;
-      }
-      if (found) {
-        // A role in another role holds what that one holds, and can SET ROLE into it (a member of postgres is a superuser in all but name); one that owns anything in any database can drop or replace it (a schema's owner drops the tables in it; the database's owns public). Both refused (review pass 1: each was taken).
-        const memberOf = ((await sql`SELECT g.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = ${found.oid} ORDER BY 1`) as { rolname: string }[]).map((r) => r.rolname);
-        if (memberOf.length) {
-          console.error(`login-role.ts: ${role} is a member of ${memberOf.join(", ")}, whose privileges it holds; this step gives a service a role that is a member of none. Name another role, or revoke the membership. Nothing changed.`);
-          return 2;
-        }
-        // pg_shdepend is shared: it holds an owner row for every object the role owns in any database, the database itself included (review pass 2: a pg_class count beside it counted each table again).
-        const [{ owned }] = (await sql`SELECT count(*)::int AS owned FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = ${found.oid} AND deptype = 'o'`) as { owned: number }[];
-        if (owned > 0) {
-          console.error(`login-role.ts: ${role} owns ${owned} object(s) (a relation, schema, function, type, large object or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
-          return 2;
-        }
-      }
-      // The verifier holds only base64 and `$:`, so it quotes as it stands; the doubled quote is the rule all the same.
-      const verifier = scramVerifier(process.env[passwordEnv]!).replaceAll("'", "''");
-      const ident = quoteIdent(role);
       await sql.begin(async (tx) => {
-        // The role's lock, which `migrate.ts --grant --exact` takes too: two role steps at once queue (review pass 3: "tuple concurrently updated").
-        await tx`SELECT pg_advisory_xact_lock(hashtext(${ROLE_LOCK_PREFIX + role}))`;
-        await tx.unsafe(`${found ? "ALTER" : "CREATE"} ROLE ${ident} ${ROLE_ATTRIBUTES} CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD '${verifier}'`);
-        if (!found) return;
+        // The one lock every `migrate.ts --grant` takes too, taken before the role is looked up: two role steps at once queue rather than both finding no role and colliding on CREATE, or on "tuple concurrently updated" (review passes 3 and 4).
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${GRANT_LOCK}))`;
+        const [row] = (await tx`SELECT oid, rolsuper FROM pg_roles WHERE rolname = ${role}`) as { oid: number; rolsuper: boolean }[];
+        if (row?.rolsuper) throw new Refusal(`${role} is a superuser; this step makes a role that is not one, and will not take one that is. Name another role. Nothing changed.`);
+        if (row) {
+          // A role in another role holds what that one holds, and can SET ROLE into it (a member of postgres is a superuser in all but name); one that owns anything in any database can drop or replace it (a schema's owner drops the tables in it; the database's owns public). Both refused (review pass 1: each was taken).
+          const memberOf = ((await tx`SELECT g.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = ${row.oid} ORDER BY 1`) as { rolname: string }[]).map((r) => r.rolname);
+          if (memberOf.length) throw new Refusal(`${role} is a member of ${memberOf.join(", ")}, whose privileges it holds; this step gives a service a role that is a member of none. Name another role, or revoke the membership. Nothing changed.`);
+          // pg_shdepend is shared: it holds an owner row for every object the role owns in any database, the database itself included (review pass 2: a pg_class count beside it counted each table again).
+          const [{ owned }] = (await tx`SELECT count(*)::int AS owned FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = ${row.oid} AND deptype = 'o'`) as { owned: number }[];
+          if (owned > 0) throw new Refusal(`${role} owns ${owned} object(s) (a relation, schema, function, type, large object or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
+        }
+        found = row;
+        await tx.unsafe(`${row ? "ALTER" : "CREATE"} ROLE ${ident} ${ROLE_ATTRIBUTES} CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD '${verifier}'`);
+        if (!row) return;
         // A role that was there loses its settings, the role's own and each database's (review pass 2: a search_path set IN DATABASE survived RESET ALL and sent the runner's unqualified function calls to a planted schema). Its privileges are `migrate.ts --grant --exact`'s to replace, in the grant's own transaction, so a runner in flight never meets a moment without them (review pass 3).
         await tx.unsafe(`ALTER ROLE ${ident} RESET ALL`);
-        const settingDbs = (await tx`SELECT d.datname FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE s.setrole = ${found.oid}`) as { datname: string }[];
+        const settingDbs = (await tx`SELECT d.datname FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE s.setrole = ${row.oid}`) as { datname: string }[];
         for (const { datname } of settingDbs) await tx.unsafe(`ALTER ROLE ${ident} IN DATABASE ${quoteIdent(datname)} RESET ALL`);
       });
       console.log(`login-role.ts: ${role} ${found ? "updated, its settings cleared" : "created"} (${ROLE_ATTRIBUTES}; password from ${passwordEnv}, stored as a SCRAM verifier)`);
       return 0;
     } catch (e) {
       console.error(`login-role.ts: ${(e as Error).message}`);
-      return 1;
+      return e instanceof Refusal ? 2 : 1;
     }
   });
 }

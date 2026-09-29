@@ -358,7 +358,7 @@ export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "s
  */
 export const ROLE_GRANTS: Readonly<Record<RoleGrantGroup, readonly RoleGrant[]>>;
 /** The order groups are issued and documented in. */
-export const ROLE_LOCK_PREFIX: string;
+export const GRANT_LOCK: string;
 export const ROLE_GRANT_GROUPS: readonly RoleGrantGroup[];
 /** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
 export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];
