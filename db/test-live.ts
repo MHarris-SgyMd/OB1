@@ -5184,19 +5184,23 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     const noModel = await replayOne(canarySql, { ...logged, arm: "current" });
     await canarySql`UPDATE thoughts SET metadata = metadata - 'issue' - 'status' - 'status_type' WHERE id = ${settledId}::uuid`;
     assert(asCurrent.ran && asCurrent.ids.length === 3 && asHybrid.ids[0] === settledId && asCurrent.ids[2] === settledId
-        && [...asCurrent.ids].sort().join() === [...asHybrid.ids].sort().join() && !noModel.ran && noModel.reason === "current needs a provider (set OB1_EVAL_EMBED)",
+        && [...asCurrent.ids].sort().join() === [...asHybrid.ids].sort().join() && !noModel.ran && noModel.reason === "current needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)",
       `a logged prefer_current search replays through search_thoughts_current — the completed row the hybrid ranks first comes last — and without a provider it is skipped with the arm named (${asCurrent.ids.indexOf(settledId) + 1} of ${asCurrent.ids.length}; ${noModel.reason})`);
 
     // The CLI's report and verdict (SMD-2182), on the same canary. Both verbs
     // print the window and the counts, and a window that replayed nothing is
     // --diff's exit 3, where it used to be the pass "nothing moved".
-    // No model, and no env file to bring one back: tier.ts imports evals/lib.ts,
-    // whose loadEnv() fills a missing OB1_EVAL_EMBED from evals/.env, .env or
-    // deploy/.env, and Bun loads the working directory's .env on its own — so
-    // off, --no-env-file and a directory outside the checkout, as tier.sh does.
+    // The replay embeds through the egress gate (SMD-2290): with the embeddings
+    // endpoint not declared local under the default deny, the hybrid/current arms
+    // are skipped before any request, so these CLI runs reach no provider. Start
+    // each run from a clean, refusing egress config (a stray OB1_LLM_LOCAL or
+    // OB1_EGRESS_* in the host's env would let it embed) and let a case opt back
+    // in through extraEnv; --no-env-file and OB1_ENV_FILES=off from a directory
+    // outside the checkout, as tier.sh does, keep a .env from declaring one local.
     const tierCli = async (args: string[], extraEnv: Record<string, string> = {}) => {
-      const env: Record<string, string | undefined> = { ...process.env, ...extraEnv, OB1_ENV_FILES: "off" };
-      delete env.OB1_EVAL_EMBED;
+      const env: Record<string, string | undefined> = { ...process.env, OB1_ENV_FILES: "off" };
+      for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY"]) delete env[k];
+      Object.assign(env, extraEnv);
       const p = Bun.spawn(["bun", "--no-env-file", join(HERE, "tier.ts"), ...args], { stdout: "pipe", stderr: "pipe", env, cwd: tmpdir() });
       const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
       return { code: await p.exited, out, err };
@@ -5212,17 +5216,41 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       `--diff right after a refresh, with no --since, compared nothing and exits 3, not 0 (exit ${fresh.code}: ${fresh.out.trim()})`);
     const freshReplay = await tierCli(["--replay", ...both]);
     assert(freshReplay.code === 0 && freshReplay.out.includes("nothing to compare"), `--replay, the report, says the same and exits 0 (exit ${freshReplay.code})`);
-    // A hybrid row, logged after the refresh: with no OB1_EVAL_EMBED it is
-    // skipped, and the report says so on both windows.
+    // A hybrid row, logged after the refresh: with the embeddings endpoint refused
+    // by the default deny it is skipped, and the report says so on both windows.
     await sql`
       INSERT INTO query_log (kind, tool, query, match_count, threshold, recency_weight, filter, result_ids, arm, tier, logged_at)
       VALUES ('search', 'search_thoughts', 'zqcanary', 10, 0.2, 0, '{}'::jsonb, ${`{${canaryHits.join(",")}}`}::uuid[], 'hybrid', 'stable', now() + interval '1 hour')`;
     const mixed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
-    assert(mixed.code === 0 && /^replayed 2 of 3 logged searches .* \(1 skipped\)$/m.test(mixed.out) && mixed.out.includes("skipped 1: hybrid needs a provider (set OB1_EVAL_EMBED)") && mixed.out.includes("on the 2 replayed (1 skipped, not compared)."),
-      `--diff with a hybrid row and no OB1_EVAL_EMBED reports it skipped, and claims only the rows it replayed (exit ${mixed.code}: ${mixed.out.trim()})`);
+    assert(mixed.code === 0 && /^replayed 2 of 3 logged searches .* \(1 skipped\)$/m.test(mixed.out) && mixed.out.includes("skipped 1: hybrid needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)") && mixed.out.includes("on the 2 replayed (1 skipped, not compared)."),
+      `--diff with a hybrid row and the endpoint refused reports it skipped, and claims only the rows it replayed (exit ${mixed.code}: ${mixed.out.trim()})`);
     const skippedAll = await tierCli(["--diff", ...both]);
     assert(skippedAll.code === 3 && /^replayed 0 of 1 logged searches/m.test(skippedAll.out) && skippedAll.out.includes("nothing to compare: every search in the window was skipped."),
       `--diff whose every row was skipped compared nothing and exits 3 (exit ${skippedAll.code}: ${skippedAll.out.trim()})`);
+
+    // SMD-2290: the embed arms send the logged query text to the provider, so they
+    // pass through the egress gate now, like every other provider call in the fork.
+    // A stub records requests. Under the default deny with the endpoint not declared
+    // local the hybrid arm is skipped and the stub is never called; declared local
+    // the replay embeds and the stub IS called — so a dropped gate (which would
+    // embed under deny too) is caught by the first assertion's zero.
+    {
+      let stubReqs = 0;
+      const stub = Bun.serve({ port: 0, fetch() { stubReqs++; const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return Response.json({ data: [{ embedding: v }] }); } });
+      const stubUrl = `http://127.0.0.1:${stub.port}/v1`;
+      try {
+        stubReqs = 0;
+        const denied = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both], { OB1_LLM_BASE_URL: stubUrl, OB1_EMBEDDING_MODEL: EMBEDDING_MODEL });
+        assert(stubReqs === 0 && denied.out.includes("hybrid needs a provider"),
+          `the replay sends the stub nothing under the default deny — the logged query text does not leave (${stubReqs} request(s) to the stub; ${denied.out.trim().split("\n").pop()})`);
+        stubReqs = 0;
+        const allowed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both], { OB1_LLM_BASE_URL: stubUrl, OB1_EMBEDDING_MODEL: EMBEDDING_MODEL, OB1_LLM_LOCAL: "1" });
+        assert(stubReqs >= 1 && /replayed 3 of 3 logged searches/.test(allowed.out),
+          `declared local, the replay embeds the hybrid query through the gate — the stub is called and all three rows replay (${stubReqs} request(s); ${allowed.out.trim().split("\n")[0]})`);
+      } finally {
+        stub.stop(true);
+      }
+    }
     await sql`DELETE FROM query_log WHERE arm = 'hybrid'`;
     await canarySql`DELETE FROM ob1_config WHERE key = 'last_refresh'`;
     // A window that is already all of the log: the canary as its own --from

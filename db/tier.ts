@@ -59,8 +59,9 @@
  *   • the keyword arm (search_thoughts_keyword) is model-free — the arm the CI
  *     end-to-end (test-live [20]) exercises;
  *   • the hybrid arm (search_thoughts_hybrid) needs a provider to embed the query
- *     text, so it is replayed only when a model is configured (OB1_EVAL_EMBED, as
- *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise;
+ *     text, so it is replayed with the brain's configured model through the egress
+ *     gate (SMD-2290), and skipped-with-a-note when the policy would refuse the
+ *     endpoint;
  *   • the current arm (search_thoughts with prefer_current, 059) is the hybrid's
  *     through search_thoughts_current, with the same provider rule.
  * A row logged before migration 045 carries a NULL arm (no way to know which arm
@@ -80,7 +81,8 @@ import { fileURLToPath } from "node:url";
 import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig, quoteIdent, searchPathSchemas } from "./config.mjs";
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { parsePgUuidArray } from "../evals/query-log.ts";
-import { embed } from "../evals/lib.ts";
+import { createEmbedder, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { egressRefusal } from "./worker-bootstrap.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
 import { closeThenExit, connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal } from "./connect.ts";
@@ -185,7 +187,7 @@ export async function replayOne(
     return { ids: rows.map((r: { id: string }) => r.id), ran: true };
   }
   if (row.arm === "hybrid" || row.arm === "current") {
-    if (!embedFn) return { ids: [], ran: false, reason: `${row.arm} needs a provider (set OB1_EVAL_EMBED)` };
+    if (!embedFn) return { ids: [], ran: false, reason: `${row.arm} needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)` };
     const qv = await embedFn(row.query);
     const threshold = row.threshold ?? -1;
     const count = row.matchCount ?? 10;
@@ -892,9 +894,23 @@ async function main(): Promise<void> {
     const words = since !== null ? `since ${since} (--since)`
       : refreshed !== null ? `since ${refreshed} (the canary's last refresh)`
       : "in all of stable's log (the canary records no refresh)";
-    const embedModel = process.env.OB1_EVAL_EMBED;
-    const embedFn: EmbedFn | undefined = embedModel ? (q) => embed(embedModel, q, true) : undefined;
-    if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid- and current-arm searches will be skipped (keyword arm replays without a model).`);
+    // The replay embeds each logged query with the brain's own configured model,
+    // so it measures what the canary's search would return, and through the same
+    // egress gate every other provider call in the fork passes (SMD-2290). The
+    // wholesale check the claim workers run (as sync-linear.ts does): null when
+    // the endpoint is declared local, or the policy is off or allows it.
+    const embedCfg = resolveEmbedConfig(process.env as EmbedEnv);
+    const embedRefused = egressRefusal(embedCfg.embeddings, embedCfg.egress);
+    let embedFn: EmbedFn | undefined;
+    if (embedRefused) {
+      console.error(`note: the embeddings endpoint is not available to the replay (${embedRefused}) — hybrid- and current-arm searches will be skipped (the keyword arm replays without a model). Declare it local (OB1_LLM_LOCAL=1) or allow it in OB1_EGRESS_POLICY to embed the logged queries.`);
+    } else {
+      // The query's egress subject is the text alone — a replay is not a worker
+      // key's send, so no actor unit; getEmbedding gates each call and applies the
+      // model's query template (db/config.mjs), as the server's search does.
+      const embedder = createEmbedder(() => embedCfg, { rememberRefusal: false });
+      embedFn = (q) => embedder.getEmbedding(q, { kind: "query", content: q }, "query");
+    }
     const summary = await replayAndDiff(stable, canary, { since: window, embedFn });
     const verdict = printSummary(summary, verb === "diff", { words, bounded: window !== null });
     // The gate: 1 when a ranking moved, 3 when nothing was compared — not a
