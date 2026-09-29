@@ -47,7 +47,10 @@
  * --to stamped tier=stable, holding thoughts under no canary/working stamp, or
  * holding some other application's schema, unless an earlier refresh marked it
  * (targetRefusal); and a non-loopback --to unless OB1_ALLOW_REMOTE_DB=1, the
- * same guard test-support's dropSchema uses.
+ * same guard test-support's dropSchema uses. No override lifts the refusal of
+ * a URL that Bun and libpq read as different targets, or that names no
+ * database, or whose connection reached a database other than the one it
+ * names (an exported PGDATABASE beats the URL's in Bun; SMD-2317).
  *
  * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
  * is the offline, model-free, fixture-vector half in CI). For each search row
@@ -80,7 +83,7 @@ import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
-import { closeThenExit, openSql, resetRefusal } from "./connect.ts";
+import { closeThenExit, connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -519,7 +522,8 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  *   1. pg_dump the source (custom format, no owner/privileges — the target's role
  *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
  *   2. mark the target as a refresh target (refreshMark), then reset its public
- *      schema (the destructive step, guarded by targetRefusal and the loopback check).
+ *      schema (the destructive step, guarded by targetRefusal, the loopback
+ *      check, and the connected check asked on the connection that drops).
  *   3. pg_restore the dump.
  *   4. copy the source's database-level settings (databaseSettings), which the
  *      dump does not carry — 014's HNSW bounds among them (SMD-2037).
@@ -528,8 +532,15 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  * Throws with a plain message on any failed step.
  */
 export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
-  // connect.ts's one rule, the test scaffolding's too: loopback by name, not an
-  // empty host (it resolves through PGHOST), or the override.
+  // connect.ts's one rule, the test scaffolding's too, before either side is
+  // opened. Each URL must be one Bun (the guards, the drop) and libpq
+  // (pg_dump, pg_restore) take to the same place, naming its database: no
+  // override lifts that (SMD-2317). Then --to's host must be loopback by name,
+  // not an empty host (it resolves through PGHOST), or the override set.
+  for (const [side, url] of [["--from", fromUrl], ["--to", toUrl]] as const) {
+    const fixed = identityRefusal(url);
+    if (fixed !== null) throw new Error(`${side}: ${fixed}. Refusing: --refresh dumps --from and drops --to's schema, so each must name one database every client reaches.`);
+  }
   const refusal = resetRefusal(toUrl);
   if (refusal !== null) {
     throw new Error(`--to is not plainly this machine — ${refusal} — and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset it. (--refresh drops the target's schema.)`);
@@ -541,6 +552,13 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   try {
     await reach(src, fromUrl, "--from");
     await reach(target, toUrl, "--to");
+    // Where each connection went, from the server: Bun lets an exported
+    // PGDATABASE beat the URL's database, so the guards below would judge one
+    // database while pg_dump and pg_restore, which keep the URL's, used another.
+    const fromReached = await reachedDatabaseRefusal(src, fromUrl);
+    if (fromReached !== null) throw new Error(`--from: ${fromReached}. Refusing: pg_dump would read the URL's database, not the one checked.`);
+    const toReached = await connectedResetRefusal(target, toUrl);
+    if (toReached !== null) throw new Error(`--to: ${toReached}. Refusing: --refresh drops the target's schema.`);
     serverMaj = await serverMajor(src);
     settings = await databaseSettings(src);
     // The reset below drops --to's schema, so --to must be neither the source
@@ -573,6 +591,10 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     const dst = openSql(toUrl);
     try {
       if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
+      // Asked again on this connection, the one that marks and drops: the
+      // guard's own connection is closed, and this one is a new resolution.
+      const again = await connectedResetRefusal(dst, toUrl);
+      if (again !== null) throw new Error(`--to: ${again}. Refusing: --refresh drops the target's schema. --to is untouched.`);
       try {
         await dst.unsafe(`DO $mark$ BEGIN EXECUTE format('ALTER DATABASE %I SET ob1.refresh_target = %L', current_database(), '${tier}'); END $mark$`);
       } catch (e) {

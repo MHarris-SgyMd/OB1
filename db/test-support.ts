@@ -18,7 +18,7 @@ import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, resetRefusal } from "./connect.ts";
+import { REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, identityRefusal, reachedDatabaseRefusal, resetRefusal, socketRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -357,25 +357,60 @@ export { REMOTE_DB_FLAG };
  * through PGHOST, exactly as libpq does, so an empty hostname is whatever the
  * shell says it is. IPv6 loopback is `[::1]` as WHATWG URL reports it. A
  * libpq-style socket URL (`postgres://u@/db?host=/var/run/...`) does not parse
- * and is refused; the client does not honour that form either, so the override
- * is the way through for it.
+ * and is refused, override or not; the client does not honour that form
+ * either.
  *
  * `OB1_ALLOW_REMOTE_DB=1` is the deliberate override, which is a thing you have
  * to mean. `OB1_EVAL_ALLOW_REMOTE_DB`, the name the eval-local copy used, is no
  * longer read (connect.ts says why); a refusal names it when it is set.
  *
  * The rule is connect.ts's resetRefusal, which tier.ts's --refresh asks too
- * (SMD-2302); this is its refusal for a suite.
+ * (SMD-2302); this is its refusal for a suite. The URL is asked first, before
+ * anything connects; then the server is asked where the connection went
+ * (connectedResetRefusal), since an exported PGDATABASE beats the URL's
+ * database in Bun's client (SMD-2317). Neither that nor a URL that fails to
+ * pin one database is lifted by the override.
+ *
+ * Async: a caller that did not await it would run its drops while the check
+ * was still out. test-connect.ts holds every call in db/ and evals/ to an
+ * `await`.
  */
-export function assertThrowawayDatabase(url: string): void {
+export async function assertThrowawayDatabase(url: string): Promise<void> {
+  assertThrowawayUrl(url);
+  const probe = new SQL({ url, max: 1 });
+  try {
+    await assertThrowawayConnection(probe, url);
+  } finally {
+    await probe.close();
+  }
+}
+
+/** The rule's URL half, asked before anything connects: exit 2 with the refusal. */
+function assertThrowawayUrl(url: string): void {
+  const fixed = identityRefusal(url);
+  if (fixed !== null) refuseDrop(fixed, false);
   const refusal = resetRefusal(url);
-  if (refusal === null) return;
+  if (refusal !== null) refuseDrop(refusal, true);
+}
+
+/** The rule's connected half, asked on `sql`, the connection about to drop: exit 2 with the refusal. */
+async function assertThrowawayConnection(sql: SQL, url: string): Promise<void> {
+  const reached = await reachedDatabaseRefusal(sql, url);
+  if (reached !== null) refuseDrop(reached, false);
+  const socket = await socketRefusal(sql);
+  if (socket !== null) refuseDrop(socket, true);
+}
+
+/** Print why the schema will not be dropped, and exit 2. `overridable` says whether OB1_ALLOW_REMOTE_DB is the way through. */
+function refuseDrop(refusal: string, overridable: boolean): never {
   console.error(
     `  Refusing to drop the schema: ${refusal}.\n\n` +
       `  This command DROPS every table Open Brain owns in that database. That is\n` +
       `  safe against a throwaway container and destructive against anything else.\n` +
-      `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
-      `  OB1_ALLOW_REMOTE_DB=1 if you are certain.` +
+      (overridable
+        ? `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
+          `  OB1_ALLOW_REMOTE_DB=1 if you are certain.`
+        : `  OB1_ALLOW_REMOTE_DB does not lift this: it says which database is dropped.`) +
       (process.env[RETIRED_REMOTE_DB_FLAG] !== undefined ? `\n  (${RETIRED_REMOTE_DB_FLAG} is set, and is no longer read: the name is ${REMOTE_DB_FLAG}.)` : "")
   );
   process.exit(2);
@@ -390,9 +425,11 @@ export function assertThrowawayDatabase(url: string): void {
  * exists for a single caller.
  */
 export async function dropSchema(url: string): Promise<void> {
-  assertThrowawayDatabase(url);
+  assertThrowawayUrl(url);
   const admin = new SQL({ url, max: 1 });
   try {
+    // Asked on this connection, the one that drops, not on a probe of its own.
+    await assertThrowawayConnection(admin, url);
     // A kept bench corpus (SMD-1493) is thirty minutes of build behind a
     // marker; a suite run under the same OB1_PG_KEEP name would drop it here
     // with no word. The bench itself never reaches this with a marker present

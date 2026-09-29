@@ -33,8 +33,9 @@ export function databaseUrl(flag: string | undefined, env: Record<string, string
     console.error(NO_DATABASE_URL);
     process.exit(2);
   }
-  if (parsedDatabaseUrl(url) === null) {
-    console.error(UNPARSEABLE_DATABASE_URL);
+  const problem = databaseUrlProblem(url);
+  if (problem !== null) {
+    console.error(problem);
     process.exit(2);
   }
   return url;
@@ -71,20 +72,109 @@ function parsedDatabaseUrl(url: string): URL | null {
 }
 
 /**
+ * The query keys a database URL may carry. Both readers of a URL here take
+ * these the same way, and neither goes anywhere else for them. `options` is
+ * the documented route for a session's search_path (`-c search_path=…`, the
+ * value preflight prints when pgvector sits off the path, SMD-2238); it sets
+ * settings on the server Bun and libpq both reach, and names no host,
+ * database or user. Any other key is refused (SMD-2317), because the readers
+ * split on it:
+ *   • Bun 1.4.0 sends every key it does not consume to the server as a startup
+ *     setting, and the server keeps the last one, so `…/stable?database=canary`
+ *     connects to canary and `?user=` logs in as someone else, while the
+ *     client's options still name the URL's. `?path=` connects over a unix
+ *     socket whatever the host says.
+ *   • libpq (pg_dump, pg_restore) follows `host=`, `hostaddr=`, `port=`,
+ *     `dbname=` and `service=` wherever the URL's host points.
+ * The repo and its docs put no other key on a database URL: a grep for
+ * literal URLs found none (SMD-2302 review pass 3), and the suites that build
+ * one at run time add `options=` alone (test-upgrade, test-search-path,
+ * test-preflight).
+ */
+export const URL_QUERY_KEYS: ReadonlySet<string> = new Set(["sslmode", "application_name", "options"]);
+
+/**
+ * Why `url` is not a database URL every reader here takes to the same place,
+ * or null when it is. The reason never quotes the URL; it names a query key
+ * only when the key is a plain word.
+ *   • It must parse (parsedDatabaseUrl), start with a lowercase `postgres://`
+ *     or `postgresql://`, and hold no whitespace or control character.
+ *   • No fragment. libpq has none, so `…/db#?host=prod` is a query to it and
+ *     nothing to Bun.
+ *   • No `@` but the one that ends the user. libpq ends the user at the first
+ *     `@` and Bun at the last, so `u@prod:5432,x@localhost/db` sends libpq to
+ *     prod first. libpq also reads up to an `@` past a `?`, so one in a query
+ *     value splits it too.
+ *   • No `,` in the host: libpq reads a host list, and Bun one name.
+ *   • Only URL_QUERY_KEYS in the query, each once.
+ * Checked before the URL reaches a client, so a refused URL opens no
+ * connection (test-connect.ts counts them).
+ */
+export function databaseUrlProblem(url: string): string | null {
+  if (!parses(url)) return UNPARSEABLE_DATABASE_URL;
+  const split = readersSplit(url);
+  if (split === null) return null;
+  return `The database URL ${split}. (Nothing ${split.includes("the query key ") ? "else " : ""}of it is printed.)`;
+}
+
+/** Whether `url` parses as a URL both readers take: parsedDatabaseUrl, an exact scheme, no whitespace. */
+function parses(url: string): boolean {
+  // The parser strips leading and trailing spaces and drops a tab or newline
+  // anywhere, and lowercases the scheme; libpq does none of that, and takes a
+  // URL only after an exact `postgres://` or `postgresql://`.
+  return parsedDatabaseUrl(url) !== null && /^postgres(ql)?:\/\//.test(url) && !/[\s\x00-\x1f\x7f]/.test(url);
+}
+
+/** Where Bun and libpq read a URL that parses differently, as the end of a sentence about it; null when they agree. */
+function readersSplit(url: string): string | null {
+  const u = new URL(url);
+  if (url.includes("#")) return "has a fragment (a # not percent-encoded as %23): libpq reads what follows it as the query, and Bun drops it";
+  const rest = url.slice(url.indexOf("//") + 2);
+  const ats = [...rest].filter((c) => c === "@").length;
+  const authorityEnd = rest.search(/[/?]/);
+  if (ats > 1 || (ats === 1 && authorityEnd !== -1 && rest.indexOf("@") > authorityEnd)) {
+    return "has an @ other than the one ending its user (percent-encode it as %40): libpq ends the user at the first @, and Bun at the last";
+  }
+  if (u.hostname.includes(",")) return "names a host list (a , in its host): libpq tries each host, and Bun reads one name";
+  const seen = new Set<string>();
+  for (const key of u.searchParams.keys()) {
+    const named = /^[A-Za-z_]{1,40}$/.test(key) ? `the query key ${key}` : "a query key";
+    if (!URL_QUERY_KEYS.has(key)) {
+      return `carries ${named}, and only sslmode, application_name and options are read here: Bun sends any other key to the server as a setting (database= and user= override the URL's), and libpq follows host=, port=, dbname= and service=. Put the database in the URL's path`;
+    }
+    if (seen.has(key)) return `gives ${named} twice`;
+    seen.add(key);
+  }
+  return null;
+}
+
+/**
+ * The database `url` names: its path, percent-decoded, as Bun reads it (a
+ * path of `/c%61nary` reaches canary, and `/a/b` a database named `a/b`,
+ * measured on Bun 1.4.0). `""` when the path names none, and the client then
+ * takes PGDATABASE's, or the user's name. Call it on a URL
+ * databaseUrlProblem has passed.
+ */
+export function databaseOf(url: string): string {
+  return decodeURIComponent(new URL(url).pathname.slice(1));
+}
+
+/**
  * A client on `url`. One connection unless the script asks for more (a claim
- * worker takes one per worker and a spare for its heartbeat). A URL that does
- * not parse throws UNPARSEABLE_DATABASE_URL, never the client's own error,
- * which carries the URL.
+ * worker takes one per worker and a spare for its heartbeat). A URL
+ * databaseUrlProblem refuses throws that reason, never the client's own
+ * error, which carries the URL.
  *
- * What the client makes of the URL is the client's, as before SMD-2302: Bun
- * 1.4.0 lets an exported PGDATABASE beat the URL's database, and sends a
- * query's `database=`/`user=` to the server over it, where libpq tools read
- * the same URL differently again. Reconciling the two by parsing the URL
- * leaked twice in review (passes 1 and 2 — the second wrote a refresh into its
- * source); deciding from the live connection instead is SMD-2317.
+ * What the client makes of a URL that passes is still the client's: Bun 1.4.0
+ * lets an exported PGDATABASE beat the URL's database. A command that drops a
+ * schema asks the connection where it went (connectedResetRefusal) rather than
+ * trusting the URL. Pinning the URL's database here instead split a run
+ * across two databases, since the suites and sync-linear's SqlStore build
+ * clients of their own (SMD-2302 review pass 3).
  */
 export function openSql(url: string, opts: { max?: number } = {}): SQL {
-  if (parsedDatabaseUrl(url) === null) throw new Error(UNPARSEABLE_DATABASE_URL);
+  const problem = databaseUrlProblem(url);
+  if (problem !== null) throw new Error(problem);
   try {
     return new SQL({ url, max: opts.max ?? 1 });
   } catch {
@@ -135,10 +225,12 @@ export function hostOf(url: string): string | null {
  * either (a libpq socket URL, `postgres://u@/db?host=/var/run/…`, is one). The
  * reason names the hostname at most, never the rest of the URL.
  *
- * It reads the URL's hostname, as both rules before SMD-2302 did. Where a
- * client actually goes can differ — Bun connects through a unix socket for
- * `?path=`, libpq follows `?host=` and has no fragment — and closing that is
- * deciding from the live connection, SMD-2317 (review pass 3).
+ * It reads the URL's hostname, as both rules before SMD-2302 did. It is the
+ * half of the rule OB1_ALLOW_REMOTE_DB lifts. The server's own address cannot
+ * answer it instead: through a container's published port (with-postgres.sh,
+ * CI's service container) a connection to 127.0.0.1 reaches a server whose
+ * inet_server_addr() is the container's (10.88.x.x, measured), which is how
+ * an ssh tunnel to a remote server looks too (SMD-2317).
  */
 export function notThrowaway(url: string): string | null {
   const host = hostOf(url);
@@ -154,16 +246,79 @@ export function remoteDbAllowed(env: Record<string, string | undefined> = proces
 }
 
 /**
- * The one rule, as the refusal a script prints: null when a command that drops
- * a schema may run against `url`, else why not.
+ * Why no override makes `url` resettable, or null. Two things decide which
+ * database a command drops, and OB1_ALLOW_REMOTE_DB answers neither:
+ *   • the URL must be one every reader takes to the same place
+ *     (databaseUrlProblem);
+ *   • it must name its database. With none, the client takes PGDATABASE's, or
+ *     the user's name, so the shell would choose what is dropped.
  */
-export function resetRefusal(url: string, env: Record<string, string | undefined> = process.env): string | null {
-  return remoteDbAllowed(env) ? null : notThrowaway(url);
+export function identityRefusal(url: string): string | null {
+  if (!parses(url)) return "the URL does not parse";
+  const split = readersSplit(url);
+  if (split !== null) return `the URL ${split}`;
+  if (databaseOf(url) === "") return "the URL names no database (the client would take PGDATABASE's, or the user's name)";
+  return null;
 }
 
-/** The one rule: a command that drops a schema may run against `url`. */
+/**
+ * The one rule, as the refusal a script prints before it connects: null when
+ * a command that drops a schema may run against `url`, else why not. The URL
+ * must pin one database (identityRefusal), and its host must be loopback
+ * unless OB1_ALLOW_REMOTE_DB=1. Once connected, connectedResetRefusal asks
+ * the server the rest.
+ */
+export function resetRefusal(url: string, env: Record<string, string | undefined> = process.env): string | null {
+  return identityRefusal(url) ?? (remoteDbAllowed(env) ? null : notThrowaway(url));
+}
+
+/** The one rule, before connecting: a command that drops a schema may run against `url`. */
 export function mayReset(url: string, env: Record<string, string | undefined> = process.env): boolean {
   return resetRefusal(url, env) === null;
+}
+
+/** What connectedResetRefusal reads: the one query, so a suite can hand it a stand-in. */
+export interface Queryable {
+  unsafe(query: string): Promise<unknown[]>;
+}
+
+/**
+ * Why the database `sql` reached is not the one `url` names, or null. The
+ * server says where the connection went, and the URL is not asked: Bun lets
+ * an exported PGDATABASE beat the URL's database, and `dropSchema(".../canary")`
+ * with PGDATABASE=stable dropped stable's thoughts (SMD-2302 review pass 3).
+ * No override lifts this. Call it on a URL identityRefusal has passed.
+ */
+export async function reachedDatabaseRefusal(sql: Queryable, url: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
+  const [row] = (await sql.unsafe("SELECT current_database() AS db")) as { db: string }[];
+  const named = databaseOf(url);
+  if (row.db === named) return null;
+  return `the connection reached database ${JSON.stringify(row.db)}, not ${JSON.stringify(named)}, the one the URL names${
+    env.PGDATABASE !== undefined ? " — PGDATABASE is exported, and Bun lets it beat the URL's database; unset it" : ""
+  }`;
+}
+
+/**
+ * The rule's connected half, asked on the connection that is about to drop:
+ * null when it may, else why not.
+ *   • It must have reached the database the URL names (reachedDatabaseRefusal).
+ *     No override lifts this.
+ *   • It must be over TCP. A unix socket (inet_server_addr() is NULL) is not
+ *     what a loopback hostname says: Bun connects through one for `?path=`,
+ *     which databaseUrlProblem refuses, and this holds should another route
+ *     appear. OB1_ALLOW_REMOTE_DB lifts it, as it lifts the host rule.
+ * The server's address is not compared with loopback: through a container's
+ * published port it is the container's (notThrowaway says why).
+ */
+export async function connectedResetRefusal(sql: Queryable, url: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
+  return (await reachedDatabaseRefusal(sql, url, env)) ?? (await socketRefusal(sql, env));
+}
+
+/** Why `sql` is not over TCP, or null — the half of connectedResetRefusal OB1_ALLOW_REMOTE_DB lifts. */
+export async function socketRefusal(sql: Queryable, env: Record<string, string | undefined> = process.env): Promise<string | null> {
+  const [row] = (await sql.unsafe("SELECT inet_server_addr() IS NULL AS socket")) as { socket: boolean }[];
+  if (row.socket && !remoteDbAllowed(env)) return "the connection is over a unix socket, not the TCP port the URL's host names";
+  return null;
 }
 
 // ---------------------------------------------------------------------------

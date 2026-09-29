@@ -99,7 +99,7 @@ import { LOOPBACK_HOSTS } from "../db/connect.ts";
 loadEnv();
 
 const URL_ = requireDatabaseUrl("eval-quant.ts");
-assertThrowawayDatabase(URL_);
+await assertThrowawayDatabase(URL_);
 const SOURCE = process.env.OB1_EVAL_QUANT_SOURCE;
 if (!SOURCE) { console.error("OB1_EVAL_QUANT_SOURCE must name the database eval-longmemeval.ts loaded (read only here)."); process.exit(2); }
 {

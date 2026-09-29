@@ -7372,6 +7372,107 @@ console.log("\n[33] Migration 068's projection under two connections: writers of
   await db.close();
 }
 
+console.log("\n[34] The reset guards ask the server where the connection went: an exported PGDATABASE that beats the URL's database refuses dropSchema and tier.ts --refresh, override or not, and the refresh asks again on the connection that drops (SMD-2317)");
+{
+  // Bun 1.4.0 lets an exported PGDATABASE beat the URL's database, and
+  // dropSchema(".../canary") with PGDATABASE=stable dropped stable's tables in
+  // SMD-2302's review. Two scratch databases, each with a `thoughts` table as
+  // its marker (dropSchema drops that name): whatever drops the wrong one is seen.
+  const admin = new SQL({ url: URL_!, max: 1 });
+  const A = "ob1_reset_a", B = "ob1_reset_b";
+  const urlOf = (db: string) => { const u = new URL(URL_!); u.pathname = `/${db}`; return u.toString(); };
+  const markers = async () => {
+    const out: Record<string, boolean> = {};
+    for (const db of [A, B]) {
+      const s = new SQL({ url: urlOf(db), max: 1 });
+      try { out[db] = (await s`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`)[0].present; } finally { await s.close(); }
+    }
+    return out;
+  };
+  const plant = async () => {
+    for (const db of [A, B]) {
+      const s = new SQL({ url: urlOf(db), max: 1 });
+      try { await s`CREATE TABLE IF NOT EXISTS thoughts (id int)`; } finally { await s.close(); }
+    }
+  };
+  const shell: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("PG") && k !== REMOTE_DB_FLAG) shell[k] = v;
+  const drop = (url: string, env: Record<string, string>) =>
+    runScript(["bun", "-e", `import { dropSchema } from "./test-support.ts"; await dropSchema(${JSON.stringify(url)}); console.log("SCHEMA-DROP-DONE");`], { cwd: HERE, env: { ...shell, ...env } });
+  for (const db of [A, B]) { await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`); await admin.unsafe(`CREATE DATABASE ${db}`); }
+  const savedPath = process.env.PATH, savedPgDatabase = process.env.PGDATABASE;
+  const shimDir = join(tmpdir(), `ob1-reset-shim-${process.pid}`);
+  try {
+    await plant();
+    const diverted = await drop(urlOf(A), { PGDATABASE: B });
+    const after = await markers();
+    assert(diverted.code === 2 && diverted.out.includes(`the connection reached database "${B}", not "${A}", the one the URL names — PGDATABASE is exported`) && /OB1_ALLOW_REMOTE_DB does not lift this/.test(diverted.out) && !diverted.out.includes("SCHEMA-DROP-DONE") && after[A] && after[B],
+      `dropSchema(${A}) with PGDATABASE=${B} exported refuses, naming both databases and the variable, and drops neither (exit ${diverted.code}; markers ${JSON.stringify(after)}; ${diverted.out.trim().split("\n")[0]})`);
+    const overridden = await drop(urlOf(A), { PGDATABASE: B, [REMOTE_DB_FLAG]: "1" });
+    assert(overridden.code === 2 && overridden.out.includes(`reached database "${B}"`) && (await markers())[B],
+      `…and ${REMOTE_DB_FLAG}=1 does not lift it: it says which database is dropped, not whether a remote one may be (exit ${overridden.code})`);
+    // The controls: the harness sees a drop, and a PGDATABASE that agrees is no refusal.
+    const agreed = await drop(urlOf(A), { PGDATABASE: A });
+    const afterAgreed = await markers();
+    assert(agreed.code === 0 && agreed.out.includes("SCHEMA-DROP-DONE") && !afterAgreed[A] && afterAgreed[B],
+      `the control: PGDATABASE=${A}, the URL's own, drops ${A} and leaves ${B} (exit ${agreed.code}; markers ${JSON.stringify(afterAgreed)})`);
+    await plant();
+    const plain = await drop(urlOf(A), {});
+    const afterPlain = await markers();
+    assert(plain.code === 0 && !afterPlain[A] && afterPlain[B], `…and with no PGDATABASE, the URL's database is the one dropped (exit ${plain.code}; markers ${JSON.stringify(afterPlain)})`);
+    await plant();
+
+    // tier.ts --refresh: the guards ran through Bun and the tools through
+    // libpq, which keeps the URL's database, so a diverted guard judged one
+    // database while pg_restore wrote another. Now each side is asked.
+    process.env.PGDATABASE = B;
+    let fromRefused: string | null = null;
+    try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { fromRefused = (e as Error).message; }
+    let toRefused: string | null = null;
+    try { await refresh(urlOf(B), urlOf(A), "working"); } catch (e) { toRefused = (e as Error).message; }
+    if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
+    const dbName = new URL(URL_!).pathname.slice(1);
+    assert((fromRefused ?? "").startsWith(`--from: the connection reached database "${B}", not "${dbName}"`) && /pg_dump would read the URL's database/.test(fromRefused ?? ""),
+      `--refresh with PGDATABASE=${B}: a diverted --from is refused before anything is dumped (${fromRefused ?? "no refusal"})`);
+    assert((toRefused ?? "").startsWith(`--to: the connection reached database "${B}", not "${A}"`) && JSON.stringify(await markers()) === JSON.stringify({ [A]: true, [B]: true }),
+      `…and a diverted --to, with --from reaching its own, is refused, nothing dropped (${toRefused ?? "no refusal"})`);
+
+    // The connection that drops is a new resolution: the guard's is closed
+    // before pg_dump runs. A stand-in pg_dump waits while PGDATABASE changes
+    // under the refresh, and the drop's own check refuses. Without it, the
+    // mark and the DROP SCHEMA land on B.
+    await admin.unsafe(`ALTER DATABASE ${A} SET ob1.refresh_target = 'working'`);
+    const [{ n }] = await admin<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+    const major = Math.floor(Number(n) / 10000);
+    mkdirSync(shimDir, { recursive: true });
+    const started = join(shimDir, "started"), go = join(shimDir, "go");
+    const shim = (name: string, rest: string) => {
+      writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
+      chmodSync(join(shimDir, name), 0o755);
+    };
+    shim("pg_dump", `: > "${started}"; i=0; while [ ! -e "${go}" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+    shim("pg_restore", "exit 1");
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    let midRefused: string | null = null;
+    const running = refresh(URL_!, urlOf(A), "working").catch((e) => { midRefused = (e as Error).message; });
+    for (let i = 0; i < 200 && !existsSync(started); i++) await Bun.sleep(25);
+    const dumpStarted = existsSync(started);
+    process.env.PGDATABASE = B;
+    writeFileSync(go, "");
+    await running;
+    if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
+    const bMark = (await admin<{ cfg: string[] | null }[]>`SELECT setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = ${B} AND s.setrole = 0`)[0]?.cfg ?? null;
+    assert(dumpStarted && (midRefused ?? "").startsWith(`--to: the connection reached database "${B}", not "${A}"`) && /--to is untouched/.test(midRefused ?? "") && JSON.stringify(await markers()) === JSON.stringify({ [A]: true, [B]: true }) && bMark === null,
+      `PGDATABASE exported mid-refresh, after the guard and before the drop: the drop's own connection refuses, and ${B} is neither marked nor dropped (dump started: ${dumpStarted}; ${midRefused ?? "no refusal"}; ${B}'s settings ${JSON.stringify(bMark)})`);
+  } finally {
+    process.env.PATH = savedPath;
+    if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
+    rmSync(shimDir, { recursive: true, force: true });
+    for (const db of [A, B]) await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+    await admin.close();
+  }
+}
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
