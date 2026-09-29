@@ -2759,6 +2759,13 @@ guards the target three ways.
   `ALTER DATABASE … RESET ob1.refresh_target`. `deploy/README.md`, "Refreshing
   a tier", has both statements.
 - **It is loopback,** unless `OB1_ALLOW_REMOTE_DB=1`.
+- **Each side's URL names one database every client reaches** (SMD-2317).
+  Bun runs the guards and the drop, and libpq runs `pg_dump` and `pg_restore`,
+  so a URL they read differently (a query key such as `?host=`, a fragment, a
+  first-`@` host list) is refused on either side, as is one naming no host or no
+  database. After connecting, each side's server must report the URL's
+  database: an exported `PGDATABASE` beats the URL's in Bun. `--to` is asked
+  again on the connection that marks and drops. No override lifts these.
 
 It needs Bun
 and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
@@ -3032,7 +3039,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 934 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 944 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -3054,12 +3061,32 @@ and runs each entry point with a flag it does not have and with `--help`.
 Every script reaches its database through `connect.ts` (SMD-2302): `--url`, else
 `DATABASE_URL`, else exit 2 with one refusal (a URL that does not parse is
 refused too, and never printed); one client constructor; and one answer to
-"may this database be reset?" — a loopback host by name (`localhost`,
-`127.0.0.1`, `[::1]`, `0.0.0.0`), not an empty host (it resolves through
-`PGHOST`), or `OB1_ALLOW_REMOTE_DB=1`. `tier.ts --refresh` and the suites'
-`dropSchema` both ask it, and print why not. The rule reads the URL's
-hostname; where a client actually connects can differ (Bun's `?path=` socket,
-libpq's `?host=`), which is SMD-2317. `hnsw-graph.ts`,
+"may this database be reset?". `tier.ts --refresh` and the suites'
+`dropSchema` both ask it, and print why not.
+
+The resolver refuses a URL that Bun and libpq would take to different places
+(SMD-2317): a query key other than `sslmode`, `application_name` and `options` (Bun sends
+`database=` and `user=` to the server, which keeps them; libpq follows `host=`,
+`port=`, `dbname=` and `service=`), a `+` in the query (a space to Bun), a
+query part libpq refuses (empty, no `=`, a second raw `=`, an `sslmode` in
+capitals), a fragment, an `@` other than the one ending the user, a `,` or
+`%2C` in the host, or a `.`/`..` path segment (Bun resolves it, libpq does
+not). Put the
+database in the URL's path. The reset rule then has three parts:
+- **The URL must name its host and its database.** With no host, Bun
+  connects to localhost over TCP and libpq to the unix socket; with no
+  database, the shell's `PGDATABASE` would choose what is dropped.
+- **Its host must be loopback by name** (`localhost`, `127.0.0.1`, `[::1]`,
+  `0.0.0.0`), or `OB1_ALLOW_REMOTE_DB=1` must be set.
+- **Once connected, the server must report the database the URL names**
+  (`pg_catalog.current_database()`), over TCP. Bun lets an exported
+  `PGDATABASE` beat the URL's database, so this is asked on the connection
+  that drops.
+
+`OB1_ALLOW_REMOTE_DB` lifts the loopback host and the TCP requirement, and
+nothing else: the other refusals say which database would be dropped. The
+server's address is not compared with loopback, because through a container's
+published port it is the container's. `hnsw-graph.ts`,
 `graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
 after connecting and return it from `closeThenExit`, which closes the pool and
 flushes their output first (the claim workers still close before each exit

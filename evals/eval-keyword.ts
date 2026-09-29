@@ -64,7 +64,7 @@ if (!DB_URL) {
 }
 // Drops the schema, then loads internal data into it: a loopback host or nothing.
 // dropSchema enforces this too; checking here fails before the embedding work.
-assertThrowawayDatabase(DB_URL);
+await assertThrowawayDatabase(DB_URL);
 
 type Item = { id: string; title: string; text: string };
 const ITEMS: Item[] = JSON.parse(await Bun.file(CORPUS).text());
