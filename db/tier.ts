@@ -47,7 +47,10 @@
  * --to stamped tier=stable, holding thoughts under no canary/working stamp, or
  * holding some other application's schema, unless an earlier refresh marked it
  * (targetRefusal); and a non-loopback --to unless OB1_ALLOW_REMOTE_DB=1, the
- * same guard test-support's dropSchema uses.
+ * same guard test-support's dropSchema uses. No override lifts the refusal of
+ * a URL that Bun and libpq read as different targets, or that names no
+ * database, or whose connection reached a database other than the one it
+ * names (an exported PGDATABASE beats the URL's in Bun; SMD-2317).
  *
  * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
  * is the offline, model-free, fixture-vector half in CI). For each search row
@@ -80,7 +83,7 @@ import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
-import { closeThenExit, openSql, resetRefusal } from "./connect.ts";
+import { closeThenExit, connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -318,7 +321,7 @@ async function toolMajor(tool: string): Promise<number | null> {
  */
 async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
   const [me] = await a<{ pid: number; started: string; db: string }[]>`
-    SELECT pid, extract(epoch FROM backend_start)::text AS started, current_database() AS db
+    SELECT pid, extract(epoch FROM backend_start)::text AS started, pg_catalog.current_database() AS db
     FROM pg_stat_activity WHERE pid = pg_backend_pid()`;
   const [seen] = await b<{ found: boolean; db: string }[]>`
     SELECT EXISTS (
@@ -326,7 +329,7 @@ async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
              WHERE pid = ${me.pid}
                AND (backend_start IS NULL OR extract(epoch FROM backend_start)::text = ${me.started})
            ) AS found,
-           current_database() AS db`;
+           pg_catalog.current_database() AS db`;
   return seen.found && seen.db === me.db;
 }
 
@@ -431,7 +434,7 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
   const current = await databaseSettings(dst);
   // A no-op where `vector` already resolves; else the path gains its schema.
   await alignVectorSearchPath(dst);
-  const [{ db, loadable }] = await dst<{ db: string; loadable: boolean }[]>`SELECT current_database() AS db, to_regtype('vector') IS NOT NULL AS loadable`;
+  const [{ db, loadable }] = await dst<{ db: string; loadable: boolean }[]>`SELECT pg_catalog.current_database() AS db, to_regtype('vector') IS NOT NULL AS loadable`;
   if (loadable) await dst`SELECT '[1]'::vector`;
   const target = `"${db.replaceAll('"', '""')}"`;
   for (const name of Object.keys(current)) {
@@ -471,7 +474,7 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
 export async function targetRefusal(target: SQL): Promise<string | null> {
   if ((await refreshMark(target)) !== null) return null;
   const [{ db, relations, migrations, config, thoughts }] = await target<{ db: string; relations: number; migrations: boolean; config: boolean; thoughts: boolean }[]>`
-    SELECT current_database() AS db,
+    SELECT pg_catalog.current_database() AS db,
            (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = 'public'
               -- relations a schema is made of; an index, a composite type or a
@@ -519,7 +522,8 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  *   1. pg_dump the source (custom format, no owner/privileges — the target's role
  *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
  *   2. mark the target as a refresh target (refreshMark), then reset its public
- *      schema (the destructive step, guarded by targetRefusal and the loopback check).
+ *      schema (the destructive step, guarded by targetRefusal, the loopback
+ *      check, and the connected check asked on the connection that drops).
  *   3. pg_restore the dump.
  *   4. copy the source's database-level settings (databaseSettings), which the
  *      dump does not carry — 014's HNSW bounds among them (SMD-2037).
@@ -528,8 +532,15 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  * Throws with a plain message on any failed step.
  */
 export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
-  // connect.ts's one rule, the test scaffolding's too: loopback by name, not an
-  // empty host (it resolves through PGHOST), or the override.
+  // connect.ts's one rule, the test scaffolding's too, before either side is
+  // opened. Each URL must be one Bun (the guards, the drop) and libpq
+  // (pg_dump, pg_restore) take to the same place, naming its database: no
+  // override lifts that (SMD-2317). Then --to's host must be loopback by name,
+  // not an empty host (it resolves through PGHOST), or the override set.
+  for (const [side, url] of [["--from", fromUrl], ["--to", toUrl]] as const) {
+    const fixed = identityRefusal(url);
+    if (fixed !== null) throw new Error(`${side}: ${fixed}. Refusing: --refresh dumps --from and drops --to's schema, so each must name one database every client reaches.`);
+  }
   const refusal = resetRefusal(toUrl);
   if (refusal !== null) {
     throw new Error(`--to is not plainly this machine — ${refusal} — and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset it. (--refresh drops the target's schema.)`);
@@ -541,6 +552,13 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   try {
     await reach(src, fromUrl, "--from");
     await reach(target, toUrl, "--to");
+    // Where each connection went, from the server: Bun lets an exported
+    // PGDATABASE beat the URL's database, so the guards below would judge one
+    // database while pg_dump and pg_restore, which keep the URL's, used another.
+    const fromReached = await reachedDatabaseRefusal(src, fromUrl);
+    if (fromReached !== null) throw new Error(`--from: ${fromReached}. Refusing: pg_dump would read the URL's database, not the one checked.`);
+    const toReached = await connectedResetRefusal(target, toUrl);
+    if (toReached !== null) throw new Error(`--to: ${toReached}. Refusing: --refresh drops the target's schema.`);
     serverMaj = await serverMajor(src);
     settings = await databaseSettings(src);
     // The reset below drops --to's schema, so --to must be neither the source
@@ -573,8 +591,15 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     const dst = openSql(toUrl);
     try {
       if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
+      // Asked again on this connection, the one that marks and drops: the
+      // guard's own connection is closed, and this one is a new resolution.
+      const again = await connectedResetRefusal(dst, toUrl);
+      if (again !== null) throw new Error(`--to: ${again}. Refusing: --refresh drops the target's schema. --to is untouched.`);
       try {
-        await dst.unsafe(`DO $mark$ BEGIN EXECUTE format('ALTER DATABASE %I SET ob1.refresh_target = %L', current_database(), '${tier}'); END $mark$`);
+        // pg_catalog's, not the path's: a URL's options= may set search_path,
+        // and a planted current_database() would put the mark on another
+        // database, where it disarms targetRefusal (review pass 2).
+        await dst.unsafe(`DO $mark$ BEGIN EXECUTE pg_catalog.format('ALTER DATABASE %I SET ob1.refresh_target = %L', pg_catalog.current_database(), '${tier}'); END $mark$`);
       } catch (e) {
         // Nothing is reset yet. A database-level setting of a custom name needs a
         // superuser, or on PG15+ a role granted SET on the parameter; restoring
@@ -677,7 +702,7 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
     const mark = await refreshMark(stable);
     const tier = await configTier(stable);
     if (mark !== null || tier === "canary" || tier === "working") {
-      const [{ db }] = await stable<{ db: string }[]>`SELECT quote_ident(current_database()) AS db`;
+      const [{ db }] = await stable<{ db: string }[]>`SELECT pg_catalog.quote_ident(pg_catalog.current_database()) AS db`;
       throw new Error(`--to is a tier (${mark !== null ? `refresh mark ${mark}` : `tier=${tier}`}), not the record — are --from and --to the wrong way round? Refusing: --promote stamps --to as stable.${mark !== null ? ` If --to really is to be the record now, clear the mark first: ALTER DATABASE ${db} RESET ob1.refresh_target` : ""}`);
     }
     const version = await readConfig(canary, "schema_version");
