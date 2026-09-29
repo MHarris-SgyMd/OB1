@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
+import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
@@ -65,8 +66,30 @@ if (!URL_) {
 const { assert, skip, total, skipped, docCheck, report } = createAssert();
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
-function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
+function migrate(...extra: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
   return runMigrator(URL_!, undefined, ...extra);
+}
+
+/**
+ * migrate.ts's run() in this process — the engine the CLI wraps (SMD-2304) —
+ * its lines captured per stream as a child's are, a newline after each. The
+ * same shell as migrate()'s spawn (this process's environment), so the two
+ * print the same. `same` compares it with a spawned run stream by stream, so
+ * a Writer that routes a line to the other stream than the CLI's console does
+ * is a difference (review pass 4); a line moved in migrate.ts itself moves in
+ * both, and [2] pins the drift report's streams for that.
+ */
+async function migrateInProcess(opts: Omit<MigrateOptions, "writer"> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+  const outs: string[] = [], errs: string[] = [];
+  // A caller's client in place of the URL, not beside it: the run must be the client's.
+  const code = await runMigrate({ ...(opts.sql ? {} : { url: URL_! }), ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+  const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+  return { code, stdout: lines(outs), stderr: lines(errs) };
+}
+
+/** An in-process run and a spawned one agree: exit code, stdout and stderr, each byte for byte. */
+function same(a: { code: number; stdout: string; stderr: string }, b: { code: number; stdout: string; stderr: string }): boolean {
+  return a.code === b.code && a.stdout === b.stdout && a.stderr === b.stderr;
 }
 
 const unit = (i: number) => {
@@ -88,6 +111,18 @@ console.log("[1] migrate.ts against a real server");
   const dry = await migrate("--dry-run");
   assert(dry.code === 0, "--dry-run exits 0");
   assert(/would apply \d+, skipped 0/.test(dry.out), "--dry-run reports everything pending");
+  // The client backends on this database before and after an in-process run
+  // on a URL, by pid: run() opens its own and closes it. A backend that was not
+  // there before — the run's — must be gone once things settle; a backend
+  // still closing from the spawned run above is in the "before" set, so it
+  // can neither hide a leak nor fail the check by leaving.
+  const clientPids = async () => new Set(((await sql`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`) as { pid: number }[]).map((r) => r.pid));
+  const pidsBefore = await clientPids();
+  const dryIn = await migrateInProcess({ dryRun: true });
+  assert(dryIn.code === 0 && same(dryIn, dry), "run() in-process dry-runs the same, byte for byte on each stream (SMD-2304)");
+  let newPids = [...(await clientPids())].filter((p) => !pidsBefore.has(p));
+  for (let i = 0; i < 20 && newPids.length > 0; i++) { await Bun.sleep(100); newPids = [...(await clientPids())].filter((p) => !pidsBefore.has(p)); }
+  assert(newPids.length === 0, `…and closes the connection it opened (${newPids.length} backend(s) of its left)`);
   const none = await sql`SELECT to_regclass('public.thoughts') IS NULL AS absent`;
   assert(none[0].absent === true, "--dry-run created nothing");
 
@@ -107,6 +142,17 @@ console.log("[1] migrate.ts against a real server");
   const again = await migrate();
   assert(again.code === 0, "re-run exits 0");
   assert(/applied 0, skipped \d+/.test(again.out), "re-run is a no-op — the ledger holds");
+  // In-process on a client the caller owns: the same no-op, and the client is
+  // still open after — run() closes only a client it opened (SMD-2304).
+  const caller = new SQL({ url: URL_, max: 1 });
+  try {
+    const againIn = await migrateInProcess({ sql: caller, url: "postgres://u@127.0.0.1:1/none" });
+    assert(againIn.code === 0 && same(againIn, again), "run() in-process on a caller's client re-runs the same no-op, byte for byte on each stream — the client, not the dead URL beside it");
+    const [{ one }] = await caller`SELECT 1 AS one`;
+    assert(one === 1, "…and leaves the caller's client open");
+  } finally {
+    await caller.close();
+  }
 
   const ledger = await sql`SELECT count(*)::int AS c FROM schema_migrations`;
   assert(ledger[0].c > 0, `schema_migrations records ${ledger[0].c} migrations`);
@@ -122,6 +168,17 @@ console.log("\n[2] Append-only enforcement");
     assert(drifted.code === 1, "editing an applied migration exits 1");
     assert(/DRIFTED 1/.test(drifted.out), "…and reports which one drifted");
     assert(/append-only/.test(drifted.out), "…and explains the rule");
+    // Which stream each goes to, as main's migrator wrote them: the warning and
+    // the rule to stderr, the summary to stdout. The in-process comparison
+    // below cannot see this — both runs are this migrate.ts (review pass 4).
+    assert(/ALREADY APPLIED BUT FILE CHANGED/.test(drifted.stderr) && /append-only/.test(drifted.stderr) && /DRIFTED 1/.test(drifted.stdout) && !/ALREADY APPLIED BUT|append-only/.test(drifted.stdout), "…the drift warning and the rule on stderr, the summary on stdout");
+    // migrate.ts was imported before the edit: run() reads the files when it
+    // runs, not when the module loaded (SMD-2304).
+    const driftedIn = await migrateInProcess();
+    // The drift report is the one run here that writes to both streams: the
+    // ⚠ line and the append-only rule to stderr, the skipped lines and the
+    // summary to stdout.
+    assert(driftedIn.stderr.length > 0 && driftedIn.stdout.length > 0 && same(driftedIn, drifted), "run() in-process, imported before the edit, sees the drift the same, byte for byte on each stream");
   } finally {
     writeFileSync(target, original);
   }

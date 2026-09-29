@@ -668,12 +668,13 @@ export function neverAnswers(): Promise<never> {
 /**
  * Run a script as a subprocess and collect its exit code with everything it
  * printed, stdout then stderr — so a suite observes the real exit code, and an
- * assertion can read a message whichever stream it went to. Five suites had
+ * assertion can read a message whichever stream it went to — and each stream
+ * apart, for a check of which one a line went to (SMD-2304). Five suites had
  * written this body (SMD-1024's second review pass counted). `env` replaces
  * the inherited environment when given; a caller that wants the parent's plus
  * a few builds that object itself.
  */
-export async function runScript(cmd: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; out: string }> {
+export async function runScript(cmd: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
   // A child given its own environment gets exactly that: Bun loads the cwd's
   // .env into a child for every variable the passed environment lacks — which
   // after a fixture's strip is every OB1_* name, and db/.env is where a
@@ -683,8 +684,9 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
   // gets the flag too; a spawn fronted by another program spells it itself.
   const argv = opts.env && basename(cmd[0]) === "bun" ? [cmd[0], "--no-env-file", ...cmd.slice(1)] : cmd;
   const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
-  const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
-  return { code: await p.exited, out };
+  const stdout = await new Response(p.stdout).text();
+  const stderr = await new Response(p.stderr).text();
+  return { code: await p.exited, out: stdout + stderr, stdout, stderr };
 }
 
 /** This process's environment with every `OB1_*` variable removed — the allowlist `migratorEnv` and test-bench-reuse.ts build their spawns' shells on. */
@@ -721,7 +723,7 @@ export function migratorEnv(url: string, opts: Pick<SchemaOptions, "dim" | "mode
  * suites still spell the spawn for themselves. Exit code and combined output,
  * as runScript gives them.
  */
-export function runMigrator(url: string, env: Record<string, string> | undefined, ...flags: string[]): Promise<{ code: number; out: string }> {
+export function runMigrator(url: string, env: Record<string, string> | undefined, ...flags: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
   return runScript(["bun", join(HERE, "migrate.ts"), "--url", url, ...flags], { ...(env ? { env } : {}), cwd: HERE });
 }
 

@@ -642,7 +642,7 @@ function callText(text: string, from: number): string {
   ok([...`await assertThrowawayDatabase(URL_);`.matchAll(UNAWAITED)].length === 0, "…and not an awaited call");
 
   const onDoor = sources.filter((f) => f !== "connect.ts" && /closeThenExit\(/.test(read(f)));
-  for (const must of ["hnsw-graph.ts", "graph-centrality.ts", "tier.ts"]) ok(onDoor.includes(must), `${must} exits through the door`);
+  for (const must of ["hnsw-graph.ts", "graph-centrality.ts", "tier.ts", "migrate.ts"]) ok(onDoor.includes(must), `${must} exits through the door`);
   const EXITS = /\bexit\s*\(|process\s*\[\s*["'`]exit["'`]\s*\]|=\s*process\.exit\b/;
   const CLOSES = /\.\s*(close|end)\s*\(/;
   /**
