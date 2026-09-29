@@ -1042,7 +1042,7 @@ async function selfCheck(): Promise<number> {
       writeFileSync(join(tdir, "plain.json"), flow("Plain", [{ name: "call", parameters: { workflowId: { value: "ob1wf:leaf" } } }]));
       writeFileSync(join(tdir, "leaf.json"), flow("Leaf", [{ name: "x" }]));
       writeFileSync(join(tdir, `imp${PER_PIPELINE}`), flow("Import {{pipeline}}", [{ name: "hook", webhookId: "{{pipeline.webhookId}}", parameters: { path: "imp-{{pipeline}}", every: "{{pipeline.everyHours}}", wait: "{{pipeline.timeoutMs}}", expr: "={{ $json.x }}" }, credentials: { httpHeaderAuth: { id: "ob1runnerKey0001" } } }]));
-      const pipes: Pipeline[] = [{ name: "alpha", system: "alpha", scope: "alpha:x", emitter: ["bun", "a.ts"], everyHours: 6 }, { name: "beta", system: "beta", scope: "beta:x", emitter: ["bun", "b.ts"], everyHours: 24 }];
+      const pipes: Pipeline[] = [{ name: "alpha", system: "alpha", scope: "alpha:x", emitter: ["bun", "a.ts"], everyHours: 6, network: [] }, { name: "beta", system: "beta", scope: "beta:x", emitter: ["bun", "b.ts"], everyHours: 24, network: [] }];
       const run = (env: Record<string, string>) => provision(opts({ ...base, ...file(), ...env }, { credentials: [credFile], workflows: templatesIn(tdir), pipelines: pipes }));
       const keys16 = { RUN_KEY: "r".repeat(32), RUNNER_KEY: "n".repeat(32) };
       f.s.workflows.clear(); f.s.credentials.length = 0;

@@ -53,10 +53,12 @@ db/*.ts
 # The orchestration profile's import runner (deploy/orchestration/runner.Dockerfile,
 # SMD-2212) runs the ingestion pipeline, so its import graph is let back in:
 # these db/ modules (cli.ts and connect.ts above among them: every db/ script's
-# flag scanner and connection module),
+# flag scanner and connection module, and worker-bootstrap.ts, reembed's egress
+# bootstrap, SMD-2303),
 # and the two files outside db/ it reaches.
 !db/ingest-*.ts
 !db/reembed.ts
+!db/worker-bootstrap.ts
 !db/lease.ts
 !evals/linear-corpus.ts
 db/*.sh

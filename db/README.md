@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2285 assertions: 2285 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty-nine (69) migrations applied, and
+`bun test-schema.ts` prints `2300 assertions: 2300 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy (70) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -208,7 +208,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -722,10 +722,11 @@ earlier, by the producer-count arm; the remedies run 061, 063, 066 in turn).
 One body redefined on its own text with no arity change; nothing runs at
 apply time but the DDL; a pair proposed before the file stands for its
 reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
-pair — the listing reads nothing of `derived_from`, the pass never replaces
+pair — the listing read nothing of `derived_from` until 070, the pass never replaces
 it (a text move, once `rebuild_derived` runs — `db/rebuild.ts` — leaves it
-`stale` for a reviewer), and the recorder has no
-lineage guard; reject it by hand, and SMD-2313 counts and flags such rows.
+`stale` for a reviewer, and the pass settles it on its next run — 067), and
+the recorder has no lineage guard; 070 flags such a row `LINEAGE PAIR`, and
+`consolidate.ts --list lineage` lists the unreviewed ones for the reject.
 test-schema [60], test-upgrade [20r] (a proposal planted on the pair before
 the file is pending and unmoved after it); `server-portable/test-preflight.ts`
 drives the re-applied-body arm.
@@ -830,6 +831,43 @@ runs again, and a reader of `node_lifecycle()` needs SELECT on
 longer read `thought_sources` (a removed join's tables are not
 permission-checked — observed, not documented), so the server group keeps that
 grant.
+
+Migration 070 makes a proposal standing on a lineage pair visible as such
+(SMD-2313). 066 stopped the pass proposing a thought against a member of its
+`derived_from`, and changed nothing about a proposal already standing on such a
+pair — judged before 066, or recorded raw (the recorder has no lineage guard):
+the listing read nothing of `derived_from`, so a reviewer saw "the page
+supersedes its evidence" as any other pending row, and an accept would have
+archived the evidence while the page still named it. Such a row is nobody's but
+the reviewer's — a pending proposal holds its pair (029's rule, read by 063's
+candidate clause), and 063's recorder rewrites stale rows alone, so no pass
+judges or replaces it; a stale one, which 063's clause re-admits and 066 keeps
+out, is the pass's to settle since 067, on the next run that re-pools its newer
+thought (both sides with a vector, no failed claim under the run's key). The
+file redefines `list_supersession_proposals` on
+029's body with a trailing `lineage` column — 066's predicate, either direction,
+direct members, NULL-safe — and a third parameter `p_lineage` (NULL every pair,
+true the lineage pairs alone, false the rest); the two-argument form is dropped
+first (a `RETURNS TABLE` cannot gain a column under `CREATE OR REPLACE`), and a
+two-argument call resolves to the new form through the default. The readers
+follow: `consolidate.ts --list` prints `LINEAGE PAIR` on such a row with the
+reject to run, `--list lineage` selects the unreviewed ones (pending, then
+stale), `--status` counts them, `--accept` refuses such a row unless `--force`
+(029's edited-since rule, CLI-side); the MCP tool prints the tag and takes
+`lineage: true`; preflight's `lineage` check counts unreviewed proposals on a
+lineage pair (bounded, as its census is) and warns with the ids and the remedy
+— on a brain at 068 the remedy applies 070 first, since `--list` needs it while
+the census and `--status` read the tables — and, with no such row standing,
+warns when the listing is from before 070 (every listing fails there: the
+callers pass the third argument) or 029's two-argument form stands beside it
+(029 re-applied by hand lands it beside, and a call short of three arguments
+is then ambiguous and fails; the fork's callers pass three, which resolve). No
+verdict is written at apply time — a rejection is a reviewer's, with a name on
+it — and a `--reject-lineage` sweep is not taken until the flag has been used.
+DDL alone; no row moves; no grant is carried (EXECUTE is PUBLIC, as on 029's).
+test-schema [64], test-upgrade [20v], test-live [16];
+`server-portable/test-preflight.ts` drives the census, the leftover-form and
+the older-body arms; the store and e2e suites read the column.
 
 ## What changed relative to the guide
 
@@ -1934,13 +1972,13 @@ bun consolidate.ts --url … --limit 25              # a trial: this many though
 bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
-bun consolidate.ts --url … --list [pending|accepted|rejected|stale|all]
+bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
 #   --k N (3)  --min-sim F (0.6)  --min-confidence F (0.5)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
-bun consolidate.ts --url … --accept <id> --force            # a thought was edited since the pair was judged
+bun consolidate.ts --url … --accept <id> --force            # a thought edited since judged, a stale row, or a lineage pair (070)
 ```
 
 **The cost, stated up front.** Up to `--k` calls to the metadata model per
@@ -1957,8 +1995,18 @@ of them real on a hand grading — two per hundred thoughts, half worth acceptin
 **Reviewing.** `--list` prints the queue most confident first, each with the
 judge's reason, both thoughts with their capture dates and `ID:` lines, and
 the two commands that decide it; the MCP tool `list_supersession_proposals`
-prints the same queue to a client. `--accept` writes the pointer on the thought
-the verdict names as current (or the one `--direction` names — required for an
+prints the same queue to a client. A row standing on a lineage pair — one
+side's `derived_from` names the other, a page and its evidence — is tagged
+`LINEAGE PAIR` with the reject to run (`--reject <id> --note "lineage pair
+(066)"`); `--list lineage` lists the unreviewed ones, pending then stale, and
+`--status` counts them (070, SMD-2313); `--accept` on such a row is refused
+naming the reject unless `--force` says the pointer is meant — a guard on the
+one accept door, not a verdict — and a row accepted before the pair became one
+is tagged under `--list accepted` with `--reject <id>`, which clears the pointer
+(029), as the repair. `--limit` is the pass's cap and is refused beside `--list`. Such a pair is never proposed since 066, and a
+standing row is the reviewer's alone: the pass never replaces a pending one,
+and settles a stale one on its next run (067). `--accept` writes the pointer
+on the thought the verdict names as current (or the one `--direction` names — required for an
 undirected verdict, and an override for a directed one) and refuses what would
 leave the column wrong: the superseding thought already pointing at a third
 thought (the column holds one predecessor; which is the reviewer's call), or a
@@ -2711,6 +2759,13 @@ guards the target three ways.
   `ALTER DATABASE … RESET ob1.refresh_target`. `deploy/README.md`, "Refreshing
   a tier", has both statements.
 - **It is loopback,** unless `OB1_ALLOW_REMOTE_DB=1`.
+- **Each side's URL names one database every client reaches** (SMD-2317).
+  Bun runs the guards and the drop, and libpq runs `pg_dump` and `pg_restore`,
+  so a URL they read differently (a query key such as `?host=`, a fragment, a
+  first-`@` host list) is refused on either side, as is one naming no host or no
+  database. After connecting, each side's server must report the URL's
+  database: an exported `PGDATABASE` beats the URL's in Bun. `--to` is asked
+  again on the connection that marks and drops. No override lifts these.
 
 It needs Bun
 and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
@@ -2983,11 +3038,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2285 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 919 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2300 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 944 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
+bun test-worker-bootstrap.ts                # every claim worker's egress bootstrap through worker-bootstrap.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -3006,12 +3062,32 @@ and runs each entry point with a flag it does not have and with `--help`.
 Every script reaches its database through `connect.ts` (SMD-2302): `--url`, else
 `DATABASE_URL`, else exit 2 with one refusal (a URL that does not parse is
 refused too, and never printed); one client constructor; and one answer to
-"may this database be reset?" — a loopback host by name (`localhost`,
-`127.0.0.1`, `[::1]`, `0.0.0.0`), not an empty host (it resolves through
-`PGHOST`), or `OB1_ALLOW_REMOTE_DB=1`. `tier.ts --refresh` and the suites'
-`dropSchema` both ask it, and print why not. The rule reads the URL's
-hostname; where a client actually connects can differ (Bun's `?path=` socket,
-libpq's `?host=`), which is SMD-2317. `hnsw-graph.ts`,
+"may this database be reset?". `tier.ts --refresh` and the suites'
+`dropSchema` both ask it, and print why not.
+
+The resolver refuses a URL that Bun and libpq would take to different places
+(SMD-2317): a query key other than `sslmode`, `application_name` and `options` (Bun sends
+`database=` and `user=` to the server, which keeps them; libpq follows `host=`,
+`port=`, `dbname=` and `service=`), a `+` in the query (a space to Bun), a
+query part libpq refuses (empty, no `=`, a second raw `=`, an `sslmode` in
+capitals), a fragment, an `@` other than the one ending the user, a `,` or
+`%2C` in the host, or a `.`/`..` path segment (Bun resolves it, libpq does
+not). Put the
+database in the URL's path. The reset rule then has three parts:
+- **The URL must name its host and its database.** With no host, Bun
+  connects to localhost over TCP and libpq to the unix socket; with no
+  database, the shell's `PGDATABASE` would choose what is dropped.
+- **Its host must be loopback by name** (`localhost`, `127.0.0.1`, `[::1]`,
+  `0.0.0.0`), or `OB1_ALLOW_REMOTE_DB=1` must be set.
+- **Once connected, the server must report the database the URL names**
+  (`pg_catalog.current_database()`), over TCP. Bun lets an exported
+  `PGDATABASE` beat the URL's database, so this is asked on the connection
+  that drops.
+
+`OB1_ALLOW_REMOTE_DB` lifts the loopback host and the TCP requirement, and
+nothing else: the other refusals say which database would be dropped. The
+server's address is not compared with loopback, because through a container's
+published port it is the container's. `hnsw-graph.ts`,
 `graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
 after connecting and return it from `closeThenExit`, which closes the pool and
 flushes their output first (the claim workers still close before each exit
@@ -3019,6 +3095,18 @@ themselves, SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks
 that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.
+
+The claim workers bootstrap their egress through `worker-bootstrap.ts`
+(SMD-2303): one banner line, and one blanket gate that stops a pass before it
+claims when the policy would refuse the call whatever the row — its wording one
+text per case, the pass's verb ("extracted" / "judged" / "re-embedded") the
+only difference — plus the identity re-gate. `reembed.ts` gates its embeddings
+endpoint (and, with `OB1_CHUNK_CONTEXT`, warns on the blurbs endpoint);
+`sync-linear.ts` wraps the bare reason in its own sentence. The module returns
+its outcome rather than exiting, so SMD-2304's importable `run()` will turn it
+into a return code. `test-worker-bootstrap.ts` holds the wording and the
+drop-the-gate mutant, and `test-cli.ts`'s census checks that no `db/` file
+outside the module reaches `refusesEverything` or `describeEgress`.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`

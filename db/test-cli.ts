@@ -158,11 +158,26 @@ const entries = sources.filter((f) => {
   ok(entries.length >= 20, `the entry-point census finds the scripts (${entries.length}: ${entries.join(", ")})`);
   for (const must of ["extract-entities.ts", "consolidate.ts", "reembed.ts", "migrate.ts", "tier.ts", "sync-linear.ts", "graph-centrality.ts", "bench-hnsw.ts"])
     ok(entries.includes(must), `the census counts ${must} as an entry point`);
-  for (const lib of ["cli.ts", "lease.ts", "env.ts", "brain-compare.ts", "ingest-contract.ts", "bench-oracle.ts"])
+  for (const lib of ["cli.ts", "lease.ts", "env.ts", "brain-compare.ts", "ingest-contract.ts", "bench-oracle.ts", "worker-bootstrap.ts"])
     ok(!entries.includes(lib), `the census does not count the library ${lib}`);
   for (const f of entries) ok(/from "\.\/cli\.ts"/.test(readFileSync(join(HERE, f), "utf8")), `${f} imports ./cli.ts`);
   for (const f of sources.filter((s) => s !== "cli.ts"))
     ok(!/process\.argv/.test(readFileSync(join(HERE, f), "utf8")), `${f} reads no process.argv of its own — its arguments go through cli.ts`);
+}
+
+// ---------------------------------------------------------------------------
+// SMD-2303. The db/ claim workers bootstrap their provider egress through one
+// module, db/worker-bootstrap.ts: no other db/ file reaches egress.ts's
+// `refusesEverything` or `describeEgress` directly, so the blanket-gate wording
+// cannot drift back into per-worker copies.
+// ---------------------------------------------------------------------------
+{
+  const MODULE = "worker-bootstrap.ts";
+  for (const f of sources.filter((s) => s !== MODULE)) {
+    const text = readFileSync(join(HERE, f), "utf8");
+    for (const banned of ["refusesEverything", "describeEgress"])
+      ok(!text.includes(banned), `${f} does not reach egress.ts's ${banned} directly — the egress bootstrap goes through ${MODULE} (SMD-2303)`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,8 +224,10 @@ const entries = sources.filter((f) => {
   ok(tableAlone.code === 2 && /--table goes with --index/.test(tableAlone.err), `hnsw-graph.ts refuses --table without --index (exit ${tableAlone.code})`);
   const noteAlone = run("consolidate.ts", "--url", DEAD, "--list", "--note", "why");
   ok(noteAlone.code === 2 && /--note goes with --accept or --reject/.test(noteAlone.err), `consolidate.ts refuses --note without a decision (exit ${noteAlone.code})`);
+  const limitList = run("consolidate.ts", "--url", DEAD, "--list", "--limit", "5");
+  ok(limitList.code === 2 && /--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status/.test(limitList.err), `consolidate.ts refuses --limit beside --list rather than dropping it (exit ${limitList.code})`);
   const listWord = run("consolidate.ts", "--url", DEAD, "--list", "postgres://u:s3cret@h/db");
-  ok(listWord.code === 2 && /--list takes pending, accepted, rejected, stale or all/.test(listWord.err) && !listWord.err.includes("s3cret"), `consolidate.ts refuses a --list value by the words it takes, not repeating it (exit ${listWord.code})`);
+  ok(listWord.code === 2 && /--list takes pending, accepted, rejected, stale, lineage or all/.test(listWord.err) && !listWord.err.includes("s3cret"), `consolidate.ts refuses a --list value by the words it takes, not repeating it (exit ${listWord.code})`);
   const hex = run("extract-entities.ts", "--url", DEAD, "--workers", "0x10");
   ok(hex.code === 2 && /--workers must be a decimal integer >= 1$/m.test(hex.err), `extract-entities.ts refuses a hex --workers, which Number() read as 16 (exit ${hex.code})`);
   const dump = run("extract-entities.ts", "--dump");

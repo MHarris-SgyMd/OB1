@@ -4240,6 +4240,37 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const proposed = await consolidate();
     const atlas = (await proposals()).find((p) => p.older_id === atlasOld && p.newer_id === atlasNew);
     assert(proposed.code === 0 && atlas !== undefined && atlas.status === "pending" && (await proposals()).length === proposalsBefore + 1, `the atlas pair is proposed pending (exit ${proposed.code})`);
+    // 070 (SMD-2313): the PENDING row on a lineage pair — the ticket's own
+    // case, a page over its evidence judged before 066 — under --list
+    // lineage, with no stale standing on it; the array set raw and cleared
+    // (run-it, first review pass: the one --list lineage tooth was a stale
+    // row, so the pending call dropped passed every suite).
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${atlasOld}::text) WHERE id = ${atlasNew}::uuid`;
+    const pendingLineage = await consolidate("--list", "lineage");
+    assert(pendingLineage.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\), most confident first:$/m.test(pendingLineage.out) && /LINEAGE PAIR\s*$/m.test(pendingLineage.out) && !/\(stale/.test(pendingLineage.out) && pendingLineage.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`),
+           `--list lineage lists the pending row, tagged, with no stale standing and --force on the accept line (${pendingLineage.out.split("\n").find((l) => /LINEAGE PAIR/.test(l))?.trim().slice(0, 160)})`);
+    // …and the accept is refused without --force — a guard on the one accept
+    // door, not a verdict: the row stays pending, nothing is written
+    // (definitions probe, second review pass: the accept went through under
+    // the reject's own advice). A brain without 070's listing gets the file
+    // named on --list, not a driver stack: the form dropped and put back.
+    const acceptLineage = await consolidate("--accept", atlas!.id);
+    assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`)
+           && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
+           `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
+    // R3 tooth (mutant 2): the catch names 070 for the one error it is for — an unrelated failure inside the listing is shown as itself.
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
+    const listBoom = await consolidate("--list", "lineage");
+    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 070/.test(listBoom.out),
+           `an unrelated error inside --list is shown as itself, not as a missing 070 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
+    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 070 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 070 and says the listing needs the file before pointing at it");
+    const listPre070 = await consolidate("--list", "lineage");
+    assert(listPre070.code === 1 && /--list needs migration 070 \(db\/migrations\/070_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre070.out) && !/PostgresError/.test(listPre070.out),
+           `on a brain without 070 --list names the file, not a driver error (exit ${listPre070.code}: ${listPre070.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+    await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
     const rb1 = await rebuild(atlasNew);
@@ -4248,6 +4279,20 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it finds in conflict again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
     const staleList = await consolidate("--list", "stale");
     assert(staleList.code === 0 && /1 stale proposal\(s\)/.test(staleList.out) && /\(stale — in this pass's pool\)/.test(staleList.out) && staleList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`), `--list stale tags the row's standing and still offers the reviewer's decision (${staleList.out.split("\n").find((l) => /stale —/.test(l))?.trim().slice(0, 200)})`);
+    // 070 (SMD-2313): the same stale row standing on a lineage pair — the
+    // newer thought's derived_from set raw to name the older, the shape 066
+    // left behind — is tagged under --list stale, listed under --list lineage
+    // with the reject to run, and counted by --status; the array is cleared
+    // before the pass's run below, whose settle reason is the unrelated verdict.
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${atlasOld}::text) WHERE id = ${atlasNew}::uuid`;
+    const lineageList = await consolidate("--list", "lineage");
+    assert(lineageList.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\), most confident first/.test(lineageList.out) && /\(stale — in this pass's pool\)/.test(lineageList.out)
+           && lineageList.out.includes(`lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066; reject it: --reject ${atlas!.id} --note "lineage pair (066)"`) && lineageList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`),
+           `--list lineage lists the row with its standing, the lineage line and the reject to run (${lineageList.out.split("\n").find((l) => /lineage pair:/.test(l))?.trim().slice(0, 200)})`);
+    assert(/LINEAGE PAIR  \(stale — in this pass's pool\)/.test((await consolidate("--list", "stale")).out), "…--list stale tags it LINEAGE PAIR beside its standing");
+    assert(/, 1 unreviewed standing on a lineage pair \(--list lineage shows them; the reviewer rejects each — the pass never replaces a pending one\) — --list shows them/.test((await consolidate("--status")).out), "…and --status counts it");
+    await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
+    assert(/no unreviewed proposals standing on a lineage pair/.test((await consolidate("--list", "lineage")).out) && !/LINEAGE PAIR/.test((await consolidate("--list", "stale")).out), "…and cleared, nothing stands there and the tag is gone");
     // The standing is read under THIS pass's key (second review pass): the
     // row's-key claim gone and one requeued under another judge's key is
     // another pass's pool — named beside "waiting", since this run re-pools
@@ -4414,6 +4459,40 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const borrowed = await consolidate("--reject", cedar.id, "--note", `${PASS_SETTLED_PREFIX} by hand`);
     assert(borrowed.code === 2 && /that marker is the pass's own/.test(borrowed.out) && (await proposalRow(cedar.id)).review_note?.startsWith(PASS_SETTLED_PREFIX) === true && /judged again/.test((await proposalRow(cedar.id)).review_note ?? ""),
            `--note beginning with the marker is refused as usage, the row untouched (exit ${borrowed.code})`);
+    // R3 teeth (mutants 1a-1d): the accept guard's other cases on a throwaway
+    // pair — after the audit counts above, since a forced accept and its
+    // reject are audited under the reviewer's name.
+    {
+      const r3Old = await seed("smd-2313 live: the evidence", 9, 0);
+      const r3New = await seed("smd-2313 live: the page over it", 8, 0);
+      const [{ id: r3 }] = await sql`SELECT record_supersession_proposal(${r3Old}::uuid, ${r3New}::uuid, 'newer_supersedes_older', 0.8, 'the page restates the evidence', 0.9, ${KEY}, NULL) AS id`;
+      // A guard that let an accept through: undo it, so the steps below still run and report.
+      const undo = async () => { if ((await supersedesOf(r3New)) !== null) await consolidate("--reject", r3); await sql`UPDATE supersession_proposals SET status = 'pending', reviewed_at = NULL, review_note = NULL WHERE id = ${r3}::uuid`; };
+      await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${r3New}::text) WHERE id = ${r3Old}::uuid`;
+      const reverse = await consolidate("--accept", r3);
+      assert(reverse.code === 1 && /accept refused: one side's derived_from names the other/.test(reverse.out) && (await supersedesOf(r3New)) === null,
+             `the OLDER side naming the newer meets the same guard (exit ${reverse.code}: ${reverse.out.trim().slice(-160)})`);
+      await undo();
+      await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${r3Old}::uuid`;
+      await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${r3Old}::text) WHERE id = ${r3New}::uuid`;
+      await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${r3}::uuid`;
+      const staleAccept = await consolidate("--accept", r3);
+      assert(staleAccept.code === 1 && /accept refused: one side's derived_from names the other/.test(staleAccept.out),
+             `a stale lineage row's accept meets the guard before 063's stale rule (exit ${staleAccept.code}: ${staleAccept.out.trim().slice(-160)})`);
+      await undo();
+      const forcedLineage = await consolidate("--accept", r3, "--force");
+      assert(forcedLineage.code === 0 && /^\s*accepted /m.test(forcedLineage.out) && (await supersedesOf(r3New)) === r3Old,
+             `--accept --force on a lineage pair writes the pointer (exit ${forcedLineage.code}: ${forcedLineage.out.trim().slice(-160)})`);
+      const acceptedAgain = await consolidate("--accept", r3);
+      assert(acceptedAgain.code === 1 && /accept refused: already accepted/.test(acceptedAgain.out) && !/lineage/.test(acceptedAgain.out),
+             `an accept on the accepted lineage row is 029's ALREADY_ACCEPTED, not the guard's advice about a pointer not yet written (exit ${acceptedAgain.code}: ${acceptedAgain.out.trim().slice(-140)})`);
+      const acceptedList = await consolidate("--list", "accepted");
+      assert(/LINEAGE PAIR  \(accepted/.test(acceptedList.out) && acceptedList.out.includes(`accepted while the derivation names its input — --reject ${r3} clears the pointer (029)`),
+             `--list accepted tags the row and names the reject as the repair for a pointer already written (${acceptedList.out.split("\n").find((l) => /lineage pair:/.test(l))?.trim().slice(0, 160)})`);
+      const rejectedLineage = await consolidate("--reject", r3, "--note", "lineage pair (066)");
+      assert(rejectedLineage.code === 0 && /rejected [0-9a-f-]+: the supersedes pointer this proposal had set is cleared/.test(rejectedLineage.out) && (await supersedesOf(r3New)) === null && (await proposalRow(r3)).status === "rejected",
+             `--reject on a lineage pair is never refused, and clears the pointer a forced accept wrote — the repair for an accept already written (exit ${rejectedLineage.code}: ${rejectedLineage.out.trim().slice(-160)})`);
+    }
   }
 
   // SMD-1803: the CLI's day() over a proposal thought with no ISO-form date.
@@ -5343,11 +5422,11 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   let refusedRemote: string, refusedEmptyHost: string;
   try {
     refusedRemote = await refreshRefusal("postgres://u@example.com:5432/b");
-    // tier.ts's own rule trusted an empty host, which resolves through PGHOST (SMD-2302).
+    // tier.ts's own rule trusted an empty host (SMD-2302); Bun and libpq take it to two servers, so no override lifts the refusal (SMD-2317).
     refusedEmptyHost = await refreshRefusal("postgres:///b");
   } finally { if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow; }
   assert(/^--to is not plainly this machine — example\.com is not a loopback host — and OB1_ALLOW_REMOTE_DB is not 1/.test(refusedRemote), `refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema) — got: ${refusedRemote}`);
-  assert(/^--to is not plainly this machine — the URL has no host/.test(refusedEmptyHost), `…and a target with no host, which resolves through PGHOST — got: ${refusedEmptyHost}`);
+  assert(/^--to: the URL has no host \(Bun would connect to localhost over TCP and libpq to the unix socket/.test(refusedEmptyHost), `…and a target with no host, which Bun and libpq read as two servers — got: ${refusedEmptyHost}`);
   // And a --to that is the --from database under another spelling (SMD-2036):
   // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
   // under. The second URL differs as a string (a parameter only), so string
@@ -7291,6 +7370,151 @@ console.log("\n[33] Migration 068's projection under two connections: writers of
   assert(suiteDrift === 0 && left.drift === 0 && left.heads === 0,
     `every section before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
   await db.close();
+}
+
+console.log("\n[34] The reset guards ask the server where the connection went: an exported PGDATABASE that beats the URL's database refuses dropSchema and tier.ts --refresh, override or not, and the refresh asks again on the connection that drops (SMD-2317)");
+{
+  // Bun 1.4.0 lets an exported PGDATABASE beat the URL's database, and
+  // dropSchema(".../canary") with PGDATABASE=stable dropped stable's tables in
+  // SMD-2302's review. Two scratch databases, each with a `thoughts` table as
+  // its marker (dropSchema drops that name): whatever drops the wrong one is seen.
+  const admin = new SQL({ url: URL_!, max: 1 });
+  const A = "ob1_reset_a", B = "ob1_reset_b";
+  const urlOf = (db: string) => { const u = new URL(URL_!); u.pathname = `/${db}`; return u.toString(); };
+  const markers = async () => {
+    const out: Record<string, boolean> = {};
+    for (const db of [A, B]) {
+      const s = new SQL({ url: urlOf(db), max: 1 });
+      try { out[db] = (await s`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`)[0].present; } finally { await s.close(); }
+    }
+    return out;
+  };
+  const plant = async () => {
+    for (const db of [A, B]) {
+      const s = new SQL({ url: urlOf(db), max: 1 });
+      try { await s`CREATE TABLE IF NOT EXISTS thoughts (id int)`; } finally { await s.close(); }
+    }
+  };
+  const shell: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("PG") && k !== REMOTE_DB_FLAG) shell[k] = v;
+  const drop = (url: string, env: Record<string, string>) =>
+    runScript(["bun", "-e", `import { dropSchema } from "./test-support.ts"; await dropSchema(${JSON.stringify(url)}); console.log("SCHEMA-DROP-DONE");`], { cwd: HERE, env: { ...shell, ...env } });
+  for (const db of [A, B]) { await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`); await admin.unsafe(`CREATE DATABASE ${db}`); }
+  const savedPath = process.env.PATH, savedPgDatabase = process.env.PGDATABASE;
+  const shimDir = join(tmpdir(), `ob1-reset-shim-${process.pid}`);
+  try {
+    await plant();
+    const diverted = await drop(urlOf(A), { PGDATABASE: B });
+    const after = await markers();
+    assert(diverted.code === 2 && diverted.out.includes(`the connection reached database "${B}", not "${A}", the one the URL names — PGDATABASE is exported`) && /OB1_ALLOW_REMOTE_DB does not lift this/.test(diverted.out) && !diverted.out.includes("SCHEMA-DROP-DONE") && after[A] && after[B],
+      `dropSchema(${A}) with PGDATABASE=${B} exported refuses, naming both databases and the variable, and drops neither (exit ${diverted.code}; markers ${JSON.stringify(after)}; ${diverted.out.trim().split("\n")[0]})`);
+    const overridden = await drop(urlOf(A), { PGDATABASE: B, [REMOTE_DB_FLAG]: "1" });
+    assert(overridden.code === 2 && overridden.out.includes(`reached database "${B}"`) && (await markers())[B],
+      `…and ${REMOTE_DB_FLAG}=1 does not lift it: it says which database is dropped, not whether a remote one may be (exit ${overridden.code})`);
+    // assertThrowawayDatabase asks on a probe of its own, and eval-quant.ts and
+    // test-bench-reuse.ts rely on it alone before their drops (review pass 2:
+    // replacing the probe's question survived every suite).
+    const guardOnly = (url: string, env: Record<string, string>) =>
+      runScript(["bun", "-e", `import { assertThrowawayDatabase } from "./test-support.ts"; await assertThrowawayDatabase(${JSON.stringify(url)}); console.log("GUARD-PASSED");`], { cwd: HERE, env: { ...shell, ...env } });
+    const guardDiverted = await guardOnly(urlOf(A), { PGDATABASE: B });
+    const guardPlain = await guardOnly(urlOf(A), {});
+    assert(guardDiverted.code === 2 && guardDiverted.out.includes(`reached database "${B}", not "${A}"`) && !guardDiverted.out.includes("GUARD-PASSED") && guardPlain.code === 0 && guardPlain.out.includes("GUARD-PASSED"),
+      `assertThrowawayDatabase on ${A} with PGDATABASE=${B} refuses on its own probe, and passes with none (exit ${guardDiverted.code}, then ${guardPlain.code})`);
+    // The check asks pg_catalog's current_database(), not whatever the session's
+    // path finds first: options= may set search_path, and a function of that
+    // name in the reached database answered the URL's name and let the drop
+    // through (review pass 1, run). The control shows the stand-in does answer
+    // an unqualified call on that path.
+    {
+      const b = new SQL({ url: urlOf(B), max: 1 });
+      try { await b.unsafe(`CREATE SCHEMA IF NOT EXISTS evil; CREATE OR REPLACE FUNCTION evil.current_database() RETURNS name LANGUAGE sql AS $$ SELECT '${A}'::name $$`); } finally { await b.close(); }
+      const spoofQuery = "?options=-c%20search_path%3Devil%2Cpg_catalog%2Cpublic";
+      const probe = new SQL({ url: urlOf(B) + spoofQuery, max: 1 });
+      let answered = "";
+      try { answered = String((await probe.unsafe("SELECT current_database() AS db"))[0].db); } finally { await probe.close(); }
+      const spoofed = await drop(urlOf(A) + spoofQuery, { PGDATABASE: B });
+      const afterSpoof = await markers();
+      assert(answered === A && spoofed.code === 2 && spoofed.out.includes(`reached database "${B}"`) && afterSpoof[B],
+        `a current_database() planted on the path ahead of pg_catalog does not answer the check: refused, ${B} kept (the stand-in answers "${answered}" unqualified; exit ${spoofed.code})`);
+      const clean = new SQL({ url: urlOf(B), max: 1 });
+      try { await clean.unsafe("DROP SCHEMA evil CASCADE"); } finally { await clean.close(); }
+    }
+    // The controls: the harness sees a drop, and a PGDATABASE that agrees is no refusal.
+    const agreed = await drop(urlOf(A), { PGDATABASE: A });
+    const afterAgreed = await markers();
+    assert(agreed.code === 0 && agreed.out.includes("SCHEMA-DROP-DONE") && !afterAgreed[A] && afterAgreed[B],
+      `the control: PGDATABASE=${A}, the URL's own, drops ${A} and leaves ${B} (exit ${agreed.code}; markers ${JSON.stringify(afterAgreed)})`);
+    await plant();
+    const plain = await drop(urlOf(A), {});
+    const afterPlain = await markers();
+    assert(plain.code === 0 && !afterPlain[A] && afterPlain[B], `…and with no PGDATABASE, the URL's database is the one dropped (exit ${plain.code}; markers ${JSON.stringify(afterPlain)})`);
+    await plant();
+
+    // tier.ts --refresh: the guards ran through Bun and the tools through
+    // libpq, which keeps the URL's database, so a diverted guard judged one
+    // database while pg_restore wrote another. Now each side is asked.
+    process.env.PGDATABASE = B;
+    let fromRefused: string | null = null;
+    try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { fromRefused = (e as Error).message; }
+    let toRefused: string | null = null;
+    try { await refresh(urlOf(B), urlOf(A), "working"); } catch (e) { toRefused = (e as Error).message; }
+    if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
+    const dbName = new URL(URL_!).pathname.slice(1);
+    assert((fromRefused ?? "").startsWith(`--from: the connection reached database "${B}", not "${dbName}"`) && /pg_dump would read the URL's database/.test(fromRefused ?? ""),
+      `--refresh with PGDATABASE=${B}: a diverted --from is refused before anything is dumped (${fromRefused ?? "no refusal"})`);
+    assert((toRefused ?? "").startsWith(`--to: the connection reached database "${B}", not "${A}"`) && JSON.stringify(await markers()) === JSON.stringify({ [A]: true, [B]: true }),
+      `…and a diverted --to, with --from reaching its own, is refused, nothing dropped (${toRefused ?? "no refusal"})`);
+
+    // The connection that drops is a new resolution: the guard's is closed
+    // before pg_dump runs. A stand-in pg_dump waits while PGDATABASE changes
+    // under the refresh, and the drop's own check refuses. Without it, the
+    // mark and the DROP SCHEMA land on B.
+    await admin.unsafe(`ALTER DATABASE ${A} SET ob1.refresh_target = 'working'`);
+    const [{ n }] = await admin<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+    const major = Math.floor(Number(n) / 10000);
+    mkdirSync(shimDir, { recursive: true });
+    const started = join(shimDir, "started"), go = join(shimDir, "go");
+    const shim = (name: string, rest: string) => {
+      writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
+      chmodSync(join(shimDir, name), 0o755);
+    };
+    shim("pg_dump", `: > "${started}"; i=0; while [ ! -e "${go}" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+    shim("pg_restore", "exit 1");
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    let midRefused: string | null = null;
+    const running = refresh(URL_!, urlOf(A), "working").catch((e) => { midRefused = (e as Error).message; });
+    for (let i = 0; i < 200 && !existsSync(started); i++) await Bun.sleep(25);
+    const dumpStarted = existsSync(started);
+    process.env.PGDATABASE = B;
+    writeFileSync(go, "");
+    await running;
+    if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
+    const bMark = (await admin<{ cfg: string[] | null }[]>`SELECT setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = ${B} AND s.setrole = 0`)[0]?.cfg ?? null;
+    assert(dumpStarted && (midRefused ?? "").startsWith(`--to: the connection reached database "${B}", not "${A}"`) && /--to is untouched/.test(midRefused ?? "") && JSON.stringify(await markers()) === JSON.stringify({ [A]: true, [B]: true }) && bMark === null,
+      `PGDATABASE exported mid-refresh, after the guard and before the drop: the drop's own connection refuses, and ${B} is neither marked nor dropped (dump started: ${dumpStarted}; ${midRefused ?? "no refusal"}; ${B}'s settings ${JSON.stringify(bMark)})`);
+
+    // The mark names its database through pg_catalog: --to's options= may set
+    // search_path, and a current_database() planted in --to answering B would
+    // put the mark on B, where it disarms targetRefusal for a later refresh
+    // (review pass 2). --to really is A here, so every guard passes and the
+    // refresh runs to the stand-in restore, which fails.
+    {
+      const a = new SQL({ url: urlOf(A), max: 1 });
+      try { await a.unsafe(`CREATE SCHEMA IF NOT EXISTS evil; CREATE OR REPLACE FUNCTION evil.current_database() RETURNS name LANGUAGE sql AS $$ SELECT '${B}'::name $$`); } finally { await a.close(); }
+      let markRun: string | null = null;
+      try { await refresh(URL_!, urlOf(A) + "?options=-c%20search_path%3Devil%2Cpg_catalog%2Cpublic", "working"); } catch (e) { markRun = (e as Error).message; }
+      const bAfter = (await admin<{ cfg: string[] | null }[]>`SELECT setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = ${B} AND s.setrole = 0`)[0]?.cfg ?? null;
+      const after = await markers();
+      assert(/did not produce the thoughts table/.test(markRun ?? "") && bAfter === null && after[B] && !after[A],
+        `a current_database() planted in --to ahead of pg_catalog does not move the mark: the refresh reached its restore on ${A}, and ${B} is neither marked nor dropped (${(markRun ?? "no error").slice(0, 80)}; ${B}'s settings ${JSON.stringify(bAfter)}; markers ${JSON.stringify(after)})`);
+    }
+  } finally {
+    process.env.PATH = savedPath;
+    if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
+    rmSync(shimDir, { recursive: true, force: true });
+    for (const db of [A, B]) await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+    await admin.close();
+  }
 }
 
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");

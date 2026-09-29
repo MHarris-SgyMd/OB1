@@ -564,6 +564,9 @@ console.log("\n[8f] retryFailed and releaseStaleLeases are SQL-backend only over
   let rl = "";
   try { await store.releaseStaleLeases({}); } catch (e) { rl = (e as Error).message; }
   assert(/requires the SQL backend/.test(rl) && /thought_work_claims/.test(rl), `the shim says release_stale_leases needs the SQL backend (${rl.slice(0, 80)})`);
+  let dr = "";
+  try { await store.dryRunClaim("extract:whatever@p2"); } catch (e) { dr = (e as Error).message; }
+  assert(/requires the SQL backend/.test(dr) && /thought_work_claims/.test(dr), `the shim says run_worker (dry_run) needs the SQL backend (${dr.slice(0, 80)})`);
 }
 
 console.log("\n[9] Provenance rides the envelope and reads back over PostgREST too (migration 025)");
@@ -622,6 +625,15 @@ console.log("\n[10] listSupersessionProposals's rpc shape over PostgREST (migrat
   assert(pending[0].older.id === older && pending[0].newer.id === newer && /monthly/.test(pending[0].older.content), "…with both thoughts inline");
   assert((await store.listSupersessionProposals({ status: null, limit: 5 })).length === 1, "p_status NULL and an explicit limit bind");
   assert((await store.listSupersessionProposals({ status: "rejected" })).length === 0, "…and a status with no rows is an empty list, not an error");
+  // 070 (SMD-2313): p_lineage named on the rpc — the flag false here, true
+  // once the newer thought's derived_from names the older (set raw), the
+  // selector picking it and false leaving it out.
+  assert(pending[0].lineage === false && (await store.listSupersessionProposals({ lineage: false })).length === 1 && (await store.listSupersessionProposals({ lineage: true })).length === 0,
+         "…lineage is false on a pair neither side of which names the other (070): false selects it over rpc, true does not");
+  await admin`UPDATE thoughts SET derived_from = jsonb_build_array(${older}::text) WHERE id = ${newer}`;
+  const lp = await store.listSupersessionProposals({ lineage: true });
+  assert(lp.length === 1 && lp[0].id === pid && lp[0].lineage === true && (await store.listSupersessionProposals({ lineage: false })).length === 0,
+         `p_lineage over rpc: true selects the row once the newer names the older in derived_from, false leaves it out (${lp.length}: ${lp[0]?.lineage})`);
   await admin.close();
 }
 

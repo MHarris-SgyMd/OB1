@@ -276,9 +276,13 @@ jobs:
       #   password masked in the report;
       # - an export its uid cannot read, and an imports root the runner cannot
       #   search, refused; reembed's refusals told apart, by phrases the check
-      #   finds in reembed's own source; live steps stopped with the runner.
-      # Each emitter's own uid, and its leftovers killed, are the image's, and
-      # the kit's I check holds them live.
+      #   finds in reembed's own source; live steps stopped with the runner;
+      # - SMD-2289: a pipeline's `network`, the address screen, the egress
+      #   rules' text, and each networked pipeline's proxy on loopback: TLS
+      #   held to the named host by its ClientHello, the refusals it reports,
+      #   its bounds and half-open tunnels (no outbound network needed).
+      # Each emitter's own uid, its leftovers killed, and the egress rules
+      # themselves are the image's, and the kit's I check holds them live.
       - name: Orchestration import runner rules
         working-directory: deploy/orchestration
         run: bun runner.ts --self-check
@@ -458,6 +462,14 @@ jobs:
       - name: Connection module (every db/ script, no database)
         working-directory: db
         run: bun test-connect.ts
+
+      # SMD-2303. The db/ claim workers bootstrap their provider egress through
+      # one module, db/worker-bootstrap.ts: the banner line, the bare refusal,
+      # the blanket-gate sentence (verb and knob as parameters) and the identity
+      # re-gate wording, with the drop-the-gate mutant. No database, no model.
+      - name: Worker bootstrap (egress, no database)
+        working-directory: db
+        run: bun test-worker-bootstrap.ts
 
   db-live:
     name: Schema against real Postgres
@@ -1049,6 +1061,36 @@ jobs:
       - name: The import runner's image builds
         working-directory: deploy
         run: docker compose -f compose.yaml --profile orchestration build orchestration-runner
+
+      # SMD-2289: the image's own start, as compose runs the service but
+      # without its dependencies (starting opens no database connection).
+      # `--egress` gives a real nft its rules, setpriv drops NET_ADMIN and
+      # SETPCAP, and the runner listens only once its probe as an emitter uid
+      # is refused. Then, as an emitter uid, the internet and the runner's own
+      # port are refused, and the runner holds KILL, SETGID and SETUID alone.
+      # The self-check reads the rules' text; this is the kernel's answer, on
+      # Docker, where the eval kit runs podman (review pass 5). Each probe is
+      # an `if`: bash -e does not stop on a failed `!` command.
+      - name: The import runner starts with its egress rules
+        working-directory: deploy
+        env:
+          OB1_RUNNER_KEY: ci-stand-in-runner-key-not-a-secret-0123456789
+        run: |
+          docker compose -f compose.yaml --profile orchestration run -d --no-deps --name ob1-runner-egress orchestration-runner
+          for _ in $(seq 30); do docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening" && break; sleep 1; done
+          docker logs ob1-runner-egress 2>&1
+          docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening"
+          pid=$(docker exec ob1-runner-egress sh -c 'for p in /proc/[0-9]*; do [ "$(tr "\0" " " < "$p/cmdline")" = "bun deploy/orchestration/runner.ts " ] && basename "$p"; done' | head -1)
+          eff=$(docker exec ob1-runner-egress awk '/^CapEff/ {print $2}' "/proc/$pid/status")
+          echo "runner pid $pid CapEff $eff"
+          [ "$eff" = "00000000000000e0" ]
+          for target in "1.1.1.1 443" "127.0.0.1 8090"; do
+            # shellcheck disable=SC2086
+            if docker exec ob1-runner-egress su-exec 20001:20001 python3 -c "import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3)" $target; then
+              echo "an emitter uid reached $target"; exit 1
+            fi
+          done
+          docker rm -f ob1-runner-egress
 
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.
