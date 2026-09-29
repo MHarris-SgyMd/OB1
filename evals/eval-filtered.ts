@@ -95,7 +95,7 @@ for (const [what, p] of [["corpus", CORPUS], ["embedding cache", CACHE]] as cons
 }
 const DB_URL = requireDatabaseUrl("evals/eval-filtered.ts");
 // dropSchema enforces this too; checking here fails before the embedding work.
-assertThrowawayDatabase(DB_URL);
+await assertThrowawayDatabase(DB_URL);
 
 /**
  * Read and parse a JSON file, telling a missing file apart from a broken one.

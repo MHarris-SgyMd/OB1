@@ -19,8 +19,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { networkInterfaces } from "node:os";
 import {
-  LOOPBACK_HOSTS, NO_DATABASE_URL, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, UNPARSEABLE_DATABASE_URL,
-  databaseUrl, hostOf, mayReset, notThrowaway, openSql, remoteDbAllowed, resetRefusal,
+  LOOPBACK_HOSTS, NO_DATABASE_URL, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, UNPARSEABLE_DATABASE_URL, URL_QUERY_KEYS,
+  connectedResetRefusal, databaseOf, databaseUrl, databaseUrlProblem, hostOf, identityRefusal, mayReset, notThrowaway, openSql,
+  reachedDatabaseRefusal, remoteDbAllowed, resetRefusal, socketRefusal,
 } from "./connect.ts";
 
 let pass = 0;
@@ -73,10 +74,15 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
     [`postgres://u:${MARK}@db.example.com:5432/db`, false, "a remote host"],
   ];
   const none = {};
+  // The override lifts the host rule, never a URL that fails to pin one
+  // database: here one that does not parse, and an empty host, which Bun and
+  // libpq take to two servers (SMD-2317, review pass 1).
+  const pins = (what: string) => !what.includes("does not parse") && !what.includes("an empty host");
   for (const [url, local, what] of HOSTS) {
     ok((notThrowaway(url) === null) === local, `notThrowaway: ${what} → ${local ? "no reason" : "a reason"}`);
     ok(mayReset(url, none) === local, `mayReset, no override: ${what} → ${local}`);
-    ok(mayReset(url, { OB1_ALLOW_REMOTE_DB: "1" }) === true, `mayReset, OB1_ALLOW_REMOTE_DB=1: ${what} → true`);
+    ok(mayReset(url, { OB1_ALLOW_REMOTE_DB: "1" }) === pins(what), `mayReset, OB1_ALLOW_REMOTE_DB=1: ${what} → ${pins(what)}`);
+    ok((identityRefusal(url) === null) === pins(what), `identityRefusal: ${what} → ${pins(what) ? "none" : "a reason"}`);
     // The eval-local name, which the scaffolding honoured and tier.ts did not:
     // read here it would pass deploy/tier.sh, which strips only the one name.
     ok(mayReset(url, { OB1_EVAL_ALLOW_REMOTE_DB: "1" }) === local, `mayReset, OB1_EVAL_ALLOW_REMOTE_DB=1 (retired): ${what} → ${local}`);
@@ -115,23 +121,236 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
 }
 
 // ---------------------------------------------------------------------------
+// Where the readers split: a URL Bun and libpq take to different places is
+// refused by the resolver, override or not (SMD-2317).
+// ---------------------------------------------------------------------------
+/** [url, the reason's words, what] — every one loopback by name, so only the resolver stands between it and a client. */
+const SPLITS: [string, RegExp, string][] = [
+  [`postgres://u:${MARK}@localhost:5432/canary#?host=db.example.com`, /has a fragment/, "a fragment, which libpq reads as the query (#?host=)"],
+  [`postgres://u:${MARK}@localhost:5432/canary#`, /has a fragment/, "an empty fragment"],
+  [`postgres://u@db.example.com:5432,x@localhost/canary`, /an @ other than the one ending its user/, "a first-@ host list: libpq's user ends at the first @, Bun's at the last"],
+  [`postgres://u:p@ss${MARK}@localhost:5432/canary`, /an @ other than the one ending its user/, "an unencoded @ in the password"],
+  [`postgres://localhost:5432/canary?application_name=a@db.example.com`, /an @ other than the one ending its user/, "an @ in a query value, which libpq reads as ending a user"],
+  [`postgres://localhost:5432/can@ry`, /an @ other than the one ending its user/, "an @ in the database name"],
+  [`postgres://u@localhost,db.example.com/canary`, /names a host list/, "a , host list"],
+  [`postgres://u:${MARK}@localhost:5432/canary?host=db.example.com`, /the query key host,/, "?host= (libpq goes there)"],
+  [`postgres://u:${MARK}@localhost:5432/canary?hostaddr=10.0.0.5`, /the query key hostaddr,/, "?hostaddr="],
+  [`postgres://u:${MARK}@localhost:5432/canary?port=5433&dbname=openbrain`, /the query key port,/, "?port=&dbname= (the dogfood stack's other brain, no override needed)"],
+  [`postgres://u:${MARK}@localhost:5432/canary?service=prod`, /the query key service,/, "?service="],
+  [`postgres://u:${MARK}@localhost:5432/stable?database=canary`, /the query key database,/, "?database= (Bun connects to canary, its options still say stable)"],
+  [`postgres://u:${MARK}@localhost:5432/canary?user=admin`, /the query key user,/, "?user= (Bun logs in as admin)"],
+  [`postgres://u:${MARK}@localhost:5432/canary?path=/var/run/postgresql`, /the query key path,/, "?path= (Bun connects over that unix socket)"],
+  [`postgres://u:${MARK}@localhost:5432/canary?data%62ase=stable`, /the query key database,/, "a percent-encoded key, decoded as both readers decode it"],
+  [`postgres://u:${MARK}@localhost:5432/canary?${MARK}=1`, /carries a query key, and only/, "a key that is not a plain word, which is not printed"],
+  [`postgres://u:${MARK}@localhost:5432/canary?sslmode=disable&sslmode=require`, /gives the query key sslmode twice/, "sslmode twice"],
+  // Review pass 1: each measured with both readers, or a mutant survived without it.
+  [`postgres://u:${MARK}@localhost:5432/x/../canary`, /a path the parser rewrites/, "a .. segment (Bun reaches canary, libpq x/../canary)"],
+  [`postgres://u:${MARK}@localhost:5432/./canary`, /a path the parser rewrites/, "a . segment"],
+  [`postgres://u:${MARK}@localhost:5432/%2e%2e/canary`, /a path the parser rewrites/, "an encoded .. segment (libpq reaches ../canary)"],
+  [`postgres://u:${MARK}@localhost:5432/stable/%2e%2E/canary`, /a path the parser rewrites/, "a mixed-case encoded .. segment"],
+  [`postgres://u:${MARK}@localhost:5432/canary?options=-c+search_path%3Dx`, /has a \+ in its query/, "a + in a query value (a space to Bun, a + to libpq)"],
+  [`postgres://u@localhost%2Cdb.example.com/canary`, /names a host list/, "a %2C host list, which libpq decodes"],
+  [`postgres://localhost?application_name=a@db.example.com:5432/canary`, /an @ other than the one ending its user/, "an @ past a ? with no path (libpq's user ends there, its host is db.example.com)"],
+  [`postgres://localhost/@canary`, /an @ other than the one ending its user/, "an @ straight after the path's /"],
+  [`postgres://u:${MARK}@localhost:5432/canary?SSLMODE=disable`, /the query key SSLMODE,/, "a key in capitals (the allowlist is exact)"],
+  // Review pass 2: libpq refuses these query shapes, which Bun reads — a
+  // refresh dropped --to and then failed its restore; and a lowercase %2c.
+  [`postgres://u:${MARK}@localhost:5432/canary?application_name=x=y`, /a second = in a query value/, "a second raw = in a value (libpq: extra key/value separator)"],
+  [`postgres://u:${MARK}@localhost:5432/canary?options=-c%20search_path=x`, /a second = in a query value/, "an options value with a raw ="],
+  [`postgres://u:${MARK}@localhost:5432/canary?sslmode`, /no key=value/, "a key with no ="],
+  [`postgres://u:${MARK}@localhost:5432/canary?&sslmode=disable`, /no key=value/, "an empty query part"],
+  [`postgres://u:${MARK}@localhost:5432/canary?sslmode=disable&`, /no key=value/, "a trailing &"],
+  [`postgres://u:${MARK}@localhost:5432/canary?sslmode=DISABLE`, /sslmode in capitals/, "an sslmode value in capitals"],
+  [`postgres://u@nohost.invalid%2c127.0.0.1/canary`, /names a host list/, "a lowercase %2c host list (libpq reached canary through it)"],
+];
+{
+  for (const [url, re, what] of SPLITS) {
+    const problem = databaseUrlProblem(url);
+    ok(problem !== null && re.test(problem) && !problem.includes(MARK) && problem.startsWith("The database URL "), `databaseUrlProblem: ${what} → refused, never quoting it (${problem?.slice(0, 90)})`);
+    const fixed = identityRefusal(url);
+    ok(fixed !== null && re.test(fixed) && !fixed.includes(MARK), `identityRefusal: ${what} → refused`);
+    ok(!mayReset(url, { [REMOTE_DB_FLAG]: "1" }), `mayReset, ${REMOTE_DB_FLAG}=1: ${what} → false, no override lifts it`);
+  }
+  // Whitespace and a scheme's case: the parser forgives them, libpq does not.
+  for (const [url, what] of [
+    [" postgres://u@localhost/canary", "a leading space"],
+    ["postgres://u@localhost/canary ", "a trailing space"],
+    ["postgres://u@local\thost/canary", "a tab inside the host (the parser drops it)"],
+    ["postgres://u@localhost/can\nary", "a newline inside the path"],
+    ["POSTGRES://u@localhost/canary", "a scheme in capitals (libpq wants postgres:// exactly)"],
+    ["postgres:u@localhost/canary", "no // after the scheme"],
+    ["postgres://u@localhost/can\x7fary", "a DEL inside the path"],
+  ] as const) {
+    ok(databaseUrlProblem(url) === UNPARSEABLE_DATABASE_URL && identityRefusal(url) === "the URL does not parse", `${what}: refused as unparseable`);
+  }
+  // What stays open: the three keys, an encoded @ or # in the password, an encoded database.
+  for (const [url, db, what] of [
+    [`postgres://u:${MARK}@127.0.0.1:5432/canary?sslmode=disable&application_name=ob1`, "canary", "sslmode and application_name"],
+    [`postgres://u:${MARK}@127.0.0.1:5432/canary?options=-csearch_path%3D%22extensions%22%2Cpublic`, "canary", "options=, the search_path value preflight prints (SMD-2238)"],
+    [`postgresql://u:p%40ss%23${MARK}@localhost/canary`, "canary", "an @ and a # percent-encoded in the password"],
+    ["postgres://u@localhost/c%61nary", "canary", "a percent-encoded database (Bun decodes it)"],
+    ["postgres://u@localhost/a%2Fb", "a/b", "an encoded / in the database"],
+    ["postgres://localhost/canary", "canary", "no user at all"],
+    ["postgres://u@[::1]:5432/canary", "canary", "IPv6 loopback"],
+    // Review pass 2: both readers agree on these (measured), so the resolver must too.
+    ["postgres://u@localhost/café", "café", "a non-ASCII database the parser percent-encodes"],
+    ['postgres://u@localhost/a"b', 'a"b', "a \" in the database the parser percent-encodes"],
+    ["postgres://u@localhost/caf%c3%a9", "café", "a lowercase percent-escape"],
+    ["postgres://a+b@localhost/a+b", "a+b", "a + in the user and the database (a + only splits the readers in the query)"],
+    ["postgres://u@localhost/canary?options=-csearch_path%3Dx%20-cwork_mem%3D4MB", "canary", "an options value with every = and space encoded"],
+  ] as const) {
+    ok(databaseUrlProblem(url) === null && identityRefusal(url) === null && mayReset(url, {}), `${what}: accepted and resettable`);
+    ok(databaseOf(url) === db, `databaseOf: ${what} → ${JSON.stringify(db)} (${JSON.stringify(databaseOf(url))})`);
+  }
+  ok([...URL_QUERY_KEYS].sort().join() === "application_name,options,sslmode", "the query allowlist is sslmode, application_name and options, nothing more");
+  // A URL naming no database lets the shell choose what is dropped.
+  for (const url of ["postgres://u@localhost", "postgres://u@localhost/", "postgres://u@localhost:5432/?sslmode=disable"]) {
+    ok(databaseUrlProblem(url) === null, `${url}: a URL a worker may still use (the resolver passes it)`);
+    ok(/names no database/.test(identityRefusal(url) ?? "") && !mayReset(url, { [REMOTE_DB_FLAG]: "1" }), `${url}: not resettable, override or not — PGDATABASE, or the user's name, would decide (${identityRefusal(url)})`);
+  }
+  // The resolver refuses each split, printing only its reason.
+  for (const [url, re, what] of SPLITS.slice(0, 3).concat(SPLITS.slice(11, 14))) {
+    const r = child(`import { databaseUrl } from "./connect.ts"; console.log("resolved " + databaseUrl(undefined));`, { DATABASE_URL: url });
+    ok(r.code === 2 && re.test(r.err) && !r.err.includes(MARK) && !r.out.includes("resolved"), `DATABASE_URL with ${what}: exit 2, the reason, no word of the URL (exit ${r.code}: ${r.err.trim().slice(0, 70)})`);
+    const o = child(`import { openSql } from "./connect.ts"; try { openSql(${JSON.stringify(url)}); console.log("opened"); } catch (e) { console.log("threw: " + e.message); }`);
+    ok(re.test(o.out) && !o.out.includes("opened") && !o.out.includes(MARK) && !o.err.includes(MARK), `openSql on ${what} throws the reason (${o.out.trim().slice(0, 70)})`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The connected half: the server says where the connection went.
+// ---------------------------------------------------------------------------
+{
+  /** A stand-in connection answering the two questions the rule asks, and counting them. */
+  const conn = (db: string, socket: boolean) => {
+    const asked: string[] = [];
+    return {
+      asked,
+      async unsafe(q: string) {
+        asked.push(q);
+        if (/current_database\(\)/.test(q)) return [{ db }];
+        if (/inet_server_addr\(\) IS NULL/.test(q)) return [{ socket }];
+        throw new Error(`unexpected query: ${q}`);
+      },
+    };
+  };
+  const URL_A = "postgres://u@localhost/canary";
+  ok((await connectedResetRefusal(conn("canary", false), URL_A, {})) === null, "reached the named database over TCP: may reset");
+  const off = await connectedResetRefusal(conn("stable", false), URL_A, {});
+  ok(off === `the connection reached database "stable", not "canary", the one the URL names`, `reached another database: refused, naming both (${off})`);
+  const hinted = await connectedResetRefusal(conn("stable", false), URL_A, { PGDATABASE: "stable" });
+  ok(/PGDATABASE is exported, and Bun lets it beat the URL's database; unset it$/.test(hinted ?? ""), `…and with PGDATABASE exported it says so (${hinted})`);
+  ok((await connectedResetRefusal(conn("stable", false), URL_A, { [REMOTE_DB_FLAG]: "1" })) !== null, `…and ${REMOTE_DB_FLAG}=1 does not lift it`);
+  ok((await reachedDatabaseRefusal(conn("stable", false), URL_A, { [REMOTE_DB_FLAG]: "1" })) !== null && (await reachedDatabaseRefusal(conn("canary", true), URL_A, {})) === null, "reachedDatabaseRefusal asks the database alone: override or not, socket or not");
+  ok((await connectedResetRefusal(conn("Canary", false), URL_A, {})) !== null, "the compare is exact: Canary is another database than canary");
+  ok((await connectedResetRefusal(conn("a/b", false), "postgres://u@localhost/a%2Fb", {})) === null, "the URL's database decoded, as Bun decodes it (a%2Fb reaches a/b)");
+  const sock = await connectedResetRefusal(conn("canary", true), URL_A, {});
+  ok(/over a unix socket/.test(sock ?? ""), `over a unix socket: refused (${sock})`);
+  ok((await connectedResetRefusal(conn("canary", true), URL_A, { [REMOTE_DB_FLAG]: "1" })) === null && (await socketRefusal(conn("x", true), { [REMOTE_DB_FLAG]: "1" })) === null, `…and ${REMOTE_DB_FLAG}=1 lifts that half, as it lifts the host rule`);
+  const both = conn("stable", true);
+  const bothWhy = await connectedResetRefusal(both, URL_A, { [REMOTE_DB_FLAG]: "1" });
+  ok(/reached database "stable"/.test(bothWhy ?? "") && both.asked.length === 1, `the database is asked first, and a wrong one ends it (${both.asked.length} question(s))`);
+}
+
+// ---------------------------------------------------------------------------
+// What reaches the server: a startup packet read off a listener. A refused URL
+// sends none; an accepted one sends the URL's user and database once, and
+// nothing a query could add (SMD-2317).
+// ---------------------------------------------------------------------------
+{
+  type Startup = Record<string, string[]>;
+  const packets: Startup[] = [];
+  let connections = 0;
+  /** The StartupMessage's key/value pairs; an SSLRequest (Bun's default "prefer") is answered N first. */
+  const listener = Bun.listen<{ buf: Buffer }>({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      open(s) { connections++; s.data = { buf: Buffer.alloc(0) }; },
+      data(s, chunk) {
+        s.data.buf = Buffer.concat([s.data.buf, Buffer.from(chunk)]);
+        for (;;) {
+          const b = s.data.buf;
+          if (b.length < 8) return;
+          const len = b.readInt32BE(0);
+          if (b.length < len) return;
+          const code = b.readInt32BE(4);
+          s.data.buf = b.subarray(len);
+          if (code === 80877103) { s.write("N"); continue; }
+          const fields = b.subarray(8, len).toString("utf8").split("\0");
+          const pairs: Startup = {};
+          for (let i = 0; i + 1 < fields.length && fields[i] !== ""; i += 2) (pairs[fields[i]] ??= []).push(fields[i + 1]);
+          packets.push(pairs);
+          s.end();
+          return;
+        }
+      },
+    },
+  });
+  const at = (rest: string) => `postgres://ob1u:${MARK}@127.0.0.1:${listener.port}/${rest}`;
+  const send = async (url: string, env: Record<string, string> = {}) => {
+    packets.length = 0;
+    connections = 0;
+    const p = Bun.spawn(["bun", "--no-env-file", "-e", `import { openSql } from "./connect.ts"; try { const s = openSql(${JSON.stringify(url)}); await s\`SELECT 1\`.catch(() => {}); await s.close(); } catch (e) { console.error(e.message); process.exit(3); }`], { cwd: HERE, env: { ...BASE_ENV, ...env }, stdout: "pipe", stderr: "pipe" });
+    const killer = setTimeout(() => p.kill(), 15_000);
+    const watch = setInterval(() => { if (packets.length > 0) p.kill(); }, 20);
+    const err = await new Response(p.stderr).text();
+    const code = await p.exited;
+    clearTimeout(killer);
+    clearInterval(watch);
+    await Bun.sleep(50);
+    return { code, err, packet: packets[0], connections };
+  };
+  // Also the control for the rows below: the listener does read a packet.
+  const plain = await send(at("canary?application_name=ob1probe&sslmode=disable"));
+  ok(plain.packet !== undefined && plain.packet.user?.join() === "ob1u" && plain.packet.database?.join() === "canary" && plain.packet.application_name?.join() === "ob1probe",
+    `an accepted URL sends its user and database once each, and application_name (${JSON.stringify(plain.packet)})`);
+  // Bun 1.4.0's own keys beside them, measured; a key a URL could add would show here.
+  const keys = Object.keys(plain.packet ?? {}).sort().join();
+  ok(keys === "DateStyle,application_name,client_encoding,database,user", `…and nothing else: the client's client_encoding and DateStyle (${keys})`);
+  // options= reaches the server as the one startup setting it is, and moves neither user nor database.
+  const withOptions = await send(at("canary?options=-csearch_path%3Dx"));
+  ok(withOptions.packet?.options?.join() === "-csearch_path=x" && withOptions.packet?.database?.join() === "canary" && withOptions.packet?.user?.join() === "ob1u",
+    `options= is sent as options, the user and database the URL's (${JSON.stringify(withOptions.packet)})`);
+  for (const [rest, what] of [["stable?database=canary", "?database="], ["canary?user=admin", "?user="], ["canary?path=/tmp", "?path="], ["canary?host=db.example.com", "?host="]] as const) {
+    const r = await send(at(rest));
+    ok(r.code === 3 && r.connections === 0 && /the query key/.test(r.err) && !r.err.includes(MARK), `${what}: refused before any connection (${r.connections} connection(s), exit ${r.code})`);
+  }
+  listener.stop(true);
+}
+
+// ---------------------------------------------------------------------------
 // The refusals that print the rule, run: the suites' and tier.ts --refresh's.
 // ---------------------------------------------------------------------------
 {
-  const guard = (url: string) => `import { assertThrowawayDatabase } from "./test-support.ts"; assertThrowawayDatabase(${JSON.stringify(url)}); console.log("dropped");`;
+  const guard = (url: string) => `import { assertThrowawayDatabase } from "./test-support.ts"; await assertThrowawayDatabase(${JSON.stringify(url)}); console.log("dropped");`;
   const REMOTE = guard(`postgres://u:${MARK}@db.example.com/x`);
   const guarded = child(REMOTE);
-  ok(guarded.code === 2 && /Refusing to drop the schema: db\.example\.com is not a loopback host/.test(guarded.err) && !guarded.out.includes("dropped") && !guarded.err.includes(MARK) && !guarded.err.includes(RETIRED_REMOTE_DB_FLAG), `assertThrowawayDatabase refuses a remote host by name, never its password (exit ${guarded.code})`);
+  ok(guarded.code === 2 && /Refusing to drop the schema: db\.example\.com is not a loopback host/.test(guarded.err) && /or set\n\s+OB1_ALLOW_REMOTE_DB=1 if you are certain/.test(guarded.err) && !guarded.out.includes("dropped") && !guarded.err.includes(MARK) && !guarded.err.includes(RETIRED_REMOTE_DB_FLAG), `assertThrowawayDatabase refuses a remote host by name, never its password, and names the override (exit ${guarded.code})`);
+  // A URL that passes the rule goes on to ask the server (SMD-2317): here
+  // nothing answers, so it fails connecting — past the URL half, not refused by it.
+  const pastTheUrl = (r: { code: number; out: string; err: string }) => r.code !== 0 && r.code !== 2 && !/Refusing/.test(r.err) && !r.out.includes("dropped") && !r.err.includes(MARK);
   // The suites drop through Bun's client alone, which reaches the URL's host: a
   // developer's PGSERVICE or PGHOSTADDR does not refuse them (pass 1's list did).
-  const viaEnv = child(guard("postgres://u@localhost/x"), { PGHOSTADDR: "10.0.0.5", PGSERVICE: "prod" });
-  ok(viaEnv.code === 0 && viaEnv.out.trim() === "dropped", `…and localhost with PGHOSTADDR/PGSERVICE exported passes (exit ${viaEnv.code})`);
+  const viaEnv = child(guard("postgres://u@127.0.0.1:1/x"), { PGHOSTADDR: "10.0.0.5", PGSERVICE: "prod" });
+  ok(pastTheUrl(viaEnv), `…and a loopback host with PGHOSTADDR/PGSERVICE exported passes the URL half, on to connect (exit ${viaEnv.code}: ${viaEnv.err.trim().split("\n")[0]})`);
   const retired = child(REMOTE, { [RETIRED_REMOTE_DB_FLAG]: "1" });
   ok(retired.code === 2 && retired.err.includes(`${RETIRED_REMOTE_DB_FLAG} is set, and is no longer read: the name is ${REMOTE_DB_FLAG}`) && !retired.out.includes("dropped"), `…and with the retired name set it still refuses, and says the name to use (exit ${retired.code})`);
-  const allowed = child(REMOTE, { [REMOTE_DB_FLAG]: "1" });
-  ok(allowed.code === 0 && allowed.out.trim() === "dropped", `…and ${REMOTE_DB_FLAG}=1 lets it through (exit ${allowed.code})`);
+  const allowed = child(guard(`postgres://u:${MARK}@127.0.0.2:1/x`), { [REMOTE_DB_FLAG]: "1" });
+  ok(pastTheUrl(allowed), `…and ${REMOTE_DB_FLAG}=1 lets a non-loopback host through the URL half (exit ${allowed.code}: ${allowed.err.trim().split("\n")[0]})`);
   const local = child(guard("postgres://u@127.0.0.1:1/x"));
-  ok(local.code === 0 && local.out.trim() === "dropped", `…and a loopback host passes (exit ${local.code})`);
+  ok(pastTheUrl(local), `…and a loopback host passes it (exit ${local.code})`);
+  // What no override lifts: a URL the readers split on, one naming no
+  // database. Refused before connecting, and the message says the override
+  // is not the way through.
+  for (const [url, re, what] of [
+    [`postgres://u:${MARK}@localhost:5432/stable?database=canary`, /the URL carries the query key database/, "?database="],
+    [`postgres://u:${MARK}@localhost:5432/canary#?host=db.example.com`, /the URL has a fragment/, "a fragment"],
+    [`postgres://u:${MARK}@localhost:5432`, /the URL names no database/, "no database"],
+  ] as const) {
+    const r = child(guard(url), { [REMOTE_DB_FLAG]: "1" });
+    ok(r.code === 2 && re.test(r.err) && /OB1_ALLOW_REMOTE_DB does not lift this/.test(r.err) && !/if you are certain/.test(r.err) && !r.err.includes(MARK) && !r.out.includes("dropped"), `assertThrowawayDatabase, ${REMOTE_DB_FLAG}=1, ${what}: refused, and the override is not offered (exit ${r.code}: ${r.err.trim().split("\n")[0]})`);
+  }
   // The drop itself asks: dropSchema, and resetSchema through it, refuse a
   // remote host before they connect — the one call between every suite and a
   // DROP TABLE … CASCADE of a real database (review pass 5).
@@ -144,7 +363,7 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   const FROM = `postgres://u:${MARK}@127.0.0.1:1/a`;
   const refresh = (to: string, env: Record<string, string> = {}) => spawn(["tier.ts", "--refresh", "--from", FROM, "--to", to], env);
   for (const [to, re, what] of [
-    ["postgres:///b", /--to is not plainly this machine — the URL has no host/, "an empty host"],
+    ["postgres:///b", /--to: the URL has no host \(Bun would connect to localhost over TCP and libpq to the unix socket/, "an empty host"],
     ["postgres://u@db.example.com:5432/b", /--to is not plainly this machine — db\.example\.com is not a loopback host — and OB1_ALLOW_REMOTE_DB is not 1/, "a remote host"],
     ["postgres://u@192.168.1.5:5432/b", /--to is not plainly this machine — 192\.168\.1\.5 is not a loopback host/, "an RFC1918 host"],
   ] as const) {
@@ -155,6 +374,26 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   ok(through.code === 1 && /could not connect to --from/.test(through.err) && !through.err.includes(MARK), `…and with ${REMOTE_DB_FLAG}=1 it goes on, to the unreachable --from (exit ${through.code}: ${through.err.trim().split("\n")[0]})`);
   const retiredTier = refresh("postgres://u@db.example.com:5432/b", { [RETIRED_REMOTE_DB_FLAG]: "1" });
   ok(retiredTier.code === 1 && /not plainly this machine/.test(retiredTier.err), `…but not with the retired name (exit ${retiredTier.code})`);
+  // The SMD-2302 review's shapes: each passed every guard against one
+  // database while pg_restore, or Bun, went to another. Refused on either
+  // side, override or not, before anything connects (SMD-2317).
+  for (const [url, re, what] of [
+    [`postgres://u:${MARK}@localhost:5432/canary?host=stable-host`, /the URL carries the query key host/, "?host= (pg_restore went to stable-host)"],
+    [`postgres://u:${MARK}@localhost:5432/canary?port=5433&dbname=openbrain`, /the URL carries the query key port/, "?port=&dbname="],
+    [`postgres://u:${MARK}@localhost:5432/stable?database=canary`, /the URL carries the query key database/, "?database="],
+    [`postgres://u:${MARK}@localhost:5432/canary#?host=stable-host`, /the URL has a fragment/, "#?host="],
+    [`postgres://u@stable-host:5432,x@localhost/canary`, /the URL has an @ other than/, "a first-@ host list"],
+    [`postgres://u:${MARK}@localhost:5432`, /the URL names no database/, "no database"],
+    [`postgres://u:${MARK}@localhost:5432/x/../canary`, /the URL has a path the parser rewrites/, "a .. segment (the guards judged canary, pg_restore wrote x/../canary)"],
+    ["postgres:///canary", /the URL has no host/, "an empty host (Bun over TCP, libpq over the socket)"],
+    [`postgres://u:${MARK}@localhost:5432/canary?application_name=x=y`, /the URL has a second = in a query value/, "a second raw = (the guards passed, canary was dropped, pg_restore refused the URL)"],
+  ] as const) {
+    for (const side of ["--to", "--from"] as const) {
+      const argv = side === "--to" ? ["tier.ts", "--refresh", "--from", FROM, "--to", url] : ["tier.ts", "--refresh", "--from", url, "--to", "postgres://u@127.0.0.1:1/b"];
+      const r = spawn(argv, { [REMOTE_DB_FLAG]: "1" });
+      ok(r.code === 1 && r.err.includes(`${side}: `) && re.test(r.err) && /Refusing: --refresh dumps --from and drops --to's schema/.test(r.err) && !/could not connect/.test(r.err) && !r.err.includes(MARK), `tier.ts --refresh, ${REMOTE_DB_FLAG}=1, ${side} with ${what}: refused before connecting, the side named (exit ${r.code}: ${r.err.trim().split("\n")[0].slice(0, 110)})`);
+    }
+  }
 
   // "Before connecting", counted. The names above do not resolve, so a
   // connection opened before the guard would fail unseen; a listener on this
@@ -193,6 +432,14 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
     ok(tierRefused.code === 1 && tierRefused.seen === 0 && /--to is not plainly this machine/.test(tierRefused.err) && !tierRefused.err.includes(MARK), `tier.ts --refresh with both sides at a reachable non-loopback address refuses with no connection to either (exit ${tierRefused.code}, ${tierRefused.seen} connection(s))`);
     const tierControl = await counted(REFRESH, { [REMOTE_DB_FLAG]: "1" }, true);
     ok(tierControl.seen > 0, `…the control: with ${REMOTE_DB_FLAG}=1 --refresh does reach the listener (${tierControl.seen} connection(s), exit ${tierControl.code})`);
+    // The override opens the host rule, and a URL the readers split on still
+    // opens no connection (SMD-2317); the controls above show the listener is reached.
+    for (const q of ["?database=b", "?host=db.example.com", "?path=/tmp"]) {
+      const r = await counted(["-e", `import { dropSchema } from "./test-support.ts"; await dropSchema(${JSON.stringify(at("x") + q)}); console.log("dropped");`], { [REMOTE_DB_FLAG]: "1" });
+      ok(r.code === 2 && r.seen === 0 && /the query key/.test(r.err) && !r.err.includes(MARK), `dropSchema, ${REMOTE_DB_FLAG}=1, ${q}: refused with no connection opened (exit ${r.code}, ${r.seen} connection(s))`);
+      const t = await counted(["tier.ts", "--refresh", "--from", at("a"), "--to", at("b") + q], { [REMOTE_DB_FLAG]: "1" });
+      ok(t.code === 1 && t.seen === 0 && /--to: the URL carries the query key/.test(t.err) && !t.err.includes(MARK), `tier.ts --refresh, ${REMOTE_DB_FLAG}=1, --to …${q}: refused with no connection to either side (exit ${t.code}, ${t.seen} connection(s))`);
+    }
     listener.stop(true);
   }
 }
@@ -372,6 +619,27 @@ function callText(text: string, from: number): string {
   ok(spellers.length >= 60, `the loopback census reads db/ and evals/ (${spellers.length} files)`);
   for (const [name, path] of spellers) ok(!LOOPBACK_SPELLING.test(readFileSync(path, "utf8")), `${name} spells no loopback host of its own — connect.ts's rule is the one`);
   ok(LOOPBACK_SPELLING.test(`["localhost", "127.0.0.1"].includes(h)`), "the loopback census sees a regrown two-name rule");
+
+  // assertThrowawayDatabase is async since it asks the server (SMD-2317): a
+  // call without `await` would let its caller's drops run while the check was
+  // still out, and its refusal land after them. Every call in db/ and evals/,
+  // suites included, is awaited. Only a call is counted: an import or the
+  // definition is not followed by `(`.
+  const UNAWAITED = /(?<!\bawait\s+)\bassertThrowawayDatabase\s*\(/g;
+  const everyTs = [
+    ...readdirSync(HERE).filter((s) => /\.ts$/.test(s) && s !== "test-connect.ts").map((s) => [s, join(HERE, s)]),
+    ...readdirSync(EVALS).filter((s) => /\.ts$/.test(s)).map((s) => [`evals/${s}`, join(EVALS, s)]),
+  ];
+  let calls = 0;
+  for (const [name, path] of everyTs) {
+    const text = readFileSync(path, "utf8").replace(/export async function assertThrowawayDatabase\(/, "");
+    calls += (text.match(/\bawait\s+assertThrowawayDatabase\s*\(/g) ?? []).length;
+    const bare = [...text.matchAll(UNAWAITED)].length;
+    ok(bare === 0, `${name}: every assertThrowawayDatabase call is awaited (${bare} not)`);
+  }
+  ok(calls >= 5, `the await census finds the calls (${calls}: bench-hnsw, test-bench-reuse and three evals)`);
+  for (const s of ["assertThrowawayDatabase(URL_);", "void assertThrowawayDatabase(u)", "assertThrowawayDatabase (u).then(run)"]) ok([...s.matchAll(UNAWAITED)].length === 1, `the await census sees ${s}`);
+  ok([...`await assertThrowawayDatabase(URL_);`.matchAll(UNAWAITED)].length === 0, "…and not an awaited call");
 
   const onDoor = sources.filter((f) => f !== "connect.ts" && /closeThenExit\(/.test(read(f)));
   for (const must of ["hnsw-graph.ts", "graph-centrality.ts", "tier.ts", "migrate.ts"]) ok(onDoor.includes(must), `${must} exits through the door`);
