@@ -916,11 +916,13 @@ same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once, or with `--groups capture,worker,…` those alone
 (SMD-2289). `--groups` grants less and revokes nothing; `--exact` adds the
-revoke, in the grant's own transaction: what an ACL grants the role on a
+revoke, in the grant's own transaction: a member of another role or an owner
+of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the
 database, go (schema USAGE, CONNECT and TEMP stay); it is refused if it still
 holds anything else (named by catalog and database); then the groups are
-granted, so what it holds here is theirs. `db/login-role.ts --role <name> --password-env <VAR>`
+granted, so what it holds here is theirs. Every `--grant`, and `login-role.ts`,
+holds one advisory lock, so two at once in one database queue. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
 a member of no role, its settings in every database cleared),
 its password sent as a SCRAM verifier, for a compose service that connects as
@@ -929,7 +931,7 @@ holds capture, worker, structure and extraction, what its ingester
 and reembed run (measured), and not the server group, whose writes to
 `ob1_agent_keys` could clear a key's revocation. `login-role.ts` refuses a
 role that is a superuser, a member of another role or the owner of anything,
-and `--exact` one still holding a privilege it cannot revoke (a default
+or whose name a schema here bears (first on its search_path), and `--exact` one still holding a privilege it cannot revoke (a default
 privilege naming it, a grant in another database). Under that role the `ANALYZE
 thought_work_claims` that reembed and 015's `enqueue_thoughts` run (the
 owner's to run) is skipped: Postgres warns, the client does not print it, and

@@ -197,14 +197,34 @@ async function heldBeyond(sql: any, role: string): Promise<string[]> {
   return rows.map((r) => r.what);
 }
 
-/** --exact's work inside a transaction: the revokes, then what is left refused. Returns the revokes it ran. */
+/**
+ * A role --exact cannot make hold only the groups': a member of another role
+ * holds that role's privileges, which no revoke here reaches, and an owner's
+ * rights are its ownership, not an ACL entry, so a revoke would strip the
+ * owner's own privileges on its tables and leave it able to grant them back
+ * (review pass 5: both ran and said "nothing else"). The same two refusals as
+ * db/login-role.ts, here so --exact alone keeps its word.
+ */
+async function exactRoleRefusal(tx: any, role: string): Promise<string | null> {
+  const memberOf = ((await tx`SELECT g.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = ${role} ORDER BY 1`) as { rolname: string }[]).map((r) => r.rolname);
+  if (memberOf.length) return `--exact: ${role} is a member of ${memberOf.join(", ")}, whose privileges it holds and no revoke here reaches. Revoke the membership, or name another role. Nothing changed.`;
+  const [{ owned }] = (await tx`SELECT count(*)::int AS owned FROM pg_shdepend d JOIN pg_roles r ON r.oid = d.refobjid WHERE d.refclassid = 'pg_authid'::regclass AND d.deptype = 'o' AND r.rolname = ${role}`) as { owned: number }[];
+  if (owned > 0) return `--exact: ${role} owns ${owned} object(s), here or in another database; an owner's rights are not a grant to revoke. Name a role that owns nothing. Nothing changed.`;
+  return null;
+}
+
+/** --exact's work inside a transaction: the role checked, the revokes, then what is left refused. Returns the revokes it ran. */
 async function exactTransaction(tx: any, role: string): Promise<string[]> {
+  const refusal = await exactRoleRefusal(tx, role);
+  if (refusal) throw new GrantRefusal(refusal);
   const revokes = await exactRevokes(tx, role);
   try {
     for (const s of revokes) await tx.unsafe(s);
   } catch (e) {
     // The role handed on a privilege it held WITH GRANT OPTION: revoking it needs the grants made from it gone first (review pass 4: exit 1, unnamed).
     if (/dependent privileges exist/.test((e as Error).message)) throw new GrantRefusal(`--exact: ${role} has granted to others a privilege it held WITH GRANT OPTION, so it cannot be revoked here without theirs. Revoke those grants first, or name another role. Nothing changed.`);
+    // A grantor holding nothing at all on the object is refused the revoke outright, where one holding something gets a warning and heldBeyond names the leftover (review pass 5: exit 1, as if the grant had failed).
+    if ((e as { errno?: string }).errno === "42501") throw new GrantRefusal(`--exact: ${role} holds a privilege this connection's role may not revoke (${(e as Error).message}). Revoke it as its grantor or a superuser, or name another role. Nothing changed.`);
     throw e;
   }
   const left = await heldBeyond(tx, role);
@@ -231,7 +251,8 @@ async function exactTransaction(tx: any, role: string): Promise<string[]> {
 // orchestration runner's role gets what its ingester and reembed run, not the
 // whole list). It grants less; alone it revokes nothing, so a role granted more
 // before keeps what it has. --exact makes the grant all the role holds in this
-// database: in the grant's own transaction it first revokes, object by object,
+// database: in the grant's own transaction it refuses a member of another role
+// or an owner of anything (review pass 5), then revokes, object by object,
 // what an ACL grants the role (a table's or column's, a sequence's, a
 // routine's, CREATE on a schema or on the database; schema USAGE, CONNECT and
 // TEMP stay, which an operator may have granted on pgvector's schema or a
@@ -242,7 +263,8 @@ async function exactTransaction(tx: any, role: string): Promise<string[]> {
 // transaction, so a run in flight as the role never meets a moment without
 // its privileges, and a failure leaves what it had (SMD-2289 review passes 3
 // and 4). Every --grant, and db/login-role.ts, holds one advisory lock
-// (GRANT_LOCK), so two at once queue rather than deadlock. --dry-run --exact
+// (GRANT_LOCK), so two at once in one database queue rather than deadlock (an
+// advisory lock is per database; a role is the cluster's). --dry-run --exact
 // runs the revokes and the check in a transaction it rolls back, so it shows
 // a refusal to come.
 const grantRole = cli.value("grant");

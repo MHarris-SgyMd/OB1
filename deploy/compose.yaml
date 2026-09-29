@@ -622,6 +622,10 @@ services:
     build:
       context: ..
       dockerfile: db/Dockerfile
+    # Built on every `up`, from cache when nothing changed: an image of its own
+    # would otherwise keep an old config.mjs's grants after `up --build server`
+    # rebuilt migrate and a new migration's tables (review pass 5).
+    pull_policy: build
     profiles: ["orchestration"]
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain

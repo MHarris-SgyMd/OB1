@@ -16,11 +16,14 @@
  *   would hold that role's privileges, and a member of postgres can SET ROLE
  *   to it), or the owner of anything in any database — a relation, schema,
  *   function, type, large object or the database itself (a schema's owner can
- *   drop the tables in it). Such a role is not one to give a service.
+ *   drop the tables in it). Such a role is not one to give a service. It
+ *   refuses, too, when a schema named for the role exists in this database:
+ *   that schema is first on the role's search_path ("$user").
  * - Its privileges are not this step's: `migrate.ts --grant --groups …
  *   --exact`, run after it, replaces what the role's grants hold in this
  *   database (schema USAGE, CONNECT and TEMP stay) with the groups' privileges
  *   in one transaction, and refuses one holding a privilege it cannot revoke.
+ *   This step commits first, so a refused grant leaves the password set.
  * - The password, read from the named variable, must be 24 or more of
  *   [A-Za-z0-9_-] (`provision.ts --init` writes 64 hex). It is sent as a
  *   SCRAM-SHA-256 verifier computed here, so the password itself is never in
@@ -88,10 +91,13 @@ if (import.meta.main) {
     let found: { oid: number } | undefined;
     try {
       await sql.begin(async (tx) => {
-        // The one lock every `migrate.ts --grant` takes too, taken before the role is looked up: two role steps at once queue rather than both finding no role and colliding on CREATE, or on "tuple concurrently updated" (review passes 3 and 4).
+        // The one lock every `migrate.ts --grant` takes too, taken before the role is looked up: two role steps at once in one database queue rather than both finding no role and colliding on CREATE, or on "tuple concurrently updated" (review passes 3 and 4; an advisory lock is per database, so steps for two databases of one cluster do not queue, and the loser fails and is run again).
         await tx`SELECT pg_advisory_xact_lock(hashtext(${GRANT_LOCK}))`;
-        const [row] = (await tx`SELECT oid, rolsuper FROM pg_roles WHERE rolname = ${role}`) as { oid: number; rolsuper: boolean }[];
+        const [row] = (await tx`SELECT oid, rolsuper, rolcreatedb, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = ${role}`) as { oid: number; rolsuper: boolean; rolcreatedb: boolean; rolreplication: boolean; rolbypassrls: boolean }[];
         if (row?.rolsuper) throw new Refusal(`${role} is a superuser; this step makes a role that is not one, and will not take one that is. Name another role. Nothing changed.`);
+        // A schema named for the role is first on its search_path ("$user"), ahead of public: whoever made it decides what the runner's unqualified calls reach (review pass 5, pass 2's attack by another door).
+        const [plant] = (await tx`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = ${role}`) as { owner: string }[];
+        if (plant) throw new Refusal(`a schema named ${role} (owned by ${plant.owner}) exists in this database; it comes before public on the role's search_path, so its functions would take the runner's calls. Drop or rename it, or name another role. Nothing changed.`);
         if (row) {
           // A role in another role holds what that one holds, and can SET ROLE into it (a member of postgres is a superuser in all but name); one that owns anything in any database can drop or replace it (a schema's owner drops the tables in it; the database's owns public). Both refused (review pass 1: each was taken).
           const memberOf = ((await tx`SELECT g.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = ${row.oid} ORDER BY 1`) as { rolname: string }[]).map((r) => r.rolname);
@@ -101,7 +107,9 @@ if (import.meta.main) {
           if (owned > 0) throw new Refusal(`${role} owns ${owned} object(s) (a relation, schema, function, type, large object or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
         }
         found = row;
-        await tx.unsafe(`${row ? "ALTER" : "CREATE"} ROLE ${ident} ${ROLE_ATTRIBUTES} CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD '${verifier}'`);
+        // ALTER names only the attributes to clear: Postgres refuses NOCREATEDB, NOREPLICATION and NOBYPASSRLS from a migrator that is not a superuser even when nothing would change (review pass 5: every re-run on a managed Postgres failed "permission denied to alter role").
+        const attributes = row ? ["LOGIN NOCREATEROLE", row.rolcreatedb && "NOCREATEDB", row.rolreplication && "NOREPLICATION", row.rolbypassrls && "NOBYPASSRLS"].filter(Boolean).join(" ") : ROLE_ATTRIBUTES;
+        await tx.unsafe(`${row ? "ALTER" : "CREATE"} ROLE ${ident} ${attributes} CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD '${verifier}'`);
         if (!row) return;
         // A role that was there loses its settings, the role's own and each database's (review pass 2: a search_path set IN DATABASE survived RESET ALL and sent the runner's unqualified function calls to a planted schema). Its privileges are `migrate.ts --grant --exact`'s to replace, in the grant's own transaction, so a runner in flight never meets a moment without them (review pass 3).
         await tx.unsafe(`ALTER ROLE ${ident} RESET ALL`);
@@ -111,7 +119,9 @@ if (import.meta.main) {
       console.log(`login-role.ts: ${role} ${found ? "updated, its settings cleared" : "created"} (${ROLE_ATTRIBUTES}; password from ${passwordEnv}, stored as a SCRAM verifier)`);
       return 0;
     } catch (e) {
-      console.error(`login-role.ts: ${(e as Error).message}`);
+      // A migrator that is not a superuser alters only a role it holds ADMIN OPTION on (Postgres 16: the roles it created); another's is refused 42501.
+      const hint = (e as { errno?: string }).errno === "42501" ? ` — connect as a superuser, or as a role holding ADMIN OPTION on ${role} (the one that created it)` : "";
+      console.error(`login-role.ts: ${(e as Error).message}${hint}`);
       return e instanceof Refusal ? 2 : 1;
     }
   });

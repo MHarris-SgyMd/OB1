@@ -954,11 +954,14 @@ no other role.
   database, then `migrate.ts --grant --groups … --exact` replaces what its
   grants hold here with the groups' privileges (schema USAGE, CONNECT and
   TEMP stay) in one transaction, so a runner already running never meets a
-  moment without them. A role neither will take is
-  refused by name: a superuser, a member of another role, an owner, or one
-  holding a privilege a revoke there does not reach (a default privilege
-  naming it, a grant in another database).
-- So a new migration's grants reach it on the next start. To rotate the
+  moment without them. A role neither will take is refused by name: a
+  superuser, a member of another role, an owner, one with a schema of its
+  name, or one holding a privilege a revoke there does not reach (a default
+  privilege naming it, a grant in another database). `login-role.ts` commits
+  first, so when `--exact` refuses, the new password is already set and the
+  runner, if its config changed, is left created and not started.
+- The step's image is built on every `up` (from cache when nothing changed),
+  so a new migration's grants reach it on the next start. To rotate the
   password, edit `OB1_RUNNER_DB_PASSWORD` and start the profile again
   (`compose --profile orchestration up -d`).
 - The runner's environment holds what its ingester and reembed read: the
