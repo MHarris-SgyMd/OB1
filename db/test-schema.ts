@@ -8246,7 +8246,7 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   const atTwo = await gateReads(["SMD-8002", "SMD-8003"]);
   const atFour = await gateReads(["SMD-8002", "SMD-8003", "SMD-8004", "SMD-8005"]);
   assert(atTwo.facets === 2 && atFour.facets === 4 && atTwo.loops > 0 && atFour.loops === atTwo.loops && !atTwo.subplan && !atFour.subplan && !atTwo.thoughts && !atFour.thoughts,
-    `node_dependencies()' gate is one grouped pass over the stored gate: its reads of ob1_source_gate are ${atTwo.loops} at two facets and ${atFour.loops} at four, none of thoughts, and no subplan runs (${atFour.scans})`);
+    `node_dependencies()' gate is one initplan over the stored gate: its reads of ob1_source_gate are ${atTwo.loops} at two facets and ${atFour.loops} at four, none of thoughts, and no subplan runs (${atFour.scans})`);
   // The role split: every migrations' group but structure — thoughts,
   // thought_facets and the graph — with the server group's SELECT on
   // thought_sources, which it holds since 059 (search_thoughts'
@@ -10957,7 +10957,18 @@ console.log("\n[63] Migration 069: node_state's dependency columns read the ids 
   await q(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocks", "target": "G-FX"}]'::jsonb)`, [fxTicket.id]);
   const sameText = await diverged([fxTicket.id, fxHolder.id]);
   const [fxIssue] = await q<{ blocked: boolean; in_dependencies: boolean }>(`SELECT blocked, in_dependencies FROM node_state(ARRAY[$1::uuid])`, [fxHolder.id]);
-  await db.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[fxTicket.id, fxHolder.id]]);
+  // A blocker whose status is one no lifecycle knows: open, and unknown — by
+  // id as for the whole brain (fourth review pass: the sequences' random ids
+  // caught a keyed read that read only a missing status as unknown, and then
+  // did not).
+  const [fxWeird] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[63] a weird blocker', '{"status_type": "weird"}') RETURNING id::text AS id`);
+  await q(`SELECT record_thought_source($1::uuid, 'linear', 'L-FXW', 'x', 'text/plain')`, [fxWeird.id]);
+  await q(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocked_by", "target": "L-FXW"}]'::jsonb)`, [fxTicket.id]);
+  const weird = await diverged([fxTicket.id, fxWeird.id]);
+  const [fxBlocked] = await q<{ blockers: string[] | null; unknown_blockers: string[] | null }>(`SELECT blockers, unknown_blockers FROM node_state(ARRAY[$1::uuid])`, [fxTicket.id]);
+  await db.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[fxTicket.id, fxHolder.id, fxWeird.id]]);
+  assert(!weird.keyed && !weird.state && JSON.stringify(fxBlocked.blockers) === JSON.stringify(["L-FXW"]) && JSON.stringify(fxBlocked.unknown_blockers) === JSON.stringify(["L-FXW"]),
+    `a blocker whose status_type no lifecycle knows is an open blocker and an unknown one, read by id as for the whole brain (${JSON.stringify(fxBlocked)}; ${JSON.stringify(weird)})`);
   assert(!foreign.keyed && !foreign.state && !foreign.deps && fxRow.blockers === null && fxRow.in_dependencies === false
       && !sameText.keyed && !sameText.state && fxIssue.blocked === false && fxIssue.in_dependencies === false,
     `a linear link carried by a thought whose source row is github's holds nothing: the ticket it names, read by id, is neither blocked nor in the dependencies; and a linear link naming "G-FX" does not reach the github issue G-FX — as 058's read has it (${JSON.stringify(foreign)}; ${JSON.stringify(sameText)})`);
@@ -11046,6 +11057,17 @@ console.log("\n[63] Migration 069: node_state's dependency columns read the ids 
   const [bareNote] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[63] a bare note', '{"status_type": "started"}') RETURNING id::text AS id`);
   const bareEdit = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`UPDATE thoughts SET content = content || ' (edited)', metadata = metadata || '{"status_type": "canceled"}' WHERE id = $1`, [bareNote.id]));
   const bareDelete = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`DELETE FROM thoughts WHERE id = $1`, [bareNote.id]));
+  // Reads (fourth review pass: no test held SAFETY's read claims). A linear
+  // ticket blocked by another, both sourced and gating: without the table a
+  // read of its dependency columns by id is refused, a read of its lifecycle
+  // columns by id is not.
+  const [rdTicket] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[63] a read ticket', '{"status_type": "started"}') RETURNING id::text AS id`);
+  const [rdBlocker] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[63] a read blocker', '{"status_type": "started"}') RETURNING id::text AS id`);
+  await q(`SELECT record_thought_source($1::uuid, 'linear', 'L-RD', 'x', 'text/plain')`, [rdTicket.id]);
+  await q(`SELECT record_thought_source($1::uuid, 'linear', 'L-RD2', 'x', 'text/plain')`, [rdBlocker.id]);
+  await q(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocked_by", "target": "L-RD2"}]'::jsonb)`, [rdTicket.id]);
+  const bareDeps = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`SELECT blockers FROM node_state(ARRAY[$1::uuid])`, [rdTicket.id]));
+  const bareLife = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`SELECT status_type, superseded_by FROM node_state(ARRAY[$1::uuid])`, [rdTicket.id]));
   const bareStatus = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = $1`, [bareRow.id]));
   const bareSource = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, async () => {
     const [c] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[63] a bare source', '{}') RETURNING id::text AS id`);
@@ -11054,9 +11076,10 @@ console.log("\n[63] Migration 069: node_state's dependency columns read the ids 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[63] a %'`);
   const [gone] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_source_gate WHERE thought_id = $1`, [sourced.id]);
   assert(structured === "ok" && captureOnly === "ok" && noUpdate === "ok" && gone.n === 0 && bareCapture === "ok" && bareEdit === "ok" && bareDelete === "ok"
+      && /permission denied for table ob1_source_gate\b/.test(bareDeps) && bareLife === "ok"
       && /permission denied for table ob1_source_gate\b/.test(bareStatus) && /permission denied for table ob1_source_gate\b/.test(bareSource)
       && ROLE_GRANTS.capture.some((r) => (r as { table?: string }).table === "ob1_source_gate"),
-    `a structured pass's role records a source row and its links, moves its status and reads the dependency columns; a capture role without SELECT on the source rows moves a sourced thought's status and deletes it, its mirror row going with it; a role without UPDATE on thoughts writes and deletes a source row (the gate's locks are advisory); without the mirror a plain capture, an edit that keeps its status known and a delete of an unsourced thought succeed, and a status move and a source write are refused on it (${structured}; ${captureOnly}; ${noUpdate}; ${bareEdit}; ${bareDelete}; ${bareStatus}; ${bareSource})`);
+    `a structured pass's role records a source row and its links, moves its status and reads the dependency columns; a capture role without SELECT on the source rows moves a sourced thought's status and deletes it, its mirror row going with it; a role without UPDATE on thoughts writes and deletes a source row (the gate's locks are advisory); without the mirror a plain capture, an edit that keeps its status known, a delete of an unsourced thought and a lifecycle read by id succeed, and a status move, a source write and a read of a linked ticket's dependency columns are refused on it (${structured}; ${captureOnly}; ${noUpdate}; ${bareEdit}; ${bareDelete}; ${bareLife}; ${bareStatus}; ${bareSource}; ${bareDeps})`);
 
   // Replays: 069 over itself writes nothing; 058 alone puts back its grouped
   // gate and its whole-brain node_state, and the triggers keep the mirror

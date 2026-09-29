@@ -58,8 +58,9 @@
 --     board sync's claim, for a linear identity no source row holds, found by
 --     068's issue index rather than 001's GIN index, which read every issue
 --     row's posting per blocker (the bench's brain, most of whose links name a
---     ticket it does not hold: the keyed read 47 ms and every thought's 5 s,
---     on 068's reads as on these, then 2.2 ms and 27).
+--     ticket it does not hold: this file's keyed read 47 ms until the
+--     resolver moved, then 2.2 ms; every thought's 5 s on either reads, then
+--     27 ms).
 --   * node_dependencies() — same signature and rows; its gate a test against
 --     the systems some mirror row gates, read once per call, not a pass over
 --     every source row and its
@@ -99,9 +100,10 @@
 --
 --   Concurrency. A source write and a status move of the same thought take
 --   turns on an advisory transaction lock: a bucket of the thought's id, 256
---   buckets in class 22563 (ob1_source_gate_lock), taken in bucket order by
---   the thought_sources triggers' insert and update paths and by the thoughts
---   status trigger, each before it reads a status or writes a mirror row, and
+--   buckets in class 22563 (ob1_source_gate_lock), taken in bucket order —
+--   exclusive by the thought_sources triggers' insert and update paths, shared
+--   by the thoughts status trigger, so two status moves never wait on each
+--   other — each before it reads a status or writes a mirror row, and
 --   each read a statement after the lock — so whichever goes second reads
 --   what the first committed. A source row's delete takes none: it
 --   drops the mirror row by key, and a status move meets it on that row. So a
@@ -111,7 +113,9 @@
 --   status trigger sorts after 068's on thoughts, so a statement takes 068's
 --   classes before 22563. A bucket is held until commit, so a transaction
 --   that has written a source row holds up a status move of any thought in
---   that bucket, not only its own, until it commits.
+--   that bucket, not only its own, until it commits; and one that has moved a
+--   status holds up source writes in its buckets (a bulk status UPDATE, every
+--   source write), but no other status move.
 --   Not the thought's row (FOR SHARE, until the second review pass): a source
 --   writer's share lock crossed every lock taken in another order — a
 --   multi-row UPDATE of thoughts in scan order, a delete's cascade, a take's
@@ -135,7 +139,8 @@
 --   classes (then a ticket row's write), or two such transactions each writing
 --   source rows whose buckets the other already holds (two bulk writers of
 --   thirty source rows each deadlocked five times in ten, where 068's own
---   ticket writes do the same). Write a thought before its source row, one
+--   ticket writes do the same). Status moves alone never deadlock here: their
+--   buckets are shared. Write a thought before its source row, one
 --   thought per transaction, as the repo's writers do. Within one statement: a
 --   take (record_thought_source's p_take, two statements in one call) against
 --   one status update of both its thoughts, when the update's trigger has taken
@@ -167,7 +172,7 @@
 --   known and an unknown status_type, and a read of the dependency columns
 --   that reaches the gate (every whole-brain read — graph-centrality
 --   --startable and --decay-blocked, node_dependencies()' gates — a keyed read
---   of sourced or linked thoughts, and any read of node_state that is planned
+--   of a thought whose ticket a link names, and any read of node_state that is planned
 --   with the whole-brain branch in it: a generic plan, or a call whose argument
 --   is a subquery and so is not inlined) is refused on the new table; a delete
 --   of a thought with no source row, an edit that moves no status between
@@ -187,8 +192,10 @@
 --
 -- Expected outcome
 --   SELECT count(*) FROM ob1_node_projection_drift() is 0, node_state() and
---   node_dependencies() list what 058's did, and node_state(<ids>) costs what
---   its ids' links cost, whatever the brain's size.
+--   node_dependencies() list what 058's did, and node_state(<ids>), inlined
+--   with its ids, costs what its ids' links cost, whatever the brain's size —
+--   under a generic plan, or with a subquery for its argument, 068's filter
+--   scans every thought (SMD-2380).
 -- Dependencies: 053 (thought_sources, source_thought), 058 (the node_*
 --   functions), 068 (ob1_ticket_head, ob1_superseded_by, the drift function).
 -- =============================================================================
@@ -213,6 +220,12 @@ BEGIN
   END IF;
 END
 $g$;
+
+-- thoughts before thought_sources, the order a writer of both takes them (a
+-- delete of a thought, then its cascade): the triggers below would take
+-- thought_sources' lock first, and a delete of a sourced thought during the
+-- migration then deadlocked with it (fourth review pass).
+LOCK TABLE thoughts, thought_sources IN SHARE ROW EXCLUSIVE MODE;
 
 -- ---------------------------------------------------------------------------
 -- The mirror. No foreign key, as 068's two tables.
@@ -357,7 +370,7 @@ COMMENT ON FUNCTION ob1_node_projection_drift() IS
 -- first did, put a bucket before a source row's lock where every trigger puts
 -- the row first, and a stress run of mixed writers gave 23 deadlocks against 4
 -- without it (six seeds of 3,600 statements; main, none or one).
-CREATE OR REPLACE FUNCTION ob1_source_gate_lock(p_ids uuid[])
+CREATE OR REPLACE FUNCTION ob1_source_gate_lock(p_ids uuid[], p_shared boolean DEFAULT false)
 RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -365,12 +378,16 @@ DECLARE
   b int;
 BEGIN
   FOR b IN SELECT DISTINCT hashtext(x::text) & 255 FROM unnest(p_ids) x WHERE x IS NOT NULL ORDER BY 1 LOOP
-    PERFORM pg_advisory_xact_lock(22563, b);
+    IF p_shared THEN
+      PERFORM pg_advisory_xact_lock_shared(22563, b);
+    ELSE
+      PERFORM pg_advisory_xact_lock(22563, b);
+    END IF;
   END LOOP;
 END
 $$;
-COMMENT ON FUNCTION ob1_source_gate_lock(uuid[]) IS
-  'Takes the gate''s advisory transaction locks for the thoughts given — class 22563, a bucket of 256 per thought id, in bucket order — so a transaction holds at most 256 of them. The thought_sources triggers'' insert and update paths and the thoughts status trigger take them before they read a thought''s status or write a mirror row. Migration 069 / SMD-2267.';
+COMMENT ON FUNCTION ob1_source_gate_lock(uuid[], boolean) IS
+  'Takes the gate''s advisory transaction locks for the thoughts given — class 22563, a bucket of 256 per thought id, in bucket order, shared when p_shared — so a transaction holds at most 256 of them. The thought_sources triggers'' insert and update paths take them exclusive and the thoughts status trigger shared, before they read a thought''s status or write a mirror row: a source write and a status move exclude each other, two status moves do not (the thought''s row orders two moves of one thought). Migration 069 / SMD-2267.';
 
 CREATE OR REPLACE FUNCTION ob1_source_gate_sync()
 RETURNS trigger
@@ -481,12 +498,17 @@ BEGIN
       HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of source rows and statuses is serializable.',
       ERRCODE = 'feature_not_supported';
   END IF;
-  -- The buckets, then the update — a fresh statement: a source writer that
-  -- held a bucket first has committed its mirror row, and this finds it; one
-  -- arriving later waits for this and reads the status it commits. This
-  -- trigger sorts after 068's on thoughts, so a statement takes 068's classes
-  -- before this one.
-  PERFORM ob1_source_gate_lock(v_ids);
+  -- The buckets, shared, then the update — a fresh statement: a source
+  -- writer that held a bucket first has committed its mirror row, and this
+  -- finds it; one arriving later waits for this and reads the status it
+  -- commits. Shared, so two status moves never wait on each other's bucket —
+  -- two moves of one thought are ordered by the thought's row, and a move of
+  -- a plain note (no source row, no ticket key) waits for nothing it did not
+  -- wait for on main (fourth review pass: exclusive, two transactions moving
+  -- plain notes' statuses deadlocked across statements, and one move held up
+  -- every other in its bucket). This trigger sorts after 068's on thoughts, so
+  -- a statement takes 068's classes before this one.
+  PERFORM ob1_source_gate_lock(v_ids, true);
   UPDATE ob1_source_gate g
      SET gates = coalesce(t.metadata->>'status_type' = ANY(node_lifecycle_types()), false)
     FROM thoughts t
@@ -576,8 +598,8 @@ COMMENT ON FUNCTION node_dependencies() IS
 -- index answers that by reading the posting list of every row carrying an
 -- issue key: 6 ms per blocker at 10,000 thoughts, for one the brain does not
 -- hold at all, and more as tickets accumulate (SMD-2267's bench, two in three
--- of whose links name such a ticket: the keyed read 47 ms, every thought's 5
--- s, on 068's reads as on these). The same rows by 068's md5 index on the
+-- of whose links name such a ticket: this file's keyed read 47 ms, every
+-- thought's 5 s on 068's reads as on these). The same rows by 068's md5 index on the
 -- issue: containment of a top-level scalar is equality of that key's value
 -- (an array holding it does not contain it below the top level), so the two
 -- keys are compared as jsonb, and the md5 of the issue's text narrows the
@@ -732,4 +754,4 @@ AS $$
    WHERE p_ids IS NULL OR l.thought_id = ANY(p_ids)
 $$;
 COMMENT ON FUNCTION node_state(uuid[]) IS
-  'Per thought (every thought when p_ids is NULL, else those named): node_lifecycle()''s columns; open (known and not settled, NULL when the status_type is missing or unknown); blocked (open blockers, and the thought itself not settled); blockers (its ticket''s open blockers from gating active links, a blocker settled only by its own known lifecycle, sorted, linear bare and another system''s as system:key, NULL when none — kept on a settled thought); unknown_blockers (those with no known status); in_dependencies (a gating active link names its ticket); superseded_by (the newest thought superseding it, NULL when current — ob1_superseded_by''s). Coverage is open IS NOT NULL; freshness is synced_at and created_at, never updated_at. No top-level WITH, so a caller''s planner pulls it up: a read of the lifecycle and superseded_by columns is primary-key lookups from the caller''s ids, and the dependency join runs only when its columns are read — by index from p_ids when given, every link when NULL (ob1_node_dependencies_of, the gate stored). The one read graph-centrality and search rank by. Migration 058 / SMD-2074; stored, 068 / SMD-2256; keyed, 069 / SMD-2267.';
+  'Per thought (every thought when p_ids is NULL, else those named): node_lifecycle()''s columns; open (known and not settled, NULL when the status_type is missing or unknown); blocked (open blockers, and the thought itself not settled); blockers (its ticket''s open blockers from gating active links, a blocker settled only by its own known lifecycle, sorted, linear bare and another system''s as system:key, NULL when none — kept on a settled thought); unknown_blockers (those with no known status); in_dependencies (a gating active link names its ticket); superseded_by (the newest thought superseding it, NULL when current — ob1_superseded_by''s). Coverage is open IS NOT NULL; freshness is synced_at and created_at, never updated_at. No top-level WITH, so a caller''s planner pulls it up: a read of the lifecycle and superseded_by columns is primary-key lookups from the caller''s ids, and the dependency join runs only when its columns are read — by index from p_ids when given (inlined with its ids; a generic plan scans every thought, SMD-2380), every link when NULL (ob1_node_dependencies_of, the gate stored). The one read graph-centrality and search rank by. Migration 058 / SMD-2074; stored, 068 / SMD-2256; keyed, 069 / SMD-2267.';

@@ -588,8 +588,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // thoughts and redefines 058's node_lifecycle and node_state on their own
   // signatures, refusing by name without 025 or 058 ([20t]); 069 adds a
   // table, an index and four triggers on 053's thought_sources and one on
-  // 001's thoughts, and redefines 058's node_dependencies and node_state and
-  // 068's drift on their own signatures, refusing by name without 053 or 068
+  // 001's thoughts, and redefines 053's source_thought, 058's
+  // node_dependencies and node_state and 068's drift on their own signatures,
+  // refusing by name without 053 or 068
   // ([20u]) — all recorded by the baseline with their prerequisites present,
   // so none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
@@ -2919,7 +2920,7 @@ console.log("\n[20u] Migration 069 on a schema without 068 — refused up front,
   assert(baselined.code === 0, `--baseline records every migration over the pre-068 schema (exit ${baselined.code})`);
   const sql = new SQL({ url: URL_, max: 1 });
   const the068 = MIGRATIONS.find((f) => f.startsWith("068_"))!;
-  const the069 = MIGRATIONS.find((f) => f.startsWith("069_"))!;
+  const the069 = MIGRATIONS.find((f) => f.endsWith("_node_dependencies_keyed.sql"))!;  // by name: renumbered when main takes its number
   await sql`DELETE FROM schema_migrations WHERE name = ${the069}`;
   // 068 stays recorded and never tried — the baseline is what an adopted
   // brain's ledger says — so 069 is the first file the plain run applies.

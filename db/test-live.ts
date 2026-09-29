@@ -7293,6 +7293,42 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   assert(multi.every((m) => m.ok),
     `a two-row source insert waits on the bucket of whichever of its thoughts a status move holds, and a source write waits on the bucket of whichever thought a two-row status move holds — each then reads the committed status, and no drift (${multi.map((m) => m.detail).join("; ")})`);
 
+  // Two status moves of bucket-mates do not wait on each other: the status
+  // trigger takes its bucket shared (fourth review pass: exclusive, two
+  // transactions moving plain notes' statuses deadlocked across statements,
+  // and one held move held up every other in its bucket). Two plain notes —
+  // no source row, no ticket key — whose ids share a bucket; A moves one's
+  // status and holds; B's move of the other commits while A still holds.
+  {
+    const a = await row("[34] SH a", { kind: "race2267", status_type: "started" });
+    const [{ b: bucket }] = await db`SELECT hashtext(${a}) & 255 AS b`;
+    let mate = "";
+    for (let k = 0; !mate; k++) {
+      const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[34] SH mate ${k}`}, ${{ kind: "race2267", status_type: "started" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
+      if (c.b === bucket) mate = c.id;
+    }
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bDone = false, errors = "";
+    const aRun = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = ${a}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bRun = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = ${mate}::uuid`;
+    }).then(() => { bDone = true; }, (e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(() => bDone || errors !== "", 100);
+    const bFirst = bDone;
+    done();
+    await aRun; await bRun;
+    await connA.close(); await connB.close();
+    assert(aHolding && bFirst && errors === "" && (await drift()) === 0,
+      `a status move of a plain note commits while another transaction holds a status move of a note in the same bucket — the status trigger's bucket is shared — and no drift (${bFirst ? "committed first" : "waited"}; ${errors || "clean"})`);
+  }
+
   // A take against one status update of both thoughts (first and second
   // review passes), two ways round. First: B holds linear L-TK; one statement
   // moves A's and B's statuses and sleeps before its trigger runs, holding

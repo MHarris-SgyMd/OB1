@@ -321,18 +321,32 @@ for (const n of SCALES) {
   await sql.unsafe("VACUUM ANALYZE");
   const [dep] = await sql`SELECT (SELECT count(*)::int FROM thought_sources) AS sources, (SELECT count(*)::int FROM thought_facets WHERE kind = 'link') AS links`;
   const [{ ids40 }] = await sql`SELECT array_agg(id)::text AS ids40 FROM (SELECT thought_id AS id FROM thought_sources ORDER BY md5(thought_id::text) LIMIT 40) x`;
-  // The reads as 068 left them are timed once each, not as a median: on this
-  // brain 053's resolver costs each unheld blocker a GIN scan, seconds a read
-  // at 10,000 rows and minutes at 100,000.
-  const once = async (fn: () => Promise<unknown>) => { const t = performance.now(); await fn(); return performance.now() - t; };
-  const depReads = async (timer: (fn: () => Promise<unknown>) => Promise<number>) => ({
-    keyed: await timer(() => sql`SELECT * FROM node_state(${ids40}::uuid[])`),
-    whole: await timer(() => sql`SELECT count(blockers) + count(unknown_blockers) + count(nullif(in_dependencies, false)) FROM node_state()`),
-    // The gates column read: count(*) alone drops the gate's join, and a plan
-    // that re-read every gating row per link went unseen (first review pass).
-    deps: await timer(() => sql`SELECT count(*) FILTER (WHERE gates) FROM node_dependencies()`),
-    rows: (await sql`SELECT md5(string_agg(x::text, '|' ORDER BY x::text)) AS h FROM node_state(${ids40}::uuid[]) x`)[0].h as string,
-  });
+  // The reads as 068 left them are timed once each, not as a median, and cut
+  // at a minute (printed ">60 s"): on this brain 053's resolver costs each
+  // unheld blocker a GIN scan, seconds a read at 10,000 rows and ten minutes
+  // at 100,000 (fourth review pass: three uncut runs of them added half an
+  // hour). The keyed read's timed call is the one whose rows are compared.
+  const CUT_MS = 60_000;
+  const once = async (fn: () => Promise<unknown>) => {
+    const t = performance.now();
+    try { await sql.unsafe(`SET statement_timeout = ${CUT_MS}`); await fn(); return performance.now() - t; }
+    catch (e) { if (/statement timeout/.test((e as Error).message)) return Infinity; throw e; }
+    finally { await sql.unsafe(`RESET statement_timeout`); }
+  };
+  let lastRows = "";
+  const keyedRows = async () => { lastRows = (await sql`SELECT md5(string_agg(x::text, '|' ORDER BY x::text)) AS h FROM node_state(${ids40}::uuid[]) x`)[0].h as string; };
+  const depReads = async (timer: (fn: () => Promise<unknown>) => Promise<number>) => {
+    lastRows = "";
+    const keyed = await timer(keyedRows);
+    return {
+      keyed, rows: lastRows,
+      whole: await timer(() => sql`SELECT count(blockers) + count(unknown_blockers) + count(nullif(in_dependencies, false)) FROM node_state()`),
+      // The gates column read: count(*) alone drops the gate's join, and a plan
+      // that re-read every gating row per link went unseen (first review pass).
+      deps: await timer(() => sql`SELECT count(*) FILTER (WHERE gates) FROM node_dependencies()`),
+    };
+  };
+  const cut = (ms: number) => (Number.isFinite(ms) ? fmt(ms) : `>${CUT_MS / 1000} s`);
   const keyedNow = await depReads(time);
   await applyMigrations(URL_, { dim: DIM, model: "stub-embed", trgm: true, only: (f) => f.startsWith("058_") || f.startsWith("068_") });
   // 053's resolver alone: its file redefines much that later files redefine again.
@@ -340,15 +354,16 @@ for (const n of SCALES) {
   const at053 = src053.indexOf("CREATE OR REPLACE FUNCTION source_thought(");
   await sql.unsafe(src053.slice(at053, src053.indexOf("\n$$;", at053) + 4));
   const keyedBefore = await depReads(once);
-  await applyMigrations(URL_, { dim: DIM, model: "stub-embed", trgm: true, only: (f) => f.startsWith("069_") });
+  await applyMigrations(URL_, { dim: DIM, model: "stub-embed", trgm: true, only: (f) => f.endsWith("_node_dependencies_keyed.sql") });
   const [{ blockedRows }] = await sql`SELECT count(*) FILTER (WHERE blockers IS NOT NULL)::int AS "blockedRows" FROM node_state(${ids40}::uuid[])`;
   keyedBudget.set(n, keyedNow.keyed);
   const keyedVerdict = n === 10000 ? `budget 2.00 ms: ${within(keyedNow.keyed <= 2)}`
     : keyedBudget.has(10000) ? `budget 1.5 × ${fmt(keyedBudget.get(10000)!)}: ${within(keyedNow.keyed <= 1.5 * keyedBudget.get(10000)!)}` : "no 10,000-row run to compare";
   console.log(`\n  node_state's dependency read (069), ${dep.sources.toLocaleString()} source rows and ${dep.links.toLocaleString()} links; 069 (median) vs the reads as 068 left them (once):\n`);
-  console.log(`    node_state(<40 ids>), every column      ${fmt(keyedNow.keyed).padStart(9)} vs ${fmt(keyedBefore.keyed)}   (${blockedRows} of 40 blocked; ${keyedVerdict}; rows ${keyedNow.rows === keyedBefore.rows ? "identical" : "DIFFER"})`);
-  console.log(`    node_state(), the dependency columns    ${fmt(keyedNow.whole).padStart(9)} vs ${fmt(keyedBefore.whole)}`);
-  console.log(`    node_dependencies()                     ${fmt(keyedNow.deps).padStart(9)} vs ${fmt(keyedBefore.deps)}`);
+  const rowsVerdict = keyedBefore.rows === "" ? "rows not compared (cut)" : `rows ${keyedNow.rows === keyedBefore.rows ? "identical" : "DIFFER"}`;
+  console.log(`    node_state(<40 ids>), every column      ${fmt(keyedNow.keyed).padStart(9)} vs ${cut(keyedBefore.keyed)}   (${blockedRows} of 40 blocked; ${keyedVerdict}; ${rowsVerdict})`);
+  console.log(`    node_state(), the dependency columns    ${fmt(keyedNow.whole).padStart(9)} vs ${cut(keyedBefore.whole)}`);
+  console.log(`    node_dependencies()                     ${fmt(keyedNow.deps).padStart(9)} vs ${cut(keyedBefore.deps)}`);
 
   // What 069's triggers cost a writer, pre-registered: a plain capture at most
   // +0.03 ms, a status move on a sourced row between known and unknown at most
@@ -372,10 +387,14 @@ for (const n of SCALES) {
   };
   const gateCapture = await gateBlocks(() => sql`SELECT upsert_thought(${`bench gate capture ${n} ${++captures}`}, '{"metadata":{}}'::jsonb)`);
   const sourced = (await sql`SELECT thought_id AS id FROM thought_sources ORDER BY thought_id LIMIT 200`).map((r: { id: string }) => r.id);
+  // Each call flips its row between known and unknown from where it stands,
+  // so every sample moves the gate (fourth review pass: half moved a known
+  // status to another known one, and the trigger returned at once).
   let move = 0;
   const gateStatus = await gateBlocks(() => {
     const i = move++;
-    return sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status_type', ${i % 4 < 2 ? "weird" : "started"}::text) WHERE id = ${sourced[i % sourced.length]}`;
+    return sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status_type',
+                 CASE WHEN metadata->>'status_type' = ANY(node_lifecycle_types()) THEN 'weird' ELSE 'started' END) WHERE id = ${sourced[i % sourced.length]}`;
   });
   const unsourced = (await sql`SELECT id FROM thoughts t WHERE NOT EXISTS (SELECT 1 FROM thought_sources s WHERE s.thought_id = t.id) ORDER BY id LIMIT 200`).map((r: { id: string }) => r.id);
   let rec = 0;
@@ -389,6 +408,9 @@ for (const n of SCALES) {
     await gateTriggers(on);
     const k = ++flip;
     (on ? flipsOn : flipsOff).push(await timed(() => k % 2 ? stampTickets(`settled-${k}`, `live-${k}`) : stampTickets("completed", "started")));
+    // After an off run the mirror is behind the rows; put it level (untimed),
+    // so the next on run's update writes the rows it moves (fourth review pass).
+    if (!on) { await gateTriggers(true); await sql`SELECT * FROM ob1_rebuild_source_gate()`; }
   }
   await gateTriggers(true);
   await sql`SELECT * FROM ob1_rebuild_source_gate()`;

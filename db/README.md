@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2275 assertions: 2275 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2276 assertions: 2276 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-nine (69) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -845,7 +845,8 @@ key, reading nothing else — and on `thoughts` (AFTER UPDATE) for the rows whos
 `status_type` moved between known and unknown; any other write returns at once.
 A source write and a status move of one thought take turns on an advisory
 lock — a bucket of the thought's id, 256 buckets in class 22563, taken in
-bucket order after 068's classes — so whichever goes second reads what the
+bucket order after 068's classes, exclusive for source writes and shared for
+status moves, so two status moves never wait on each other — so whichever goes second reads what the
 first committed; a source row's delete takes none (it drops the mirror row by
 key).
 Not the thought's row: a source writer's share lock there, until the second
@@ -855,7 +856,8 @@ holds up status moves of any thought in its buckets, and bulk writers can
 deadlock across statements, as 068's ticket writes can: write a thought before
 its source row, one thought per transaction. REPEATABLE READ is refused for a source row's insert or move and for
 every status move between known and unknown (a source row's delete and a
-re-record that changes nothing run). `ob1_rebuild_source_gate()` repairs the mirror after a write made with
+re-record that changes nothing run; the delete raises 40001 if its thought's
+status moved since the snapshot). `ob1_rebuild_source_gate()` repairs the mirror after a write made with
 triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm.
 `node_dependencies()` keeps its rows and tests each link's system against the
 gating systems, read once per call, instead of grouping every source row with
@@ -2994,8 +2996,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2275 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 915 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2276 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 916 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

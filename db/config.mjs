@@ -1724,8 +1724,9 @@ export const ROLE_GRANTS = Object.freeze({
     // every status move between a known and an unknown status_type, and keep
     // node_state's gate; node_dependencies()' gates and the dependency
     // columns read it. A role without these cannot make those writes nor
-    // read those columns; a delete of an unsourced thought and an edit that
-    // moves no status need none of it (SMD-2267).
+    // read those columns; a delete of an unsourced thought, an edit that
+    // moves no status and a re-record that changes only the canonical need
+    // none of it (SMD-2267).
     Object.freeze({ table: "ob1_source_gate",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "069" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
