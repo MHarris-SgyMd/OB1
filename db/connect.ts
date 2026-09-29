@@ -106,9 +106,11 @@ export const URL_QUERY_KEYS: ReadonlySet<string> = new Set(["sslmode", "applicat
  *     prod first. libpq also reads up to an `@` past a `?`, so one in a query
  *     value splits it too.
  *   • No `,` (or `%2C`) in the host: libpq reads a host list, and Bun one name.
- *   • A path the parser leaves as written: it resolves `.` and `..`
+ *   • A path the parser leaves as written, decoded: it resolves `.` and `..`
  *     segments, and libpq does not.
  *   • No `+` in the query: Bun decodes it as a space, and libpq does not.
+ *   • Every query part a `key=value` with one raw `=`, and sslmode in
+ *     lowercase: libpq refuses the rest, which Bun reads.
  *   • Only URL_QUERY_KEYS in the query, each once.
  * Checked before the URL reaches a client, so a refused URL opens no
  * connection (test-connect.ts counts them).
@@ -141,17 +143,33 @@ function readersSplit(url: string): string | null {
   if (u.hostname.includes(",") || u.hostname.toLowerCase().includes("%2c")) return "names a host list (a , in its host, or %2C, which libpq decodes to one): libpq tries each host, and Bun reads one name";
   // The parser resolves dot segments in the path and libpq reads the path as
   // written: `/x/../canary` reaches canary in Bun and a database named
-  // `x/../canary` in libpq (review pass 1, measured with both).
+  // `x/../canary` in libpq (review pass 1, measured with both). Compared
+  // decoded, since the parser also percent-encodes characters both readers
+  // agree on (`/café` is `/caf%C3%A9` to it, café to both; review pass 2).
   if (authorityEnd !== -1 && rest[authorityEnd] === "/") {
     const q = rest.indexOf("?", authorityEnd);
-    if (rest.slice(authorityEnd, q === -1 ? undefined : q) !== u.pathname) {
-      return "has a path the parser rewrites (a . or .. segment, or a character it encodes): Bun reads the rewritten path, and libpq the path as written";
+    let same = false;
+    try {
+      same = decodeURIComponent(rest.slice(authorityEnd, q === -1 ? undefined : q)) === decodeURIComponent(u.pathname);
+    } catch {
+      /* a bad escape in the raw path: not the same */
     }
+    if (!same) return "has a path the parser rewrites (a . or .. segment): Bun reads the rewritten path, and libpq the path as written";
   }
   // Bun decodes a + in a query value as a space, and libpq keeps it: an
   // options value of `-c+search_path=x` is `-c search_path=x` to one and a
   // setting named "+search_path" to the other (review pass 1).
   if (u.search.includes("+")) return "has a + in its query: Bun reads it as a space and libpq as a +, so write %20 or %2B";
+  // libpq refuses a query part that is empty, has no `=`, or has a second
+  // raw `=`, where Bun reads each: a refresh then dropped --to and failed its
+  // restore on `?application_name=x=y` (review pass 2, measured).
+  for (const part of u.search.slice(1).split("&")) {
+    if (u.search === "") break;
+    if (part === "" || !part.includes("=")) return "has a query part with no key=value (an empty part, or a key with no =): libpq refuses it, and Bun reads it";
+    if (part.indexOf("=") !== part.lastIndexOf("=")) return "has a second = in a query value (percent-encode it as %3D): libpq refuses it, and Bun reads it";
+  }
+  const sslmode = u.searchParams.get("sslmode");
+  if (sslmode !== null && sslmode !== sslmode.toLowerCase()) return "gives sslmode in capitals: libpq reads its values in lowercase only, and Bun in either";
   const seen = new Set<string>();
   for (const key of u.searchParams.keys()) {
     const named = /^[A-Za-z_]{1,40}$/.test(key) ? `the query key ${key}` : "a query key";

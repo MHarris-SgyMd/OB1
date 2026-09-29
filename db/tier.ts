@@ -321,7 +321,7 @@ async function toolMajor(tool: string): Promise<number | null> {
  */
 async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
   const [me] = await a<{ pid: number; started: string; db: string }[]>`
-    SELECT pid, extract(epoch FROM backend_start)::text AS started, current_database() AS db
+    SELECT pid, extract(epoch FROM backend_start)::text AS started, pg_catalog.current_database() AS db
     FROM pg_stat_activity WHERE pid = pg_backend_pid()`;
   const [seen] = await b<{ found: boolean; db: string }[]>`
     SELECT EXISTS (
@@ -329,7 +329,7 @@ async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
              WHERE pid = ${me.pid}
                AND (backend_start IS NULL OR extract(epoch FROM backend_start)::text = ${me.started})
            ) AS found,
-           current_database() AS db`;
+           pg_catalog.current_database() AS db`;
   return seen.found && seen.db === me.db;
 }
 
@@ -434,7 +434,7 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
   const current = await databaseSettings(dst);
   // A no-op where `vector` already resolves; else the path gains its schema.
   await alignVectorSearchPath(dst);
-  const [{ db, loadable }] = await dst<{ db: string; loadable: boolean }[]>`SELECT current_database() AS db, to_regtype('vector') IS NOT NULL AS loadable`;
+  const [{ db, loadable }] = await dst<{ db: string; loadable: boolean }[]>`SELECT pg_catalog.current_database() AS db, to_regtype('vector') IS NOT NULL AS loadable`;
   if (loadable) await dst`SELECT '[1]'::vector`;
   const target = `"${db.replaceAll('"', '""')}"`;
   for (const name of Object.keys(current)) {
@@ -474,7 +474,7 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
 export async function targetRefusal(target: SQL): Promise<string | null> {
   if ((await refreshMark(target)) !== null) return null;
   const [{ db, relations, migrations, config, thoughts }] = await target<{ db: string; relations: number; migrations: boolean; config: boolean; thoughts: boolean }[]>`
-    SELECT current_database() AS db,
+    SELECT pg_catalog.current_database() AS db,
            (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = 'public'
               -- relations a schema is made of; an index, a composite type or a
@@ -596,7 +596,10 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
       const again = await connectedResetRefusal(dst, toUrl);
       if (again !== null) throw new Error(`--to: ${again}. Refusing: --refresh drops the target's schema. --to is untouched.`);
       try {
-        await dst.unsafe(`DO $mark$ BEGIN EXECUTE format('ALTER DATABASE %I SET ob1.refresh_target = %L', current_database(), '${tier}'); END $mark$`);
+        // pg_catalog's, not the path's: a URL's options= may set search_path,
+        // and a planted current_database() would put the mark on another
+        // database, where it disarms targetRefusal (review pass 2).
+        await dst.unsafe(`DO $mark$ BEGIN EXECUTE pg_catalog.format('ALTER DATABASE %I SET ob1.refresh_target = %L', pg_catalog.current_database(), '${tier}'); END $mark$`);
       } catch (e) {
         // Nothing is reset yet. A database-level setting of a custom name needs a
         // superuser, or on PG15+ a role granted SET on the parameter; restoring
@@ -699,7 +702,7 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
     const mark = await refreshMark(stable);
     const tier = await configTier(stable);
     if (mark !== null || tier === "canary" || tier === "working") {
-      const [{ db }] = await stable<{ db: string }[]>`SELECT quote_ident(current_database()) AS db`;
+      const [{ db }] = await stable<{ db: string }[]>`SELECT pg_catalog.quote_ident(pg_catalog.current_database()) AS db`;
       throw new Error(`--to is a tier (${mark !== null ? `refresh mark ${mark}` : `tier=${tier}`}), not the record — are --from and --to the wrong way round? Refusing: --promote stamps --to as stable.${mark !== null ? ` If --to really is to be the record now, clear the mark first: ALTER DATABASE ${db} RESET ob1.refresh_target` : ""}`);
     }
     const version = await readConfig(canary, "schema_version");

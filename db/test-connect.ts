@@ -141,7 +141,7 @@ const SPLITS: [string, RegExp, string][] = [
   [`postgres://u:${MARK}@localhost:5432/canary?user=admin`, /the query key user,/, "?user= (Bun logs in as admin)"],
   [`postgres://u:${MARK}@localhost:5432/canary?path=/var/run/postgresql`, /the query key path,/, "?path= (Bun connects over that unix socket)"],
   [`postgres://u:${MARK}@localhost:5432/canary?data%62ase=stable`, /the query key database,/, "a percent-encoded key, decoded as both readers decode it"],
-  [`postgres://u:${MARK}@localhost:5432/canary?${MARK}`, /carries a query key, and only/, "a key that is not a plain word, which is not printed"],
+  [`postgres://u:${MARK}@localhost:5432/canary?${MARK}=1`, /carries a query key, and only/, "a key that is not a plain word, which is not printed"],
   [`postgres://u:${MARK}@localhost:5432/canary?sslmode=disable&sslmode=require`, /gives the query key sslmode twice/, "sslmode twice"],
   // Review pass 1: each measured with both readers, or a mutant survived without it.
   [`postgres://u:${MARK}@localhost:5432/x/../canary`, /a path the parser rewrites/, "a .. segment (Bun reaches canary, libpq x/../canary)"],
@@ -153,6 +153,15 @@ const SPLITS: [string, RegExp, string][] = [
   [`postgres://localhost?application_name=a@db.example.com:5432/canary`, /an @ other than the one ending its user/, "an @ past a ? with no path (libpq's user ends there, its host is db.example.com)"],
   [`postgres://localhost/@canary`, /an @ other than the one ending its user/, "an @ straight after the path's /"],
   [`postgres://u:${MARK}@localhost:5432/canary?SSLMODE=disable`, /the query key SSLMODE,/, "a key in capitals (the allowlist is exact)"],
+  // Review pass 2: libpq refuses these query shapes, which Bun reads — a
+  // refresh dropped --to and then failed its restore; and a lowercase %2c.
+  [`postgres://u:${MARK}@localhost:5432/canary?application_name=x=y`, /a second = in a query value/, "a second raw = in a value (libpq: extra key/value separator)"],
+  [`postgres://u:${MARK}@localhost:5432/canary?options=-c%20search_path=x`, /a second = in a query value/, "an options value with a raw ="],
+  [`postgres://u:${MARK}@localhost:5432/canary?sslmode`, /no key=value/, "a key with no ="],
+  [`postgres://u:${MARK}@localhost:5432/canary?&sslmode=disable`, /no key=value/, "an empty query part"],
+  [`postgres://u:${MARK}@localhost:5432/canary?sslmode=disable&`, /no key=value/, "a trailing &"],
+  [`postgres://u:${MARK}@localhost:5432/canary?sslmode=DISABLE`, /sslmode in capitals/, "an sslmode value in capitals"],
+  [`postgres://u@nohost.invalid%2c127.0.0.1/canary`, /names a host list/, "a lowercase %2c host list (libpq reached canary through it)"],
 ];
 {
   for (const [url, re, what] of SPLITS) {
@@ -183,6 +192,12 @@ const SPLITS: [string, RegExp, string][] = [
     ["postgres://u@localhost/a%2Fb", "a/b", "an encoded / in the database"],
     ["postgres://localhost/canary", "canary", "no user at all"],
     ["postgres://u@[::1]:5432/canary", "canary", "IPv6 loopback"],
+    // Review pass 2: both readers agree on these (measured), so the resolver must too.
+    ["postgres://u@localhost/café", "café", "a non-ASCII database the parser percent-encodes"],
+    ['postgres://u@localhost/a"b', 'a"b', "a \" in the database the parser percent-encodes"],
+    ["postgres://u@localhost/caf%c3%a9", "café", "a lowercase percent-escape"],
+    ["postgres://a+b@localhost/a+b", "a+b", "a + in the user and the database (a + only splits the readers in the query)"],
+    ["postgres://u@localhost/canary?options=-csearch_path%3Dx%20-cwork_mem%3D4MB", "canary", "an options value with every = and space encoded"],
   ] as const) {
     ok(databaseUrlProblem(url) === null && identityRefusal(url) === null && mayReset(url, {}), `${what}: accepted and resettable`);
     ok(databaseOf(url) === db, `databaseOf: ${what} → ${JSON.stringify(db)} (${JSON.stringify(databaseOf(url))})`);
@@ -371,6 +386,7 @@ const SPLITS: [string, RegExp, string][] = [
     [`postgres://u:${MARK}@localhost:5432`, /the URL names no database/, "no database"],
     [`postgres://u:${MARK}@localhost:5432/x/../canary`, /the URL has a path the parser rewrites/, "a .. segment (the guards judged canary, pg_restore wrote x/../canary)"],
     ["postgres:///canary", /the URL has no host/, "an empty host (Bun over TCP, libpq over the socket)"],
+    [`postgres://u:${MARK}@localhost:5432/canary?application_name=x=y`, /the URL has a second = in a query value/, "a second raw = (the guards passed, canary was dropped, pg_restore refused the URL)"],
   ] as const) {
     for (const side of ["--to", "--from"] as const) {
       const argv = side === "--to" ? ["tier.ts", "--refresh", "--from", FROM, "--to", url] : ["tier.ts", "--refresh", "--from", url, "--to", "postgres://u@127.0.0.1:1/b"];

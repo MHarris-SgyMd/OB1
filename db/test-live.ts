@@ -7411,6 +7411,15 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
     const overridden = await drop(urlOf(A), { PGDATABASE: B, [REMOTE_DB_FLAG]: "1" });
     assert(overridden.code === 2 && overridden.out.includes(`reached database "${B}"`) && (await markers())[B],
       `…and ${REMOTE_DB_FLAG}=1 does not lift it: it says which database is dropped, not whether a remote one may be (exit ${overridden.code})`);
+    // assertThrowawayDatabase asks on a probe of its own, and eval-quant.ts and
+    // test-bench-reuse.ts rely on it alone before their drops (review pass 2:
+    // replacing the probe's question survived every suite).
+    const guardOnly = (url: string, env: Record<string, string>) =>
+      runScript(["bun", "-e", `import { assertThrowawayDatabase } from "./test-support.ts"; await assertThrowawayDatabase(${JSON.stringify(url)}); console.log("GUARD-PASSED");`], { cwd: HERE, env: { ...shell, ...env } });
+    const guardDiverted = await guardOnly(urlOf(A), { PGDATABASE: B });
+    const guardPlain = await guardOnly(urlOf(A), {});
+    assert(guardDiverted.code === 2 && guardDiverted.out.includes(`reached database "${B}", not "${A}"`) && !guardDiverted.out.includes("GUARD-PASSED") && guardPlain.code === 0 && guardPlain.out.includes("GUARD-PASSED"),
+      `assertThrowawayDatabase on ${A} with PGDATABASE=${B} refuses on its own probe, and passes with none (exit ${guardDiverted.code}, then ${guardPlain.code})`);
     // The check asks pg_catalog's current_database(), not whatever the session's
     // path finds first: options= may set search_path, and a function of that
     // name in the reached database answered the URL's name and let the drop
@@ -7483,6 +7492,22 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
     const bMark = (await admin<{ cfg: string[] | null }[]>`SELECT setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = ${B} AND s.setrole = 0`)[0]?.cfg ?? null;
     assert(dumpStarted && (midRefused ?? "").startsWith(`--to: the connection reached database "${B}", not "${A}"`) && /--to is untouched/.test(midRefused ?? "") && JSON.stringify(await markers()) === JSON.stringify({ [A]: true, [B]: true }) && bMark === null,
       `PGDATABASE exported mid-refresh, after the guard and before the drop: the drop's own connection refuses, and ${B} is neither marked nor dropped (dump started: ${dumpStarted}; ${midRefused ?? "no refusal"}; ${B}'s settings ${JSON.stringify(bMark)})`);
+
+    // The mark names its database through pg_catalog: --to's options= may set
+    // search_path, and a current_database() planted in --to answering B would
+    // put the mark on B, where it disarms targetRefusal for a later refresh
+    // (review pass 2). --to really is A here, so every guard passes and the
+    // refresh runs to the stand-in restore, which fails.
+    {
+      const a = new SQL({ url: urlOf(A), max: 1 });
+      try { await a.unsafe(`CREATE SCHEMA IF NOT EXISTS evil; CREATE OR REPLACE FUNCTION evil.current_database() RETURNS name LANGUAGE sql AS $$ SELECT '${B}'::name $$`); } finally { await a.close(); }
+      let markRun: string | null = null;
+      try { await refresh(URL_!, urlOf(A) + "?options=-c%20search_path%3Devil%2Cpg_catalog%2Cpublic", "working"); } catch (e) { markRun = (e as Error).message; }
+      const bAfter = (await admin<{ cfg: string[] | null }[]>`SELECT setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = ${B} AND s.setrole = 0`)[0]?.cfg ?? null;
+      const after = await markers();
+      assert(/did not produce the thoughts table/.test(markRun ?? "") && bAfter === null && after[B] && !after[A],
+        `a current_database() planted in --to ahead of pg_catalog does not move the mark: the refresh reached its restore on ${A}, and ${B} is neither marked nor dropped (${(markRun ?? "no error").slice(0, 80)}; ${B}'s settings ${JSON.stringify(bAfter)}; markers ${JSON.stringify(after)})`);
+    }
   } finally {
     process.env.PATH = savedPath;
     if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;

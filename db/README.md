@@ -3039,7 +3039,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 942 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 944 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -3068,8 +3068,10 @@ The resolver refuses a URL that Bun and libpq would take to different places
 (SMD-2317): a query key other than `sslmode`, `application_name` and `options` (Bun sends
 `database=` and `user=` to the server, which keeps them; libpq follows `host=`,
 `port=`, `dbname=` and `service=`), a `+` in the query (a space to Bun), a
-fragment, an `@` other than the one ending the user, a `,` or `%2C` in the
-host, or a `.`/`..` path segment (Bun resolves it, libpq does not). Put the
+query part libpq refuses (empty, no `=`, a second raw `=`, an `sslmode` in
+capitals), a fragment, an `@` other than the one ending the user, a `,` or
+`%2C` in the host, or a `.`/`..` path segment (Bun resolves it, libpq does
+not). Put the
 database in the URL's path. The reset rule then has three parts:
 - **The URL must name its host and its database.** With no host, Bun
   connects to localhost over TCP and libpq to the unix socket; with no

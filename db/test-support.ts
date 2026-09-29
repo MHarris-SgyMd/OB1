@@ -449,7 +449,7 @@ export async function dropSchema(url: string): Promise<void> {
     // tables were already gone — so load it explicitly first.
     try {
       await admin`SELECT '[1]'::vector`;
-      const [{ db }] = await admin`SELECT current_database() AS db`;
+      const [{ db }] = await admin`SELECT pg_catalog.current_database() AS db`;
       for (const bound of HNSW_BOUNDS) await admin.unsafe(`ALTER DATABASE ${quoteIdent(db)} RESET ${bound}`);
     } catch {
       /* not the owner of the database, or no pgvector to load — left as found */
@@ -535,7 +535,7 @@ export async function relocateVectorTo(url: string, schema: string): Promise<voi
 export async function restoreVectorToPublic(url: string): Promise<void> {
   const admin = new SQL({ url, max: 1 });
   try {
-    const [{ db }] = await admin`SELECT current_database() AS db`;
+    const [{ db }] = await admin`SELECT pg_catalog.current_database() AS db`;
     await admin.unsafe(`ALTER EXTENSION vector SET SCHEMA public`);
     await admin.unsafe(`ALTER DATABASE ${quoteIdent(db)} RESET search_path`);
   } finally {
