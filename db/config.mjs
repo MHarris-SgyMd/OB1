@@ -1769,7 +1769,7 @@ export const SHARED_SETTING_SOURCES = ["environment variable", "configuration fi
  * written five times in three idioms. Parse with parseSetConfig.
  */
 export const DB_LEVEL_SETTINGS_SQL =
-  "SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = current_database() AND s.setrole = 0";
+  "SELECT s.setconfig AS cfg FROM pg_catalog.pg_db_role_setting s JOIN pg_catalog.pg_database d ON d.oid = s.setdatabase WHERE d.datname = pg_catalog.current_database() AND s.setrole = 0";
 
 /** `["a=1","b=x"]` → `{a: "1", b: "x"}`; a value may itself contain `=`. */
 export function parseSetConfig(cfg) {
