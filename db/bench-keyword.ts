@@ -48,6 +48,7 @@
 import { SQL } from "bun";
 import { requireDatabaseUrl, resetSchema } from "./test-support.ts";
 import { commandLine } from "./cli.ts";
+import { openSql } from "./connect.ts";
 
 commandLine("bench-keyword.ts", {}, { note: "its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-keyword.ts");
@@ -226,7 +227,7 @@ console.log(`  decoy "${DECOY}" planted at the same frequency\n`);
 for (const scale of SCALES) {
   process.stdout.write(`  … ${scale.toLocaleString()} rows`);
   await resetSchema(URL_, OPTS);
-  const sql = new SQL({ url: URL_, max: 1 });
+  const sql = openSql(URL_);
 
   const texts = generate(scale);
   for (let i = 0; i < texts.length; i += 500) {

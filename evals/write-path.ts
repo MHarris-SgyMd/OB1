@@ -51,12 +51,12 @@ export const STUB_DIM = SUBJECT_KEYS.length + NOISE_AXES;
 export const STUB_EMBED_MODEL = "write-path-stub";
 /**
  * The OB1_* variables that reach the arm's process by name when every other
- * is removed: the throwaway guard's overrides (db/test-support's
- * assertThrowawayDatabase and dropSchema read them — an operator's answer to a
+ * is removed: the throwaway guard's override (db/test-support's
+ * assertThrowawayDatabase and dropSchema read it — an operator's answer to a
  * safety question, not a knob of the server under test) and this eval's own
  * verbose switch. The parent forwards these; the child keeps these.
  */
-export const FORWARDED_ENV = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB", "OB1_DROP_KEPT_CORPUS", "OB1_WP_VERBOSE"] as const;
+export const FORWARDED_ENV = ["OB1_ALLOW_REMOTE_DB", "OB1_DROP_KEPT_CORPUS", "OB1_WP_VERBOSE"] as const;
 
 /** The subjects a text names, by phrase, case-insensitive, in SUBJECTS' order. */
 export function subjectsIn(text: string): SubjectKey[] {
@@ -229,7 +229,7 @@ export function parseHits(reply: string): Hit[] {
  */
 export function parseProposalIds(reply: string): Set<string> {
   const ids = new Set<string>();
-  if (/^No .*supersession proposals\./.test(reply)) return ids;
+  if (/^No .*supersession proposals\b/.test(reply)) return ids; // 070's selectors add " on/not on a lineage pair" before the period
   for (const m of reply.matchAll(/^\s+ID: ([0-9a-f-]{36})\s*$/gim)) ids.add(m[1].toLowerCase());
   return ids;
 }

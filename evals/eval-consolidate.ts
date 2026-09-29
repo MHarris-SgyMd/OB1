@@ -51,6 +51,7 @@ import { extractionKey } from "../server-portable/entities.ts";
 import {
   buildJudgeMessages, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_SIMILARITY, type Judgement,
 } from "../server-portable/consolidate.ts";
+import { isoDay } from "../server-portable/store.ts";
 import { requireDatabaseUrl, resetSchema, runScript } from "../db/test-support.ts";
 import {
   loadLinearCorpus, linearThoughtText, linearThoughtId, insertLinearThought, entityAnswersPath, readEntityAnswers,
@@ -265,16 +266,23 @@ if (FULL || REPLAY) {
   console.log(`  cost: ${lines.length} judge calls for ${loaded.size} thoughts (${withEntities} with entities) = ${Math.round((1000 * lines.length) / loaded.size)} calls per thousand thoughts; ~${promptTokens.toLocaleString()} estimated prompt tokens, ~${Math.round(promptTokens / lines.length || 0)} per call, ~${Math.round((promptTokens / loaded.size) * 1000).toLocaleString()} per thousand thoughts` +
     (wall ? `; ${(wall / 60).toFixed(1)} min wall on ${cfg.judgeModel}` : ""));
 
-  const proposals = (await sql`SELECT * FROM list_supersession_proposals(NULL::text, 200)`) as Record<string, unknown>[];
-  const issueOf = async (id: string) => (await sql`SELECT metadata->>'issue' AS i FROM thoughts WHERE id = ${id}::uuid`)[0]?.i as string | undefined;
+  const proposals = (await sql`SELECT * FROM list_supersession_proposals(NULL::text, 200, NULL::boolean)`) as Record<string, unknown>[];
+  // Every proposal's two issue ids in one read, not two queries per proposal.
+  const proposalIds = proposals.flatMap((p) => [String(p.older_id), String(p.newer_id)]);
+  const issueById = new Map(((await sql`SELECT id::text AS id, metadata->>'issue' AS i FROM thoughts WHERE id = ANY(${sql.array(proposalIds, "TEXT")}::uuid[])`) as { id: string; i: string | null }[])
+    .map((r) => [r.id, r.i]));
+  const issueOf = (id: string) => issueById.get(id);
   const graded = new Map((labels.proposals ?? []).map((g) => [`${g.older}|${g.newer}`, g]));
+  // The rows are raw driver values (a Date, the number Infinity, null), not the
+  // store's normalised ones — String(d).slice(0, 10) printed "Wed Sep 09" (SMD-1842).
+  const day = (v: unknown) => isoDay(v) ?? "undated";
   let gTrue = 0, gFalse = 0, ungraded = 0;
   const md: string[] = [`# Supersession proposals — ${cfg.judgeModel}, k=${K}, floor ${MIN_SIM}, ${new Date().toISOString().slice(0, 10)}`, "", "Grade each: true (a real supersession/contradiction) or false, and copy the verdict into evals/consolidate-labels.json → proposals.", ""];
   for (const p of proposals) {
-    const oi = await issueOf(String(p.older_id)), ni = await issueOf(String(p.newer_id));
+    const oi = issueOf(String(p.older_id)), ni = issueOf(String(p.newer_id));
     const g = graded.get(`${oi}|${ni}`);
     if (g) { if (g.true) gTrue++; else gFalse++; } else ungraded++;
-    md.push(`## ${oi} (${String(p.older_created_at).slice(0, 10)}) → ${ni} (${String(p.newer_created_at).slice(0, 10)}) — ${p.verdict} @${Number(p.confidence).toFixed(2)}${g ? ` — graded ${g.true ? "TRUE" : "FALSE"}${g.reason ? `: ${g.reason}` : ""}` : ""}`,
+    md.push(`## ${oi} (${day(p.older_created_at)}) → ${ni} (${day(p.newer_created_at)}) — ${p.verdict} @${Number(p.confidence).toFixed(2)}${g ? ` — graded ${g.true ? "TRUE" : "FALSE"}${g.reason ? `: ${g.reason}` : ""}` : ""}`,
       "", `judge: ${p.reason ?? ""}`, "", `**older ${oi}:** ${String(p.older_content).replace(/\s+/g, " ").slice(0, 700)}`, "", `**newer ${ni}:** ${String(p.newer_content).replace(/\s+/g, " ").slice(0, 700)}`, "");
   }
   writeFileSync(OUT, md.join("\n"));

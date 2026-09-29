@@ -544,12 +544,15 @@ export class PostgrestStore implements ThoughtStore {
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseDerivative);
   }
 
-  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number }): Promise<SupersessionProposal[]> {
+  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean }): Promise<SupersessionProposal[]> {
     // Migration 029's function is plain, so PostgREST reaches it over rpc like
-    // the provenance pair above. NULL args take its defaults.
+    // the provenance pair above. NULL args take its defaults. p_lineage is
+    // named on every call: it picks 070's three-argument form where 029's
+    // two-argument one was re-applied by hand beside it.
     const { data, error } = await this.client.rpc("list_supersession_proposals", {
       p_status: opts.status === undefined ? "pending" : opts.status,
       p_limit: opts.limit ?? null,
+      p_lineage: opts.lineage ?? null,
     });
     if (error) throw new Error(error.message);
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseProposal);

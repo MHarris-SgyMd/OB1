@@ -191,6 +191,31 @@ export function isoTimestampOrNull(v: unknown): string | null {
 }
 
 /**
+ * The day of a timestamp, `YYYY-MM-DD`, for a tool that prints a date from a
+ * raw driver row — Bun's `Date`, PostgREST's string, the number `Infinity` —
+ * where `String(d).slice(0, 10)` gave `"Wed Sep 09"` (SMD-1842). Through
+ * `isoTimestampOrNull`'s rule: NULL is null (the caller picks its word). Only
+ * `toISOString`'s own form is cut to its date, an extended year's
+ * (`+275760-09-13`) included; any other text `isoTimestamp` keeps — a sentinel
+ * ("infinity"), PostgREST's `0044-03-15T00:00:00+00:00 BC`, a PostgREST year
+ * past 9999 JS cannot parse — comes out whole, not sliced to a stub or a BC
+ * date read as AD. What Bun hands over for a BC timestamp depends on the
+ * query: `Date(NaN)` (so `Invalid Date`) on an unparameterised one, and on a
+ * parameterised one a Date in ISO's astronomical year (44 BC is
+ * `-000043-03-15`, 1 BC `0000-01-01`), printed as such with no BC mark.
+ * The day is UTC's. `db/consolidate.ts`'s `day` (SMD-1803)
+ * and the grading report in `evals/eval-consolidate.ts` print through it; the
+ * judge prompt's `dateOf` (`consolidate.ts`) does not, because its text is
+ * pinned by `CONSOLIDATE_PROMPT_VERSION`.
+ */
+export function isoDay(v: unknown): string | null {
+  const iso = isoTimestampOrNull(v);
+  if (iso == null) return null;
+  const day = /^(?:[+-]\d{6}|\d{4})-\d{2}-\d{2}(?=T\d{2}:\d{2}:\d{2}\.\d{3}Z$)/.exec(iso);
+  return day ? day[0] : iso;
+}
+
+/**
  * `isoTimestamp` for a key an envelope may omit — `update_thought`'s jsonb
  * before 018 had no `updated_at`; `resolve_agent`'s has `revoked_at` only when
  * revoked. Absence is legitimate there, so `undefined` is `undefined`, not the
@@ -638,6 +663,8 @@ export type SupersessionProposal = {
   /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). `created_at` is `string | null` for the same reason the read path is (SMD-1803). */
   older: { id: string; content: string; created_at: string | null; edited: boolean };
   newer: { id: string; content: string; created_at: string | null; edited: boolean };
+  /** Since migration 070 (SMD-2313): one side's `derived_from` names the other — a derivation and its input (a page and its evidence), a pair 066's candidate filter never proposes; a standing one is a reviewer's to reject; false when the column is absent from a row. */
+  lineage: boolean;
 };
 
 /** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
@@ -660,6 +687,7 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     supersedingId: r.superseding_id == null ? null : String(r.superseding_id),
     older: { id: String(r.older_id), content: String(r.older_content), created_at: isoTimestampOrNull(r.older_created_at), edited: r.older_edited === true },
     newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: isoTimestampOrNull(r.newer_created_at), edited: r.newer_edited === true },
+    lineage: r.lineage === true,
   };
 }
 
@@ -1353,7 +1381,8 @@ export interface ThoughtStore {
    * write to thoughts.supersedes has one path. Throws on a schema before 029;
    * the tool names the migration.
    */
-  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number }): Promise<SupersessionProposal[]>;
+  /** `lineage` true selects the proposals standing on a lineage pair, false the rest, absent every pair (migration 070, SMD-2313). */
+  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean }): Promise<SupersessionProposal[]>;
 
   /**
    * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest

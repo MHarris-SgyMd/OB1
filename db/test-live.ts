@@ -34,7 +34,7 @@ import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MO
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
@@ -3430,6 +3430,87 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          && (await claimOf(tome)).last_error === null,
          `…and --retry-partial then takes the tome alone, a prefix, and reads it whole (${prefixRun.out.split("\n").find((l) => /--retry-partial:/.test(l))?.slice(0, 200)})`);
 
+  // A run whose model, not its documents, is at fault says so and exits 3
+  // (SMD-2266): partial rows succeed, so the exit code alone passed a model
+  // answering many windows in prose. The stable brain's three reference-list
+  // papers as qwen2.5:7b reads them — 4, 3 and 1 of 24 windows left out, 8 of
+  // 72 answers — are the control, and do not trip it; the mixed run above,
+  // 4 of 8, is under the fewest answers it judges. The garbled note's failure
+  // goes first, so each run's exit code is its own.
+  await sql`DELETE FROM thoughts WHERE id = ${garbled}::uuid`;
+  // A paper of `windows` paragraphs, a window each, its last `bad` a reference list the stub answers in prose.
+  const paper = (name: string, windows: number, bad: number) => seed(Array.from({ length: windows }, (_, p) => chapter(p >= windows - bad ? `The ${name} reference-list page.` : `The ${name} chapter.`, "Ada", p)).join("\n\n"));
+  proseKeys.add("reference-list page");
+  const papers = [await paper("alpha", 24, 4), await paper("beta", 24, 3), await paper("gamma", 24, 1)];
+  const refsRun = await extract();
+  assert(refsRun.code === 0 && /\n  3 extracted \(3 with 8 window\(s\) left out, [^\n]*\), 0 failed/.test(refsRun.out) && !/answers this run were/.test(refsRun.out),
+         `three papers with 8 of their 72 windows left out, as the stable brain's read: written, exit 0, no alarm (exit ${refsRun.code}: ${refsRun.out.split("\n").find((l) => /answers this run/.test(l)) ?? refsRun.out.split("\n").find((l) => /^  \d+ extracted/.test(l))?.trim()})`);
+  assert((await Promise.all(papers.map(claimOf))).every((c) => c.status === "succeeded" && c.last_error?.startsWith("partial: ")), "…each paper's claim succeeded, its windows left out named");
+  // The ticket's case: partial rows alone, nothing failed — 20 of 48 answers
+  // left out across four papers, which exited 0 and now exit 3, the advice
+  // naming the partial rows' retry and not the failed rows' (review pass 3).
+  for (const name of ["eta", "theta", "iota", "kappa"]) await paper(name, 12, 5);
+  const partialRun = await extract();
+  assert(partialRun.code === 3 && /\n  4 extracted \(4 with 20 window\(s\) left out, [^\n]*\), 0 failed/.test(partialRun.out)
+         && partialRun.out.includes("  20 of the 48 answers this run were not JSON of the expected shape")
+         && partialRun.out.includes("The rows written stand, each partial one naming its windows left out; once the model is right, --retry-left-out re-reads the partial rows, with --job")
+         && !partialRun.out.includes("--retry-failed re-reads") && /Exiting 3\./.test(partialRun.out),
+         `four papers with 20 of their 48 windows left out and no row failed exit 3, not 0, naming --retry-left-out alone (exit ${partialRun.code}: ${partialRun.out.split("\n").find((l) => /answers this run/.test(l))?.trim().slice(0, 160)})`);
+  // A broken model: three papers of 12 windows with 5 of each in prose, and 12
+  // short notes wholly so, one answer each — 48 answers, 27 malformed, and
+  // under the fewest without the notes' answers. The notes fail, and the
+  // alarm's exit 3 comes before the failures' 1.
+  const books = [await paper("delta", 12, 5), await paper("epsilon", 12, 5), await paper("zeta", 12, 5)];
+  for (let i = 0; i < 12; i++) await seed(`A short reference-list page, number ${i}.`);
+  const brokenRun = await extract();
+  assert(brokenRun.code === 3 && /\n  3 extracted \(3 with 15 window\(s\) left out, [^\n]*\), 12 failed/.test(brokenRun.out)
+         && brokenRun.out.includes(`  27 of the 48 answers this run were not JSON of the expected shape — more than 20% of at least 48 (db/config.mjs, EXTRACT_MALFORMED_ALARM_SHARE): the model, not the documents, is likely at fault`)
+         && /Check OB1_METADATA_MODEL \(stub-meta\)[^\n]*Exiting 3\./.test(brokenRun.out),
+         `a run with 27 of its 48 answers malformed — the one-window notes' answers counted — says the model is likely at fault, naming it, and exits 3 before the failures' 1 (exit ${brokenRun.code}: ${brokenRun.out.split("\n").find((l) => /answers this run/.test(l))?.trim().slice(0, 200)})`);
+  assert((await Promise.all(books.map(claimOf))).every((c) => c.status === "succeeded" && c.last_error?.startsWith("partial: 7 of 12 windows extracted; the model's answers for windows 8–12 were")),
+         "…and the rows it wrote stand, each partial one naming its windows left out");
+  // A follower judges its answers as it polls, in blocks of the floor or
+  // more, and says so while it runs — where a run that exits is judged at its
+  // end — and stopped it exits 0 (review pass 1: it said nothing until SIGINT,
+  // then "Exiting 3." and exit 0). 48 notes in prose, captured while it
+  // polls in two halves a poll apart: under the floor each, they are judged
+  // together, not dropped one poll at a time.
+  const alarmFollower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
+  await Bun.sleep(1500);
+  const failedNow = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed'`)[0].c);
+  for (const half of [0, 24]) {
+    for (let i = half; i < half + 24; i++) await seed(`A followed reference-list page, number ${i}.`);
+    for (let i = 0; i < 100 && (await failedNow()) < 36 + half; i++) await Bun.sleep(200);
+    await Bun.sleep(1500);
+  }
+  await Bun.sleep(2500);
+  alarmFollower.kill("SIGINT");
+  const alarmFollowErr = await new Response(alarmFollower.stderr).text();
+  const alarmFollowOut = (await new Response(alarmFollower.stdout).text()) + alarmFollowErr;
+  const alarmFollowCode = await alarmFollower.exited;
+  // Printed before the signal's own line: while it polled, not at its stop (review pass 2).
+  const alarmAt = alarmFollowErr.indexOf("  48 of the follower's last 48 answers were not JSON of the expected shape — more than 20% of at least 48");
+  assert(alarmFollowCode === 0 && alarmAt >= 0 && alarmAt < alarmFollowErr.indexOf("stopping after the current thought")
+         && alarmFollowOut.split("The follower keeps polling; stopped by a signal, it exits 0.").length === 2 && !/Exiting \d/.test(alarmFollowOut),
+         `a follower says the model is likely at fault while it polls, once, not at its stop, and exits 0 on SIGINT (exit ${alarmFollowCode}: ${alarmFollowOut.split("\n").find((l) => /answers were/.test(l))?.trim().slice(-120)})`);
+  // A retry chose its rows for failing: the 60 notes back, still in prose,
+  // trip the alarm, which does not clear their documents (review pass 1).
+  const retriedNotes = await extract("--retry-failed");
+  assert(retriedNotes.code === 3 && retriedNotes.out.includes("  60 of the 60 answers this run were not JSON of the expected shape")
+         && retriedNotes.out.includes("the 60 row(s) this run returned were chosen for failing or leaving windows out, so their documents may be at fault; if not, the model is.")
+         && !retriedNotes.out.includes("the model, not the documents") && retriedNotes.out.includes("No row was written; once the model is right, --retry-failed re-reads the failed ones, with --job")
+         && !retriedNotes.out.includes("--retry-left-out re-reads"),
+         `--retry-failed over rows that fail again says their documents may be at fault, gives the retry for the failed rows it left and not one for partial rows it did not, and exits 3 (exit ${retriedNotes.code}: ${retriedNotes.out.split("\n").find((l) => /answers this run/.test(l))?.trim().slice(0, 200)})`);
+  // A follower that ends at its --limit with the last block tripped: the
+  // final judgement's line, saying the exit it takes, not "keeps polling …
+  // exits 0" (review pass 2, caught by running it).
+  for (let i = 0; i < 48; i++) await seed(`A limited reference-list page, number ${i}.`);
+  const limitedFollow = await extract("--follow", "1", "--limit", "48");
+  assert(limitedFollow.code === 3 && limitedFollow.out.includes("  48 of the follower's last 48 answers were not JSON") && /\n    Check OB1_METADATA_MODEL \(stub-meta\)[^\n]*\. Exiting 3\./.test(limitedFollow.out)
+         && !limitedFollow.out.includes("keeps polling"),
+         `a follower that trips the alarm on the pass that reaches its --limit says it exits 3, and exits 3 (exit ${limitedFollow.code}: ${limitedFollow.out.split("\n").find((l) => /Exiting|keeps polling/.test(l))?.trim().slice(-120)})`);
+  proseKeys.delete("reference-list page");
+
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;
@@ -4159,6 +4240,37 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const proposed = await consolidate();
     const atlas = (await proposals()).find((p) => p.older_id === atlasOld && p.newer_id === atlasNew);
     assert(proposed.code === 0 && atlas !== undefined && atlas.status === "pending" && (await proposals()).length === proposalsBefore + 1, `the atlas pair is proposed pending (exit ${proposed.code})`);
+    // 070 (SMD-2313): the PENDING row on a lineage pair — the ticket's own
+    // case, a page over its evidence judged before 066 — under --list
+    // lineage, with no stale standing on it; the array set raw and cleared
+    // (run-it, first review pass: the one --list lineage tooth was a stale
+    // row, so the pending call dropped passed every suite).
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${atlasOld}::text) WHERE id = ${atlasNew}::uuid`;
+    const pendingLineage = await consolidate("--list", "lineage");
+    assert(pendingLineage.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\), most confident first:$/m.test(pendingLineage.out) && /LINEAGE PAIR\s*$/m.test(pendingLineage.out) && !/\(stale/.test(pendingLineage.out) && pendingLineage.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`),
+           `--list lineage lists the pending row, tagged, with no stale standing and --force on the accept line (${pendingLineage.out.split("\n").find((l) => /LINEAGE PAIR/.test(l))?.trim().slice(0, 160)})`);
+    // …and the accept is refused without --force — a guard on the one accept
+    // door, not a verdict: the row stays pending, nothing is written
+    // (definitions probe, second review pass: the accept went through under
+    // the reject's own advice). A brain without 070's listing gets the file
+    // named on --list, not a driver stack: the form dropped and put back.
+    const acceptLineage = await consolidate("--accept", atlas!.id);
+    assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`)
+           && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
+           `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
+    // R3 tooth (mutant 2): the catch names 070 for the one error it is for — an unrelated failure inside the listing is shown as itself.
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
+    const listBoom = await consolidate("--list", "lineage");
+    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 070/.test(listBoom.out),
+           `an unrelated error inside --list is shown as itself, not as a missing 070 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
+    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 070 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 070 and says the listing needs the file before pointing at it");
+    const listPre070 = await consolidate("--list", "lineage");
+    assert(listPre070.code === 1 && /--list needs migration 070 \(db\/migrations\/070_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre070.out) && !/PostgresError/.test(listPre070.out),
+           `on a brain without 070 --list names the file, not a driver error (exit ${listPre070.code}: ${listPre070.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+    await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
     const rb1 = await rebuild(atlasNew);
@@ -4167,6 +4279,20 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it finds in conflict again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
     const staleList = await consolidate("--list", "stale");
     assert(staleList.code === 0 && /1 stale proposal\(s\)/.test(staleList.out) && /\(stale — in this pass's pool\)/.test(staleList.out) && staleList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`), `--list stale tags the row's standing and still offers the reviewer's decision (${staleList.out.split("\n").find((l) => /stale —/.test(l))?.trim().slice(0, 200)})`);
+    // 070 (SMD-2313): the same stale row standing on a lineage pair — the
+    // newer thought's derived_from set raw to name the older, the shape 066
+    // left behind — is tagged under --list stale, listed under --list lineage
+    // with the reject to run, and counted by --status; the array is cleared
+    // before the pass's run below, whose settle reason is the unrelated verdict.
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${atlasOld}::text) WHERE id = ${atlasNew}::uuid`;
+    const lineageList = await consolidate("--list", "lineage");
+    assert(lineageList.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\), most confident first/.test(lineageList.out) && /\(stale — in this pass's pool\)/.test(lineageList.out)
+           && lineageList.out.includes(`lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066; reject it: --reject ${atlas!.id} --note "lineage pair (066)"`) && lineageList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`),
+           `--list lineage lists the row with its standing, the lineage line and the reject to run (${lineageList.out.split("\n").find((l) => /lineage pair:/.test(l))?.trim().slice(0, 200)})`);
+    assert(/LINEAGE PAIR  \(stale — in this pass's pool\)/.test((await consolidate("--list", "stale")).out), "…--list stale tags it LINEAGE PAIR beside its standing");
+    assert(/, 1 unreviewed standing on a lineage pair \(--list lineage shows them; the reviewer rejects each — the pass never replaces a pending one\) — --list shows them/.test((await consolidate("--status")).out), "…and --status counts it");
+    await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
+    assert(/no unreviewed proposals standing on a lineage pair/.test((await consolidate("--list", "lineage")).out) && !/LINEAGE PAIR/.test((await consolidate("--list", "stale")).out), "…and cleared, nothing stands there and the tag is gone");
     // The standing is read under THIS pass's key (second review pass): the
     // row's-key claim gone and one requeued under another judge's key is
     // another pass's pool — named beside "waiting", since this run re-pools
@@ -4333,6 +4459,40 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const borrowed = await consolidate("--reject", cedar.id, "--note", `${PASS_SETTLED_PREFIX} by hand`);
     assert(borrowed.code === 2 && /that marker is the pass's own/.test(borrowed.out) && (await proposalRow(cedar.id)).review_note?.startsWith(PASS_SETTLED_PREFIX) === true && /judged again/.test((await proposalRow(cedar.id)).review_note ?? ""),
            `--note beginning with the marker is refused as usage, the row untouched (exit ${borrowed.code})`);
+    // R3 teeth (mutants 1a-1d): the accept guard's other cases on a throwaway
+    // pair — after the audit counts above, since a forced accept and its
+    // reject are audited under the reviewer's name.
+    {
+      const r3Old = await seed("smd-2313 live: the evidence", 9, 0);
+      const r3New = await seed("smd-2313 live: the page over it", 8, 0);
+      const [{ id: r3 }] = await sql`SELECT record_supersession_proposal(${r3Old}::uuid, ${r3New}::uuid, 'newer_supersedes_older', 0.8, 'the page restates the evidence', 0.9, ${KEY}, NULL) AS id`;
+      // A guard that let an accept through: undo it, so the steps below still run and report.
+      const undo = async () => { if ((await supersedesOf(r3New)) !== null) await consolidate("--reject", r3); await sql`UPDATE supersession_proposals SET status = 'pending', reviewed_at = NULL, review_note = NULL WHERE id = ${r3}::uuid`; };
+      await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${r3New}::text) WHERE id = ${r3Old}::uuid`;
+      const reverse = await consolidate("--accept", r3);
+      assert(reverse.code === 1 && /accept refused: one side's derived_from names the other/.test(reverse.out) && (await supersedesOf(r3New)) === null,
+             `the OLDER side naming the newer meets the same guard (exit ${reverse.code}: ${reverse.out.trim().slice(-160)})`);
+      await undo();
+      await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${r3Old}::uuid`;
+      await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${r3Old}::text) WHERE id = ${r3New}::uuid`;
+      await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${r3}::uuid`;
+      const staleAccept = await consolidate("--accept", r3);
+      assert(staleAccept.code === 1 && /accept refused: one side's derived_from names the other/.test(staleAccept.out),
+             `a stale lineage row's accept meets the guard before 063's stale rule (exit ${staleAccept.code}: ${staleAccept.out.trim().slice(-160)})`);
+      await undo();
+      const forcedLineage = await consolidate("--accept", r3, "--force");
+      assert(forcedLineage.code === 0 && /^\s*accepted /m.test(forcedLineage.out) && (await supersedesOf(r3New)) === r3Old,
+             `--accept --force on a lineage pair writes the pointer (exit ${forcedLineage.code}: ${forcedLineage.out.trim().slice(-160)})`);
+      const acceptedAgain = await consolidate("--accept", r3);
+      assert(acceptedAgain.code === 1 && /accept refused: already accepted/.test(acceptedAgain.out) && !/lineage/.test(acceptedAgain.out),
+             `an accept on the accepted lineage row is 029's ALREADY_ACCEPTED, not the guard's advice about a pointer not yet written (exit ${acceptedAgain.code}: ${acceptedAgain.out.trim().slice(-140)})`);
+      const acceptedList = await consolidate("--list", "accepted");
+      assert(/LINEAGE PAIR  \(accepted/.test(acceptedList.out) && acceptedList.out.includes(`accepted while the derivation names its input — --reject ${r3} clears the pointer (029)`),
+             `--list accepted tags the row and names the reject as the repair for a pointer already written (${acceptedList.out.split("\n").find((l) => /lineage pair:/.test(l))?.trim().slice(0, 160)})`);
+      const rejectedLineage = await consolidate("--reject", r3, "--note", "lineage pair (066)");
+      assert(rejectedLineage.code === 0 && /rejected [0-9a-f-]+: the supersedes pointer this proposal had set is cleared/.test(rejectedLineage.out) && (await supersedesOf(r3New)) === null && (await proposalRow(r3)).status === "rejected",
+             `--reject on a lineage pair is never refused, and clears the pointer a forced accept wrote — the repair for an accept already written (exit ${rejectedLineage.code}: ${rejectedLineage.out.trim().slice(-160)})`);
+    }
   }
 
   // SMD-1803: the CLI's day() over a proposal thought with no ISO-form date.
@@ -5194,6 +5354,41 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
         const [{ tuples }] = await fresh<{ tuples: string }[]>`SELECT current_setting('hnsw.max_scan_tuples') AS tuples FROM (SELECT '[1]'::vector) v`;
         assert(tuples === "100000", `a new session on the target runs with the source's HNSW bound (got ${tuples})`);
       } finally { await fresh.close(); }
+      // A path stored raw (SET … FROM CURRENT keeps the text as written) is
+      // read as Postgres reads it (SMD-2247): NoWhere folds to nowhere, a tab
+      // separates, a quoted name keeps its case. Kept literally it came back
+      // as "NoWhere" and "\tpublic", two other schemas. temp_tablespaces the
+      // same, keeping its empty entry — the database's default tablespace,
+      // one of the list's members — which the path's reading drops. The
+      // target's session runs with standard_conforming_strings off, as a
+      // second refresh's does when the source sets it: a name holding a
+      // backslash is copied as written, not read as an escape.
+      await sql.unsafe(`ALTER DATABASE ${setDst} SET standard_conforming_strings = off`);
+      const rawSrc = new SQL({ url: urlOf(setSrc), max: 1 }), rawDst = new SQL({ url: urlOf(setDst), max: 1 });
+      let read: Record<string, string> = {};
+      try {
+        await rawSrc`SELECT set_config('search_path', ${'NoWhere,\tpublic, "Kept", "a\\b"'}, false)`;
+        await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET search_path FROM CURRENT`);
+        await rawSrc`SELECT set_config('temp_tablespaces', ${'"", PG_DEFAULT'}, false)`;
+        await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET temp_tablespaces FROM CURRENT`);
+        await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET ob1.scalar_probe = 'C:\\temp'`);
+        read = await databaseSettings(rawSrc);
+        await applyDatabaseSettings(rawDst, await databaseSettings(rawSrc));
+      } finally { await rawSrc.close(); await rawDst.close(); }
+      const [rawSrcCfg, rawDstCfg] = [await rawOf(setSrc), await rawOf(setDst)];
+      assert(rawSrcCfg.search_path === 'NoWhere,\tpublic, "Kept", "a\\b"' && rawDstCfg.search_path === 'nowhere, public, "Kept", "a\\b"',
+             `a raw path on the source is copied as the schemas it names (source ${JSON.stringify(rawSrcCfg.search_path)}, target ${JSON.stringify(rawDstCfg.search_path)})`);
+      assert(read.search_path === '"nowhere", "public", "Kept", "a\\b"', `…read on the source, as its server reads it, each name quoted (${JSON.stringify(read.search_path)})`);
+      assert(rawSrcCfg.temp_tablespaces === '"", PG_DEFAULT' && read.temp_tablespaces === '"", "pg_default"' && rawDstCfg.temp_tablespaces === '"", pg_default',
+             `…and a raw temp_tablespaces keeps its empty entry, the default tablespace, and folds its name (source ${JSON.stringify(rawSrcCfg.temp_tablespaces)}, read ${JSON.stringify(read.temp_tablespaces)}, target ${JSON.stringify(rawDstCfg.temp_tablespaces)})`);
+      assert(rawSrcCfg["ob1.scalar_probe"] === "C:\\temp" && rawDstCfg["ob1.scalar_probe"] === "C:\\temp",
+             `…and a scalar holding a backslash is copied as written, not read as an escape (source ${JSON.stringify(rawSrcCfg["ob1.scalar_probe"])}, target ${JSON.stringify(rawDstCfg["ob1.scalar_probe"])})`);
+      // A path set to the empty list: no name to write, so the copy writes ''.
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET search_path = ''`);
+      const emptySrc = new SQL({ url: urlOf(setSrc), max: 1 }), emptyDst = new SQL({ url: urlOf(setDst), max: 1 });
+      try { await applyDatabaseSettings(emptyDst, await databaseSettings(emptySrc)); } finally { await emptySrc.close(); await emptyDst.close(); }
+      const emptied = (await rawOf(setDst)).search_path;
+      assert(emptied === '""', `…and a path set to the empty list is copied as the empty list (target ${JSON.stringify(emptied)})`);
     } finally {
       for (const db of [setSrc, setDst]) await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     }
@@ -5215,13 +5410,23 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   // The refresh guards, without needing client tools: a pg_dump older than the
   // server is refused, and a non-loopback target is refused without the opt-in.
   assert((await refreshToolsReady(9999)).ready === false, "refreshToolsReady refuses when pg_dump cannot read the server's major version");
-  const savedAllow = process.env.OB1_ALLOW_REMOTE_DB;
-  delete process.env.OB1_ALLOW_REMOTE_DB;
-  let refusedRemote = false;
-  try { await refresh("postgres://u@example.com:5432/a", "postgres://u@example.com:5432/b", "canary"); }
-  catch { refusedRemote = true; }
-  finally { if (savedAllow !== undefined) process.env.OB1_ALLOW_REMOTE_DB = savedAllow; }
-  assert(refusedRemote, "refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema)");
+  // The refusal by its words, not any throw: an unreachable example.com threw
+  // too, so a guard removed still passed. The rule's rows are test-connect.ts's;
+  // this holds that --refresh asks it, before it reaches either side.
+  const savedAllow = process.env[REMOTE_DB_FLAG];
+  delete process.env[REMOTE_DB_FLAG];
+  const refreshRefusal = async (to: string): Promise<string> => {
+    try { await refresh("postgres://u@example.com:5432/a", to, "canary"); return "no refusal"; }
+    catch (e) { return (e as Error).message; }
+  };
+  let refusedRemote: string, refusedEmptyHost: string;
+  try {
+    refusedRemote = await refreshRefusal("postgres://u@example.com:5432/b");
+    // tier.ts's own rule trusted an empty host, which resolves through PGHOST (SMD-2302).
+    refusedEmptyHost = await refreshRefusal("postgres:///b");
+  } finally { if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow; }
+  assert(/^--to is not plainly this machine — example\.com is not a loopback host — and OB1_ALLOW_REMOTE_DB is not 1/.test(refusedRemote), `refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema) — got: ${refusedRemote}`);
+  assert(/^--to is not plainly this machine — the URL has no host/.test(refusedEmptyHost), `…and a target with no host, which resolves through PGHOST — got: ${refusedEmptyHost}`);
   // And a --to that is the --from database under another spelling (SMD-2036):
   // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
   // under. The second URL differs as a string (a parameter only), so string

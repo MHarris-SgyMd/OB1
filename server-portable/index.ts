@@ -4,6 +4,8 @@ import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
 import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
 import { captureLineage } from "./lineage.ts";
+import { classifyGenre } from "./genre.ts";
+import { resolveJevConfig } from "./jev.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
@@ -332,6 +334,14 @@ function embedConfig(): EmbedConfig {
 // The tag extraction is metadata.ts (shared with db/sync-linear.ts); this is
 // the server's reader over it, lazy like embedConfig for the same reason.
 const extractMetadata = (text: string, subject: EgressSubject) => extractMetadataWith(text, subject, embedConfig());
+
+// The genre classifier (SMD-2323): a deterministic pre-signal over the metadata
+// first, then the typed-decision tier when OB1_JEV_BASE_URL names one — opt-in
+// and null-by-default, so a capture pays nothing for it unless the tier is
+// configured (the classifier is pre-signal-only and falls back to `other`).
+const jevConfig = () => resolveJevConfig(env());
+const classifyThoughtGenre = (content: string, metadata: Record<string, unknown>, subject: EgressSubject) =>
+  classifyGenre(content, metadata, jevConfig(), subject);
 
 function citationBase(): string {
   return env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
@@ -1493,20 +1503,24 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "List Supersession Proposals",
       description:
-        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all.",
+        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070).",
       annotations: {
         readOnlyHint: true,
       },
       inputSchema: {
         status: z.enum(["pending", "accepted", "rejected", "stale", "all"]).optional().default("pending"),
         limit: z.number().int().min(1).max(200).optional().default(10),
+        lineage: z.boolean().optional().describe("true: only proposals standing on a lineage pair (one side's derived_from names the other); false: only the rest; absent: every pair (migration 070)"),
       },
     },
-    async ({ status, limit }) => {
+    async ({ status, limit, lineage }) => {
       try {
-        const data = await (await db()).listSupersessionProposals({ status: status === "all" ? null : status, limit });
+        const data = await (await db()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }) });
+        const onLineage = lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "";
         if (!data.length) {
-          return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals. The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by).` }] };
+          // A lineage pair is never proposed since 066, so an empty lineage
+          // selection is not the pass's to fill (maintainer read, third pass).
+          return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}.${lineage === true ? "" : " The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by)."}` }] };
         }
         // SMD-1803: through displayDate, never new Date() on a raw column — an
         // undated thought reads "undated", an infinity/BC one its own text, not
@@ -1523,11 +1537,18 @@ function buildServer(principal: Principal): McpServer {
         const results = data.map((p, i) => {
           const edited = p.older.edited || p.newer.edited;
           const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
+          // 070: the CLI refuses an accept on a lineage pair without --force.
           const review = p.status === "pending"
-            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited ? " --force" : ""}   reject: … --reject ${p.id}` +
+            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited || p.lineage ? " --force" : ""}   reject: … --reject ${p.id}` +
               (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
             : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${p.reviewNote ? `: ${cleanForDisplay(p.reviewNote)}` : ""}`;
-          return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.reason ? `\n   ${cleanForDisplay(p.reason)}` : ""}` +
+          // 070 (SMD-2313): a lineage pair — one side derived from the other
+          // — is never proposed since 066; a row standing on one is the
+          // reviewer's to reject, said with the command while it is theirs.
+          const lineageLine = p.lineage
+            ? `\n   LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066${p.status === "pending" || p.status === "stale" ? `; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} --note "lineage pair (066)"` : p.status === "accepted" ? `; accepted while the derivation names its input — cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} clears the pointer (029)` : ""}`
+            : "";
+          return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${p.reason ? `\n   ${cleanForDisplay(p.reason)}` : ""}${lineageLine}` +
             `\n   newer [${day(p.newer.created_at)}]${p.newer.edited ? " (edited since judged)" : ""}: ${snip(p.newer.content)}\n      ID: ${p.newer.id}` +
             `\n   older [${day(p.older.created_at)}]${p.older.edited ? " (edited since judged)" : ""}: ${snip(p.older.content)}\n      ID: ${p.older.id}` +
             `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
@@ -1535,13 +1556,18 @@ function buildServer(principal: Principal): McpServer {
         return {
           content: [{
             type: "text" as const,
-            text: `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s), most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`,
+            text: `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`,
           }],
         };
       } catch (err: unknown) {
         const msg = (err as Error).message;
-        const hint = /list_supersession_proposals|supersession_proposals/.test(msg)
-          ? " — migration 029 (db/migrations/029_supersession_proposals.sql) is not applied, or PostgREST has not reloaded its schema cache"
+        // 070 (SMD-2313): both stores call the three-argument form, so a brain
+        // short of 070 — or of 029, whose queue the listing reads — fails
+        // naming that form (PostgREST names p_lineage); the driver's message
+        // is the same either way, so one hint names both files (cold read,
+        // first and fourth review passes).
+        const hint = /list_supersession_proposals|supersession_proposals|p_lineage/.test(msg)
+          ? " — the migrations through 070 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 070, db/migrations/070_listing_flags_lineage_pair.sql, its current listing), or PostgREST has not reloaded its schema cache"
           : "";
         return {
           content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],
@@ -1978,10 +2004,16 @@ function buildServer(principal: Principal): McpServer {
         // still RECORDS the label below, for the passes and the per-source weight.
         const subject: EgressSubject = { kind: "capture", actor: principal.name, content };
         const gate = decideCalls(subject, cfg, cfg.egress);
-        // Independent of each other, so they overlap.
-        const [embedded, metadata] = await Promise.all([
+        // Independent of each other, so they overlap. The genre classifier reads
+        // the caller's metadata (a `source:linear`/arXiv pre-signal) and, only
+        // when the tier is configured, the content — never the extractor's tags,
+        // so it need not wait for extractMetadata (SMD-2323). Its own egress is
+        // the tier's, so it runs regardless of the capture's chat gate; a tier
+        // outage falls back to `other` inside the classifier, never here.
+        const [embedded, metadata, genre] = await Promise.all([
           gate.embeddings.allowed ? embedCapture(content, subject) : Promise.resolve(undefined),
           gate.chat.allowed ? extractMetadata(content, subject) : Promise.resolve(metadataRefused()),
+          classifyThoughtGenre(content, { ...clientMetadata, source: origin }, subject),
         ]);
         const chunks = embedded?.chunks ?? [];
         const contextFailures = embedded?.contextFailures ?? 0;
@@ -1991,7 +2023,11 @@ function buildServer(principal: Principal): McpServer {
         // shape check above has already refused a reserved key outright, so this
         // only orders the rest), and `summary_model` and its like survive
         // (SMD-2014).
-        const payload = { metadata: { ...clientMetadata, ...metadata, source: origin } };
+        // `genre` last, over both spreads: the classifier already honours a valid
+        // caller-supplied genre (its pre-signal returns it), so placing the
+        // classified value here lets that one round-trip while a bogus one is
+        // overwritten by the classification (SMD-2323).
+        const payload = { metadata: { ...clientMetadata, ...metadata, source: origin, genre: genre.genre } };
 
         // Atomicity is the store's problem now: the SQL path writes content,
         // metadata and vector in one statement, while the PostgREST path keeps the

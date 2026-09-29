@@ -102,7 +102,7 @@ async function runArm(url: string, arm: Arm, reader: ReaderPolicy): Promise<Obse
   // removes them again first thing; the rule is on both sides), and bun told
   // to read no .env file on the way in — a dogfood shell's chunk knob or
   // worker key must not reach the server under test.
-  // Forwarded by name: the throwaway guard's overrides (db/test-support), an
+  // Forwarded by name: the throwaway guard's override (db/test-support), an
   // operator's answer to a safety question, not a knob of the server under test.
   const forwarded = Object.fromEntries(FORWARDED_ENV.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]!]));
   const env = { ...shellWithoutOb1(), ...forwarded, DATABASE_URL: url, OB1_WP_ARM: arm, OB1_WP_READER: reader };

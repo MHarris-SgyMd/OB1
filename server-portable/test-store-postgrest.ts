@@ -25,7 +25,7 @@ import { SQL } from "bun";
 import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
-import { isoTimestamp, isoTimestampOrNull, normaliseMutation } from "./store.ts";
+import { isoDay, isoTimestamp, isoTimestampOrNull, normaliseMutation } from "./store.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -193,6 +193,24 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
   assert(isoTimestamp(-Infinity) === "-infinity" && isoTimestamp("-infinity") === "-infinity", "…and so does -infinity");
   assert(isoTimestamp("0044-03-15T00:00:00+00:00 BC") === "0044-03-15T00:00:00+00:00 BC", "a value with no ISO form keeps Postgres's text — one odd row, not a failed result");
   assert((() => { try { isoTimestamp(undefined); return false; } catch { return true; } })(), "a column missing from the row throws — a SELECT bug, not data");
+
+  // isoDay (SMD-1842): the day a tool prints from a raw driver row. Bun's Date
+  // is the case that printed "Wed Sep 09" through String(d).slice(0, 10).
+  assert(isoDay(new Date("2026-09-09T12:00:00Z")) === "2026-09-09", `a Date is its ISO day (${isoDay(new Date("2026-09-09T12:00:00Z"))})`);
+  assert(isoDay("2026-09-09 12:00:00+00") === "2026-09-09", "a timestamptz string is its ISO day too");
+  assert(isoDay(Infinity) === "infinity" && isoDay("infinity") === "infinity" && isoDay(-Infinity) === "-infinity",
+         "an infinite timestamp prints Postgres's spelling whole, not \"Infinity\" or a stub");
+  assert(isoDay("0044-03-15T00:00:00+00:00 BC") === "0044-03-15T00:00:00+00:00 BC",
+         `PostgREST's BC text comes out whole, not cut at its "T" to an AD day (${isoDay("0044-03-15T00:00:00+00:00 BC")})`);
+  assert(isoDay(new Date("+275760-09-13T00:00:00Z")) === "+275760-09-13",
+         `an extended year is its whole day, not sliced to a year-month stub (${isoDay(new Date("+275760-09-13T00:00:00Z"))})`);
+  assert(isoDay(new Date("-000043-03-15T00:00:00Z")) === "-000043-03-15",
+         `a negative extended year (44 BC in ISO's astronomical count) is its whole day (${isoDay(new Date("-000043-03-15T00:00:00Z"))})`);
+  assert(isoDay("2026-09-09T12:00:00.000Z BC") === "2026-09-09T12:00:00.000Z BC",
+         "only a whole toISOString form is cut: an ISO-shaped head with a suffix comes out whole");
+  assert(isoDay(new Date(NaN)) === "Invalid Date", "Bun's BC Date(NaN) keeps isoTimestamp's text");
+  assert(isoDay(null) === null, "SQL NULL is null, for the caller to word, not \"null\" or the epoch");
+  assert((() => { try { isoDay(undefined); return false; } catch { return true; } })(), "a missing column still throws");
 }
 
 console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");
@@ -607,6 +625,15 @@ console.log("\n[10] listSupersessionProposals's rpc shape over PostgREST (migrat
   assert(pending[0].older.id === older && pending[0].newer.id === newer && /monthly/.test(pending[0].older.content), "…with both thoughts inline");
   assert((await store.listSupersessionProposals({ status: null, limit: 5 })).length === 1, "p_status NULL and an explicit limit bind");
   assert((await store.listSupersessionProposals({ status: "rejected" })).length === 0, "…and a status with no rows is an empty list, not an error");
+  // 070 (SMD-2313): p_lineage named on the rpc — the flag false here, true
+  // once the newer thought's derived_from names the older (set raw), the
+  // selector picking it and false leaving it out.
+  assert(pending[0].lineage === false && (await store.listSupersessionProposals({ lineage: false })).length === 1 && (await store.listSupersessionProposals({ lineage: true })).length === 0,
+         "…lineage is false on a pair neither side of which names the other (070): false selects it over rpc, true does not");
+  await admin`UPDATE thoughts SET derived_from = jsonb_build_array(${older}::text) WHERE id = ${newer}`;
+  const lp = await store.listSupersessionProposals({ lineage: true });
+  assert(lp.length === 1 && lp[0].id === pid && lp[0].lineage === true && (await store.listSupersessionProposals({ lineage: false })).length === 0,
+         `p_lineage over rpc: true selects the row once the newer names the older in derived_from, false leaves it out (${lp.length}: ${lp[0]?.lineage})`);
   await admin.close();
 }
 

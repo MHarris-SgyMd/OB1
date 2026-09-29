@@ -36,6 +36,7 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { requireDatabaseUrl, resetSchema } from "./test-support.ts";
 import { commandLine } from "./cli.ts";
+import { openSql } from "./connect.ts";
 
 commandLine("bench-trgm.ts", {}, { note: "its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-trgm.ts");
@@ -371,7 +372,7 @@ for (const scale of SCALES) {
     // building it after the load would also mean the arm measured a
     // freshly-built index rather than one grown row by row.
     await resetSchema(URL_, { ...OPTS, trgm: withIndex });
-    const c = new SQL({ url: URL_, max: 1 });
+    const c = openSql(URL_);
     if (!withIndex) await dropIndex(c);
     await insertRows(c, generate(model, scale));
     await c`ANALYZE thoughts`;
