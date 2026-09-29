@@ -11,12 +11,17 @@
  * compose file names; the privileges are still --grant's (`--groups`).
  * - The role is LOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOREPLICATION
  *   and NOBYPASSRLS, with no connection limit, no expiry and no settings of
- *   its own, whether it is created or already there.
+ *   its own in any database, whether it is created or already there.
+ * - A role that was there has every privilege it holds in this database
+ *   revoked first (tables, sequences, functions, schemas, the database), so
+ *   what `migrate.ts --grant` gives it next is all it holds.
  * - It refuses a role that is a superuser, a member of any other role (it
  *   would hold that role's privileges, and a member of postgres can SET ROLE
- *   to it), or the owner of anything in any database — a relation, schema,
- *   function, type or the database itself (a schema's owner can drop the
- *   tables in it). Such a role is a migrator's, not one to give a service.
+ *   to it), the owner of anything in any database — a relation, schema,
+ *   function, type, large object or the database itself (a schema's owner can
+ *   drop the tables in it) — or one still holding a privilege a revoke here
+ *   cannot reach (a default privilege naming it, a grant in another
+ *   database). Such a role is not one to give a service.
  * - The password, read from the named variable, must be 24 or more of
  *   [A-Za-z0-9_-] (`provision.ts --init` writes 64 hex). It is sent as a
  *   SCRAM-SHA-256 verifier computed here, so the password itself is never in
@@ -29,6 +34,9 @@ import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
 import { commandLine } from "./cli.ts";
 import { quoteIdent } from "./config.mjs";
 import { closeThenExit, databaseUrl, openSql } from "./connect.ts";
+
+/** A refusal found inside the transaction: exit 2, and the transaction rolled back. */
+class Refusal extends Error {}
 
 /** A role name this step takes: a plain lower-case identifier, so it is quoted the one way. */
 export const ROLE_NAME_RE = /^[a-z_][a-z0-9_]{0,62}$/;
@@ -88,24 +96,41 @@ if (import.meta.main) {
           console.error(`login-role.ts: ${role} is a member of ${memberOf.join(", ")}, whose privileges it holds; this step gives a service a role that is a member of none. Name another role, or revoke the membership. Nothing changed.`);
           return 2;
         }
-        const [{ owned }] = (await sql`SELECT (SELECT count(*) FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = ${found.oid} AND deptype = 'o') + (SELECT count(*) FROM pg_class WHERE relowner = ${found.oid}) AS owned`) as { owned: number }[];
-        if (Number(owned) > 0) {
-          console.error(`login-role.ts: ${role} owns ${owned} object(s) (a relation, schema, function, type or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
+        // pg_shdepend is shared: it holds an owner row for every object the role owns in any database, the database itself included (review pass 2: a pg_class count beside it counted each table again).
+        const [{ owned }] = (await sql`SELECT count(*)::int AS owned FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = ${found.oid} AND deptype = 'o'`) as { owned: number }[];
+        if (owned > 0) {
+          console.error(`login-role.ts: ${role} owns ${owned} object(s) (a relation, schema, function, type, large object or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
           return 2;
         }
       }
       // The verifier holds only base64 and `$:`, so it quotes as it stands; the doubled quote is the rule all the same.
       const verifier = scramVerifier(process.env[passwordEnv]!).replaceAll("'", "''");
+      const ident = quoteIdent(role);
       await sql.begin(async (tx) => {
-        await tx.unsafe(`${found ? "ALTER" : "CREATE"} ROLE ${quoteIdent(role)} ${ROLE_ATTRIBUTES} CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD '${verifier}'`);
-        // A setting made on the role by hand (a search_path, a statement timeout) goes with the rest of what this step does not make.
-        if (found) await tx.unsafe(`ALTER ROLE ${quoteIdent(role)} RESET ALL`);
+        await tx.unsafe(`${found ? "ALTER" : "CREATE"} ROLE ${ident} ${ROLE_ATTRIBUTES} CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD '${verifier}'`);
+        if (!found) return;
+        // What this step does not make goes, for a role that was there: its settings, the role's own and each database's (review pass 2: a search_path set IN DATABASE survived RESET ALL and sent the runner's unqualified function calls to a planted schema) ...
+        await tx.unsafe(`ALTER ROLE ${ident} RESET ALL`);
+        const settingDbs = (await tx`SELECT d.datname FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE s.setrole = ${found.oid}`) as { datname: string }[];
+        for (const { datname } of settingDbs) await tx.unsafe(`ALTER ROLE ${ident} IN DATABASE ${quoteIdent(datname)} RESET ALL`);
+        // ... and every privilege it holds in this database, so what --grant gives next is all it holds (review pass 2: --groups revokes nothing, and a role granted more before kept it).
+        const schemas = (await tx`SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'`) as { nspname: string }[];
+        for (const { nspname } of schemas) {
+          const s = quoteIdent(nspname);
+          for (const kind of ["TABLES", "SEQUENCES", "FUNCTIONS"]) await tx.unsafe(`REVOKE ALL ON ALL ${kind} IN SCHEMA ${s} FROM ${ident}`);
+          await tx.unsafe(`REVOKE ALL ON SCHEMA ${s} FROM ${ident}`);
+        }
+        const [{ db }] = (await tx`SELECT current_database() AS db`) as { db: string }[];
+        await tx.unsafe(`REVOKE ALL ON DATABASE ${quoteIdent(db)} FROM ${ident}`);
+        // What a REVOKE here cannot reach — a default privilege naming it, a grant in another database, on a type or a large object — is refused, and the transaction with it.
+        const [{ left }] = (await tx`SELECT count(*)::int AS left FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = ${found.oid} AND deptype = 'a'`) as { left: number }[];
+        if (left > 0) throw new Refusal(`${role} still holds ${left} privilege(s) this step cannot revoke here (a default privilege naming it, or a grant in another database, on a type or on a large object); a service's role holds only what --grant gives it. Revoke them, or name another role. Nothing changed.`);
       });
-      console.log(`login-role.ts: ${role} ${found ? "updated" : "created"} (${ROLE_ATTRIBUTES}; password from ${passwordEnv}, stored as a SCRAM verifier)`);
+      console.log(`login-role.ts: ${role} ${found ? "updated, its settings and privileges cleared for --grant" : "created"} (${ROLE_ATTRIBUTES}; password from ${passwordEnv}, stored as a SCRAM verifier)`);
       return 0;
     } catch (e) {
       console.error(`login-role.ts: ${(e as Error).message}`);
-      return 1;
+      return e instanceof Refusal ? 2 : 1;
     }
   });
 }

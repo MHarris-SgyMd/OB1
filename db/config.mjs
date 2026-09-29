@@ -2198,7 +2198,7 @@ export function grantedObjects(groups = ROLE_GRANT_GROUPS) {
  * answer "is this object documented at all", this keeps an object's rows apart,
  * because db/README.md documents privileges per group and an object can appear
  * in more than one with a different set (`ob1_config`: SELECT in `server`,
- * INSERT/UPDATE in `worker`; `thought_audit`: INSERT in `capture`, SELECT in
+ * SELECT/INSERT/UPDATE in `worker`; `thought_audit`: INSERT in `capture`, SELECT in
  * `server`, SELECT and INSERT in `community`). check-fork-consistency's privilege comparison reads it
  * (SMD-1471).
  */
@@ -2269,7 +2269,7 @@ export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = nu
  * The groups' rows merged per object — [{ kind, name, privileges }] in
  * group/list order, privileges in a stable order. An object can appear in
  * more than one group with different privileges (ob1_config: SELECT in
- * `server`, INSERT/UPDATE in `worker`; thought_audit: INSERT in `capture`,
+ * `server`, SELECT/INSERT/UPDATE in `worker`; thought_audit: INSERT in `capture`,
  * SELECT and INSERT in `community`), so the role gets one GRANT combining
  * them. `present` (object names) drops what a database lacks. Shared by
  * grantStatements and grantVerifySql so what is granted and what is checked

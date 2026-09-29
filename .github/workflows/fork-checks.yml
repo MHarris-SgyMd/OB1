@@ -1059,10 +1059,14 @@ jobs:
       # then updated, as a rotated password would be. Then it is asked over the
       # compose network, as the runner connects (inside the postgres container
       # localhost is trusted, so the password would never be checked there):
-      # with its password it is itself, not a superuser, reads thoughts, and
-      # cannot create a table; with a wrong one it is refused. Last, the step
-      # refuses a superuser that owns nothing, and a member of another role,
-      # each by name (review pass 1).
+      # with its password it is itself, not a superuser, a member of no role,
+      # reads the ledger and ob1_config, may not write ob1_agent_keys (where a
+      # key's revocation lives), and cannot create a table; with a wrong one
+      # it is refused as that. Then the step refuses, by name, a superuser, a
+      # member of another role, an owner and a default privilege's grantee,
+      # and clears a role's leftover privilege and per-database setting
+      # (review passes 1 and 2). Each check is an `if` or an `||`: bash -e
+      # does not stop on a failure inside an `&&` list.
       - name: The import runner's database role is made and granted
         working-directory: deploy
         env:
@@ -1070,26 +1074,30 @@ jobs:
         run: |
           # run's own flags, then the service, then a command in its image.
           oneshot() { docker compose -f compose.yaml --profile orchestration run --rm --no-deps "$@"; }
+          superuser() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc "$1"; }
           oneshot orchestration-runner-role
           oneshot orchestration-runner-role | tee /tmp/role-again.log
           grep -q "ob1_orchestration_runner updated" /tmp/role-again.log
           good="postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD}@postgres:5432/openbrain"
           # shellcheck disable=SC2016 # JavaScript, whose template literals stay unexpanded
-          ask='const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); const [r] = await s`SELECT current_user::text AS u, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS su, (SELECT count(*)::int FROM thoughts) AS n`; let created = true; try { await s`CREATE TABLE ob1_runner_role_probe (x int)`; } catch { created = false; } await s.close(); console.log(JSON.stringify({ ...r, created })); process.exit(r.u === "ob1_orchestration_runner" && r.su === false && !created ? 0 : 1);'
+          ask='const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); const [r] = await s`SELECT current_user::text AS u, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS su, (SELECT count(*)::int FROM pg_auth_members m JOIN pg_roles x ON x.oid = m.member WHERE x.rolname = current_user) AS memberships, has_table_privilege(${"schema_migrations"}, ${"SELECT"}) AS ledger, has_table_privilege(${"ob1_config"}, ${"SELECT"}) AS config, has_table_privilege(${"ob1_agent_keys"}, ${"UPDATE"}) AS keys, (SELECT count(*)::int FROM thoughts) AS n`; let created = true; try { await s`CREATE TABLE ob1_runner_role_probe (x int)`; } catch { created = false; } await s.close(); console.log(JSON.stringify({ ...r, created })); process.exit(r.u === "ob1_orchestration_runner" && r.su === false && r.memberships === 0 && r.ledger && r.config && !r.keys && !created ? 0 : 1);'
           oneshot -e ROLE_URL="$good" orchestration-runner-role bun -e "$ask"
           # shellcheck disable=SC2016 # JavaScript, as above
-          if oneshot -e ROLE_URL="${good/@postgres/x@postgres}" orchestration-runner-role bun -e 'const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); await s`SELECT 1`;'; then
+          if wrong=$(oneshot -e ROLE_URL="${good/@postgres/x@postgres}" orchestration-runner-role bun -e 'const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); await s`SELECT 1`;' 2>&1); then
             echo "a wrong password was accepted"; exit 1
           fi
-          docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qc "CREATE ROLE ci_super SUPERUSER; CREATE ROLE ci_member; GRANT pg_read_all_data TO ci_member;"
-          for probe in "ci_super is a superuser" "ci_member is a member of pg_read_all_data"; do
+          grep -q "password authentication failed" <<<"$wrong" || { echo "a wrong password failed, but not as a refused password: $wrong"; exit 1; }
+          superuser "CREATE ROLE ci_super SUPERUSER; CREATE ROLE ci_member; GRANT pg_read_all_data TO ci_member; CREATE ROLE ci_owner; CREATE SCHEMA ci_owned AUTHORIZATION ci_owner; CREATE ROLE ci_defacl; ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT ON TABLES TO ci_defacl; CREATE ROLE ci_prior; GRANT UPDATE ON ob1_agent_keys TO ci_prior; ALTER ROLE ci_prior IN DATABASE openbrain SET search_path = ci_owned, public;"
+          for probe in "ci_super is a superuser" "ci_member is a member of pg_read_all_data" "ci_owner owns" "ci_defacl still holds"; do
             set +e
             out=$(oneshot orchestration-runner-role bun login-role.ts --role "${probe%% *}" --password-env OB1_RUNNER_DB_PASSWORD 2>&1)
             code=$?
             set -e
             echo "$out" | tail -1
-            [ "$code" = 2 ] && grep -q "$probe" <<<"$out"
+            { [ "$code" = 2 ] && grep -q "$probe" <<<"$out"; } || { echo "login-role.ts did not refuse ${probe%% *} as \"$probe\" (exit $code)"; exit 1; }
           done
+          oneshot orchestration-runner-role bun login-role.ts --role ci_prior --password-env OB1_RUNNER_DB_PASSWORD
+          [ "$(superuser "SELECT has_table_privilege('ci_prior', 'ob1_agent_keys', 'UPDATE') OR EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE r.rolname = 'ci_prior')")" = "f" ] || { echo "ci_prior kept a privilege or a setting"; exit 1; }
 
       # SMD-2289: the image's own start, as compose runs the service but
       # without its dependencies (starting opens no database connection).

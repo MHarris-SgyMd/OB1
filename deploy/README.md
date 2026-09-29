@@ -950,7 +950,10 @@ no other role.
 - The `orchestration-runner-role` step makes it, on the migrator's image and
   as the migrator connects, before the runner starts, on every `up`:
   `db/login-role.ts` creates the role or resets its password to
-  `OB1_RUNNER_DB_PASSWORD`, then `migrate.ts --grant --groups` grants.
+  `OB1_RUNNER_DB_PASSWORD` and clears what an existing one holds (its
+  settings in every database, its privileges here), then `migrate.ts
+  --grant --groups` grants. It refuses a role it cannot clear: a superuser,
+  a member of another role, an owner, or one a default privilege names.
 - So a new migration's grants reach it on the next start. To rotate the
   password, edit `OB1_RUNNER_DB_PASSWORD` and start the profile again
   (`compose --profile orchestration up -d`).

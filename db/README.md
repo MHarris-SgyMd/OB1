@@ -917,16 +917,23 @@ refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once, or with `--groups capture,worker,…` those alone
 (SMD-2289). `--groups` grants less; it revokes nothing, so a role granted
 more before keeps it. `db/login-role.ts --role <name> --password-env <VAR>`
-creates or updates the LOGIN role itself (not a superuser, owning nothing),
+creates or updates the LOGIN role itself (not a superuser, owning nothing,
+a member of no role; an existing one has its settings in every database and
+its privileges in this one cleared first, so the `--grant` after it is all it
+holds),
 its password sent as a SCRAM verifier, for a compose service that connects as
 a role of its own: the orchestration runner's `ob1_orchestration_runner`
 holds capture, worker, structure and extraction, what its ingester
 and reembed run (measured), and not the server group, whose writes to
 `ob1_agent_keys` could clear a key's revocation. `login-role.ts` refuses a
-role that is a superuser, a member of another role, or the owner of
-anything. Under that role, reembed's `ANALYZE thought_work_claims` (the
-owner's to run) is skipped with a warning, and autovacuum keeps the
-claim table's statistics.
+role that is a superuser, a member of another role, the owner of anything, or
+one still holding a privilege it cannot revoke (a default privilege naming
+it, a grant in another database). Under that role the `ANALYZE
+thought_work_claims` that reembed and 015's `enqueue_thoughts` run (the
+owner's to run) is skipped: Postgres warns, the client does not print it, and
+autovacuum keeps the claim table's statistics. The worker group's `UPDATE` on
+`ob1_config` covers the whole table, the event log's ordering key among its
+rows, as it does for every worker; narrowing it would take row-level policy.
 
 | Group | Object (migration, or `schemas/` file) | Privileges |
 | --- | --- | --- |
