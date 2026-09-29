@@ -5295,7 +5295,7 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
         writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
         chmodSync(join(shimDir, name), 0o755);
       };
-      shim("pg_dump", `while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; [ -n "$t" ] && echo "CREATE TABLE $t ();"; exit 0`);
       shim("pg_restore", "exit 1");
       process.env.PATH = `${shimDir}:${savedPath}`;
       let failed: string | null = null;
@@ -7478,7 +7478,7 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
       chmodSync(join(shimDir, name), 0o755);
     };
-    shim("pg_dump", `: > "${started}"; i=0; while [ ! -e "${go}" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+    shim("pg_dump", `: > "${started}"; i=0; while [ ! -e "${go}" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; [ -n "$t" ] && echo "CREATE TABLE $t ();"; exit 0`);
     shim("pg_restore", "exit 1");
     process.env.PATH = `${shimDir}:${savedPath}`;
     let midRefused: string | null = null;
@@ -7507,12 +7507,69 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       const after = await markers();
       assert(/did not produce the thoughts table/.test(markRun ?? "") && bAfter === null && after[B] && !after[A],
         `a current_database() planted in --to ahead of pg_catalog does not move the mark: the refresh reached its restore on ${A}, and ${B} is neither marked nor dropped (${(markRun ?? "no error").slice(0, 80)}; ${B}'s settings ${JSON.stringify(bAfter)}; markers ${JSON.stringify(after)})`);
+      const clean = new SQL({ url: urlOf(A), max: 1 });
+      try { await clean.unsafe("DROP SCHEMA evil CASCADE"); } finally { await clean.close(); }
+    }
+
+    // The tools get toolTarget's connection, never the URL (SMD-2317's second
+    // PR): stand-in tools record their argv and environment while every
+    // variable that redirects libpq is exported. Bun ignores these when the
+    // URL names a host (measured), so the guards pass and the refresh runs to
+    // the stand-in restore.
+    {
+      await plant();
+      const rec = (name: string) => join(shimDir, `${name}.rec`);
+      const recorder = (name: string, rest: string) => shim(name, `{ echo "--- argv"; printf '%s\\n' "$@"; echo "--- env"; env; } >> "${rec(name)}"\n${rest}`);
+      recorder("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; [ -n "$t" ] && echo "CREATE TABLE $t ();"; exit 0`);
+      recorder("pg_restore", "exit 1");
+      const redirects = { PGHOSTADDR: "10.9.9.9", PGSERVICE: "ob1-nosuch", PGOPTIONS: "-csearch_path=elsewhere", PGHOST: "prod.invalid", PGUSER: "nobody", PGSERVICEFILE: "/nonexistent/pg_service.conf" };
+      // A role of its own, so the password is a string no database name holds
+      // (the throwaway server's is its database's name).
+      const password = "rec-SECRET-2317";
+      await admin.unsafe(`DROP ROLE IF EXISTS ob1_rec; CREATE ROLE ob1_rec LOGIN SUPERUSER PASSWORD '${password}'`);
+      const asRec = (db: string) => { const x = new URL(urlOf(db)); x.username = "ob1_rec"; x.password = password; return x.toString(); };
+      const saved: Record<string, string | undefined> = {};
+      for (const [k, v] of Object.entries(redirects)) { saved[k] = process.env[k]; process.env[k] = v; }
+      let recRun: string | null = null;
+      try { await refresh(asRec(new URL(URL_!).pathname.slice(1)), asRec(A), "working"); } catch (e) { recRun = (e as Error).message; }
+      finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
+      const u = new URL(asRec(A));
+      const dumpRec = existsSync(rec("pg_dump")) ? readFileSync(rec("pg_dump"), "utf8") : "";
+      const restoreRec = existsSync(rec("pg_restore")) ? readFileSync(rec("pg_restore"), "utf8") : "";
+      const argvOf = (r: string) => r.split("--- argv").slice(1).map((s) => s.split("--- env")[0]).join("");
+      const envOf = (r: string) => r.split("--- env").slice(1).join("");
+      const conninfoTo = `host='${u.hostname}' port='${u.port}' dbname='${A}' user='${u.username}'`;
+      const dbName = u.pathname.slice(1);
+      assert(/did not produce the thoughts table/.test(recRun ?? "") && argvOf(restoreRec).includes(conninfoTo) && argvOf(dumpRec).includes(`host='${u.hostname}' port='${u.port}' dbname='${dbName}' user='${u.username}'`) && argvOf(dumpRec).includes(conninfoTo),
+        `pg_dump (the dump and the probe) and pg_restore are handed a connection string of the URL's host and port and the server's database and user, not the URL (${(recRun ?? "no error").slice(0, 60)}; restore argv ${JSON.stringify(argvOf(restoreRec).split("\n").filter((l) => l.startsWith("host=")))})`);
+      assert(!argvOf(dumpRec + restoreRec).includes(password) && !argvOf(dumpRec + restoreRec).includes("postgres://") && envOf(restoreRec).includes(`PGPASSWORD=${password}`),
+        "…with the password in PGPASSWORD and no URL or password on any argv");
+      const leaked = Object.keys(redirects).filter((k) => new RegExp(`^${k}=`, "m").test(envOf(dumpRec + restoreRec)));
+      assert(leaked.length === 0, `…and none of PGHOSTADDR, PGSERVICE, PGSERVICEFILE, PGOPTIONS, PGHOST, PGUSER in either tool's environment (${leaked.join(", ") || "none"})`);
+      rmSync(rec("pg_dump"), { force: true });
+      rmSync(rec("pg_restore"), { force: true });
+    }
+
+    // The probe: pg_dump is asked, on the connection string pg_restore will
+    // get, for a table made through the connection that drops. A tool that
+    // reaches anywhere else finds nothing, and --to is left as it was.
+    {
+      await plant();
+      shim("pg_dump", `while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+      let probeRun: string | null = null;
+      try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { probeRun = (e as Error).message; }
+      const a = new SQL({ url: urlOf(A), max: 1 });
+      let leftovers = -1;
+      try { leftovers = Number((await a`SELECT count(*)::int AS n FROM pg_class WHERE relname LIKE 'ob1_refresh_probe_%'`)[0].n); } finally { await a.close(); }
+      assert(/^--to: pg_dump, given the connection the guards judged, did not find a table just created there/.test(probeRun ?? "") && /--to is untouched/.test(probeRun ?? "") && (await markers())[A] && leftovers === 0,
+        `a pg_dump that does not find the probe's table stops the refresh before the mark and the drop: ${A} keeps its thoughts and no probe table (${(probeRun ?? "no refusal").slice(0, 120)}; ${leftovers} left)`);
     }
   } finally {
     process.env.PATH = savedPath;
     if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
     rmSync(shimDir, { recursive: true, force: true });
     for (const db of [A, B]) await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+    await admin.unsafe("DROP ROLE IF EXISTS ob1_rec");
     await admin.close();
   }
 }

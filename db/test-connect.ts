@@ -21,7 +21,7 @@ import { networkInterfaces } from "node:os";
 import {
   LOOPBACK_HOSTS, NO_DATABASE_URL, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, UNPARSEABLE_DATABASE_URL, URL_QUERY_KEYS,
   connectedResetRefusal, databaseOf, databaseUrl, databaseUrlProblem, hostOf, identityRefusal, mayReset, notThrowaway, openSql,
-  reachedDatabaseRefusal, remoteDbAllowed, resetRefusal, socketRefusal,
+  reachedDatabaseRefusal, remoteDbAllowed, resetRefusal, socketRefusal, TOOL_PG_KEEP, conninfoValue, toolTarget,
 } from "./connect.ts";
 
 let pass = 0;
@@ -250,6 +250,44 @@ const SPLITS: [string, RegExp, string][] = [
   const both = conn("stable", true);
   const bothWhy = await connectedResetRefusal(both, URL_A, { [REMOTE_DB_FLAG]: "1" });
   ok(/reached database "stable"/.test(bothWhy ?? "") && both.asked.length === 1, `the database is asked first, and a wrong one ends it (${both.asked.length} question(s))`);
+}
+
+// ---------------------------------------------------------------------------
+// The libpq tools' connection: built from the URL's parts, never the URL
+// (SMD-2317's second PR).
+// ---------------------------------------------------------------------------
+{
+  const AS = { database: "canary", user: "ob1u" };
+  const t = toolTarget(`postgres://u:${MARK}@127.0.0.1:5433/stable?sslmode=disable&application_name=ob1&options=-csearch_path%3Dx%20-cwork_mem%3D4MB`, AS, {});
+  ok(t.conninfo === "host='127.0.0.1' port='5433' dbname='canary' user='ob1u' sslmode='disable' application_name='ob1' options='-csearch_path=x -cwork_mem=4MB'",
+    `the tools' connection: the URL's host and port, the server's database and user, the three kept keys decoded (${t.conninfo})`);
+  ok(!t.conninfo.includes(MARK) && t.env.PGPASSWORD === MARK, "the password is in PGPASSWORD, not the connection string (argv)");
+  ok(toolTarget("postgres://u:p%40ss%3Aw%2Fd@localhost:5432/x", AS, {}).env.PGPASSWORD === "p@ss:w/d", "the password decoded, as Bun decodes it");
+  ok(toolTarget("postgres://u@[::1]:5432/x", AS, {}).conninfo.startsWith("host='::1' port='5432'"), "IPv6: the host's brackets off, as libpq's host= takes it");
+  ok(toolTarget("postgres://u@localhost/x", AS, {}).conninfo.includes("port='5432'"), "no port in the URL: 5432, Bun's default (identityRefusal refuses one while PGPORT is exported)");
+  ok(toolTarget("postgres://u@localhost:5432/x", { database: "it's a\\b", user: "o'k" }, {}).conninfo.includes("dbname='it\\'s a\\\\b' user='o\\'k'"), "a ' or \\ in a value is escaped the way libpq's keyword/value parser reads it");
+  // The environment: every PG* variable that chooses a server, database or
+  // user goes; what authenticates stays; the rest of the environment is kept.
+  const env = {
+    PATH: "/bin", HOME: "/h", PGHOST: "prod", PGHOSTADDR: "10.0.0.5", PGPORT: "6543", PGDATABASE: "stable", PGUSER: "admin", PGSERVICE: "prod",
+    PGSERVICEFILE: "/etc/svc", PGSYSCONFDIR: "/etc", PGOPTIONS: "-crole=x", PGTARGETSESSIONATTRS: "read-write", PGLOADBALANCEHOSTS: "random", PGAPPNAME: "x",
+    PGPASSFILE: "/h/.pgpass", PGSSLMODE: "require", PGSSLROOTCERT: "/ca", PGCHANNELBINDING: "require", PGREQUIREAUTH: "scram-sha-256", PGGSSENCMODE: "disable", PGKRBSRVNAME: "pg", PGCONNECT_TIMEOUT: "5",
+    PGPASSWORD: "from-env",
+  };
+  const withPw = toolTarget(`postgres://u:${MARK}@localhost:5432/x`, AS, env).env;
+  const gone = ["PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGUSER", "PGSERVICE", "PGSERVICEFILE", "PGSYSCONFDIR", "PGOPTIONS", "PGTARGETSESSIONATTRS", "PGLOADBALANCEHOSTS", "PGAPPNAME"];
+  const kept = ["PGPASSFILE", "PGSSLMODE", "PGSSLROOTCERT", "PGCHANNELBINDING", "PGREQUIREAUTH", "PGGSSENCMODE", "PGKRBSRVNAME", "PGCONNECT_TIMEOUT", "PATH", "HOME"];
+  ok(gone.every((k) => !(k in withPw)), `the variables that redirect libpq are removed (${gone.filter((k) => k in withPw).join(", ") || "none left"})`);
+  ok(kept.every((k) => withPw[k] === (env as Record<string, string>)[k]), `the ones that authenticate or bound, and the rest of the environment, are kept (${kept.filter((k) => withPw[k] !== (env as Record<string, string>)[k]).join(", ") || "all kept"})`);
+  ok(withPw.PGPASSWORD === MARK, "a URL's password replaces PGPASSWORD");
+  ok(toolTarget("postgres://u@localhost:5432/x", AS, env).env.PGPASSWORD === "from-env", "…and with none in the URL, the environment's password stays: it authenticates, and chooses nothing");
+  ok(TOOL_PG_KEEP.test("PGSSLCERT") && !TOOL_PG_KEEP.test("PGSERVICE") && !TOOL_PG_KEEP.test("PGHOSTADDR") && !TOOL_PG_KEEP.test("PGPASSWORD"), "TOOL_PG_KEEP: the SSL family in; the redirects and the password (handled apart) out");
+  ok(conninfoValue("a b") === "'a b'" && conninfoValue("") === "''", "conninfoValue quotes every value, the empty one too");
+  // A portless URL while PGPORT is exported: Bun takes PGPORT, the tools 5432.
+  ok(/names no port and PGPORT is exported/.test(identityRefusal("postgres://u@localhost/x", { PGPORT: "6543" }) ?? "") && !mayReset("postgres://u@localhost/x", { PGPORT: "6543", [REMOTE_DB_FLAG]: "1" }),
+    "a URL with no port while PGPORT is exported is refused, override or not (measured: dropSchema dropped a second server's database)");
+  ok(identityRefusal("postgres://u@localhost:5432/x", { PGPORT: "6543" }) === null && identityRefusal("postgres://u@localhost/x", {}) === null && identityRefusal("postgres://u@localhost/x", { PGPORT: "" }) === null,
+    "…and not a URL that names its port, nor a portless one with PGPORT unset or empty");
 }
 
 // ---------------------------------------------------------------------------

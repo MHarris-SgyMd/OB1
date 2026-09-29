@@ -83,7 +83,7 @@ import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
-import { closeThenExit, connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal } from "./connect.ts";
+import { closeThenExit, connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal, toolTarget, type ToolTarget } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -506,15 +506,42 @@ export async function refreshToolsReady(serverMaj: number): Promise<{ ready: boo
   return { ready: true };
 }
 
-async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Promise<{ code: number; out: string; err: string }> {
+async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe"; env?: Record<string, string> } = {}): Promise<{ code: number; out: string; err: string }> {
   const proc = Bun.spawn(cmd, {
     stdout: opts.stdio === "inherit" ? "inherit" : "pipe",
     stderr: opts.stdio === "inherit" ? "inherit" : "pipe",
-    env: process.env,
+    env: opts.env ?? process.env,
   });
   const out = opts.stdio === "inherit" ? "" : await new Response(proc.stdout).text();
   const err = opts.stdio === "inherit" ? "" : await new Response(proc.stderr).text();
   return { code: await proc.exited, out, err };
+}
+
+/** The database and user the server says `sql` is connected as: what a tool's connection names (toolTarget). */
+async function reachedAs(sql: SQL): Promise<{ database: string; user: string }> {
+  const [row] = await sql<{ db: string; u: string }[]>`SELECT pg_catalog.current_database() AS db, current_user AS u`;
+  return { database: row.db, user: row.u };
+}
+
+/**
+ * Why pg_dump, handed `tool`, does not reach the database `dst` is connected
+ * to, or null when it does. The server cannot say where a client dialled from
+ * (behind a published port its address is the container's), so the tool is
+ * asked directly: a table only this run knows is created through `dst`, and
+ * pg_dump's schema of that one table must name it. A tool that went anywhere
+ * else finds nothing (SMD-2317). The table is dropped either way; on success
+ * the reset that follows would drop it anyway.
+ */
+export async function toolReachRefusal(dst: SQL, tool: ToolTarget): Promise<string | null> {
+  const probe = `ob1_refresh_probe_${crypto.randomUUID().replaceAll("-", "")}`;
+  await dst.unsafe(`CREATE TABLE public.${probe} ()`);
+  try {
+    const r = await run(["pg_dump", "--schema-only", "--no-owner", "--no-privileges", "--no-password", "-t", `public.${probe}`, "-d", tool.conninfo], { env: tool.env });
+    if (r.code === 0 && r.out.includes(probe)) return null;
+    return `pg_dump, given the connection the guards judged, did not find a table just created there (exit ${r.code}${r.err.trim() ? `: ${r.err.trim().split("\n")[0]}` : ""}) — it reaches another database or server`;
+  } finally {
+    await dst.unsafe(`DROP TABLE IF EXISTS public.${probe}`);
+  }
 }
 
 /**
@@ -523,7 +550,9 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
  *   2. mark the target as a refresh target (refreshMark), then reset its public
  *      schema (the destructive step, guarded by targetRefusal, the loopback
- *      check, and the connected check asked on the connection that drops).
+ *      check, the connected check asked on the connection that drops, and a
+ *      probe showing pg_dump reaches that same database, toolReachRefusal).
+ * pg_dump and pg_restore get toolTarget's connection, never the URL.
  *   3. pg_restore the dump.
  *   4. copy the source's database-level settings (databaseSettings), which the
  *      dump does not carry — 014's HNSW bounds among them (SMD-2037).
@@ -549,6 +578,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   const target = openSql(toUrl);
   let serverMaj: number;
   let settings: Record<string, string>;
+  let fromAs: { database: string; user: string };
   try {
     await reach(src, fromUrl, "--from");
     await reach(target, toUrl, "--to");
@@ -559,6 +589,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     if (fromReached !== null) throw new Error(`--from: ${fromReached}. Refusing: pg_dump would read the URL's database, not the one checked.`);
     const toReached = await connectedResetRefusal(target, toUrl);
     if (toReached !== null) throw new Error(`--to: ${toReached}. Refusing: --refresh drops the target's schema.`);
+    fromAs = await reachedAs(src);
     serverMaj = await serverMajor(src);
     settings = await databaseSettings(src);
     // The reset below drops --to's schema, so --to must be neither the source
@@ -579,7 +610,12 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   const dir = await mkdtemp(join(tmpdir(), "ob1-tier-"));
   const dumpFile = join(dir, "stable.dump");
   try {
-    const dumped = await run(["pg_dump", "-Fc", "--no-owner", "--no-privileges", "-f", dumpFile, fromUrl]);
+    // The tools get a connection built from the URL's parts and the server's
+    // answer, never the URL: libpq read URLs by rules of its own and followed
+    // PGHOSTADDR/PGSERVICE past the guards (connect.ts toolTarget, SMD-2317).
+    // --no-password: a missing password fails rather than waits on a prompt.
+    const fromTool = toolTarget(fromUrl, fromAs);
+    const dumped = await run(["pg_dump", "-Fc", "--no-owner", "--no-privileges", "--no-password", "-f", dumpFile, "-d", fromTool.conninfo], { env: fromTool.env });
     if (dumped.code !== 0) throw new Error(`pg_dump failed (exit ${dumped.code}): ${dumped.err.trim()}`);
 
     // Reset the target so the restore lands on a clean schema. DROP … CASCADE is
@@ -589,12 +625,18 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     // recognises as its own (refreshMark). `tier` is one of TIERS, checked by
     // the caller; ALTER DATABASE takes no bind parameters.
     const dst = openSql(toUrl);
+    let toTool: ToolTarget;
     try {
       if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
       // Asked again on this connection, the one that marks and drops: the
       // guard's own connection is closed, and this one is a new resolution.
       const again = await connectedResetRefusal(dst, toUrl);
       if (again !== null) throw new Error(`--to: ${again}. Refusing: --refresh drops the target's schema. --to is untouched.`);
+      // pg_restore will write where its connection goes, so pg_dump is asked,
+      // on that same connection string, to find a table made on this one.
+      toTool = toolTarget(toUrl, await reachedAs(dst));
+      const unreached = await toolReachRefusal(dst, toTool);
+      if (unreached !== null) throw new Error(`--to: ${unreached}. Refusing: pg_restore would write there. --to is untouched.`);
       try {
         // pg_catalog's, not the path's: a URL's options= may set search_path,
         // and a planted current_database() would put the mark on another
@@ -613,7 +655,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
       await dst.close();
     }
 
-    const restored = await run(["pg_restore", "--no-owner", "--no-privileges", "-d", toUrl, dumpFile]);
+    const restored = await run(["pg_restore", "--no-owner", "--no-privileges", "--no-password", "-d", toTool.conninfo, dumpFile], { env: toTool.env });
     // pg_restore exits non-zero on benign warnings (e.g. a comment on an extension
     // it did not create); treat a restore that produced the core table as success,
     // otherwise surface it.
