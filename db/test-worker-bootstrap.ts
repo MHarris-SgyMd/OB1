@@ -11,7 +11,7 @@
  */
 
 import { providerEndpoint } from "../server-portable/embed.ts";
-import { resolveEgressPolicy, ROW_UNITS, type EgressEnv } from "../server-portable/egress.ts";
+import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, egressDescription, egressRefusal, regateMessage } from "./worker-bootstrap.ts";
 
 let pass = 0;
@@ -24,7 +24,7 @@ function ok(cond: boolean, msg: string): void {
 const remote = providerEndpoint("https://api.openai.com", "k", false);
 const local = providerEndpoint("http://localhost:11434", undefined, true, "OB1_LLM_LOCAL");
 // The default policy: deny, no allow terms — every remote call refused.
-const deny = resolveEgressPolicy({} as EgressEnv);
+const deny = resolveEgressPolicy({});
 
 // ---------------------------------------------------------------------------
 // egressRefusal — the bare reason, or null.
@@ -38,6 +38,22 @@ const deny = resolveEgressPolicy({} as EgressEnv);
   // be null like the local one. The two must differ.
   ok(egressRefusal(remote, deny, ROW_UNITS) !== egressRefusal(local, deny, ROW_UNITS),
     "the gate distinguishes the remote endpoint from the local one (drop-the-gate mutant)");
+}
+
+// ---------------------------------------------------------------------------
+// The units default — the optimistic keyed gate. With a worker key set the
+// workers pass units=undefined, which credits the full set (an actor among
+// them); the keyless caller passes ROW_UNITS, which carries no actor. Under a
+// deny policy whose only allow term is an actor:, the two must differ — the
+// keyed gate passes, the keyless one (and the identity re-gate) is refused.
+// ---------------------------------------------------------------------------
+{
+  const actorAllow = resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:someone" });
+  ok(egressRefusal(remote, actorAllow, undefined) === null,
+    "units undefined reaches the default EGRESS_UNITS (an actor among them): an actor: allow term lets the optimistic keyed gate pass");
+  const keyless = egressRefusal(remote, actorAllow, ROW_UNITS);
+  ok(keyless !== null && /names a unit this caller never carries/.test(keyless),
+    "the same policy refuses a ROW_UNITS caller — it carries no actor for the actor: term to match (the re-gate case)");
 }
 
 // ---------------------------------------------------------------------------
