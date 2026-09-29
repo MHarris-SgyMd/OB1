@@ -295,6 +295,16 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   // A URL beside the client is the worker key's, held to connect.ts's rule too.
   const beside = await inProcess({ sql: stub, url: "mysql://h/x" });
   ok(beside.code === 2 && beside.err === `${UNPARSEABLE_DATABASE_URL}\n` && !closed, `extract run() refuses a bad URL beside a caller's client (exit ${beside.code})`);
+  // A reserved connection (`release`) or a transaction's handle (`savepoint`)
+  // reports its pool's max but is one connection: refused, and not closed.
+  for (const [what, extra] of [["a reserved connection", { release: () => {} }], ["a transaction's handle", { savepoint: async () => {} }]] as const) {
+    const handle = Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 10 }, close: async () => { closed = true; } }, extra);
+    const h = await inProcess({ sql: handle, url: AT });
+    ok(h.code === 2 && /needs a pool, not a reserved connection or a transaction's handle/.test(h.err) && !closed && h.seen === 0, `extract run() refuses ${what} as its client (exit ${h.code})`);
+  }
+  // A signal aborted before the call: 130, nothing opened.
+  const early = await inProcess({ url: AT, signal: AbortSignal.abort() });
+  ok(early.code === 130 && /stopped before the pass began: the caller's signal was aborted; nothing was claimed/.test(early.err) && early.out === "" && early.seen === 0, `extract run() with a signal already aborted returns 130 before connecting (exit ${early.code}, ${early.seen} connection(s))`);
   const late = await inProcess({ sql: stub });
   ok(late.code === 2 && /Nothing would be extracted/.test(late.err) && !closed, `…and the egress gate's refusal, after the client is accepted, does not close it either (exit ${late.code})`);
   // null is absent: no URL, the default workers (so a max-3 client passes the width check and is queried).

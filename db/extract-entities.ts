@@ -23,7 +23,7 @@
  *   OB1_METADATA_MODEL=<larger> bun db/extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
- *   await run({ url, dryRun: true })                          # the same, in-process: import { run } from "./extract-entities.ts" (SMD-2304)
+ *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./extract-entities.ts" (SMD-2304)
  *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought)
  *   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
  *
@@ -163,16 +163,23 @@ const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.js
  * `sql`, when given, is the caller's client — used in place of `url` for the
  * pass, and never closed here. It needs a connection per worker and a spare
  * the heartbeat beats through (db/lease.ts), so at least workers + 1 (the
- * `max` option). The worker key resolves on a connection of its own
+ * `max` option), free for the run: a pool another run or caller is using at
+ * the same time takes the spare. A reserved connection or a transaction's
+ * handle is refused. The worker key resolves on a connection of its own
  * (db/worker-bootstrap.ts), so a run with OB1_WORKER_KEY set needs `url`
  * beside `sql`. `env` is what the run reads for the model, the endpoints, the
  * egress policy and the worker key: process.env when absent.
  *
  * `signal` stops the pass as the CLI's first signal does: every worker after
- * the thought in hand, its unfinished claims back to the pool. `onPass` is
- * called once, as the pass begins — where the CLI installs its signal
- * handlers (stopOnSignals) — with the pass's stop (db/lease.ts's PassStop).
- * Neither is used by --status or --dry-run, which have no pass.
+ * the thought in hand, its unfinished claims back to the pool. Aborted before
+ * the pass begins, it stops the run before its next write — the agent's
+ * registration, the key, a --retry-* statement, the pool — and run() returns
+ * 130. `onPass` is called once, as the pass begins — where the CLI installs
+ * its signal handlers (stopOnSignals) — with the pass's stop (db/lease.ts's
+ * PassStop). Its hard stop returns the leases at once, but run() returns only
+ * when the model call in hand does (at most --timeout per window), writing
+ * nothing for it; a call after run() has returned does nothing. Neither is
+ * used by --status or --dry-run, which have no pass.
  */
 export interface ExtractOptions {
   url?: string;
@@ -265,6 +272,14 @@ export async function run(opts: ExtractOptions): Promise<number> {
     return 2;
   }
   if (opts.sql != null) {
+    // A reserved connection or a transaction's handle reports its pool's max
+    // but is one connection, and a transaction keeps the run's claims from the
+    // other workers — and a rollback from the database (review pass 1).
+    const handle = opts.sql as { release?: unknown; savepoint?: unknown };
+    if (typeof handle.release === "function" || typeof handle.savepoint === "function") {
+      err("extract-entities.ts needs a pool, not a reserved connection or a transaction's handle: either is one connection whatever max it reports, and a transaction's claims are no other worker's until it commits. Pass the client itself, or a URL.");
+      return 2;
+    }
     // One connection per worker and one spare: the heartbeat (db/lease.ts)
     // beats through the pool, and a worker parked on a lock or a long statement
     // holds its own connection, so the spare is what keeps every worker's
@@ -280,6 +295,11 @@ export async function run(opts: ExtractOptions): Promise<number> {
       return 2;
     }
   }
+  // A signal aborted before the call: nothing opened, nothing written.
+  if (opts.signal?.aborted) {
+    err(STOPPED_EARLY);
+    return 130;
+  }
   const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1 });
   // Aborted when the run returns, taking its listener off the caller's signal.
   const detach = new AbortController();
@@ -291,6 +311,9 @@ export async function run(opts: ExtractOptions): Promise<number> {
     if (opts.sql == null) await sql.close().catch(() => {});
   }
 }
+
+/** What run() says when a caller's signal was aborted before the pass began (review pass 1). */
+const STOPPED_EARLY = "\n  stopped before the pass began: the caller's signal was aborted; nothing was claimed";
 
 /** The run once its options are settled: the script's body as it was, printing through the Writer and returning where it exited. */
 async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out: Writer["out"], err: Writer["err"], detach: AbortSignal): Promise<number> {
@@ -313,6 +336,18 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // SMD-2321: `--decide` re-types the 7B's entities with the Jev decider (validity +
   // type), storing p_true as confidence. Opt-in and only with the tier configured.
   const DECIDE = opts.decide === true;
+  /**
+   * A caller's signal aborted before the pass began stops the run before its
+   * next write — the agent's registration, the key, a --retry-* statement,
+   * the pool — returning 130, as a signal before the CLI's handlers ends the
+   * process where it stands; a retry's rows are not returned to a pool nothing
+   * will drain (review pass 1).
+   */
+  const stoppedEarly = (): boolean => {
+    if (opts.signal?.aborted !== true) return false;
+    err(STOPPED_EARLY);
+    return true;
+  };
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   const jevCfg = DECIDE ? resolveJevConfig(env as unknown as JevEnv) : null;
@@ -372,6 +407,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   /** The worker key's name, for the egress gate's `actor:` unit (SMD-1903); undefined without a key. */
   let actorName: string | undefined;
   if (!STATUS_ONLY && !DRY_RUN) {
+    if (stoppedEarly()) return 130;
     // Without a key the URL is not read; with one, run() refused a missing URL.
     const id = await workerIdentity(opts.url ?? "", env, {
       noKeyWarning: "  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
@@ -549,6 +585,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   // ── The run ─────────────────────────────────────────────────────────────────
 
+  if (stoppedEarly()) return 130;
   if (recordedKey !== JOB) {
     await sql`
       INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${JOB})
@@ -558,6 +595,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   /** Rows a --retry-* flag returned to the pool: the run's first judgement is of rows chosen for failing (SMD-2266, review pass 2). */
   let returned = 0;
+  if (stoppedEarly()) return 130;
   if (RETRY_FAILED) {
     const [{ n }] = await sql`
       WITH retried AS (
@@ -568,6 +606,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
 
+  if (stoppedEarly()) return 130;
   if (RETRY_PARTIAL || RETRY_LEFT_OUT) {
     // --retry-failed's statement over the partial rows — every one, or those
     // with windows left out: pending, the caveat cleared, so the row is
@@ -600,6 +639,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   }
 
   let stopping = false;
+  /**
+   * Set by the hard stop, which has returned every worker's leases: a worker
+   * writes and releases nothing more — the thought in hand is the pool's
+   * again, and may already be another worker's (review pass 1).
+   */
+  let hardStopped = false;
   let done = 0;
   /** Of `done`, the thoughts extracted over a prefix only (SMD-2240), and those with windows left out as malformed, a prefix of one included, with how many windows (SMD-2260). */
   let partial = 0;
@@ -666,7 +711,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     | { outcome: "failed"; error: string }
     | { outcome: "vanished" }
     /** Edited while it was being extracted; the trigger has already re-queued it and the pool will redo it. */
-    | { outcome: "superseded" };
+    | { outcome: "superseded" }
+    /** In hand at the hard stop: nothing written, and no longer this worker's to release. */
+    | { outcome: "abandoned" };
 
   async function processRow(row: Row): Promise<Outcome> {
     const t0 = Date.now();
@@ -694,6 +741,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (extraction.escalated) escalated++;
     else if (extraction.retried) retried++;
     if (extraction.abortedMs !== undefined) aborted++;
+    if (hardStopped) return { outcome: "abandoned" };
     if (extraction.malformed) {
       malformed++;
       const where = extraction.parts ? ` (window ${windowList(extraction.parts.filter((p) => p.malformed).map((p) => p.index))} of ${extraction.windows}${extraction.coverage ? ` sent, a prefix of ${extraction.coverage.of}` : ""})` : "";
@@ -737,6 +785,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       const decided = await decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
       extraction = { ...extraction, entities: decided.entities };
     }
+    if (hardStopped) return { outcome: "abandoned" };
     // 061: the pass's recipe — the model, the prompt's version and hash, the
     // windows sent and what was cut — recorded in `derivations` with the rows,
     // beside the input's fingerprint the function checks and now stores
@@ -794,13 +843,26 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     return LIMIT > 0 && reserved >= LIMIT;
   }
 
+  /**
+   * The Writer's err for lines written on a timer or an event — the heartbeat's,
+   * the caller's signal's — where a throw has no caller to reject and would be
+   * the host's unhandled error: it is dropped there (review pass 1).
+   */
+  const errAside = (line: string): void => {
+    try {
+      err(line);
+    } catch {
+      // Nothing awaits this line.
+    }
+  };
+
   async function worker(n: number): Promise<void> {
     const workerId = `extract-${hostname()}-${process.pid}-${n}-${randomUUID().slice(0, 8)}`;
     activeWorkers.add(workerId);
     const hb = startHeartbeat({
       sql, job: JOB, workerId, ttlS: TTL, everyS: HEARTBEAT,
-      onLost: (ids) => err(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it, or at its release if it was the row in hand`),
-      onError: (e, consecutive) => { if (consecutive === 1) err(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
+      onLost: (ids) => errAside(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it, or at its release if it was the row in hand`),
+      onError: (e, consecutive) => { if (consecutive === 1) errAside(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
     });
     try {
       while (!stopping && !limitReached()) {
@@ -875,6 +937,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 }
               }
             }
+            if (hardStopped) return;
             if (stopAfter) err(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
@@ -896,6 +959,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               return;
             }
           }
+          if (outcome.outcome === "abandoned") return;
           // Out of the heartbeat's set before the release goes out, so a beat in
           // flight across the release does not read the released row as lost.
           hb.held.delete(b.thought_id);
@@ -969,7 +1033,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // provider's refusal stopped the workers — is the hard stop: the release of
   // every worker's leases, the CLI exiting 130 when it settles.
   const stop: PassStop = () => {
+    // After the run has returned there is no pass to stop (review pass 1).
+    if (detach.aborted) return null;
     if (stopping) {
+      hardStopped = true;
       err(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
       return Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
     }
@@ -982,10 +1049,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   const abort = () => {
     if (stopping) return;
     stopping = true;
-    err("\n  stopping after the current thought; unfinished claims go back to the pool");
+    errAside("\n  stopping after the current thought; unfinished claims go back to the pool");
   };
-  if (opts.signal?.aborted) abort();
-  else opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
+  if (stoppedEarly()) return 130;
+  opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
   opts.onPass?.(stop);
 
   /**
@@ -1035,7 +1102,16 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (!FOLLOW || added > 0 || before.pending > 0) {
       printCounts(before, "before");
     }
-    await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+    // A worker that throws — a Writer that throws, in practice; each catches
+    // its own database errors — stops the rest after the thought in hand, and
+    // the pass rejects with its error once they have stopped, not while they
+    // still hold rows and the client (review pass 1).
+    const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
+      stopping = true;
+      throw e;
+    })));
+    const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (thrown) throw thrown.reason;
     progress(true);
     return counts();
   }
