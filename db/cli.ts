@@ -108,7 +108,8 @@ export interface CommandLine<K extends string = string> extends Args<K> {
  * stdout, `err` for stderr, one line — or block — a call, written at once, so
  * a caller reading the stream live sees each as it happens. The CLI passes
  * consoleWriter; a caller that drives an engine in-process passes its own and
- * captures them.
+ * captures them. A writer should not throw; one that does makes the engine's
+ * run() reject with its error — what the run had done by then stays done.
  */
 export interface Writer {
   out(line: string): void;

@@ -118,7 +118,7 @@ export interface MigrateOptions {
  */
 export async function run(opts: MigrateOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
-  if (opts.sql === undefined) {
+  if (opts.sql == null) {
     const problem = databaseUrlProblem(opts.url);
     if (problem !== null) {
       err(problem);
@@ -133,7 +133,7 @@ export async function run(opts: MigrateOptions): Promise<number> {
     return await migrateWith(sql, opts, out, err);
   } finally {
     // A failing close must not mask the run's own error.
-    if (opts.sql === undefined) await sql.close().catch(() => {});
+    if (opts.sql == null) await sql.close().catch(() => {});
   }
 }
 
@@ -922,21 +922,25 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     }
 
     // Each migration runs in its own transaction: a failure leaves earlier ones
-    // applied and recorded, so a rerun resumes rather than starting over.
+    // applied and recorded, so a rerun resumes rather than starting over. The
+    // line saying so is written after the catch, not inside it: a writer that
+    // throws there (a caller's stream gone away) is not the migration failing,
+    // and must not be reported as one when the file is applied and recorded.
+    let note: string | null;
     try {
-      const note = await begin(async (tx: SQL) => {
+      note = await begin(async (tx: SQL) => {
         const n = await applyShadowed(tx, m);
         await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
         return n;
       });
-      out(`  ✓  ${m.name}  applied`);
-      if (note !== null) out(note);
-      ran++;
     } catch (caught) {
       err(`  ✗  ${m.name}  FAILED: ${(caught as Error).message}`);
       for (const line of explainFailure(caught, m, "plain")) err(line);
       return 1;
     }
+    out(`  ✓  ${m.name}  applied`);
+    if (note !== null) out(note);
+    ran++;
 
     if (m.seeds.length) await reportSeeds(m);
   }

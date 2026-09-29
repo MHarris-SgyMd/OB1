@@ -12,8 +12,9 @@
  *     strings intact) — holds none of the listed spellings of an exit, a
  *     process listener, an argv read, the CLI's URL resolver, the door, a
  *     console call or a stream write: run() returns its code and writes
- *     through the Writer it is given. A string that reads like one (`"will
- *     exit (code 1)"`) fails the census loudly; reword it;
+ *     through the Writer it is given. What reads like one fails the census
+ *     loudly — a string (`"will exit (code 1)"`), any `.exit(` method
+ *     (`child.exit()`), a `worker.process.kill()`; reword it or name it apart;
  *   - run() refuses what the CLI refuses, in the CLI's words (the spawned
  *     script's whole stdout and stderr) and with its exit code, before
  *     connecting;
@@ -92,8 +93,8 @@ for (const engine of ENGINES) {
 // ---------------------------------------------------------------------------
 // The engine's code: no exit, no process handler, no argv, no console.
 // ---------------------------------------------------------------------------
-/** process, reached by `.`, `?.` or a bracket: `process.x`, `process?.x`, `process["x"]`. */
-const P = String.raw`\bprocess\s*(?:\??\.\s*|\[\s*["'\x60])`;
+/** process, reached by `.`, `?.`, a bracket or both: `process.x`, `process?.x`, `process["x"]`, `process?.["x"]`. */
+const P = String.raw`\bprocess\s*(?:\??\.\s*(?:\[\s*["'\x60])?|\[\s*["'\x60])`;
 const FORBIDDEN: [RegExp, string][] = [
   // test-connect's exit shapes (a bare exit( is an alias or a node:process import), plus the other ways to end the process.
   [new RegExp(String.raw`\bexit\s*\(|=\s*process\.exit\b|${P}(exit|exitCode|kill|abort|reallyExit)\b|\bBun\.exit\b`), "an exit"],
@@ -104,7 +105,7 @@ const FORBIDDEN: [RegExp, string][] = [
   [/\bcloseThenExit\(/, "the door (it ends stdout and stderr, then exits)"],
   [/\bconsole\s*(\??\.|\[)|\{[^}]*\}\s*=\s*console\b/, "a console call (the Writer is the engine's output)"],
   [/\bconsoleWriter\s*(\??\.|\[)/, "a line written to the console past the Writer (only `opts.writer ?? consoleWriter` may name it)"],
-  [new RegExp(String.raw`${P}(stdout|stderr)\b|\bBun\.(stdout|stderr)\b|\{[^}]*\b(stdout|stderr|exit|exitCode|argv|on|once|kill)\b[^}]*\}\s*=\s*(globalThis\.)?process\b|\bwriteSync\s*\(\s*[12]\s*,|\bBun\.file\s*\(\s*[12]\s*\)|["'\x60]\/dev\/std(out|err)["'\x60]`), "a direct stream write or a destructured process"],
+  [new RegExp(String.raw`${P}(stdout|stderr)\b|\bBun\.(stdout|stderr)\b|\{[^}]*\b(stdout|stderr|exit|exitCode|argv|on|once|kill)\b[^}]*\}\s*=\s*(globalThis\.)?process\b|\b(writeSync|writeFileSync|appendFileSync|Bun\.write)\s*\(\s*[12]\s*,|\bBun\.file\s*\(\s*[12]\s*\)|["'\x60]\/dev\/std(out|err)["'\x60]`), "a direct stream write or a destructured process"],
 ];
 
 /**
@@ -155,13 +156,13 @@ for (const engine of ENGINES) {
 // shapes PRs 2-4's engines will need are not.
 const censusSees = (s: string) => FORBIDDEN.some(([re]) => re.test(s));
 for (const s of [
-  "process.exit(2)", `process["exit"](2)`, "process?.exit(2)", "const { exit } = process; exit(2)", "const { exit } = globalThis.process",
+  "process.exit(2)", `process["exit"](2)`, "process?.exit(2)", `process?.["exit"](2)`, "const { exit } = process; exit(2)", "const { exit } = globalThis.process",
   "process.exitCode = 1", "Bun.exit(1)", `process.kill(process.pid, "SIGINT")`, "process.abort()",
-  `process.on("SIGINT", stop)`, `process["on"]("SIGINT", stop)`, `process?.once("SIGTERM", stop)`, `process.prependListener("SIGINT", stop)`,
+  `process.on("SIGINT", stop)`, `process["on"]("SIGINT", stop)`, `process?.once("SIGTERM", stop)`, `process?.["on"]("SIGINT", stop)`, `process.prependListener("SIGINT", stop)`,
   `commandLine("x.ts", {})`, "process.argv.slice(2)", "Bun.argv", `import { argv, on } from "node:process"`,
   "databaseUrl(flag)", "closeThenExit(sql, async () => { return 0; })",
   "console.error(line)", `console["log"](line)`, "console?.log(line)", "const { log } = console", "consoleWriter.err(line)",
-  "process.stdout.write(s)", "process?.stdout.write(s)", "await Bun.write(Bun.stdout, s)", `await Bun.write("/dev/stdout", s)`, "await Bun.write(Bun.file(1), s)", "writeSync(2, s)", "const { stdout } = process; stdout.write(s)",
+  "process.stdout.write(s)", "process?.stdout.write(s)", "await Bun.write(Bun.stdout, s)", `await Bun.write("/dev/stdout", s)`, "await Bun.write(Bun.file(1), s)", "await Bun.write(1, s)", "writeSync(2, s)", "writeFileSync(2, s)", "appendFileSync(1, s)", "const { stdout } = process; stdout.write(s)",
 ]) ok(censusSees(s), `the engine census sees ${s}`);
 for (const s of [`signal.addEventListener("abort", stop)`, `opts.signal?.addEventListener("abort", stop)`, `emitter.on("x", f)`, "const { on } = hooks", "function onExit() {}", "const r = { exitCode: 0 }", "writeSync(fd, s)"])
   ok(!censusSees(s), `…and does not flag ${s}`);

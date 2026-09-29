@@ -107,7 +107,7 @@ console.log("[1] migrate.ts against a real server");
   // there before — the run's — must be gone once things settle; a backend
   // still closing from the spawned run above is in the "before" set, so it
   // can neither hide a leak nor fail the check by leaving.
-  const clientPids = async () => new Set(((await sql`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()`) as { pid: number }[]).map((r) => r.pid));
+  const clientPids = async () => new Set(((await sql`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`) as { pid: number }[]).map((r) => r.pid));
   const pidsBefore = await clientPids();
   const dryIn = await migrateInProcess({ dryRun: true });
   assert(dryIn.code === 0 && dryIn.out === dry.out, "run() in-process dry-runs the same, byte for byte (SMD-2304)");
