@@ -124,7 +124,8 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
+import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
+import { blanketGate, egressDescription, egressRefusal, regateMessage } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
@@ -210,16 +211,16 @@ console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${
 console.log(`  window: ${describeExtractWindow(cfg)}`);
 // What may leave the box (SMD-1903): a row the gate refuses is a failed claim
 // naming the rule; its text never went anywhere, and --retry-failed revisits it.
-console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+console.log(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
 {
   // A policy that refuses whatever the row (SMD-1903): stop before claiming,
   // rather than fail every row in the pool one at a time. A dry run and
   // --status still report — the banner's egress line says why a run would not.
   // The units a row of this pass carries: its metadata and text, and the
   // worker key's name as the actor when one is set (second review pass).
-  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS);
+  const blanket = blanketGate({ endpoint: cfg.chat, policy: cfg.egress, units: process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "extracted", localKnobKey: localKnob(cfg, "chat") });
   if (blanket && !STATUS_ONLY && !DRY_RUN) {
-    console.error(`\n  Nothing would be extracted: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    console.error(`\n  ${blanket}`);
     process.exit(2);
   }
 }
@@ -295,9 +296,9 @@ if (!STATUS_ONLY && !DRY_RUN) {
   // A key that was set but did not resolve to a name is no actor: the blanket
   // check above credited one, so it is asked again without (third review pass).
   if (process.env.OB1_WORKER_KEY && actorName === undefined) {
-    const again = refusesEverything(cfg.chat, cfg.egress, ROW_UNITS);
+    const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
     if (again) {
-      console.error(`\n  Nothing would be extracted: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
+      console.error(`\n  ${regateMessage("extracted", again)}`);
       await sql.close();
       process.exit(2);
     }

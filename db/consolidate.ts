@@ -116,7 +116,8 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
+import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
+import { blanketGate, egressDescription, egressRefusal, regateMessage } from "./worker-bootstrap.ts";
 import {
   actorKindOf, cleanForDisplay, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -238,7 +239,7 @@ console.log(`  job:    ${JOB}`);
 if (!REVIEW_ONLY) console.log(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
 // What may leave the box (SMD-1903): a pair either row of which the gate
 // refuses is not judged, and the thought's claim fails naming the rule.
-if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+if (!REVIEW_ONLY) console.log(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
 {
   // A policy that refuses whatever the row (SMD-1903): stop before claiming,
   // rather than fail every row in the pool one at a time. A dry run and
@@ -246,9 +247,9 @@ if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, 
   // The units a row of this pass carries: its metadata and text, and the
   // worker key's name as the actor when one is set — re-checked below once
   // the key has, or has not, resolved (third review pass).
-  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS);
+  const blanket = blanketGate({ endpoint: cfg.chat, policy: cfg.egress, units: process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "judged", localKnobKey: localKnob(cfg, "chat") });
   if (blanket && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY) {
-    console.error(`\n  Nothing would be judged: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    console.error(`\n  ${blanket}`);
     process.exit(2);
   }
 }
@@ -324,9 +325,9 @@ if (WRITES) {
   // A key that was set but did not resolve to a name is no actor: the blanket
   // check above credited one, so it is asked again without (third review pass).
   if (process.env.OB1_WORKER_KEY && keyName === undefined && !REVIEW_ONLY) {
-    const again = refusesEverything(cfg.chat, cfg.egress, ROW_UNITS);
+    const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
     if (again) {
-      console.error(`\n  Nothing would be judged: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
+      console.error(`\n  ${regateMessage("judged", again)}`);
       await sql.close();
       process.exit(2);
     }
