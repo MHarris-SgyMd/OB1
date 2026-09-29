@@ -263,6 +263,10 @@ export function renderComposeOverlay(o: OverlayInput): string {
     `    image: ${pinned(o.images.server.ref, o.images.server.digest)}`,
     "  migrate:",
     `    image: ${pinned(o.images.migrate.ref, o.images.migrate.digest)}`,
+    "  # The orchestration profile's role step runs the migrator's image (deploy/compose.yaml).",
+    "  orchestration-runner-role:",
+    `    image: ${pinned(o.images.migrate.ref, o.images.migrate.digest)}`,
+    "    pull_policy: missing",
     "  ollama:",
     "    image: *ollama-image",
     "  ollama-pull:",
@@ -430,6 +434,7 @@ function selfCheck(): number {
   const overlay = renderComposeOverlay({ version: release.version, tag: "v1.0.0", rendered: "2026-09-30", images: { server: { ref: "ghcr.io/x/ob1-server:1.0.0", digest: "sha256:aa" }, migrate: { ref: "ghcr.io/x/ob1-migrate:1.0.0", digest: "sha256:bb" } }, ollamaImage: "ollama/ollama:0.34.3", ollamaDigest: "sha256:cc" });
   const parsed = Bun.YAML.parse(overlay) as { services: Record<string, { image: string }> };
   ok(parsed.services.server.image === "ghcr.io/x/ob1-server:1.0.0@sha256:aa" && parsed.services.migrate.image === "ghcr.io/x/ob1-migrate:1.0.0@sha256:bb", "the overlay pins the two images by tag and digest");
+  ok(parsed.services["orchestration-runner-role"].image === parsed.services.migrate.image, "the orchestration role step runs the release's migrator, not a checkout's build (SMD-2289 review pass 7)");
   ok(parsed.services.ollama.image === "ollama/ollama@sha256:cc" && parsed.services["ollama-pull"].image === "ollama/ollama@sha256:cc" && overlay.includes("ollama/ollama:0.34.3 at release time"), "Ollama is pinned by digest for both services, the tag it came from beside it");
   ok(overlay.startsWith("# Open Brain — release 1.0.0+upstream.9543c29 (tag v1.0.0)"), "the overlay's header names the release");
   const dry = renderComposeOverlay({ version: "0.0.0+upstream.x", tag: REHEARSAL_TAG, rendered: "d", images: { server: { ref: "s:rehearsal" }, migrate: { ref: "m:rehearsal" } }, ollamaImage: "ollama/ollama:1", ollamaDigest: "sha256:cc" });

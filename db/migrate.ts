@@ -124,6 +124,8 @@ if (force && !baseline) {
 class GrantRefusal extends Error {}
 /** Thrown to roll a --dry-run's transaction back. */
 class RolledBack extends Error {}
+/** A 42501 from a GRANT is the grantor's: it holds nothing on the object, so it cannot grant it. */
+const grantorHint = "This connection's role may not grant that object: connect as its owner (the role that ran the migrations or applied the community schema) or a superuser.";
 
 /**
  * --exact's revokes, one per object whose ACL names the role (review pass 4:
@@ -209,7 +211,7 @@ async function exactRoleRefusal(tx: any, role: string): Promise<string | null> {
   const memberOf = ((await tx`SELECT g.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = ${role} ORDER BY 1`) as { rolname: string }[]).map((r) => r.rolname);
   if (memberOf.length) return `--exact: ${role} is a member of ${memberOf.join(", ")}, whose privileges it holds and no revoke here reaches. Revoke the membership, or name another role. Nothing changed.`;
   const [{ owned }] = (await tx`SELECT count(*)::int AS owned FROM pg_shdepend d JOIN pg_roles r ON r.oid = d.refobjid WHERE d.refclassid = 'pg_authid'::regclass AND d.deptype = 'o' AND r.rolname = ${role}`) as { owned: number }[];
-  if (owned > 0) return `--exact: ${role} owns ${owned} object(s), here or in another database; an owner's rights are not a grant to revoke. Name a role that owns nothing. Nothing changed.`;
+  if (owned > 0) return `--exact: ${role} owns ${owned} object(s) (a relation, schema, function, type, large object, user mapping or database), here or in another database; an owner's rights are not a grant to revoke. Name a role that owns nothing. Nothing changed.`;
   return null;
 }
 
@@ -333,7 +335,7 @@ if (grantRole !== undefined) {
       console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`} --exact  (--dry-run: nothing kept)\n`);
       for (const st of [...preview, ...statements]) console.log(`  ${st}`);
       if (refusal) console.log(`\n  ${refusal}`);
-      if (failure) console.log(`\n  --grant would fail: ${failure}`);
+      if (failure) console.log(`\n  --grant would fail: ${failure}${/permission denied/.test(failure) ? `\n  ${grantorHint}` : ""}`);
       if (missing.length) console.log(`\n  ${skippedHint}`);
       await gsql.close();
       process.exit(refusal ? 2 : failure ? 1 : 0);
@@ -364,9 +366,7 @@ if (grantRole !== undefined) {
       await gsql.close();
       process.exit(2);
     }
-    // 42501 here is the grantor's, not the grantee's: it holds nothing on the
-    // object at all, so it cannot grant it.
-    const hint = /permission denied/.test(message) ? "\n  This connection's role may not grant that object: connect as its owner (the role that ran the migrations or applied the community schema) or a superuser." : "";
+    const hint = /permission denied/.test(message) ? `\n  ${grantorHint}` : "";
     console.error(`--grant failed: ${message}${hint}`);
     await gsql.close();
     process.exit(1);

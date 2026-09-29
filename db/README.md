@@ -1040,7 +1040,9 @@ a privilege without grant option "grants" it with only a warning and no effect;
 if anything is not held it rolls back, names the privileges, and says to connect
 as the objects' owner or a superuser; it never creates the role or sets a password, so
 create the role first. `--grant --dry-run` prints the statements without running
-them, so a locked-down deployment can grant a subset by hand. A role that only
+them, so a locked-down deployment can grant a subset by hand; with `--exact` it
+runs the revokes, the check and the grants in a transaction it rolls back, so it
+needs the privileges a real run does and shows what that run would refuse. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, and **pages**

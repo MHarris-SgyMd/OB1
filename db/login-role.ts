@@ -106,14 +106,14 @@ if (import.meta.main) {
           if (memberOf.length) throw new Refusal(`${role} is a member of ${memberOf.join(", ")}, whose privileges it holds; this step gives a service a role that is a member of none. Name another role, or revoke the membership. Nothing changed.`);
           // pg_shdepend is shared: it holds an owner row for every object the role owns in any database, the database itself included (review pass 2: a pg_class count beside it counted each table again).
           const [{ owned }] = (await tx`SELECT count(*)::int AS owned FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = ${row.oid} AND deptype = 'o'`) as { owned: number }[];
-          if (owned > 0) throw new Refusal(`${role} owns ${owned} object(s) (a relation, schema, function, type, large object or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
+          if (owned > 0) throw new Refusal(`${role} owns ${owned} object(s) (a relation, schema, function, type, large object, user mapping or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
         }
         found = row;
         if (row) {
-          // Clearing CREATEDB takes CREATEDB, and REPLICATION or BYPASSRLS a superuser; the driver shows only "permission denied to alter role", not which (review pass 6).
-          const [me] = (await tx`SELECT rolsuper, rolcreatedb FROM pg_roles WHERE rolname = current_user`) as { rolsuper: boolean; rolcreatedb: boolean }[];
-          const cannot = [row.rolcreatedb && !me.rolsuper && !me.rolcreatedb && "CREATEDB", row.rolreplication && !me.rolsuper && "REPLICATION", row.rolbypassrls && !me.rolsuper && "BYPASSRLS"].filter(Boolean);
-          if (cannot.length) throw new Refusal(`${role} holds ${cannot.join(", ")}, which this connection's role may not clear (CREATEDB takes CREATEDB; REPLICATION and BYPASSRLS a superuser). Clear it as a superuser, or name another role. Nothing changed.`);
+          // Clearing REPLICATION or BYPASSRLS takes a superuser, and on Postgres 16 CREATEDB takes CREATEDB (15 lets CREATEROLE clear it); the driver shows only "permission denied to alter role", not which (review passes 6 and 7).
+          const [me] = (await tx`SELECT rolsuper, rolcreatedb, current_setting('server_version_num')::int AS version FROM pg_roles WHERE rolname = current_user`) as { rolsuper: boolean; rolcreatedb: boolean; version: number }[];
+          const cannot = [row.rolcreatedb && !me.rolsuper && !me.rolcreatedb && me.version >= 160000 && "CREATEDB", row.rolreplication && !me.rolsuper && "REPLICATION", row.rolbypassrls && !me.rolsuper && "BYPASSRLS"].filter(Boolean);
+          if (cannot.length) throw new Refusal(`${role} holds ${cannot.join(", ")}, which this connection's role may not clear (REPLICATION and BYPASSRLS take a superuser, CREATEDB on Postgres 16 CREATEDB). Clear it as a superuser, or name another role. Nothing changed.`);
         }
         // ALTER names only the attributes to clear: Postgres refuses NOCREATEDB, NOREPLICATION and NOBYPASSRLS from a migrator that is not a superuser even when nothing would change (review pass 5: every re-run on a managed Postgres failed "permission denied to alter role").
         const attributes = row ? ["LOGIN NOCREATEROLE", row.rolcreatedb && "NOCREATEDB", row.rolreplication && "NOREPLICATION", row.rolbypassrls && "NOBYPASSRLS"].filter(Boolean).join(" ") : ROLE_ATTRIBUTES;

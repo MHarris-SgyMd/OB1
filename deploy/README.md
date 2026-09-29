@@ -960,10 +960,11 @@ no other role.
   privilege naming it, a grant in another database). `login-role.ts` commits
   first, so when `--exact` refuses, the new password is already set and the
   runner, if its config changed, is left created and not started.
-- The step runs `migrate`'s image, by name, so the build that brings a new
-  migration (`up --build server` included) brings its grants to the step's
-  next run. To rotate the
-  password, edit `OB1_RUNNER_DB_PASSWORD` and start the profile again
+- The step runs `migrate`'s image, by the name Compose v2 gives it, and never
+  pulls or builds its own, so the build that brings a new migration (`up
+  --build server` included) brings its grants to the step's next run; a
+  release overlay pins it to the release's migrator. To rotate the password,
+  edit `OB1_RUNNER_DB_PASSWORD` and start the profile again
   (`compose --profile orchestration up -d`).
 - The runner's environment holds what its ingester and reembed read: the
   tier, the embedding, chunk and chat-blurb knobs, the provider's endpoints
