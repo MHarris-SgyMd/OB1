@@ -2944,7 +2944,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2285 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 912 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 911 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -2986,10 +2986,11 @@ defines it and does nothing else, and `run({ url, dryRun, baseline, reapply,
 force, grant, sql, writer })` is the CLI's run, returning the exit code — its
 lines go to the `Writer` it is given (`cli.ts`; the CLI passes the console),
 the migration files are read per call, and a client passed in is used in
-place of the URL, never closed, and handed back with its session as it went
-in (it must be one connection — the `max: 1` option or a reserved one — since
-the run sets lock_timeout and may extend search_path for the session, and puts
-both back after). The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
+place of the URL and never closed. It must be one connection (the `max: 1`
+option), and it keeps the session state the run sets — lock_timeout, pgvector's
+schema on search_path when it is off the path, the `ob1.acl_*` settings — so
+pass one dedicated to the run, not a pooled connection another caller gets
+next. The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
 holds each engine to that: an import opens no connection, prints nothing and
 installs no process listener; the engine's code holds no exit, handler, argv
 scan or console call; and `run()` refuses in the CLI's words before

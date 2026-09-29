@@ -85,12 +85,13 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations
 /**
  * What one migrator run is asked to do — the CLI's flags, typed (SMD-2304).
  * `sql`, when given, is the caller's client — used in place of `url`, and never
- * closed here. It must be a single connection (opened with the `max: 1`
- * option, or a reserved connection): the run sets lock_timeout for the session
- * and may put pgvector's schema on the session's search_path, and both must
- * hold on the connection its statements run on. Both are put back as they were
- * when the run returns, so the caller's client comes back as it went in.
- * Without `sql`, the run opens one connection on `url` and closes it.
+ * closed here. It must be a single connection, opened with the `max: 1`
+ * option: the run sets session state that must hold on the connection its
+ * statements run on, and leaves it there — lock_timeout, pgvector's schema on
+ * search_path when it is off the path, and the `ob1.acl_*` settings several
+ * migrations set. So pass a client dedicated to the run (the CLI passes its
+ * own), not a connection a pool will hand to someone else after. Without
+ * `sql`, the run opens one connection on `url` and closes it.
  */
 export interface MigrateOptions {
   url?: string;
@@ -110,7 +111,10 @@ export interface MigrateOptions {
  * floor, 2 a refusal. Nothing happens at import; the migration files are read
  * here, per call, so a caller sees the tree as it is when it runs. The
  * embedding model, width and trigram choice are config.mjs's, read from the
- * environment when that module was first imported.
+ * environment when that module was first imported. A database error outside
+ * a migration's own transaction — the ledger's CREATE TABLE refused, say —
+ * rejects, as the CLI's stack dump always showed; run()'s own connection is
+ * closed first.
  */
 export async function run(opts: MigrateOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
@@ -120,33 +124,20 @@ export async function run(opts: MigrateOptions): Promise<number> {
       err(problem);
       return 2;
     }
-  } else if (Number((opts.sql.options as { max?: number }).max ?? 1) !== 1) {
-    err("migrate.ts needs a single connection: the run sets lock_timeout and may extend search_path for the session. Pass a client opened with the max: 1 option (not ?max= in the URL), a reserved connection, or a URL.");
+  } else if (Number((opts.sql as { options?: { max?: number } }).options?.max ?? 1) !== 1) {
+    err("migrate.ts needs a single connection: the run sets session state (lock_timeout, search_path) that must hold where its statements run. Pass a client opened with the max: 1 option (not ?max= in the URL), or a URL.");
     return 2;
   }
   const sql = opts.sql ?? openSql(opts.url as string);
-  // The caller's session settings, read just before the run first changes them
-  // (so a refusal before any query still opens nothing) and put back after.
-  const session: SessionSettings = { restore: opts.sql !== undefined, saved: null };
   try {
-    return await migrateWith(sql, opts, out, err, session);
+    return await migrateWith(sql, opts, out, err);
   } finally {
-    // Neither step may mask the run's own error: a connection the run broke
-    // cannot be restored, and the caller finds that out on its next query.
-    if (session.saved !== null) {
-      await sql`SELECT set_config('lock_timeout', ${session.saved.lockTimeout}, false), set_config('search_path', ${session.saved.searchPath}, false)`.catch(() => {});
-    }
+    // A failing close must not mask the run's own error.
     if (opts.sql === undefined) await sql.close().catch(() => {});
   }
 }
 
-/** A caller's lock_timeout and search_path, saved to be put back — only when the client is the caller's. */
-interface SessionSettings {
-  restore: boolean;
-  saved: { lockTimeout: string; searchPath: string } | null;
-}
-
-async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], err: Writer["err"], session: SessionSettings): Promise<number> {
+async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], err: Writer["err"]): Promise<number> {
   const dryRun = opts.dryRun === true;
   const baseline = opts.baseline === true;
   const reapply = opts.reapply === true;
@@ -342,10 +333,6 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // the bound must hold where the locks are taken. (A pooled URL is not the
   // migrator's — README §5 says so: the search_path it aligns is session state
   // too.) 023's call sets its own, locally, for its transaction.
-  if (session.restore) {
-    const [row] = (await sql`SELECT current_setting('lock_timeout') AS lock_timeout, current_setting('search_path') AS search_path`) as { lock_timeout: string; search_path: string }[];
-    session.saved = { lockTimeout: row.lock_timeout, searchPath: row.search_path };
-  }
   await sql.unsafe(`SET lock_timeout = '${LOCK_TIMEOUT_S}s'`);
   /**
    * A transaction under READ COMMITTED with the run's lock_timeout set inside it,

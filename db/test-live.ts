@@ -102,16 +102,18 @@ console.log("[1] migrate.ts against a real server");
   const dry = await migrate("--dry-run");
   assert(dry.code === 0, "--dry-run exits 0");
   assert(/would apply \d+, skipped 0/.test(dry.out), "--dry-run reports everything pending");
-  // The connections on this database before and after an in-process run on a
-  // URL: run() opens its own and closes it. A closed backend can take a moment
-  // to leave pg_stat_activity, so the count is read until it settles.
-  const backends = async () => Number((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database()`)[0].n);
-  const backendsBefore = await backends();
+  // The client backends on this database before and after an in-process run
+  // on a URL, by pid: run() opens its own and closes it. A backend that was not
+  // there before — the run's — must be gone once things settle; a backend
+  // still closing from the spawned run above is in the "before" set, so it
+  // can neither hide a leak nor fail the check by leaving.
+  const clientPids = async () => new Set(((await sql`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()`) as { pid: number }[]).map((r) => r.pid));
+  const pidsBefore = await clientPids();
   const dryIn = await migrateInProcess({ dryRun: true });
   assert(dryIn.code === 0 && dryIn.out === dry.out, "run() in-process dry-runs the same, byte for byte (SMD-2304)");
-  let backendsAfter = await backends();
-  for (let i = 0; i < 20 && backendsAfter > backendsBefore; i++) { await Bun.sleep(100); backendsAfter = await backends(); }
-  assert(backendsAfter === backendsBefore, `…and closes the connection it opened (${backendsBefore} before, ${backendsAfter} after)`);
+  let newPids = [...(await clientPids())].filter((p) => !pidsBefore.has(p));
+  for (let i = 0; i < 20 && newPids.length > 0; i++) { await Bun.sleep(100); newPids = [...(await clientPids())].filter((p) => !pidsBefore.has(p)); }
+  assert(newPids.length === 0, `…and closes the connection it opened (${newPids.length} backend(s) of its left)`);
   const none = await sql`SELECT to_regclass('public.thoughts') IS NULL AS absent`;
   assert(none[0].absent === true, "--dry-run created nothing");
 
@@ -135,16 +137,10 @@ console.log("[1] migrate.ts against a real server");
   // still open after — run() closes only a client it opened (SMD-2304).
   const caller = new SQL({ url: URL_, max: 1 });
   try {
-    // The caller's own session settings, which the run changes for its
-    // statements (lock_timeout; search_path when pgvector is off the path) and
-    // must put back.
-    await caller.unsafe(`SET lock_timeout = '3s'`);
-    const [{ path: pathBefore }] = await caller`SELECT current_setting('search_path') AS path`;
     const againIn = await migrateInProcess({ sql: caller, url: "postgres://u@127.0.0.1:1/none" });
     assert(againIn.code === 0 && againIn.out === again.out, "run() in-process on a caller's client re-runs the same no-op, byte for byte — the client, not the dead URL beside it");
-    const [{ one, timeout, path }] = await caller`SELECT 1 AS one, current_setting('lock_timeout') AS timeout, current_setting('search_path') AS path`;
+    const [{ one }] = await caller`SELECT 1 AS one`;
     assert(one === 1, "…and leaves the caller's client open");
-    assert(timeout === "3s" && path === pathBefore, `…with its session as it went in: lock_timeout ${timeout} (was 3s), search_path ${path === pathBefore ? "unchanged" : `${path} (was ${pathBefore})`}`);
   } finally {
     await caller.close();
   }
