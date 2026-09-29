@@ -50,6 +50,7 @@ export const TOOLS = [
   { name: "delete_thought", scope: "write" },
   { name: "retry_failed", scope: "write" },
   { name: "release_stale_leases", scope: "write" },
+  { name: "run_worker", scope: "write" },
 ] as const satisfies readonly ToolEntry[];
 
 /** Every tool name as a literal union — the type a tool name is checked against. */

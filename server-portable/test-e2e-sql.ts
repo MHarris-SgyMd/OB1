@@ -686,6 +686,87 @@ console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a rest
   await sql.close();
 }
 
+console.log("\n[6h] run_worker dry_run over HTTP — the preview matches worker_status and claims nothing, the drain is refused, audit/scope parity (SMD-2272)");
+{
+  // The dry_run half of run_worker: a pure-SQL preview. This proves the
+  // tool/route/scope wiring, that the preview census matches worker_status for the
+  // same pool, that it claims NOTHING, that a non-dry_run call is refused as a value
+  // (the executing drain is deferred), and that no action-log row is written (a dry
+  // run mutates nothing). Exact census arithmetic is proven in test-store-sql [5g].
+  const sql = new SQL({ url: URL_, max: 1 });
+  const qlog = new SQL({ url: URL_, max: 1 });
+  const WT = "extract:e2e-run@p1";
+  const post = (path: string, body: unknown, key = "e2e-key") =>
+    fetch(`${BASE}${path}`, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify(body) });
+  try {
+    const ids = (await sql`SELECT id::text AS id FROM thoughts ORDER BY id LIMIT 2`).map((r: { id: string }) => r.id);
+    assert(ids.length === 2, "two corpus thoughts to pool");
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${WT}`;
+    await qlog`DELETE FROM query_log WHERE tool = 'run_worker'`;
+    // Seed a mixed pool: one pending (drainable now), one stale claimed.
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES
+      (${ids[0]}::uuid, ${WT}, 'pending', NULL, NULL, NULL),
+      (${ids[1]}::uuid, ${WT}, 'claimed', 'w-dead', now() - interval '2 hours', now() - interval '2 hours')`;
+    const total = Number((await sql`SELECT count(*)::int AS n FROM thoughts`)[0].n);
+    const before = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${WT} ORDER BY thought_id`).map((r: { status: string }) => r.status);
+
+    // ── The dry_run tool: the preview census, claiming nothing.
+    const dr = JSON.parse(await call("run_worker", { work_type: WT, dry_run: true }));
+    assert(dr.workType === WT && dr.pending === 1 && dr.claimed === 1 && dr.stale === 1, `run_worker dry_run reports the pool census (${JSON.stringify(dr)})`);
+    assert(dr.unpooled === total - 2 && dr.thoughts === total, `unpooled = corpus − pooled (${dr.unpooled} = ${total} − 2)`);
+    assert(dr.backlog === dr.pending + dr.stale + dr.unpooled && dr.wouldClaim === dr.backlog && dr.limit === null, `backlog = pending + stale + unpooled (stale leases reap and drain too), wouldClaim = backlog with no limit (${JSON.stringify(dr)})`);
+    const after = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${WT} ORDER BY thought_id`).map((r: { status: string }) => r.status);
+    assert(JSON.stringify(before) === JSON.stringify(after), `dry_run claimed nothing — the pool is unchanged (${JSON.stringify(after)})`);
+
+    // ── limit bounds wouldClaim.
+    const drLim = JSON.parse(await call("run_worker", { work_type: WT, dry_run: true, limit: 1 }));
+    assert(drLim.wouldClaim === 1 && drLim.limit === 1 && drLim.backlog === dr.backlog, `limit caps wouldClaim without changing backlog (${JSON.stringify(drLim)})`);
+
+    // ── The preview agrees with worker_status for the same pool.
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${WT}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    const wsRow = (JSON.parse(await call("worker_status")) as { workType: string }[]).find((r) => r.workType === WT) as Record<string, unknown> | undefined;
+    assert(!!wsRow && wsRow.pending === dr.pending && wsRow.claimed === dr.claimed && wsRow.stale === dr.stale && wsRow.unpooled === dr.unpooled, `dry_run and worker_status agree on the pool (${JSON.stringify(wsRow)})`);
+
+    // ── The keyed POST mirror returns the same JSON census.
+    const drPost = await post("/worker-run", { work_type: WT, dry_run: true });
+    const drPostBody = await drPost.json() as { workType: string; wouldClaim: number };
+    assert(drPost.status === 200 && drPostBody.workType === WT && drPostBody.wouldClaim === dr.wouldClaim, `POST /worker-run dry_run returns the JSON census (${JSON.stringify(drPostBody)})`);
+
+    // ── The executing drain is refused as a value (tool) and a 400 with the code (POST).
+    let drainRefusal = "";
+    try { await call("run_worker", { work_type: WT }); } catch (e) { drainRefusal = (e as Error).message; }
+    assert(/not yet available/.test(drainRefusal) && /dry_run/.test(drainRefusal), `run_worker without dry_run is refused as a value (${drainRefusal.slice(0, 80)})`);
+    const drainPost = await post("/worker-run", { work_type: WT, dry_run: false });
+    const drainPostBody = await drainPost.json() as { code?: string };
+    assert(drainPost.status === 400 && drainPostBody.code === "RUN_WORKER_DRAIN_NOT_AVAILABLE", `POST run_worker without dry_run:true is a 400 with the code (${drainPost.status}, ${JSON.stringify(drainPostBody)})`);
+    const stillThere = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${WT} ORDER BY thought_id`).map((r: { status: string }) => r.status);
+    assert(JSON.stringify(stillThere) === JSON.stringify(before), "the refused drain claimed nothing either");
+
+    // ── A blank work_type is refused.
+    let emptyRefusal = "";
+    try { await call("run_worker", { work_type: "  ", dry_run: true }); } catch (e) { emptyRefusal = (e as Error).message; }
+    assert(/work_type is required/.test(emptyRefusal), `a blank work_type is refused (${emptyRefusal.slice(0, 60)})`);
+
+    // ── No audit row: a dry run mutates nothing, so it stamps no action.
+    assert((await qlog`SELECT count(*)::int AS n FROM query_log WHERE kind = 'action' AND tool = 'run_worker'`)[0].n === 0, "run_worker dry_run writes no action-log row");
+
+    // ── A non-write key cannot act: the tool is not registered (call throws), the POST is plain "ok".
+    let capRefusal = "";
+    try { await call("run_worker", { work_type: WT, dry_run: true }, CAPTURE_KEY); } catch (e) { capRefusal = (e as Error).message; }
+    assert(/JSON-RPC error|tool/.test(capRefusal), `a capture key does not see run_worker (${capRefusal.slice(0, 80)})`);
+    const capPost = await post("/worker-run", { work_type: WT, dry_run: true }, CAPTURE_KEY);
+    assert((await capPost.text()) === "ok", "POST /worker-run with a capture key is plain ok — no preview");
+    const noKeyPost = await fetch(`${BASE}/worker-run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ work_type: WT, dry_run: true }) });
+    assert((await noKeyPost.text()) === "ok", "POST /worker-run with no key is plain ok");
+  } finally {
+    await sql`DELETE FROM thought_work_claims WHERE work_type = 'extract:e2e-run@p1'`;
+    await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+    await qlog`DELETE FROM query_log WHERE tool = 'run_worker'`;
+    await sql.close();
+    await qlog.close();
+  }
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");

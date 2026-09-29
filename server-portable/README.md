@@ -463,11 +463,13 @@ budget and its both-backend contract.
 
 ## Worker-queue write actions
 
-Two **write-scoped** tools act on the same queues (SMD-2132) — the control plane over
-the existing claim machinery (migration 015), never a worker or a scheduler, and never
-the LLM drain (the server does not run the bulk passes; that is a follow-up, SMD-1869).
-A read or capture key does not see them, and each stamps the calling key as actor into
-the action log, one row per affected thought:
+Three **write-scoped** tools act on the same queues (SMD-2132, SMD-2272) — the control
+plane over the existing claim machinery (migration 015), never a worker or a scheduler,
+and never the LLM drain itself (the server does not run the bulk passes; executing a
+drain waits on a callable worker core, SMD-2304 — `run_worker` below is its preview half
+only). A read or capture key does not see them. The two mutating actions each stamp the
+calling key as actor into the action log, one row per affected thought; `run_worker`'s
+dry-run preview mutates nothing, so it stamps none:
 
 - **`retry_failed(work_type)`** — requeue one pool's `failed` claim rows to `pending`
   (the `db/*.ts --retry-failed` path), scoped to the one `work_type`; a fresh attempt
@@ -477,12 +479,19 @@ the action log, one row per affected thought:
   manual form of the lazy reaper. By default a live lease is left for its holder;
   reaching one needs `include_live` **and** a `worker_id`, because releasing a live lease
   risks the holder double-processing (refused as a value otherwise).
+- **`run_worker(work_type, dry_run, limit?)`** — the third action SMD-2132 carved out,
+  for now a **preview only**: `dry_run: true` reports, without claiming anything, what a
+  drain of the pool would process — the same census `worker_status` shows plus a
+  `backlog` and a `limit`-bounded `wouldClaim` (exact for an extraction pool, an upper
+  bound for reembed/consolidate, whose eligibility is model-aware). A call without
+  `dry_run: true` is refused as a value (`RUN_WORKER_DRAIN_NOT_AVAILABLE`) — the executing
+  drain waits on the callable core (SMD-2304), so it writes no action-log row.
 
-Each is mirrored by a keyed **`POST`** — `POST /worker-retry-failed` and
-`POST /worker-release-leases` — with the args in the JSON body, gated by a **write** key
-(stricter than the read routes; a read/capture/no key gets the bodiless `ok`). Like
-`worker_status`, both are SQL-backend only — the PostgREST shim answers that it needs the
-SQL store.
+Each is mirrored by a keyed **`POST`** — `POST /worker-retry-failed`,
+`POST /worker-release-leases` and `POST /worker-run` — with the args in the JSON body,
+gated by a **write** key (stricter than the read routes; a read/capture/no key gets the
+bodiless `ok`). Like `worker_status`, all are SQL-backend only — the PostgREST shim
+answers that it needs the SQL store.
 
 ## Expected outcome
 
