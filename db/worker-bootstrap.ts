@@ -22,6 +22,8 @@ import { refusesLength, type ProviderEndpoint } from "../server-portable/embed.t
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 
+// ── Egress ───────────────────────────────────────────────────────────────────
+
 /**
  * One banner line: what the gate does for calls to this endpoint under this
  * policy, in words. The worker prints it under its own `  egress:` label.
