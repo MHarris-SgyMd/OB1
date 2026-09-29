@@ -71,6 +71,7 @@
 import { SQL } from "bun";
 import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, matchThoughtsOid, requireDatabaseUrl, resetSchema, routingAt, seededRandom } from "./test-support.ts";
 import { commandLine } from "./cli.ts";
+import { openSql } from "./connect.ts";
 import type { Branch } from "./test-support.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
@@ -235,7 +236,7 @@ let banner = false;
 for (const n of SCALES) {
   console.log(`▸ ${n.toLocaleString()} rows at ${DIM} dimensions — loading`);
   await resetSchema(URL_, { ...OPTS, only: (f) => f < "019" });
-  let sql = new SQL({ url: URL_, max: 1 });
+  let sql = openSql(URL_);
   if (!banner) {
     const [{ extversion }] = await sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
     const [{ v }] = await sql`SELECT version() AS v`;
@@ -318,7 +319,7 @@ for (const n of SCALES) {
   // the cost of.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "019" });
   await sql.close();
-  sql = new SQL({ url: URL_, max: 1 });
+  sql = openSql(URL_);
   const body019 = await extractBody(sql, "unfiltered", DIM);
   if (!ctes014 || (await cteBlocks()) !== ctes014) throw new Error("the deployed candidate CTEs differ from 014's; the before/after comparison is not of the same scan");
   for (const arm of ["deployed (w 0) custom", "deployed (w 0) generic", "deployed (w 0.3)"] as Arm[]) {

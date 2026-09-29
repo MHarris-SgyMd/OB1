@@ -16,7 +16,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, plantLegacyRow, resetSchema, runScript } from "../db/test-support.ts";
+import { applyMigrations, createAssert, plantLegacyRow, resetSchema, runScript } from "../db/test-support.ts";
 import { readdirSync } from "node:fs";
 import { FORK_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
@@ -618,6 +618,155 @@ console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll w
   assert(/No job/.test(mirrorRefusal), `job_status for another key is a tool error, not another key's job (${mirrorRefusal.slice(0, 60)})`);
 }
 
+console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a restart, reconcile marks orphans lost, prune_jobs retains (real Postgres)");
+{
+  // The suite runs the server in-process (not import.meta.main), so index.ts's
+  // startup wiring does not fire — set the sink here, sharing jobs.ts's module
+  // state with the running server. A separate SqlStore on the same database is
+  // enough: the durable table is shared. resetJobsForTest() clears the in-memory
+  // registry, standing in for a restart.
+  const { setJobSink, resetJobsForTest, reconcileDurableJobsLost } = await import("./jobs.ts");
+  const { SqlStore } = await import("./store-sql.ts");
+  const jobStore = new SqlStore(URL_!);
+  const sink = jobStore.jobSink();
+  assert(sink !== null, "the SQL store returns a durable job sink");
+  setJobSink(sink);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const OWNER_HASH = hashKey("e2e-key");
+
+  // Start a scan and let it finish; its record is written through to jobs.
+  const handle = JSON.parse(await call("scan_thoughts", { limit: 5 })) as { jobId: string };
+  let job: Record<string, unknown> = {};
+  for (let i = 0; i < 100; i++) {
+    job = (await (await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
+    if (["succeeded", "failed", "lost"].includes(String(job.status))) break;
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  assert(job.status === "succeeded", `the job reaches succeeded (${job.status})`);
+
+  // The terminal write is best-effort/async, so poll the DB for the durable row.
+  let dbRow: Record<string, unknown> | undefined;
+  for (let i = 0; i < 100; i++) {
+    const rows = await sql`SELECT status, owner_key_hash FROM jobs WHERE id = ${handle.jobId}::uuid`;
+    if (rows[0]?.status === "succeeded") { dbRow = rows[0]; break; }
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  assert(dbRow?.status === "succeeded" && dbRow?.owner_key_hash === OWNER_HASH, `the terminal row is durable in jobs, owned by the starting key (${dbRow?.status})`);
+
+  // A restart: the in-memory registry is gone, but the poll falls back to the
+  // durable row and still carries the result.
+  resetJobsForTest();
+  const afterRestart = (await (await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
+  const restartResult = afterRestart.result as { scanned?: number } | undefined;
+  assert(afterRestart.status === "succeeded" && (restartResult?.scanned ?? 0) >= 1, `after a restart the poll reads the durable result (${afterRestart.status}, ${JSON.stringify(restartResult)})`);
+  const mirror = JSON.parse(await call("job_status", { job_id: handle.jobId })) as Record<string, unknown>;
+  assert(mirror.status === "succeeded", "the job_status tool reads the durable job after a restart");
+  const sse = await fetch(`${BASE}/jobs/${handle.jobId}/stream`, { headers: { "x-brain-key": "e2e-key" }, signal: AbortSignal.timeout(5_000) });
+  assert(/event: done\b/.test(await sse.text()), "the SSE stream replays the durable snapshot + done after a restart");
+  const other = await fetch(`${BASE}/jobs/${handle.jobId}`, { headers: { "x-brain-key": "op-raw" } });
+  assert(other.status === 404, `another key's durable poll gets 404 (${other.status})`);
+
+  // Reconcile: a job left running (its process gone) is marked lost, durably.
+  const orphan = crypto.randomUUID();
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (${orphan}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'running')`;
+  const cut = await reconcileDurableJobsLost();
+  assert(cut >= 1, `reconcile marks the orphaned running job lost (${cut})`);
+  const lost = (await (await fetch(`${BASE}/jobs/${orphan}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
+  assert(lost.status === "lost" && (lost.error as { code?: string })?.code === "SERVER_RESTARTED", `the reconciled job reads back lost over HTTP with SERVER_RESTARTED (${lost.status})`);
+
+  // prune_jobs retains: an aged terminal row goes, the live ones do not.
+  const aged = crypto.randomUUID();
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (${aged}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'failed', now() - interval '2 hours')`;
+  const prunedN = Number((await sql`SELECT prune_jobs(60) AS n`)[0].n);
+  assert(prunedN >= 1 && Number((await sql`SELECT count(*)::int AS c FROM jobs WHERE id = ${aged}::uuid`)[0].c) === 0, `prune_jobs deletes the aged terminal row and keeps the fresh ones (${prunedN})`);
+
+  setJobSink(null);
+  resetJobsForTest();
+  await jobStore.close();
+  await sql.close();
+}
+
+console.log("\n[6h] run_worker dry_run over HTTP — the preview matches worker_status and claims nothing, the drain is refused, audit/scope parity (SMD-2272)");
+{
+  // The dry_run half of run_worker: a pure-SQL preview. This proves the
+  // tool/route/scope wiring, that the preview census matches worker_status for the
+  // same pool, that it claims NOTHING, that a non-dry_run call is refused as a value
+  // (the executing drain is deferred), and that no action-log row is written (a dry
+  // run mutates nothing). Exact census arithmetic is proven in test-store-sql [5g].
+  const sql = new SQL({ url: URL_, max: 1 });
+  const qlog = new SQL({ url: URL_, max: 1 });
+  const WT = "extract:e2e-run@p1";
+  const post = (path: string, body: unknown, key = "e2e-key") =>
+    fetch(`${BASE}${path}`, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify(body) });
+  try {
+    const ids = (await sql`SELECT id::text AS id FROM thoughts ORDER BY id LIMIT 2`).map((r: { id: string }) => r.id);
+    assert(ids.length === 2, "two corpus thoughts to pool");
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${WT}`;
+    await qlog`DELETE FROM query_log WHERE tool = 'run_worker'`;
+    // Seed a mixed pool: one pending (drainable now), one stale claimed.
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES
+      (${ids[0]}::uuid, ${WT}, 'pending', NULL, NULL, NULL),
+      (${ids[1]}::uuid, ${WT}, 'claimed', 'w-dead', now() - interval '2 hours', now() - interval '2 hours')`;
+    const total = Number((await sql`SELECT count(*)::int AS n FROM thoughts`)[0].n);
+    const before = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${WT} ORDER BY thought_id`).map((r: { status: string }) => r.status);
+
+    // ── The dry_run tool: the preview census, claiming nothing.
+    const dr = JSON.parse(await call("run_worker", { work_type: WT, dry_run: true }));
+    assert(dr.workType === WT && dr.pending === 1 && dr.claimed === 1 && dr.stale === 1, `run_worker dry_run reports the pool census (${JSON.stringify(dr)})`);
+    assert(dr.unpooled === total - 2 && dr.thoughts === total, `unpooled = corpus − pooled (${dr.unpooled} = ${total} − 2)`);
+    assert(dr.backlog === dr.pending + dr.stale + dr.unpooled && dr.wouldClaim === dr.backlog && dr.limit === null, `backlog = pending + stale + unpooled (stale leases reap and drain too), wouldClaim = backlog with no limit (${JSON.stringify(dr)})`);
+    const after = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${WT} ORDER BY thought_id`).map((r: { status: string }) => r.status);
+    assert(JSON.stringify(before) === JSON.stringify(after), `dry_run claimed nothing — the pool is unchanged (${JSON.stringify(after)})`);
+
+    // ── limit bounds wouldClaim.
+    const drLim = JSON.parse(await call("run_worker", { work_type: WT, dry_run: true, limit: 1 }));
+    assert(drLim.wouldClaim === 1 && drLim.limit === 1 && drLim.backlog === dr.backlog, `limit caps wouldClaim without changing backlog (${JSON.stringify(drLim)})`);
+
+    // ── The preview agrees with worker_status for the same pool.
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${WT}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    const wsRow = (JSON.parse(await call("worker_status")) as { workType: string }[]).find((r) => r.workType === WT) as Record<string, unknown> | undefined;
+    assert(!!wsRow && wsRow.pending === dr.pending && wsRow.claimed === dr.claimed && wsRow.stale === dr.stale && wsRow.unpooled === dr.unpooled, `dry_run and worker_status agree on the pool (${JSON.stringify(wsRow)})`);
+
+    // ── The keyed POST mirror returns the same JSON census.
+    const drPost = await post("/worker-run", { work_type: WT, dry_run: true });
+    const drPostBody = await drPost.json() as { workType: string; wouldClaim: number };
+    assert(drPost.status === 200 && drPostBody.workType === WT && drPostBody.wouldClaim === dr.wouldClaim, `POST /worker-run dry_run returns the JSON census (${JSON.stringify(drPostBody)})`);
+
+    // ── The executing drain is refused as a value (tool) and a 400 with the code (POST).
+    let drainRefusal = "";
+    try { await call("run_worker", { work_type: WT }); } catch (e) { drainRefusal = (e as Error).message; }
+    assert(/not yet available/.test(drainRefusal) && /dry_run/.test(drainRefusal), `run_worker without dry_run is refused as a value (${drainRefusal.slice(0, 80)})`);
+    const drainPost = await post("/worker-run", { work_type: WT, dry_run: false });
+    const drainPostBody = await drainPost.json() as { code?: string };
+    assert(drainPost.status === 400 && drainPostBody.code === "RUN_WORKER_DRAIN_NOT_AVAILABLE", `POST run_worker without dry_run:true is a 400 with the code (${drainPost.status}, ${JSON.stringify(drainPostBody)})`);
+    const stillThere = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${WT} ORDER BY thought_id`).map((r: { status: string }) => r.status);
+    assert(JSON.stringify(stillThere) === JSON.stringify(before), "the refused drain claimed nothing either");
+
+    // ── A blank work_type is refused.
+    let emptyRefusal = "";
+    try { await call("run_worker", { work_type: "  ", dry_run: true }); } catch (e) { emptyRefusal = (e as Error).message; }
+    assert(/work_type is required/.test(emptyRefusal), `a blank work_type is refused (${emptyRefusal.slice(0, 60)})`);
+
+    // ── No audit row: a dry run mutates nothing, so it stamps no action.
+    assert((await qlog`SELECT count(*)::int AS n FROM query_log WHERE kind = 'action' AND tool = 'run_worker'`)[0].n === 0, "run_worker dry_run writes no action-log row");
+
+    // ── A non-write key cannot act: the tool is not registered (call throws), the POST is plain "ok".
+    let capRefusal = "";
+    try { await call("run_worker", { work_type: WT, dry_run: true }, CAPTURE_KEY); } catch (e) { capRefusal = (e as Error).message; }
+    assert(/JSON-RPC error|tool/.test(capRefusal), `a capture key does not see run_worker (${capRefusal.slice(0, 80)})`);
+    const capPost = await post("/worker-run", { work_type: WT, dry_run: true }, CAPTURE_KEY);
+    assert((await capPost.text()) === "ok", "POST /worker-run with a capture key is plain ok — no preview");
+    const noKeyPost = await fetch(`${BASE}/worker-run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ work_type: WT, dry_run: true }) });
+    assert((await noKeyPost.text()) === "ok", "POST /worker-run with no key is plain ok");
+  } finally {
+    await sql`DELETE FROM thought_work_claims WHERE work_type = 'extract:e2e-run@p1'`;
+    await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+    await qlog`DELETE FROM query_log WHERE tool = 'run_worker'`;
+    await sql.close();
+    await qlog.close();
+  }
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");
@@ -726,15 +875,47 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
     SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'conflict_undirected', 0.7, ${"A then B \x1b[31mred"}, 0.9, 'consolidate:stub@p2', NULL) AS id`;
   const listed = await call("list_supersession_proposals", {});
   assert(/1 pending supersession proposal/.test(listed) && /conflict, direction not stated/.test(listed), "the tool lists the pending proposal with its verdict phrase");
-  assert(listed.includes(`ID: ${older}`) && listed.includes(`ID: ${newer}`) && listed.includes(`--accept ${pid} --direction <newer|older>`) && listed.includes(`--reject ${pid}`),
-         "…both ids, and the accept command with the direction placeholder the shell cannot parse");
+  assert(listed.includes(`ID: ${older}`) && listed.includes(`ID: ${newer}`) && listed.includes(`--accept ${pid} --direction <newer|older>`) && listed.includes(`--reject ${pid}`) && !listed.includes("--force"),
+         "…both ids, and the accept command with the direction placeholder the shell cannot parse, and no --force on a row neither edited nor on a lineage pair");
   assert(!listed.includes("\x1b") && /forged line/.test(listed) && /A then B/.test(listed), "…with the escape sequences stripped from the thought and the reason, the words kept");
   assert(!/edited since judged/.test(listed), "…and nothing marked edited yet");
+  // 070 (SMD-2313): the newer thought's derived_from naming the older — set
+  // raw, the shape a page and its evidence take — tags the row LINEAGE PAIR
+  // with the reject to run; `lineage: false` leaves it out and `true` selects
+  // it, each said in the headline; the array cleared, the rest of this
+  // section reads as before.
+  assert(/1 pending supersession proposal\(s\) not on a lineage pair, most confident first/.test(await call("list_supersession_proposals", { lineage: false })), "before either names the other, lineage: false is the one row (a selector that read false as nothing would drop it)");
+  await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${older}::text) WHERE id = ${newer}::uuid`;
+  const tagged = await call("list_supersession_proposals", {});
+  assert(/accepting needs --direction newer or older  LINEAGE PAIR/.test(tagged) && tagged.includes(`LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${pid} --note "lineage pair (066)"`) && tagged.includes(`--accept ${pid} --direction <newer|older> --force`),
+         `a proposal standing on a lineage pair is tagged, with the reject to run and --force on the accept the CLI would otherwise refuse (${tagged.split("\n").find((l) => /LINEAGE PAIR:/.test(l))?.trim().slice(0, 200)})`);
+  assert(/No pending supersession proposals not on a lineage pair\./.test(await call("list_supersession_proposals", { lineage: false })) && /1 pending supersession proposal\(s\) on a lineage pair, most confident first/.test(await call("list_supersession_proposals", { lineage: true })),
+         "lineage: true selects it and false leaves it out, each said in the headline");
+  await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${newer}::uuid`;
+  assert(!/LINEAGE PAIR/.test(await call("list_supersession_proposals", {})), "…and cleared, no tag");
+  // A brain at 068 under this server: the three-argument form is missing and
+  // the hint names 070, not 029 (cold read, first review pass: it named 029
+  // for every error on the name). The form dropped by hand here; the file
+  // puts it back.
+  await sql`DROP FUNCTION list_supersession_proposals(text, int, boolean)`;
+  const pre070 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
+  assert(/list_supersession_proposals\(text, integer, boolean\) does not exist/.test(pre070) && /the migrations through 070 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 070, db\/migrations\/070_listing_flags_lineage_pair\.sql, its current listing\)/.test(pre070),
+         `on a brain without 070 the tool's error names the migrations through 070, 029's queue and 070's listing both (${pre070.replace(/\n/g, " ").slice(0, 200)})`);
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+  assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 070 applied, the queue lists again");
   await sql`SELECT update_thought(${newer}::uuid, ${"queue newer: the plan is B, revised"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
   const edited = await call("list_supersession_proposals", { status: "pending", limit: 5 });
   assert(/newer \[[^\]]+\] \(edited since judged\)/.test(edited) && edited.includes(`--accept ${pid} --direction <newer|older> --force`) && /verdict is about an earlier text/.test(edited),
          "after an edit the tool marks the side, adds --force to the accept command and says why");
   assert(/No accepted supersession proposals/.test(await call("list_supersession_proposals", { status: "accepted" })), "an empty status says so and names the pass that fills it");
+  // 070: a lineage pair accepted before it was one (the pointer standing) is
+  // the harm realised; the tool tags the accepted row and names the reject
+  // that clears the pointer as the repair (adversarial re-run, third pass).
+  await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, 'newer', NULL, true)`;
+  await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${older}::text) WHERE id = ${newer}::uuid`;
+  const acceptedTagged = await call("list_supersession_proposals", { status: "accepted" });
+  assert(/LINEAGE PAIR/.test(acceptedTagged) && acceptedTagged.includes(`accepted while the derivation names its input — cd db && bun consolidate.ts --url $DATABASE_URL --reject ${pid} clears the pointer (029)`) && !/reject it:/.test(acceptedTagged),
+         `an accepted lineage pair is tagged with the reject that clears its pointer as the repair, not the pending row's line (${acceptedTagged.split("\n").find((l) => /LINEAGE PAIR:/.test(l))?.trim().slice(0, 160)})`);
   await sql`DELETE FROM supersession_proposals`;
   await sql`DELETE FROM thoughts WHERE id IN (${older}::uuid, ${newer}::uuid)`;
   await sql.close();

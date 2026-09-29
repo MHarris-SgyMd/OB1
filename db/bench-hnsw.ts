@@ -218,6 +218,7 @@
 import { SQL } from "bun";
 import { BENCH_MARKER, applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, hasKeptCorpus, ledgerNames, ledgerStrangers, migratorEnv, preparedSignature, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
 import { commandLine } from "./cli.ts";
+import { openSql } from "./connect.ts";
 import type { Branch } from "./test-support.ts";
 import { digestOf, markerAnswers } from "./bench-oracle.ts";
 import type { OracleAnswer, OracleCache } from "./bench-oracle.ts";
@@ -1254,7 +1255,7 @@ async function withPrepared<T>(
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 
-let sql = new SQL({ url: URL_, max: 1 });
+let sql = openSql(URL_);
 /**
  * Database-level settings (014 seeds the walk's two bounds with ALTER DATABASE)
  * are read at session START. RESET ALL does not fetch them — it restores the
@@ -1264,7 +1265,7 @@ let sql = new SQL({ url: URL_, max: 1 });
  */
 async function reconnect(): Promise<void> {
   await sql.close();
-  sql = new SQL({ url: URL_, max: 1 });
+  sql = openSql(URL_);
 }
 
 type Arm = "before (001–013)" | "after (014 on)" | `after (014–${string})`;
@@ -1294,7 +1295,7 @@ const bounds: BoundsRow[] = [];
 // Every destructive statement below used to sit behind resetSchema's loopback
 // guard; the kept-corpus paths drop a marker table and run the migrator
 // without it, so the guard is asked once here, for the whole run (review pass).
-assertThrowawayDatabase(URL_);
+await assertThrowawayDatabase(URL_);
 
 // The after arm asserts the bounds 014 seeds are in force. A role that does not
 // own the database cannot seed them, and finding that out after a 100,000-row

@@ -16,7 +16,12 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   provider pre-installs pgvector into a schema off the connection's `search_path`
   (Supabase uses `extensions`), the runner adds it to its own session so the
   migrations apply, and preflight names the persistent fix for the server — see
-  the `test-search-path.ts` note under Testing.
+  the `test-search-path.ts` note under Testing. The runner also puts `public`
+  first on its own session's path, the rest after it, so the brain is built in
+  `public` whatever the role's or the connection string's path puts first. It
+  refuses, changing nothing, where the path reaches a brain's ledger in another
+  schema and `public` holds no brain, or `public` cannot come first
+  (test-upgrade [23]).
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
@@ -166,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2276 assertions: 2276 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty-nine (69) migrations applied, and
+`bun test-schema.ts` prints `2315 assertions: 2315 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-one (71) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -208,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 071 SMD-2267).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -722,10 +727,11 @@ earlier, by the producer-count arm; the remedies run 061, 063, 066 in turn).
 One body redefined on its own text with no arity change; nothing runs at
 apply time but the DDL; a pair proposed before the file stands for its
 reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
-pair — the listing reads nothing of `derived_from`, the pass never replaces
+pair — the listing read nothing of `derived_from` until 070, the pass never replaces
 it (a text move, once `rebuild_derived` runs — `db/rebuild.ts` — leaves it
-`stale` for a reviewer), and the recorder has no
-lineage guard; reject it by hand, and SMD-2313 counts and flags such rows.
+`stale` for a reviewer, and the pass settles it on its next run — 067), and
+the recorder has no lineage guard; 070 flags such a row `LINEAGE PAIR`, and
+`consolidate.ts --list lineage` lists the unreviewed ones for the reject.
 test-schema [60], test-upgrade [20r] (a proposal planted on the pair before
 the file is pending and unmoved after it); `server-portable/test-preflight.ts`
 drives the re-applied-body arm.
@@ -830,6 +836,43 @@ runs again, and a reader of `node_lifecycle()` needs SELECT on
 longer read `thought_sources` (a removed join's tables are not
 permission-checked — observed, not documented), so the server group keeps that
 grant.
+
+Migration 070 makes a proposal standing on a lineage pair visible as such
+(SMD-2313). 066 stopped the pass proposing a thought against a member of its
+`derived_from`, and changed nothing about a proposal already standing on such a
+pair — judged before 066, or recorded raw (the recorder has no lineage guard):
+the listing read nothing of `derived_from`, so a reviewer saw "the page
+supersedes its evidence" as any other pending row, and an accept would have
+archived the evidence while the page still named it. Such a row is nobody's but
+the reviewer's — a pending proposal holds its pair (029's rule, read by 063's
+candidate clause), and 063's recorder rewrites stale rows alone, so no pass
+judges or replaces it; a stale one, which 063's clause re-admits and 066 keeps
+out, is the pass's to settle since 067, on the next run that re-pools its newer
+thought (both sides with a vector, no failed claim under the run's key). The
+file redefines `list_supersession_proposals` on
+029's body with a trailing `lineage` column — 066's predicate, either direction,
+direct members, NULL-safe — and a third parameter `p_lineage` (NULL every pair,
+true the lineage pairs alone, false the rest); the two-argument form is dropped
+first (a `RETURNS TABLE` cannot gain a column under `CREATE OR REPLACE`), and a
+two-argument call resolves to the new form through the default. The readers
+follow: `consolidate.ts --list` prints `LINEAGE PAIR` on such a row with the
+reject to run, `--list lineage` selects the unreviewed ones (pending, then
+stale), `--status` counts them, `--accept` refuses such a row unless `--force`
+(029's edited-since rule, CLI-side); the MCP tool prints the tag and takes
+`lineage: true`; preflight's `lineage` check counts unreviewed proposals on a
+lineage pair (bounded, as its census is) and warns with the ids and the remedy
+— on a brain at 068 the remedy applies 070 first, since `--list` needs it while
+the census and `--status` read the tables — and, with no such row standing,
+warns when the listing is from before 070 (every listing fails there: the
+callers pass the third argument) or 029's two-argument form stands beside it
+(029 re-applied by hand lands it beside, and a call short of three arguments
+is then ambiguous and fails; the fork's callers pass three, which resolve). No
+verdict is written at apply time — a rejection is a reviewer's, with a name on
+it — and a `--reject-lineage` sweep is not taken until the flag has been used.
+DDL alone; no row moves; no grant is carried (EXECUTE is PUBLIC, as on 029's).
+test-schema [64], test-upgrade [20v], test-live [16];
+`server-portable/test-preflight.ts` drives the census, the leftover-form and
+the older-body arms; the store and e2e suites read the column.
 
 Migration 071 makes `node_state`'s dependency columns read the ids they are
 asked for (SMD-2267). The gate — whether some source row of a system states a
@@ -960,6 +1003,7 @@ issues every group at once.
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
+| **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
@@ -1519,6 +1563,7 @@ bun extract-entities.ts --url … --retry-left-out        # …only those with w
 OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
+#   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -1637,8 +1682,47 @@ flag reads a row again under the bound and the model in force: whole, or, over
 the bound, to it; a reading that fails outright — a window timing out, none
 parsing — records the row failed, and the earlier reading's entities stay in
 the graph until a later reading succeeds, since a failure writes nothing. A run that leaves partial rows and
-no failure exits 0, the partial rows listed on stdout: a job watching the exit
-code or stderr sees them only as `--status` counts them.
+no failure exits 0, the partial rows listed on stdout, unless the model looks
+at fault (below).
+
+**A run whose model looks at fault says so and exits 3 (SMD-2266).** Since a
+windowed thought with any window parsed is succeeded, a model answering many
+windows malformed writes partial rows, not failed ones. So the run counts its
+answers, one per window sent of each thought that returned (a timeout's
+earlier windows are not counted), and when more than a fifth of at least 48
+were not JSON of the expected shape (`db/config.mjs`'s `malformedAlarm`) it
+says so on stderr in two lines:
+- the first says the model, not the documents, is likely at fault, and names
+  `OB1_METADATA_MODEL`, and `OB1_EXTRACT_ESCALATE_MODEL` when it answered
+  runaways; a run of `--retry-failed`, `--retry-partial` or `--retry-left-out`
+  chose its rows for failing, so its first judgement says how many rows were
+  returned and that their documents may be at fault instead;
+- the second says the rows written stand, and names the retries for the kinds
+  of row the run left, with `--job` if `OB1_METADATA_MODEL` changes.
+
+The run exits 3, ahead of the 1 of rows failed, leased or pending, whose lines
+still print; a signal or the provider's refusal still exits 130 or 2, and the
+line says so. An all-malformed run exits 3 where it exited 1; its rows are
+failed, as before. A `--follow` process judges its answers in blocks of 48 or
+more after each pass drains the pool, so a breakage that starts late is not
+diluted by the good polls before it; one started on a backlog says nothing
+until the backlog is done, as a plain run does, so try a new model with
+`--limit 48` first. Stopped by a signal, a follower still exits 0; ending at
+its `--limit` with a block tripped, it exits 3, the last pass's block judged
+with the exit it takes.
+
+Measured on the stable brain's pool, read-only: qwen2.5:7b left out 11 of
+1,658 answers, all in six papers' reference lists, and read those six again at
+12 of 136 (9%). The wrong model, qwen3.5:0.8b, left out 17 of 61 over 24
+windowed thoughts (28%), 14 of them partial and none failed — the quiet case;
+over 24 one-window thoughts it failed 4, so a run with short thoughts in it
+already exits 1. There is no floor on one thought's share, since a thought's
+share reflects its text and a run's reflects the model; a floor of half would
+have failed only 3 of the wrong model's 14 partial thoughts. The three papers
+SMD-2260 was written for, read at 20 of 72 before it (28%), would pass a
+fifth: no share tells that reading apart from the wrong model's, and the floor
+of 48 keeps one such paper alone below the threshold at the default bound of
+24 windows.
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
@@ -1949,13 +2033,13 @@ bun consolidate.ts --url … --limit 25              # a trial: this many though
 bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
-bun consolidate.ts --url … --list [pending|accepted|rejected|stale|all]
+bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
 #   --k N (3)  --min-sim F (0.6)  --min-confidence F (0.5)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
-bun consolidate.ts --url … --accept <id> --force            # a thought was edited since the pair was judged
+bun consolidate.ts --url … --accept <id> --force            # a thought edited since judged, a stale row, or a lineage pair (070)
 ```
 
 **The cost, stated up front.** Up to `--k` calls to the metadata model per
@@ -1972,8 +2056,18 @@ of them real on a hand grading — two per hundred thoughts, half worth acceptin
 **Reviewing.** `--list` prints the queue most confident first, each with the
 judge's reason, both thoughts with their capture dates and `ID:` lines, and
 the two commands that decide it; the MCP tool `list_supersession_proposals`
-prints the same queue to a client. `--accept` writes the pointer on the thought
-the verdict names as current (or the one `--direction` names — required for an
+prints the same queue to a client. A row standing on a lineage pair — one
+side's `derived_from` names the other, a page and its evidence — is tagged
+`LINEAGE PAIR` with the reject to run (`--reject <id> --note "lineage pair
+(066)"`); `--list lineage` lists the unreviewed ones, pending then stale, and
+`--status` counts them (070, SMD-2313); `--accept` on such a row is refused
+naming the reject unless `--force` says the pointer is meant — a guard on the
+one accept door, not a verdict — and a row accepted before the pair became one
+is tagged under `--list accepted` with `--reject <id>`, which clears the pointer
+(029), as the repair. `--limit` is the pass's cap and is refused beside `--list`. Such a pair is never proposed since 066, and a
+standing row is the reviewer's alone: the pass never replaces a pending one,
+and settles a stale one on its next run (067). `--accept` writes the pointer
+on the thought the verdict names as current (or the one `--direction` names — required for an
 undirected verdict, and an override for a directed one) and refuses what would
 leave the column wrong: the superseding thought already pointing at a third
 thought (the column holds one predecessor; which is the reviewer's call), or a
@@ -2726,6 +2820,13 @@ guards the target three ways.
   `ALTER DATABASE … RESET ob1.refresh_target`. `deploy/README.md`, "Refreshing
   a tier", has both statements.
 - **It is loopback,** unless `OB1_ALLOW_REMOTE_DB=1`.
+- **Each side's URL names one database every client reaches** (SMD-2317).
+  Bun runs the guards and the drop, and libpq runs `pg_dump` and `pg_restore`,
+  so a URL they read differently (a query key such as `?host=`, a fragment, a
+  first-`@` host list) is refused on either side, as is one naming no host or no
+  database. After connecting, each side's server must report the URL's
+  database: an exported `PGDATABASE` beats the URL's in Bun. `--to` is asked
+  again on the connection that marks and drops. No override lifts these.
 
 It needs Bun
 and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
@@ -2998,10 +3099,13 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2276 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 916 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2315 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 965 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
+bun test-connect.ts                         # every script's connection through connect.ts — no database
+bun test-engines.ts                         # the engines (migrate.ts) import with no side effect, refuse through run() — no database
+bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -3016,6 +3120,82 @@ and `extract-entities.ts` ignored a flag they did not know, so `--K 10` ran the
 default `--k` and exited 0 (SMD-2015). `test-cli.ts` holds the scanner's rules,
 that every entry point imports `cli.ts` and nothing else reads `process.argv`,
 and runs each entry point with a flag it does not have and with `--help`.
+
+Every script reaches its database through `connect.ts` (SMD-2302): `--url`, else
+`DATABASE_URL`, else exit 2 with one refusal (a URL that does not parse is
+refused too, and never printed); one client constructor; and one answer to
+"may this database be reset?". `tier.ts --refresh` and the suites'
+`dropSchema` both ask it, and print why not.
+
+The resolver refuses a URL that Bun and libpq would take to different places
+(SMD-2317): a query key other than `sslmode`, `application_name` and `options` (Bun sends
+`database=` and `user=` to the server, which keeps them; libpq follows `host=`,
+`port=`, `dbname=` and `service=`), a `+` in the query (a space to Bun), a
+query part libpq refuses (empty, no `=`, a second raw `=`, an `sslmode` in
+capitals), a fragment, an `@` other than the one ending the user, a `,` or
+`%2C` in the host, or a `.`/`..` path segment (Bun resolves it, libpq does
+not). Put the
+database in the URL's path. The reset rule then has three parts:
+- **The URL must name its host and its database.** With no host, Bun
+  connects to localhost over TCP and libpq to the unix socket; with no
+  database, the shell's `PGDATABASE` would choose what is dropped.
+- **Its host must be loopback by name** (`localhost`, `127.0.0.1`, `[::1]`,
+  `0.0.0.0`), or `OB1_ALLOW_REMOTE_DB=1` must be set.
+- **Once connected, the server must report the database the URL names**
+  (`pg_catalog.current_database()`), over TCP. Bun lets an exported
+  `PGDATABASE` beat the URL's database, so this is asked on the connection
+  that drops.
+
+`OB1_ALLOW_REMOTE_DB` lifts the loopback host and the TCP requirement, and
+nothing else: the other refusals say which database would be dropped. The
+server's address is not compared with loopback, because through a container's
+published port it is the container's. `hnsw-graph.ts`,
+`graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
+after connecting and return it from `closeThenExit`, which closes the pool and
+flushes their output first (the claim workers still close before each exit
+themselves, SMD-2304).
+`test-connect.ts` holds the rule as a truth table, runs the door, and checks
+that no script outside the suites reads `DATABASE_URL`, builds a client or
+exits inside the door.
+
+`migrate.ts` is also an engine (SMD-2304): `import { run } from "./migrate.ts"`
+defines it and does nothing else, and `run({ url, dryRun, baseline, reapply,
+force, grant, sql, writer })` is the CLI's run, returning the exit code — its
+lines go to the `Writer` it is given (`cli.ts`; the CLI passes the console),
+the migration files are read per call, and a client passed in is used in
+place of the URL and never closed. It must be one connection (the `max: 1`
+option), and it keeps the session state the run sets — lock_timeout, pgvector's
+schema on search_path when it is off the path, the `ob1.acl_*` settings — so
+pass one dedicated to the run, not a pooled connection another caller gets
+next. The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
+holds each engine to that: an import opens no connection, prints nothing and
+installs no process listener; the engine's code holds no exit, handler, argv
+scan or console call; and `run()` refuses in the CLI's words before
+connecting. Extraction, consolidation and re-embedding become engines next,
+one PR each, over the bootstrap below.
+
+The claim workers bootstrap their egress, identity and error handling through
+`worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket
+gate that stops a pass before it claims when the policy would refuse the call
+whatever the row — its wording one text per case, the pass's verb ("extracted" /
+"judged" / "re-embedded") the only difference — plus the identity re-gate.
+`reembed.ts` gates its embeddings endpoint (and, with `OB1_CHUNK_CONTEXT`, warns
+on the blurbs endpoint); `sync-linear.ts` wraps the bare reason in its own
+sentence. **Identity** (`extract-entities.ts` and `consolidate.ts`):
+`workerIdentity` checks `OB1_WORKER_KEY` against `MCP_ACCESS_KEYS` and resolves
+it through the store's capped path (`SqlStore.resolveAgent`, which bounds
+`lock_timeout` — the raw call the workers ran did not), refusing a revoked key
+and warning when none is set. **Errors and actors:** one `classifyError`
+classifies a provider error into thought / transient / fatal for both workers
+(extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
+`reembed.ts` and `ingest-records.ts` build their audit actors through
+`actorPayload` rather than by hand. The module returns its outcome rather than
+exiting, so SMD-2304's importable `run()` will turn it into a return code.
+`test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
+the `classifyError` rules and the identity cases that refuse before connecting;
+`test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that
+no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
+`resolve_agent(` or `parseKeyRecords`.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
@@ -3038,7 +3218,9 @@ how SMD-1806's ingester met the step when it imported two `scripts/*.mjs`
 not resolve — and asserts the runner heals its own session while preflight names
 the persistent fix. The test container installs pgvector into `public`, on the
 path, so nothing else in the matrix sees this; the suite restores it afterward,
-which `ci-parity.sh` needs since it shares one Postgres.
+which `ci-parity.sh` needs since it shares one Postgres. Its [7] holds the path
+the migrator gives migration 021's transaction, `pg_temp` taken out, to the
+schemas Postgres reads in the raw path (SMD-2247).
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
 the command and removes the container on exit. It prefers podman (including the
@@ -3348,7 +3530,19 @@ first assumed. See FORK.md's SMD-1632 section.
   bound too; `--retry-left-out`, run as `--status` advises — another model,
   `--job` this pool's key — the stub answering now, takes those two and not the prefix, saying one is a
   prefix too, and clears their caveats and adds the windows' entities, and
-  `--retry-partial` then takes the prefix (SMD-2260).
+  `--retry-partial` then takes the prefix (SMD-2260). Three 24-window papers
+  with 4, 3 and 1 windows in prose — the stable brain's reference-list papers
+  as the 7B reads them, 8 of 72 answers — are written and the run exits 0 with
+  no alarm; four 12-window papers with 5 windows each in prose, 20 of 48
+  answers and no row failed, exit 3 where they exited 0, naming
+  `--retry-left-out` alone; three 12-window papers with 5 each in prose and 12
+  one-window notes in
+  prose, 27 of 48 answers, exit 3, before the notes' failures' 1, the stderr
+  line naming the share and the model, the papers' rows standing; a `--follow`
+  process given 48 notes in prose prints the line as it polls, not at its
+  stop, and exits 0 on SIGINT; and `--retry-failed` over the 60 notes, still in
+  prose, exits 3 saying their documents may be at fault; a `--follow --limit`
+  that trips on its last pass says it exits 3, and does (SMD-2266).
 
 ### What test-schema.ts asserts
 

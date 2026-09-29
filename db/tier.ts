@@ -47,7 +47,10 @@
  * --to stamped tier=stable, holding thoughts under no canary/working stamp, or
  * holding some other application's schema, unless an earlier refresh marked it
  * (targetRefusal); and a non-loopback --to unless OB1_ALLOW_REMOTE_DB=1, the
- * same guard test-support's dropSchema uses.
+ * same guard test-support's dropSchema uses. No override lifts the refusal of
+ * a URL that Bun and libpq read as different targets, or that names no
+ * database, or whose connection reached a database other than the one it
+ * names (an exported PGDATABASE beats the URL's in Bun; SMD-2317).
  *
  * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
  * is the offline, model-free, fixture-vector half in CI). For each search row
@@ -74,12 +77,13 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
+import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig, quoteIdent, searchPathSchemas } from "./config.mjs";
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
+import { closeThenExit, connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -246,16 +250,6 @@ export async function replayAndDiff(
 // The refresh — a faithful whole-database snapshot, then migrate forward.
 // ---------------------------------------------------------------------------
 
-/** A host that is safe to reset without OB1_ALLOW_REMOTE_DB — refresh drops the target's schema. */
-function isLoopback(url: string): boolean {
-  try {
-    const h = new URL(url).hostname.toLowerCase();
-    return h === "" || h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Where a URL points, for a message: host:port/database, never its user or
  * password. An `@` after the host means the userinfo was not percent-encoded
@@ -269,7 +263,9 @@ export function where(url: string): string {
   try {
     const u = new URL(url);
     if (`${u.pathname}${u.search}${u.hash}`.includes("@")) return "a URL with an @ after its host — is its password percent-encoded?";
-    return `${u.hostname || "localhost"}:${u.port || "5432"}${u.pathname.length > 1 ? u.pathname : ""}`;
+    // No host is PGHOST's to decide (Bun's client and libpq both read it), not
+    // localhost; no port is PGPORT's when it is set, as both clients read it too.
+    return `${u.hostname || "$PGHOST"}:${u.port || (process.env.PGPORT ? "$PGPORT" : "5432")}${u.pathname.length > 1 ? u.pathname : ""}`;
   } catch {
     return "a URL that does not parse";
   }
@@ -325,7 +321,7 @@ async function toolMajor(tool: string): Promise<number | null> {
  */
 async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
   const [me] = await a<{ pid: number; started: string; db: string }[]>`
-    SELECT pid, extract(epoch FROM backend_start)::text AS started, current_database() AS db
+    SELECT pid, extract(epoch FROM backend_start)::text AS started, pg_catalog.current_database() AS db
     FROM pg_stat_activity WHERE pid = pg_backend_pid()`;
   const [seen] = await b<{ found: boolean; db: string }[]>`
     SELECT EXISTS (
@@ -333,7 +329,7 @@ async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
              WHERE pid = ${me.pid}
                AND (backend_start IS NULL OR extract(epoch FROM backend_start)::text = ${me.started})
            ) AS found,
-           current_database() AS db`;
+           pg_catalog.current_database() AS db`;
   return seen.found && seen.db === me.db;
 }
 
@@ -364,6 +360,15 @@ async function refreshMark(sql: SQL): Promise<string | null> {
  * variable_is_guc_list_quote names the same six.
  */
 const LIST_SETTINGS = new Set(["local_preload_libraries", "search_path", "session_preload_libraries", "shared_preload_libraries", "temp_tablespaces", "unix_socket_directories"]);
+/**
+ * The two of them whose elements are identifiers, which Postgres reads with
+ * SplitIdentifierString: searchPathSchemas, so an unquoted name folds and only
+ * Postgres's whitespace separates (SMD-2247). A value stored by `SET … FROM
+ * CURRENT` is the text as written — `NoWhere` is the schema nowhere, never
+ * `"NoWhere"`. temp_tablespaces keeps an empty entry, the database's default
+ * tablespace, which search_path's reading drops.
+ */
+const IDENTIFIER_LISTS = new Set(["search_path", "temp_tablespaces"]);
 const SETTING_NAME = /^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)*$/i;
 
 /**
@@ -371,18 +376,35 @@ const SETTING_NAME = /^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)*$/i;
  * setrole 0) as name → value, the refresh mark left out. pg_dump without
  * --create carries none of them, so a refresh copies them from --from onto
  * --to itself (SMD-2037): migration 014 seeds the HNSW walk's bounds there
- * once, and a copy without them answers a broad filtered search short.
+ * once, and a copy without them answers a broad filtered search short. An
+ * identifier list comes back re-spelled, each name quoted: read as this
+ * server reads it (a vertical tab separates from PostgreSQL 17), so --to
+ * keeps --from's meaning whatever its version.
  */
 export async function databaseSettings(sql: SQL): Promise<Record<string, string>> {
   const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+  const [{ version }] = await sql<{ version: number }[]>`SELECT current_setting('server_version_num')::int AS version`;
   const { ["ob1.refresh_target"]: _mark, ...settings } = parseSetConfig(row?.cfg);
-  for (const name of Object.keys(settings)) {
+  for (const [name, value] of Object.entries(settings)) {
     if (!SETTING_NAME.test(name)) throw new Error(`database setting ${JSON.stringify(name)} is not a name this tool can write back`);
+    if (IDENTIFIER_LISTS.has(name)) settings[name] = searchPathSchemas(value, version, name === "temp_tablespaces").map(quoteIdent).join(", ");
   }
   return settings;
 }
 
-/** A list setting's stored value (`"$user", public`) as its elements. */
+/**
+ * A value as an E'' string literal, the same text whatever the session's
+ * standard_conforming_strings: a plain '…' literal reads a backslash as an
+ * escape with it off, and a refresh's target session may start with it off —
+ * a setting of the source's that an earlier refresh copied.
+ */
+const literal = (v: string) => `E'${v.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
+
+/**
+ * A list setting's stored value (`"$user", public`) as its elements. An
+ * identifier list reaches here as databaseSettings re-spelled it, every name
+ * quoted, so the split needs no case or whitespace rules of Postgres's.
+ */
 function listElements(value: string): string[] {
   const out: string[] = [];
   let cur = "", quoted = false, inQuotes = false;
@@ -401,8 +423,9 @@ function listElements(value: string): string[] {
 }
 
 /**
- * Make `dst`'s own settings equal `settings`, the refresh mark aside: each one
- * `dst` has that `settings` lacks is reset, and each in `settings` is set.
+ * Make `dst`'s own settings equal `settings` — as databaseSettings returns
+ * them — the refresh mark aside: each one `dst` has that `settings` lacks is
+ * reset, and each in `settings` is set.
  * pgvector is loaded first, as migration 014's remedy does, so `hnsw.*` are
  * the library's settings, which a database owner may set, rather than
  * placeholders only a superuser may.
@@ -411,17 +434,20 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
   const current = await databaseSettings(dst);
   // A no-op where `vector` already resolves; else the path gains its schema.
   await alignVectorSearchPath(dst);
-  const [{ db, loadable }] = await dst<{ db: string; loadable: boolean }[]>`SELECT current_database() AS db, to_regtype('vector') IS NOT NULL AS loadable`;
+  const [{ db, loadable }] = await dst<{ db: string; loadable: boolean }[]>`SELECT pg_catalog.current_database() AS db, to_regtype('vector') IS NOT NULL AS loadable`;
   if (loadable) await dst`SELECT '[1]'::vector`;
   const target = `"${db.replaceAll('"', '""')}"`;
   for (const name of Object.keys(current)) {
     if (!(name in settings)) await dst.unsafe(`ALTER DATABASE ${target} RESET ${name}`);
   }
   for (const [name, value] of Object.entries(settings)) {
+    // Each list element a string literal, never a quoted identifier: `""` is
+    // no identifier, and temp_tablespaces' empty entry must be written. For
+    // these settings Postgres stores a literal element as it would the
+    // identifier, quoted where the name needs it — except that a literal is
+    // not cut to 63 bytes, where a quoted identifier cut a library path.
     const elements = LIST_SETTINGS.has(name) ? listElements(value) : null;
-    const rhs = elements === null ? `'${value.replaceAll("'", "''")}'`
-      : elements.length === 0 || (elements.length === 1 && elements[0] === "") ? "''"
-      : elements.map((e) => `"${e.replaceAll('"', '""')}"`).join(", ");
+    const rhs = elements === null ? literal(value) : elements.length === 0 ? "''" : elements.map(literal).join(", ");
     await dst.unsafe(`ALTER DATABASE ${target} SET ${name} = ${rhs}`);
   }
 }
@@ -448,7 +474,7 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
 export async function targetRefusal(target: SQL): Promise<string | null> {
   if ((await refreshMark(target)) !== null) return null;
   const [{ db, relations, migrations, config, thoughts }] = await target<{ db: string; relations: number; migrations: boolean; config: boolean; thoughts: boolean }[]>`
-    SELECT current_database() AS db,
+    SELECT pg_catalog.current_database() AS db,
            (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = 'public'
               -- relations a schema is made of; an index, a composite type or a
@@ -496,7 +522,8 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  *   1. pg_dump the source (custom format, no owner/privileges — the target's role
  *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
  *   2. mark the target as a refresh target (refreshMark), then reset its public
- *      schema (the destructive step, guarded by targetRefusal and the loopback check).
+ *      schema (the destructive step, guarded by targetRefusal, the loopback
+ *      check, and the connected check asked on the connection that drops).
  *   3. pg_restore the dump.
  *   4. copy the source's database-level settings (databaseSettings), which the
  *      dump does not carry — 014's HNSW bounds among them (SMD-2037).
@@ -505,16 +532,33 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  * Throws with a plain message on any failed step.
  */
 export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
-  if (!isLoopback(toUrl) && process.env.OB1_ALLOW_REMOTE_DB !== "1") {
-    throw new Error(`--to is not loopback and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset a remote database. (--refresh drops the target's schema.)`);
+  // connect.ts's one rule, the test scaffolding's too, before either side is
+  // opened. Each URL must be one Bun (the guards, the drop) and libpq
+  // (pg_dump, pg_restore) take to the same place, naming its database: no
+  // override lifts that (SMD-2317). Then --to's host must be loopback by name,
+  // not an empty host (it resolves through PGHOST), or the override set.
+  for (const [side, url] of [["--from", fromUrl], ["--to", toUrl]] as const) {
+    const fixed = identityRefusal(url);
+    if (fixed !== null) throw new Error(`${side}: ${fixed}. Refusing: --refresh dumps --from and drops --to's schema, so each must name one database every client reaches.`);
   }
-  const src = new SQL({ url: fromUrl, max: 1 });
-  const target = new SQL({ url: toUrl, max: 1 });
+  const refusal = resetRefusal(toUrl);
+  if (refusal !== null) {
+    throw new Error(`--to is not plainly this machine — ${refusal} — and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset it. (--refresh drops the target's schema.)`);
+  }
+  const src = openSql(fromUrl);
+  const target = openSql(toUrl);
   let serverMaj: number;
   let settings: Record<string, string>;
   try {
     await reach(src, fromUrl, "--from");
     await reach(target, toUrl, "--to");
+    // Where each connection went, from the server: Bun lets an exported
+    // PGDATABASE beat the URL's database, so the guards below would judge one
+    // database while pg_dump and pg_restore, which keep the URL's, used another.
+    const fromReached = await reachedDatabaseRefusal(src, fromUrl);
+    if (fromReached !== null) throw new Error(`--from: ${fromReached}. Refusing: pg_dump would read the URL's database, not the one checked.`);
+    const toReached = await connectedResetRefusal(target, toUrl);
+    if (toReached !== null) throw new Error(`--to: ${toReached}. Refusing: --refresh drops the target's schema.`);
     serverMaj = await serverMajor(src);
     settings = await databaseSettings(src);
     // The reset below drops --to's schema, so --to must be neither the source
@@ -544,11 +588,18 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     // fails on the copy, a Ctrl-C mid-restore — leaves a target the next one
     // recognises as its own (refreshMark). `tier` is one of TIERS, checked by
     // the caller; ALTER DATABASE takes no bind parameters.
-    const dst = new SQL({ url: toUrl, max: 1 });
+    const dst = openSql(toUrl);
     try {
       if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
+      // Asked again on this connection, the one that marks and drops: the
+      // guard's own connection is closed, and this one is a new resolution.
+      const again = await connectedResetRefusal(dst, toUrl);
+      if (again !== null) throw new Error(`--to: ${again}. Refusing: --refresh drops the target's schema. --to is untouched.`);
       try {
-        await dst.unsafe(`DO $mark$ BEGIN EXECUTE format('ALTER DATABASE %I SET ob1.refresh_target = %L', current_database(), '${tier}'); END $mark$`);
+        // pg_catalog's, not the path's: a URL's options= may set search_path,
+        // and a planted current_database() would put the mark on another
+        // database, where it disarms targetRefusal (review pass 2).
+        await dst.unsafe(`DO $mark$ BEGIN EXECUTE pg_catalog.format('ALTER DATABASE %I SET ob1.refresh_target = %L', pg_catalog.current_database(), '${tier}'); END $mark$`);
       } catch (e) {
         // Nothing is reset yet. A database-level setting of a custom name needs a
         // superuser, or on PG15+ a role granted SET on the parameter; restoring
@@ -566,7 +617,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     // pg_restore exits non-zero on benign warnings (e.g. a comment on an extension
     // it did not create); treat a restore that produced the core table as success,
     // otherwise surface it.
-    const check = new SQL({ url: toUrl, max: 1 });
+    const check = openSql(toUrl);
     let hasThoughts = false;
     try {
       const [{ present }] = await check<{ present: boolean }[]>`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`;
@@ -583,7 +634,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
 
     // Before the migration, so a migration that reads a setting sees the
     // source's; each later session on --to — migrate.ts's, the server's — does.
-    const settle = new SQL({ url: toUrl, max: 1 });
+    const settle = openSql(toUrl);
     try {
       await applyDatabaseSettings(settle, settings);
     } catch (e) {
@@ -595,7 +646,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     const migrated = await run(["bun", join(HERE, "migrate.ts"), "--url", toUrl], { stdio: "inherit" });
     if (migrated.code !== 0) throw new Error(`migrate.ts failed on the refreshed target (exit ${migrated.code})`);
 
-    const stamp = new SQL({ url: toUrl, max: 1 });
+    const stamp = openSql(toUrl);
     try {
       await stampTier(stamp, tier);
       await setConfig(stamp, "last_refresh", new Date().toISOString());
@@ -639,8 +690,8 @@ async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
  * performed because no image is published yet.
  */
 export async function promote(canaryUrl: string, stableUrl: string): Promise<{ version: string | null }> {
-  const canary = new SQL({ url: canaryUrl, max: 1 });
-  const stable = new SQL({ url: stableUrl, max: 1 });
+  const canary = openSql(canaryUrl);
+  const stable = openSql(stableUrl);
   try {
     await reach(canary, canaryUrl, "--from (canary)");
     await reach(stable, stableUrl, "--to (stable)");
@@ -651,7 +702,7 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
     const mark = await refreshMark(stable);
     const tier = await configTier(stable);
     if (mark !== null || tier === "canary" || tier === "working") {
-      const [{ db }] = await stable<{ db: string }[]>`SELECT quote_ident(current_database()) AS db`;
+      const [{ db }] = await stable<{ db: string }[]>`SELECT pg_catalog.quote_ident(pg_catalog.current_database()) AS db`;
       throw new Error(`--to is a tier (${mark !== null ? `refresh mark ${mark}` : `tier=${tier}`}), not the record — are --from and --to the wrong way round? Refusing: --promote stamps --to as stable.${mark !== null ? ` If --to really is to be the record now, clear the mark first: ALTER DATABASE ${db} RESET ob1.refresh_target` : ""}`);
     }
     const version = await readConfig(canary, "schema_version");
@@ -821,16 +872,18 @@ async function main(): Promise<void> {
 
   // replay | diff
   const since = cli.value("since") ?? null;
-  const stable = new SQL({ url: from, max: 4 });
-  const canary = new SQL({ url: to, max: 4 });
-  try {
+  const stable = openSql(from, { max: 4 });
+  const canary = openSql(to, { max: 4 });
+  // The code is returned and applied after both pools close: an exit inside
+  // the body skipped the close (a throw still closes, then reaches main's catch).
+  await closeThenExit([stable, canary], async () => {
     // Each side answers and has the table; say so in the reader's words, not a driver trace.
     for (const [sql, url, label] of [[stable, from, "--from (stable)"], [canary, to, "--to (canary)"]] as const) {
       await reach(sql, url, label);
       const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.query_log') IS NOT NULL AS present`;
       if (!present) {
         console.error(`tier.ts --${verb}: query_log is not present on ${label} — migration 034 is not applied there.`);
-        process.exit(2);
+        return 2;
       }
     }
     // The default window is since the canary was last refreshed; else everything.
@@ -847,11 +900,9 @@ async function main(): Promise<void> {
     // The gate: 1 when a ranking moved, 3 when nothing was compared — not a
     // pass, and not a move either, so a caller can tell the two apart. (A
     // failed step is 1 as well, below; a usage error or refusal is 2.)
-    if (verb === "diff" && verdict !== "unmoved") process.exit(verdict === "moved" ? 1 : 3);
-  } finally {
-    await stable.close();
-    await canary.close();
-  }
+    if (verb === "diff" && verdict !== "unmoved") return verdict === "moved" ? 1 : 3;
+    return 0;
+  });
 }
 
 // A refusal or a failed step is a sentence for the operator, not a stack trace

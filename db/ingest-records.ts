@@ -89,11 +89,13 @@ import { loadLinearCorpus, linearThoughtId, type LinearDoc } from "../evals/line
 import { parseFragment, fragmentSection } from "../scripts/fragments.ts";
 import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
 import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
+import { actorPayload } from "../server-portable/store.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { ItemsRefusal, parseItems, PIPELINE_META_KEYS, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
 import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
 import { commandLine } from "./cli.ts";
+import { databaseUrl, openSql } from "./connect.ts";
 
 // The structure writer lives in ingest-structure.ts so db/sync-linear.ts can
 // import it without this file's evals/ and scripts/ imports (its container
@@ -529,7 +531,7 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
   const asOf = doc.watermark?.asOf ?? null;
   try {
     return await sql.begin(async (tx) => {
-      await tx`SELECT set_config('ob1.actor', ${JSON.stringify(actor)}, true)`;
+      await tx`SELECT set_config('ob1.actor', ${JSON.stringify(actorPayload(actor))}, true)`;
       // Another thought already IS this item — the board sync's row for a
       // ticket, found by identity (thought_sources; on a brain the sync filled
       // before 053, its metadata.issue claim). Asked BEFORE the write: with one
@@ -910,10 +912,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  const url = cli.value("url") ?? process.env.DATABASE_URL;
-  if (!url) { console.error("No database URL. Pass --url or set DATABASE_URL."); process.exit(2); }
+  const url = databaseUrl(cli.value("url"));
 
-  const sql = new SQL({ url, max: 1 });
+  const sql = openSql(url);
   const run = runName();
   const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, patched: 0, unchanged: 0, skipped: 0, held: 0, stale: 0 };
   const structure = { canonical: { inserted: 0, updated: 0, unchanged: 0 } as Record<string, number>, links: { added: 0, closed: 0, kept: 0, dropped: 0 }, mentions: 0, records: 0 };

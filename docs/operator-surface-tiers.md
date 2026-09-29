@@ -1,13 +1,13 @@
 # Three servers and an authorization server behind the proxy (SMD-2282)
 
-An architecture decision record. **Decided 2026-09-27 by the maintainer.**
+An architecture decision record. **Decided 2026-09-27 by the maintainer.** Amended 2026-09-29 with the authorization server's selection and identity rules (SMD-2285, decisions 13–16).
 
 The brain's deployed surface becomes three servers and an authorization server, all behind one reverse proxy:
 
 - **A REST core** owns Postgres, egress and the contract, and answers JSON.
 - **An operator GUI** in SvelteKit is a client of the REST core.
 - **An MCP server** on SDK v2 is a client of the REST core too.
-- **An authorization server** is its own service. Identity crosses from the MCP server to the REST core by token exchange.
+- **An authorization server** is its own service, off unless the operator turns it on. An OAuth token crosses from the MCP server to the REST core by token exchange. An access key is forwarded to the REST core, which checks it.
 
 Internal names are subdomains; public routes are paths. The stack deploys by compose only.
 
@@ -27,12 +27,16 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 | 4 | **One reverse proxy** in front of all three (SMD-1846). Each has its own public endpoint through it, and they talk to each other over an internal-only network. | one host port per service |
 | 5 | **Subdomains for internal names, paths for public routes.** | subdomains everywhere; paths everywhere |
 | 6 | **An authorization server now, as its own service.** | inside the GUI server; OAuth later |
-| 7 | **Token exchange (RFC 8693)** carries identity across the MCP→REST hop. | a service credential plus an asserted user |
+| 7 | **Token exchange (RFC 8693)** carries an OAuth token's identity across the MCP→REST hop. **An access key is forwarded** with the MCP server's own service key, and the REST core checks it (amended 2026-09-29, SMD-2285). | a service credential plus an asserted user; exchanging keys too |
 | 8 | **Compose-only deployment.** | keeping a single-process mode |
 | 9 | **A contributed server (an extension or an integration) folds into the REST core as a plugin** (SMD-2308, 2026-09-27). Its operations join the shared contract, and REST and MCP expose them from one process. | a REST-core client of its own at `/ext/<name>`; unchanged standalone servers |
 | 10 | **The six curated `extensions/` port to plugins** (SMD-2311). | keeping them as an undeployed learning path; retiring them |
 | 11 | **`dashboards/` becomes extension pages in the canonical GUI**, registered through its nav registry. There are no standalone dashboard apps. | an open category of REST-client apps behind `/api` |
 | 12 | **Extensions use the brain's identity**: keys or authorization-server tokens, checked by the REST core. There is no key list per extension. | a key list per extension |
+| 13 | **The authorization server is `oidc-provider`** (panva, MIT, OpenID Certified), in a small service of our own on Bun through `node:http`, pinned to an exact version (SMD-2285, 2026-09-28). It was the only candidate to pass all eight criteria. Better Auth is the runner-up in the proof of concept. | Keycloak, Authentik, Logto, Better Auth; Zitadel, Ory Hydra and Authelia were ruled out |
+| 14 | **One authorization server for every tier.** `/mcp`, `/canary/mcp`, `/working/mcp` and each tier's REST core are distinct resources (RFC 8707 audiences) under one public origin. | one per tier |
+| 15 | **Operator sign-in is a passkey, with a password fallback**, both at the authorization server. **Break-glass:** key sign-in to the GUI on a loopback-only listener that no tunnel points at. | password and TOTP; an upstream provider; no break-glass; key sign-in everywhere |
+| 16 | **The `auth` compose profile is the switch** (SMD-2382, 2026-09-29). Setting the public origin without it means keys only. | the origin being the switch |
 
 ## The shape
 
@@ -48,7 +52,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
                  │   /hooks/<name> → api.ob1.internal (a plugin's webhook; off by default, per plugin)
                  └───────────────┬────────────────────────┘
                                  │  mesh network (internal: true, no outbound route)
-   mcp ──token exchange──▶ auth  │
+   mcp ──token exchange──▶ auth  │  (OAuth tokens only; keys are forwarded to api)
    mcp ─────REST client──▶ api ◀──── REST client ── app
    n8n ─────REST──────────▶ api ──▶ postgres
    n8n ──runner key──▶ orchestration-runner ──▶ postgres
@@ -78,35 +82,50 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
     - the REST core, for Ollama (host Ollama on the dogfood stack), Jev and OpenRouter;
     - every worker-class process that calls a provider: the `db/` workers (extract, consolidate, reembed, rebuild's pools), board-sync (also Linear), and the `orchestration-runner`;
     - n8n, for Linear and Gmail;
-    - the authorization server, if its client registration fetches metadata documents.
+    - the authorization server, which fetches client ID metadata documents. Each fetch goes through a guard that refuses private, loopback, link-local, CGNAT and `*.ob1.internal` targets, because the server also sits on the mesh (SMD-2285).
 
     The MCP server and the GUI stay mesh-only. The proxy joins the edge network and the mesh.
 - **Postgres from the host** stays an operator opt-in: `deploy/compose.host-ports.yaml` publishes it on loopback (SMD-1844). A host-run `db/` script or recipe uses that overlay, or runs in a tools container on the mesh (SMD-1869).
 - **The REST core's own `/health` is internal only.** Brain identity and ledger freshness reach the public side through the MCP server's `/health`, the one probe URL for `smoke.sh`, the image healthcheck and `db/brain-compare.ts`.
-- **`/.well-known/` stays a 404 except two routed paths:**
+- **`/.well-known/` stays a 404 except three routed paths, and those only while the `auth` profile is configured:**
   - `/.well-known/oauth-protected-resource/mcp` goes to the MCP server (RFC 9728).
   - `/.well-known/oauth-authorization-server/auth` goes to the authorization server (RFC 8414).
-  Both use the path-inserted form those RFCs define for a resource or issuer that lives under a path.
+  - The bare `/.well-known/oauth-authorization-server` goes to the authorization server too. Claude Code 2.1.275 fetches only that URL and ignores the issuer's path (anthropics/claude-code#95270). With one authorization server (decision 14) the route conflicts with nothing. Its document names the issuer `…/auth`, not the bare origin, so whether Claude Code accepts it is a proof-of-concept check.
+  The first two use the path-inserted form those RFCs define for a resource or issuer that lives under a path.
 - **Path-based public routes carry obligations:**
   - The GUI sets SvelteKit's `paths.base` and scopes its cookie to `Path=/dashboard`, so the cookie never reaches another route.
-  - The authorization server must run with its issuer under `/auth`. That is a selection criterion in SMD-2285.
+  - The authorization server's issuer is `${OB1_PUBLIC_ORIGIN}/auth`, set from configuration and never derived from request headers (SMD-2382).
 
 ## Identity
 
+- **The switch and its two states** (decision 16, SMD-2382). One setting, `OB1_PUBLIC_ORIGIN`, fixes the issuer, the protected-resource URL, the passkey relying-party ID and every redirect URI. OAuth exists only when the `auth` compose profile is enabled, and the profile refuses to start without the origin. Two states are kept apart:
+  - **Configured** is static: `COMPOSE_PROFILES=auth` in `deploy/.env`, interpolated into every service. **Security rules key on it.** While configured, the GUI's public port never offers key sign-in and the REST core never drops its issuer check, even with the authorization server down.
+  - **Reachable** is dynamic: `auth.ob1.internal` answers its health check. **Only what is advertised or offered keys on it**: the protected-resource metadata, the 401 challenge and passkey sign-in. Knocking the authorization server over closes those; it never opens a weaker door.
+  - Not configured, with or without an origin, is today's posture: keys only. That covers loopback-only stacks, the quick tunnel (whose name changes every start) and a named tunnel whose operator wants no OAuth.
 - **The REST core is the only resource server that authorizes.**
   - Access keys keep their read / write / capture scopes (`server-portable/auth.ts`).
   - The authorization server's tokens map to the same three scopes: `brain:read`, `brain:write`, `brain:capture`.
-  - The audit actor is the subject, plus `act` when a service delegated.
+  - The audit actor is the subject, plus `act` when a service delegated. A key's subject is its bare name, and an OAuth subject is `oauth:<sub>`. So a key can never read as a signed-in identity, because `keygen.ts` allows no `:` in a key name. Existing rows, `actor:` egress terms and the search tools' `actor` filter keep matching, since each already reads a key's bare name.
   - No privilege exists only in OAuth.
 - **MCP server:**
-  - It serves protected-resource metadata and answers 401 with `WWW-Authenticate`.
-  - It exchanges each incoming token (audience = the public `/mcp` resource) for a REST-core token under its own client credentials.
+  - While the authorization server is reachable, it serves protected-resource metadata and answers 401 with `WWW-Authenticate`. The challenge goes only on requests whose `Host` is the public origin, so a keyless loopback client gets today's plain 401 rather than an OAuth flow it can never finish. Keying this on `Host` fails safe; no security rule keys on `Host`.
+  - While configured but unreachable, OAuth clients get a 503, not a 401 that would restart their sign-in.
+  - It exchanges each incoming OAuth token (audience = the public `/mcp` resource) for a REST-core token under its own client credentials. It caches the result by the incoming token, never by subject alone. One operator can hold a read-scope connector and a write-scope connector.
   - The MCP authorization spec forbids passing the received token upstream; exchange is how the hop keeps both the subject and the delegating service.
-- **GUI:** a confidential client using authorization code with PKCE, asking for the REST core as the resource (RFC 8707). Tokens live in the sealed server-side session and never reach the browser, the same pattern the SvelteKit dashboard uses for the key today.
+- **Access-key MCP clients** (the hook, `?key=` connectors) are **forwarded** (decision 7, SMD-2286 step 4). The MCP server passes the key to the REST core with its own forwarder key. The REST core checks both, and records the key's name as the subject and the MCP service as the actor.
+  - The forwarder is a key with a `forward` scope that grants nothing by itself. The REST core refuses any other key in the forwarder's place, so a client holding two keys cannot stamp one as the other's actor (SMD-2284).
+  - This is not the token passthrough the spec forbids. That rule covers OAuth tokens issued for the MCP server, and a brain key is the REST core's own credential, checked there.
+  - Forwarding works in every state and needs no authorization server. Keys therefore survive its outage, the capture hook included.
+- **GUI:**
+  - A confidential client using authorization code with PKCE, asking for the REST core as the resource (RFC 8707).
+  - Tokens live in the sealed server-side session and never reach the browser, the same pattern the SvelteKit dashboard uses for the key today.
+  - Sign-in is a passkey with a password fallback while configured (decision 15), and a key when not.
+  - Break-glass key sign-in stays available on a separate port published only on `127.0.0.1`. Neither the source IP nor `Host` can tell local from public, because every documented tunnel dials `127.0.0.1`.
 - **Clients inside compose** (n8n, the `db/` worker containers) call the REST core directly on the mesh with an access key.
-- **Clients on the host** cannot reach the mesh: the session-capture hook (`OB1_BRAIN_URL`), `db/brain-compare.ts`, Claude Code's MCP entries and `db/` scripts run from the host. They use `https://<host>/mcp`, or `/api` where the operator has turned it on.
+- **Clients on the host** cannot reach the mesh: the session-capture hook (`OB1_BRAIN_URL`), `db/brain-compare.ts`, Claude Code's MCP entries and `db/` scripts run from the host.
+  - They keep keys and may use the loopback URL. OAuth needs the public origin, which is a different resource from `http://127.0.0.1…/mcp` (SMD-2382).
+  - `/api` is available where the operator has turned it on.
   - The hook stays an MCP client. It reads the SMD-1978 refusal codes from `structuredContent`, which SMD-2287 must carry over exactly.
-- **Access-key MCP clients** (the hook, `?key=` connectors) either exchange the key at the authorization server or have it forwarded to the REST core. Which one depends on whether the chosen server supports custom subject-token types (SMD-2285 criterion 8, SMD-2286 step 4).
 - **Multi-user isolation stays deferred** (SMD-1716). The authorization server introduces identities, not tenants.
 
 ## Where everything else lives
@@ -150,7 +169,8 @@ Decided 2026-09-27 (SMD-2308, decisions 9–12).
 | 3 | SMD-1846 (revised): the proxy and internal network, alongside SMD-1849 | One published port; streaming passes through unbuffered |
 | 4 | SMD-2280: the GUI's read views against the REST core | The smoke renders every read view with three key scopes |
 | 5 | SMD-2287: the MCP server on v2 as a REST client; parity, then canary, then cutover | The suites pass against it; `index.ts` registers no tools |
-| 6 | SMD-2285, then SMD-2286: authorization server and identity chain. Selection starts now, in parallel | A claude.ai connector signs in and its audit row names the subject and `act` |
+| with 3 | SMD-2382: the public origin and the `auth` profile switch | Each of the four states (no origin; an origin without the profile; configured and reachable; configured and unreachable) behaves as the Identity section says |
+| 6 | SMD-2285, then SMD-2286: authorization server and identity chain. The pick is made (decision 13); the proof of concept runs next, in parallel | A claude.ai connector signs in and its audit row names the subject and `act` |
 | 7 | SMD-2288: compose-only; retire the Workers target; rewrite the guard rail and SETUP.md | No doc names a non-compose deployment |
 | with 2, 5 | SMD-2296: release images per server, the CI full-stack job through the proxy, the landing check and counted surfaces | A release rehearsal smokes every pulled image |
 | after 5 | SMD-2294: the tier stack (`compose.tiers.yaml`, `canary.sh`, `tier.sh`, `--compare`) on proxy paths | No `:8010`–`:8012` left in `deploy/` or `db/` |
@@ -173,13 +193,15 @@ Read against the tree on 2026-09-27.
 | Session-capture hook | New URL; stays an MCP client; refusal codes carried over exactly | SMD-2287 |
 | board-sync and the `db/` scripts | 35 files import `server-portable` modules (`entities`, `embed`, `chunk`, `egress`, `store`, …) and none import `index.ts`. SMD-2283 keeps those paths. The worker containers join the mesh and the egress network (they call providers) | SMD-2283, SMD-2134, SMD-1869 |
 | n8n | Brain calls move from MCP to the REST core. SMD-2212 (merged, #222) needs no re-aim for its import: n8n calls the `orchestration-runner`, not the brain. Its act tool is n8n's own endpoint | SMD-2295 |
-| `orchestration-runner` (#222) | A worker-class DB writer on the mesh and the egress network; its per-uid hardening is redesigned against the two networks | SMD-2289 |
+| `orchestration-runner` (#222) | A worker-class DB writer on the mesh and the egress network. Its per-uid egress rules (SMD-2289) are the container's own network namespace's, so they hold whichever networks it joins | SMD-2289 |
 | `integrations/kubernetes-deployment` | Retires under compose-only | SMD-1931, SMD-2288 |
 | Jev, the LLM env forwarding, the preflight entrypoint | Move from the `server` service to the REST core | SMD-2284 |
 | Release images and CI | `ob1-server` becomes one image per server; the full-stack job goes through the proxy; the Workers build retires | SMD-2296, SMD-2288 |
 | Docs and skills with the one-process `?key=` URL shape | One bring-up path and the new URLs | SMD-2288 |
 | `chrome-capture-extension`, `recipes/*` MCP callers, agent-memory plugins | New URLs; the extension needs `/api` or a move to `/mcp` once `rest-api` retires | SMD-1931 |
-| Secrets in `deploy/.env` | The authorization server's signing key and each service's client secret, with the backup note | SMD-2285 |
+| Secrets in `deploy/.env` | The authorization server's signing key, each service's client secret, the `ob1_auth` role's password and the operator's argon2 password hash, with the backup note | SMD-2285 |
+| Postgres, backup and restore | The authorization server's own `ob1_auth` database, under its own role rather than the superuser, created by an idempotent provision step. `pg_dump openbrain` misses it, so backup and restore gain a second dump. `db/tier.ts --refresh` never touches it | SMD-2285, SMD-2294 |
+| `docs/01-getting-started.md` (quick tunnel first) | OAuth and passkeys need a stable origin: a named tunnel, Tailscale Funnel or your own domain. The quick tunnel stays key-only | SMD-2382 |
 
 ## Retirement conditions
 
@@ -193,7 +215,7 @@ Read against the tree on 2026-09-27.
 
 ## What this reverses or amends
 
-- **Change 042 ("OAuth discovery is a 404", SMD-1246):** two `/.well-known/` paths are now routed. Everything else stays a 404.
+- **Change 042 ("OAuth discovery is a 404", SMD-1246):** three `/.well-known/` paths are now routed, and only while the `auth` profile is configured. Everything else stays a 404.
 - **SMD-1846's "OAuth not in scope":** OAuth is in scope. Auth stays in the services, not the proxy.
 - **`docs/orchestration-tool.md`:** n8n "reaches the brain only through its MCP surface". Under decision 1 it reaches the REST core instead. The key discipline (a capture-scope key in a domain-pinned credential) carries over unchanged.
 - **CLAUDE.md's MCP guard rail:** "one HTTP process reached by URL", never stdio, still holds for the MCP server. The reference deployment becomes the compose stack, not the Bun container (SMD-2288, maintainer review of the wording).
@@ -205,11 +227,16 @@ Read against the tree on 2026-09-27.
 
 ## Not decided here
 
-- **Which authorization server.** SMD-2285 selects it against eight criteria: token exchange, resource indicators, MCP client registration, PKCE, an issuer under a path, one compose service, licence, custom subject-token types.
+- **The authorization server's remaining details**, each in its own ticket:
+  - token lifetimes and refresh-token rotation (SMD-2286);
+  - the client-metadata fetch policy (resolve-and-refuse, or an allowlist) and whether `openbrain` revokes PUBLIC's CONNECT, which would need `db/migrate.ts --grant` to grant CONNECT explicitly (SMD-2285);
+  - how the canary tier reaches `auth.ob1.internal` across compose projects (SMD-2294).
+
+  The survey behind decision 13 (eight candidates at the versions checked on 2026-09-28) is on SMD-2285.
 - **Which vendored integrations become plugins and which retire** (agent-memory-api, smart-ingest, the capture sources in SMD-2101). SMD-1931 gives the dispositions under decision 9. The GUI's agent-memory and kanban views follow from them.
 - **The importance scale, the restricted-content lock and kanban's status column.** Each is non-core schema today (`schemas/enhanced-thoughts`, `schemas/workflow-status`); adopting one is a migration decision of its own.
 - **Operations that exist only on the command line or not at all**, needed by the GUI's later views, filed when the GUI reaches them:
-  - supersession accept/reject (`db/consolidate.ts --accept/--reject`), where the list tool now also has a `stale` status (migration 063);
+  - supersession accept/reject (`db/consolidate.ts --accept/--reject`), where the list tool now also has a `stale` status (migration 063) and a `lineage` selector (070);
   - `rebuild_derived`, its orphan sweep and its census (migration 063, `db/rebuild.ts`);
   - lineage and provenance reads;
   - an entity-graph read.
@@ -218,4 +245,4 @@ Read against the tree on 2026-09-27.
 
 - `docs/operator-gui-dashboards-analysis.md`: the three dashboards, the feature matrix and the operator gaps.
 - `changes/152-the-dashboards-off-supabase.md`: the sealed-session sign-in the GUI starts from.
-- SMD-2133 (epic), SMD-1931, SMD-1846, SMD-1849, SMD-2275/2278/2279, SMD-2131/2132, SMD-2134, SMD-1716, SMD-1246.
+- SMD-2133 (epic), SMD-1931, SMD-1846, SMD-1849, SMD-2275/2278/2279, SMD-2131/2132, SMD-2134, SMD-1716, SMD-1246, SMD-2285/2286, SMD-2382.

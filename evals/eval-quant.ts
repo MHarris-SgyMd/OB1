@@ -94,20 +94,21 @@ import { existsSync, readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import { EVAL_BASE, EVAL_HEADERS, applyPrompt, parseSpec } from "./lib.ts";
 import { applyFunctionSettings, assertThrowawayDatabase, matchThoughtsOid, migratorEnv, requireDatabaseUrl, routingAt, runMigrator } from "../db/test-support.ts";
+import { LOOPBACK_HOSTS } from "../db/connect.ts";
 
 loadEnv();
 
 const URL_ = requireDatabaseUrl("eval-quant.ts");
-assertThrowawayDatabase(URL_);
+await assertThrowawayDatabase(URL_);
 const SOURCE = process.env.OB1_EVAL_QUANT_SOURCE;
 if (!SOURCE) { console.error("OB1_EVAL_QUANT_SOURCE must name the database eval-longmemeval.ts loaded (read only here)."); process.exit(2); }
 {
   // The source is read and the target rebuilt; pointed at one database the
   // "kept" path would drop the source's indexes and build every arm on it.
   const a = new URL(SOURCE), b = new URL(URL_);
-  // Loopback under any of its names is one host (the set assertThrowawayDatabase admits).
-  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
-  const host = (u: URL) => (LOOPBACK.has(u.hostname) ? "loopback" : u.hostname);
+  // Loopback under any of its names is one host (db/connect.ts's set, the one
+  // assertThrowawayDatabase admits), and a hostname in capitals is the same host.
+  const host = (u: URL) => (LOOPBACK_HOSTS.has(u.hostname.toLowerCase()) ? "loopback" : u.hostname.toLowerCase());
   if (host(a) === host(b) && (a.port || "5432") === (b.port || "5432") && a.pathname === b.pathname) {
     console.error(`eval-quant.ts: OB1_EVAL_QUANT_SOURCE is the database this run would measure in (${a.hostname}:${a.port || "5432"}${a.pathname}). Point DATABASE_URL at a throwaway database; nothing was touched.`);
     process.exit(2);

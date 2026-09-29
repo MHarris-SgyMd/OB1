@@ -22,6 +22,7 @@
  */
 
 import { SQL } from "bun";
+import type { ExtractWindowObservation } from "./entities.ts";
 import { createAssert, resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -462,6 +463,43 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(many.relations.length === 4 && many.relations.every((r) => r.to === "Open Brain" && r.relation === "works_on"), "the four works_on edges, one per window, all to the one subject");
   assert(many.parts?.length === reqs.length && many.parts.every((p, i) => p.index === i && p.entities.length === 2 && p.tokens <= 600 && p.ms >= 0), "the per-window record keeps what each call returned, in order, with its size and time");
 
+  // SMD-2269: the two measurement hooks — budgetTimes scales the answer budget,
+  // observe surfaces each window's finish reason and a raw-answer sample. Neither
+  // is set by windowingFor, so the worker's call above is unchanged; an eval
+  // passes them explicitly to measure a larger budget and diagnose why a
+  // reference-list window fails JSON. Run with retryRunaway off (windowingFor
+  // leaves it off for this stub's model), so each window is one observed call.
+  reqs.length = 0;
+  const obs: ExtractWindowObservation[] = [];
+  const scaled = await extractEntities(long, cfgD, undefined, { kind: "extraction" }, { ...windowingFor(cfgD), budgetTimes: 2, observe: (r: ExtractWindowObservation) => obs.push(r) });
+  assert(reqs.length >= 3 && reqs.every((r) => r.maxTokens === Math.ceil(extractOutputBudget(estimateTokens(r.text)) * 2)),
+         `budgetTimes: 2 doubles every call's answer budget over its own text (${reqs.map((r) => r.maxTokens).join(", ")}) — the base budget would be half (the drop-the-multiplier control)`);
+  assert(obs.length === reqs.length && obs.every((o, i) => o.index === i && o.of === reqs.length && o.tokens <= 600 && o.budget === reqs[i].maxTokens),
+         `observe fired once per window, in order, each with its own text's tokens and the budget the call requested (${obs.map((o) => o.budget).join(", ")})`);
+  assert(!scaled.malformed && obs.every((o) => o.malformed === false && !o.aborted && o.answerSample?.startsWith("{")),
+         "…and every window here parsed: observe reports it not malformed, not aborted, with a JSON-opening sample");
+
+  // The diagnosis itself: a window answered in PROSE (the shape SMD-2269 hunts).
+  // observe must carry the raw prose so the eval can tell it from wrong-shape
+  // JSON — the merged Extraction only says `malformed`, not what the answer was.
+  reqs.length = 0;
+  obs.length = 0;
+  proseIf = /Priya/; // the third window's person, answered "I cannot help with that."
+  const mixed = await extractEntities(long, cfgD, undefined, { kind: "extraction" }, { ...windowingFor(cfgD), observe: (r: ExtractWindowObservation) => obs.push(r) });
+  const proseWin = obs.find((o) => o.answerSample?.startsWith("I cannot help"));
+  assert(proseWin !== undefined && proseWin.malformed === true && !proseWin.aborted,
+         "a prose window is observed malformed with its prose sample — not aborted, so the eval reads it as prose, not a runaway");
+  assert(obs.filter((o) => o.malformed).length === 1 && mixed.coverage?.malformed?.length === 1 && mixed.coverage.malformed[0] === proseWin!.index,
+         `…and only that window: observe's malformed index matches coverage.malformed (${JSON.stringify(mixed.coverage?.malformed)})`);
+  proseIf = null;
+
+  // With neither hook the worker's request is the base budget and nothing is
+  // observed — the identity guard that budgetTimes/observe are inert by default.
+  reqs.length = 0;
+  const plain = await extractEntities(long, cfgD, undefined, { kind: "extraction" });
+  assert(!plain.malformed && reqs.every((r) => r.maxTokens === extractOutputBudget(estimateTokens(r.text))),
+         "unset, budgetTimes leaves the answer budget exactly as extractOutputBudget sizes it — the worker's call");
+
   // An over-estimate that chunk.ts packs into one window is the whole-thought
   // path — no marker, no per-window record (third review pass).
   reqs.length = 0;
@@ -626,6 +664,22 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
          && prefixForms.every((c) => caveatOf({ ...c, malformed: [0] }).includes(MALFORMED_WINDOWS_MARK) && caveatOf({ ...c, malformed: [0] }).includes(OVER_BOUND_MARK))
          && caveatOf({ windows: 24, of: 24, cut: false, malformed: [0] }).includes(MALFORMED_WINDOWS_MARK) && !caveatOf({ windows: 24, of: 24, cut: false, malformed: [0] }).includes(OVER_BOUND_MARK),
          "MALFORMED_WINDOWS_MARK is in every caveat with windows left out and in no prefix's, OVER_BOUND_MARK in every prefix's and in none of windows left out alone — the worker's partition holds");
+  // The run's signal that the model, not its documents, is at fault
+  // (SMD-2266): a share of the run's answers, over a floor of answers — not a
+  // floor on one thought's share, which is its text's.
+  const { malformedAlarm, EXTRACT_MALFORMED_ALARM_SHARE, EXTRACT_MALFORMED_ALARM_MIN } = await import("../db/config.mjs");
+  // Answers at or past the floor whose share is a whole count: the share
+  // itself, exactly, is not past it.
+  const den = Math.round(1 / EXTRACT_MALFORMED_ALARM_SHARE);
+  const evenly = Math.ceil(EXTRACT_MALFORMED_ALARM_MIN / den) * den;
+  const atShare = evenly / den;
+  assert(!malformedAlarm(1658, 11) && !malformedAlarm(136, 12) && !malformedAlarm(72, 8) && !malformedAlarm(24, 9),
+         "the stable pool's 11 of 1,658 answers left out, its six reference-list papers read again at 12 of 136, the ticket's three at 8 of 72, and one paper's 9 of 24 alone do not trip the alarm");
+  assert(malformedAlarm(61, 17) && malformedAlarm(72, 20),
+         "the wrong model's 17 of 61 over the pool's windowed thoughts trips it — and so would the three papers' reading before SMD-2260, 20 of 72, which no share tells from it");
+  assert(den === 1 / EXTRACT_MALFORMED_ALARM_SHARE && malformedAlarm(evenly, atShare + 1) && !malformedAlarm(evenly, atShare)
+         && malformedAlarm(EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_MIN) && !malformedAlarm(EXTRACT_MALFORMED_ALARM_MIN - 1, EXTRACT_MALFORMED_ALARM_MIN - 1),
+         `more than the share (${EXTRACT_MALFORMED_ALARM_SHARE.toFixed(3)}) of at least ${EXTRACT_MALFORMED_ALARM_MIN} answers trips it, the share itself does not, and fewer answers do not however many are malformed`);
 
   // A runaway — an answer cut at its budget — is the answer under the shipped
   // windowing, and is made once more with the frequency penalty when the
@@ -648,8 +702,14 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const cfgE = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerE.port}/v1`, OB1_METADATA_MODEL: "stub-chat" });
   assert(windowingFor(cfgE).retryRunaway === true, "the shipped windowing retries a runaway — 32 of 32 stragglers against 2 without (evals/README.md)");
   runawayOnce = true;
-  const cut = await extractEntities(short, cfgE, undefined, { kind: "extraction" }, { ...windowingFor(cfgE), retryRunaway: false });
+  const cutObs: ExtractWindowObservation[] = [];
+  const cut = await extractEntities(short, cfgE, undefined, { kind: "extraction" }, { ...windowingFor(cfgE), retryRunaway: false, observe: (r: ExtractWindowObservation) => cutObs.push(r) });
   assert(cut.malformed && cut.retried === undefined && penalties.length === 1 && penalties[0] === undefined, "with the retry off a cut answer is malformed after one call, with no penalty sent");
+  // SMD-2269: observe carries the finish reason (`length`) a cut answer ends on —
+  // the signal the diagnosis reads to tell a budget cut from prose. Not aborted
+  // (this is a whole read), and the sample is the JSON the answer began with.
+  assert(cutObs.length === 1 && cutObs[0].finishReason === "length" && cutObs[0].malformed === true && cutObs[0].aborted === false && cutObs[0].answerSample?.startsWith("{") === true,
+         `observe reports the cut window: finish_reason length, malformed, not aborted, JSON-opening sample (${JSON.stringify(cutObs[0]?.finishReason)}, ${cutObs[0]?.aborted})`);
   penalties.length = 0;
   runawayOnce = true;
   const again = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
@@ -866,7 +926,8 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const cfgG = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerG.port}/v1`, OB1_METADATA_MODEL: "stub-chat" });
   assert(windowingFor(cfgG).streamAbort === true, "the shipped windowing streams the answer and aborts a runaway on it (EXTRACT_STREAM_ABORT)");
   gMode = "loop";
-  const rescued = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  const loopObs: ExtractWindowObservation[] = [];
+  const rescued = await extractEntities(short, cfgG, undefined, { kind: "extraction" }, { ...windowingFor(cfgG), observe: (r: ExtractWindowObservation) => loopObs.push(r) });
   // The stub's cancel() lands after the client's reader.cancel(): wait for
   // it, bounded, rather than a fixed sleep (second review pass).
   for (let waited = 0; !runs[0]?.cancelled && waited < 2000; waited += 10) await Bun.sleep(10);
@@ -875,6 +936,11 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(runs.length === 2 && runs[0].body.stream === true && runs[0].body.frequency_penalty === undefined && runs[1].body.frequency_penalty === RUNAWAY_PENALTY && runs[1].body.stream === undefined, `the first call asks for a stream and carries no penalty; the retry carries ${RUNAWAY_PENALTY} and is read WHOLE — a penalised answer can repeat an item three times and recover (${runs.map((r) => `${r.body.stream}/${r.body.frequency_penalty}`).join(" ")})`);
   assert(runs[0].cancelled && runs[0].sent >= RUNAWAY_REPEATS + 1 && runs[0].sent < runs[0].total, `the client hung up on the loop after the third copy and before it ran out (${runs[0].sent} of ${runs[0].total} frames sent) — the mutant that reads the stream to its end sends all ${runs[0].total}`);
   assert(!runs[1].cancelled && runs[1].total === 0, "…and the retry's whole answer is the thought's");
+  // SMD-2269: observe fires only on the FIRST (aborted) call — the retry omits it —
+  // and reports the abort with no answer sample, so the diagnosis reads a stream
+  // abort as a loop, distinct from a budget cut. (The drop-the-observe mutant fails here.)
+  assert(loopObs.length === 1 && loopObs[0].aborted === true && loopObs[0].malformed === true && loopObs[0].answerSample === undefined,
+         `observe reports the aborted first call once, malformed, with no sample read (${loopObs.length} obs, aborted ${loopObs[0]?.aborted})`);
 
   // The streamed answer, reassembled from frames that split tokens, is the
   // whole answer; and a provider that answers a stream request with plain JSON

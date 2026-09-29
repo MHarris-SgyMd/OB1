@@ -18,6 +18,7 @@ import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, identityRefusal, reachedDatabaseRefusal, resetRefusal, socketRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -60,6 +61,9 @@ const TABLES = [
   // schema "without 034" and found the previous section's table standing —
   // the reset had carried it across every boundary since 034 landed.
   "query_log",
+  // 069's durable async job registry (SMD-2318): no foreign key either way — a
+  // job's record outlives the agent or thoughts it names — so its place is free.
+  "jobs",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -153,6 +157,8 @@ const FUNCTIONS = [
   "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)",
   "review_supersession_proposal(uuid, text, text, text, jsonb, boolean)",
   "list_supersession_proposals(text, int)",
+  // 070 (SMD-2313): 029's listing under a third parameter; the two-argument form above stands on a schema stopped before 070.
+  "list_supersession_proposals(text, int, boolean)",
   "thought_changes(timestamptz, uuid, text, text, text[], int)",
   // 053 (SMD-1867); its table is listed above, its two indexes drop with thought_facets,
   // and record_thought_entities / thought_facets_validate are 016's and 042's names.
@@ -194,6 +200,8 @@ const FUNCTIONS = [
   "validate_derived_from(jsonb)",
   // 034 (SMD-1295); listed with its table, above.
   "prune_query_log(int)",
+  // 069 (SMD-2318); listed with its `jobs` table, above.
+  "prune_jobs(int)",
   // 024, 025 and 026: the three this list had also missed, found when
   // SMD-1749's second review pass listed what survives a reset on a fully
   // applied brain. test-upgrade [21] asks the catalog the same question after
@@ -336,8 +344,8 @@ export function substitute(sql: string, opts: SchemaOptions): string {
   );
 }
 
-/** The deliberate overrides of the loopback rule below, named once so a suite that spawns another checked script can pass them on. */
-export const REMOTE_DB_FLAGS = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB"] as const;
+/** The deliberate override of the loopback rule below (connect.ts names it), for a suite that spawns another checked script and passes it on. */
+export { REMOTE_DB_FLAG };
 
 /**
  * Refuse to drop a database that is not obviously a throwaway.
@@ -356,34 +364,66 @@ export const REMOTE_DB_FLAGS = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB
  * a LAN-hosted stack at 192.168.x.x holding a real database is the documented
  * deployment topology, and a stale DATABASE_URL to it would have been dropped
  * without a prompt. The two questions have different answers. An EMPTY host is
- * refused rather than trusted: Bun's SQL client resolves `postgres:///db`
- * through PGHOST, exactly as libpq does, so an empty hostname is whatever the
- * shell says it is. IPv6 loopback is `[::1]` as WHATWG URL reports it. A
+ * refused rather than trusted, override or not: `postgres:///db` goes where
+ * PGHOST says, and with PGHOST unset Bun connects to localhost over TCP while
+ * libpq takes the unix socket, which can be another server (SMD-2317). IPv6
+ * loopback is `[::1]` as WHATWG URL reports it. A
  * libpq-style socket URL (`postgres://u@/db?host=/var/run/...`) does not parse
- * and is refused; the client does not honour that form either, so the override
- * is the way through for it.
+ * and is refused, override or not; the client does not honour that form
+ * either.
  *
  * `OB1_ALLOW_REMOTE_DB=1` is the deliberate override, which is a thing you have
- * to mean. `OB1_EVAL_ALLOW_REMOTE_DB=1`, the name the eval-local copy used, is
- * honoured too so a shell profile that set it keeps working.
+ * to mean. `OB1_EVAL_ALLOW_REMOTE_DB`, the name the eval-local copy used, is no
+ * longer read (connect.ts says why); a refusal names it when it is set.
+ *
+ * The rule is connect.ts's resetRefusal, which tier.ts's --refresh asks too
+ * (SMD-2302); this is its refusal for a suite. The URL is asked first, before
+ * anything connects; then the server is asked where the connection went
+ * (connectedResetRefusal), since an exported PGDATABASE beats the URL's
+ * database in Bun's client (SMD-2317). Neither that nor a URL that fails to
+ * pin one database is lifted by the override.
+ *
+ * Async: a caller that did not await it would run its drops while the check
+ * was still out. test-connect.ts holds every call in db/ and evals/ to an
+ * `await`.
  */
-export function assertThrowawayDatabase(url: string): void {
-  if (REMOTE_DB_FLAGS.some((flag) => process.env[flag] === "1")) return;
-  let host: string | null = null;
+export async function assertThrowawayDatabase(url: string): Promise<void> {
+  assertThrowawayUrl(url);
+  const probe = new SQL({ url, max: 1 });
   try {
-    host = new URL(url).hostname.toLowerCase();
-  } catch {
-    /* unparseable: refuse below */
+    await assertThrowawayConnection(probe, url);
+  } finally {
+    await probe.close();
   }
-  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
-  if (host !== null && LOOPBACK.has(host)) return;
-  const shown = host === null ? "an unparseable URL" : host === "" ? "a URL with no host (the client would resolve PGHOST)" : host;
+}
+
+/** The rule's URL half, asked before anything connects: exit 2 with the refusal. */
+function assertThrowawayUrl(url: string): void {
+  const fixed = identityRefusal(url);
+  if (fixed !== null) refuseDrop(fixed, false);
+  const refusal = resetRefusal(url);
+  if (refusal !== null) refuseDrop(refusal, true);
+}
+
+/** The rule's connected half, asked on `sql`, the connection about to drop: exit 2 with the refusal. */
+async function assertThrowawayConnection(sql: SQL, url: string): Promise<void> {
+  const reached = await reachedDatabaseRefusal(sql, url);
+  if (reached !== null) refuseDrop(reached, false);
+  const socket = await socketRefusal(sql);
+  if (socket !== null) refuseDrop(socket, true);
+}
+
+/** Print why the schema will not be dropped, and exit 2. `overridable` says whether OB1_ALLOW_REMOTE_DB is the way through. */
+function refuseDrop(refusal: string, overridable: boolean): never {
   console.error(
-    `  Refusing to drop the schema at ${shown}.\n\n` +
+    `  Refusing to drop the schema: ${refusal}.\n\n` +
       `  This command DROPS every table Open Brain owns in that database. That is\n` +
       `  safe against a throwaway container and destructive against anything else.\n` +
-      `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
-      `  OB1_ALLOW_REMOTE_DB=1 if you are certain.`
+      (overridable
+        ? `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
+          `  OB1_ALLOW_REMOTE_DB=1 if you are certain.`
+        : `  OB1_ALLOW_REMOTE_DB does not lift this: it says which database is dropped.`) +
+      (process.env[RETIRED_REMOTE_DB_FLAG] !== undefined ? `\n  (${RETIRED_REMOTE_DB_FLAG} is set, and is no longer read: the name is ${REMOTE_DB_FLAG}.)` : "")
   );
   process.exit(2);
 }
@@ -397,9 +437,11 @@ export function assertThrowawayDatabase(url: string): void {
  * exists for a single caller.
  */
 export async function dropSchema(url: string): Promise<void> {
-  assertThrowawayDatabase(url);
+  assertThrowawayUrl(url);
   const admin = new SQL({ url, max: 1 });
   try {
+    // Asked on this connection, the one that drops, not on a probe of its own.
+    await assertThrowawayConnection(admin, url);
     // A kept bench corpus (SMD-1493) is thirty minutes of build behind a
     // marker; a suite run under the same OB1_PG_KEEP name would drop it here
     // with no word. The bench itself never reaches this with a marker present
@@ -418,7 +460,7 @@ export async function dropSchema(url: string): Promise<void> {
     // tables were already gone — so load it explicitly first.
     try {
       await admin`SELECT '[1]'::vector`;
-      const [{ db }] = await admin`SELECT current_database() AS db`;
+      const [{ db }] = await admin`SELECT pg_catalog.current_database() AS db`;
       for (const bound of HNSW_BOUNDS) await admin.unsafe(`ALTER DATABASE ${quoteIdent(db)} RESET ${bound}`);
     } catch {
       /* not the owner of the database, or no pgvector to load — left as found */
@@ -504,7 +546,7 @@ export async function relocateVectorTo(url: string, schema: string): Promise<voi
 export async function restoreVectorToPublic(url: string): Promise<void> {
   const admin = new SQL({ url, max: 1 });
   try {
-    const [{ db }] = await admin`SELECT current_database() AS db`;
+    const [{ db }] = await admin`SELECT pg_catalog.current_database() AS db`;
     await admin.unsafe(`ALTER EXTENSION vector SET SCHEMA public`);
     await admin.unsafe(`ALTER DATABASE ${quoteIdent(db)} RESET search_path`);
   } finally {
@@ -622,7 +664,6 @@ export function createAssert(): {
   };
 }
 
-/** The DATABASE_URL check every suite opens with. */
 /**
  * A stub provider's answer that never comes: the request stays open until the
  * client's own deadline (OB1_LLM_TIMEOUT) abandons it. Two things follow for
@@ -638,12 +679,13 @@ export function neverAnswers(): Promise<never> {
 /**
  * Run a script as a subprocess and collect its exit code with everything it
  * printed, stdout then stderr — so a suite observes the real exit code, and an
- * assertion can read a message whichever stream it went to. Five suites had
+ * assertion can read a message whichever stream it went to — and each stream
+ * apart, for a check of which one a line went to (SMD-2304). Five suites had
  * written this body (SMD-1024's second review pass counted). `env` replaces
  * the inherited environment when given; a caller that wants the parent's plus
  * a few builds that object itself.
  */
-export async function runScript(cmd: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; out: string }> {
+export async function runScript(cmd: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
   // A child given its own environment gets exactly that: Bun loads the cwd's
   // .env into a child for every variable the passed environment lacks — which
   // after a fixture's strip is every OB1_* name, and db/.env is where a
@@ -653,8 +695,9 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
   // gets the flag too; a spawn fronted by another program spells it itself.
   const argv = opts.env && basename(cmd[0]) === "bun" ? [cmd[0], "--no-env-file", ...cmd.slice(1)] : cmd;
   const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
-  const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
-  return { code: await p.exited, out };
+  const stdout = await new Response(p.stdout).text();
+  const stderr = await new Response(p.stderr).text();
+  return { code: await p.exited, out: stdout + stderr, stdout, stderr };
 }
 
 /** This process's environment with every `OB1_*` variable removed — the allowlist `migratorEnv` and test-bench-reuse.ts build their spawns' shells on. */
@@ -691,7 +734,7 @@ export function migratorEnv(url: string, opts: Pick<SchemaOptions, "dim" | "mode
  * suites still spell the spawn for themselves. Exit code and combined output,
  * as runScript gives them.
  */
-export function runMigrator(url: string, env: Record<string, string> | undefined, ...flags: string[]): Promise<{ code: number; out: string }> {
+export function runMigrator(url: string, env: Record<string, string> | undefined, ...flags: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
   return runScript(["bun", join(HERE, "migrate.ts"), "--url", url, ...flags], { ...(env ? { env } : {}), cwd: HERE });
 }
 
@@ -785,9 +828,10 @@ export async function ledgerNames(sql: SQL): Promise<string[] | null> {
   return (await sql`SELECT name FROM schema_migrations ORDER BY name`).map((r: { name: string }) => r.name);
 }
 
+/** The DATABASE_URL check every suite opens with. Blank is unset, as connect.ts's databaseUrl has it. */
 export function requireDatabaseUrl(script: string): string {
   const url = process.env.DATABASE_URL;
-  if (!url) {
+  if (url === undefined || url.trim() === "") {
     console.error(`DATABASE_URL is not set. Try: ../db/with-postgres.sh bun ${script}`);
     process.exit(2);
   }

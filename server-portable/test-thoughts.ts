@@ -22,6 +22,8 @@ import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, parseJudgement, wrapSide } from "./consolidate.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
+import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
+import { classifyGenre, presignalGenre, type ChooseFn } from "./genre.ts";
 import { extractMetadata } from "./metadata.ts";
 
 const { assert, report } = createAssert();
@@ -514,6 +516,9 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   assert(windowingFor(plain).streamAbort === true, "the shipped windowing streams the answer and aborts a runaway on it (EXTRACT_STREAM_ABORT)");
   assert(describeExtractWindow(plain).includes("; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0.5 frequency penalty, read whole"), `…and the banner/preflight sentence names the abort, the retry and that the retry is read whole (${describeExtractWindow(plain)})`);
   assert(windowingFor(resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_METADATA_REASONING: "medium" })).streamAbort === false, "with OB1_METADATA_REASONING on the answer is read whole: no budget, no retry, no abort");
+  // SMD-2269: the measurement hooks are never on the worker's windowing — only an
+  // eval passes budgetTimes/observe explicitly, so the shipped call is unchanged.
+  assert(windowingFor(plain).budgetTimes === undefined && windowingFor(plain).observe === undefined, "windowingFor sets neither the budget multiplier nor the diagnostic sink (SMD-2269) — the worker's call carries the plain budget and no observer");
 
   // The merge carries the longest abort of the windows, and none when none was.
   const win = (index: number, abortedMs?: number): ExtractionWindow => ({ index, tokens: 100, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, ...(abortedMs !== undefined ? { abortedMs } : {}) });
@@ -628,6 +633,75 @@ console.log("\n[10] The entity name gate (SMD-1935): a number or a type word is 
   } finally {
     stub.stop(true);
   }
+}
+
+console.log("\n[11] Hybrid decide (SMD-2321): identifiers carved by rule, the decider validates+types the rest, a number refused, a name absent from the text kept uncided, a decider outage falls back");
+{
+  const E = (name: string, type = "topic"): any => ({ name, type, confidence: 1, aliases: [] });
+  const cfg = {} as any;
+  const subj = { kind: "capture" } as any;
+  const text = "Anita fixed worker_status and SMD-1549; see db/x.ts. The widget is generic. openrouter.ai is a host.";
+  const verdicts: Record<string, [boolean, string]> = { "Anita": [true, "person"], "openrouter.ai": [true, "organization"], "the widget": [false, "tool"] };
+  const stub: DecideFn = async (_c, decisions) => ({
+    ms: 1,
+    results: decisions.map((d: any) => {
+      const name = /"([^"]+)"/.exec(d.proposition ?? d.question ?? "")?.[1] ?? "";
+      const [valid, type] = verdicts[name] ?? [false, "tool"];
+      if (d.kind === "binary") return { id: d.id, kind: "binary", probabilities: { true: valid ? 0.9 : 0.1, false: valid ? 0.1 : 0.9 }, selected: valid ? "true" : "false", abstained: false, p_insufficient: 0, p_true: valid ? 0.9 : 0.1, logits: [], temperature: 1, tokens: 1, truncated: false };
+      return { id: d.id, kind: "choice", probabilities: { [type]: 0.9 }, selected: type, abstained: false, p_insufficient: 0, logits: [], temperature: 1, tokens: 1, truncated: false };
+    }),
+  });
+  const ents = [E("worker_status"), E("SMD-1549"), E("db/x.ts"), E("021", "person"), E("Anita", "organization"), E("the widget", "tool"), E("openrouter.ai", "place"), E("Ghost Name", "tool")];
+  const { entities, stats } = await decideEntities(text, ents, cfg, subj, stub);
+  const by = new Map(entities.map((e) => [e.name, e]));
+  assert(by.get("worker_status")?.type === "tool" && by.get("SMD-1549")?.type === "project" && by.get("db/x.ts")?.type === "tool" && stats.carved === 3, `identifier shapes are carved by rule, not decided (carved ${stats.carved})`);
+  assert(!by.has("021") && stats.droppedRefused === 1, "a number is refused before any decide call is spent");
+  assert(by.get("Anita")?.type === "person" && Math.abs((by.get("Anita")?.confidence ?? 0) - 0.9) < 1e-9 && by.get("openrouter.ai")?.type === "organization", "the decider validates and types the rest, its p_true is the confidence");
+  assert(!by.has("the widget") && stats.droppedByDecider === 1, "the decider drops a candidate it calls not-an-entity");
+  assert(by.get("Ghost Name")?.type === "tool" && stats.noContext === 1, "a name absent from the text keeps the model's type, uncided");
+  const boom: DecideFn = async () => { throw new Error("decider down"); };
+  const fb = await decideEntities(text, [E("Anita", "organization")], cfg, subj, boom);
+  assert(fb.stats.deciderError === true && fb.entities.length === 1 && fb.entities[0].type === "organization", "a decider outage falls back to the model's entities, flagged");
+}
+
+console.log("\n[12] Genre classify (SMD-2323): a metadata pre-signal decides without a call, the tier decides the rest, an abstain/outage/tier-unset fall back to other");
+{
+  const cfg = {} as any;
+  const subj = { kind: "capture" } as any;
+  let calls = 0;
+  let lastD: Parameters<ChooseFn>[1] | undefined;
+  const choose =
+    (selected: string, abstained = false): ChooseFn =>
+    async (_cfg, d) => {
+      calls++;
+      lastD = d;
+      return { result: { id: "g", kind: "choice", probabilities: { [selected]: 0.9 }, selected, abstained, p_insufficient: abstained ? 0.9 : 0, logits: [], temperature: 1, tokens: 1, truncated: false } as any };
+    };
+
+  // Pure pre-signal, no tier, no call.
+  assert(presignalGenre({ source: "linear" }) === "project-issue", "a source:linear row is a project-issue by rule");
+  assert(presignalGenre({ arxiv_id: "2301.00001" }) === "research-paper" && presignalGenre({ authors: ["A. Turing"] }) === "research-paper", "an arXiv id or an author list is a research paper");
+  assert(presignalGenre({ genre: "recipe" }) === "recipe" && presignalGenre({ genre: "nonsense" }) === null && presignalGenre({}) === null, "a valid existing genre is kept, a bogus one and an empty metadata say nothing");
+
+  const boom: ChooseFn = async () => { throw new Error("tier down"); };
+  const linear = await classifyGenre("anything", { source: "linear" }, cfg, subj, { decide: boom });
+  assert(linear.genre === "project-issue" && linear.source === "presignal", "the pre-signal short-circuits before any decide call, even with a tier configured");
+
+  const unset = await classifyGenre("A blog post about widgets.", { source: "mcp" }, null, subj, { decide: choose("blog-article") });
+  assert(unset.genre === "other" && unset.source === "fallback" && calls === 0, "no tier: pre-signal-only, fall back to other, no call made");
+
+  const decided = await classifyGenre("Combine flour and water, then bake at 200C.", { source: "mcp" }, cfg, subj, { decide: choose("recipe") });
+  assert(decided.genre === "recipe" && decided.source === "decider" && calls === 1, "the tier decides a genre the pre-signal cannot");
+  assert(lastD?.context.includes("Combine flour and water") && lastD.options.length === 7 && lastD.options.some((o) => o.id === "recipe") && lastD.question.trim() !== "", "the decider is handed the content as context and the full genre vocabulary — not an empty window or bare options (SMD-2017's starved-decider failure)");
+
+  const abstained = await classifyGenre("hm.", { source: "mcp" }, cfg, subj, { decide: choose("__insufficient_evidence__", true) });
+  assert(abstained.genre === "other" && abstained.source === "decider", "an abstain lands on other, credited to the decider");
+
+  const bogus = await classifyGenre("x", { source: "mcp" }, cfg, subj, { decide: choose("not-a-genre") });
+  assert(bogus.genre === "other" && bogus.source === "decider", "a selection outside the vocabulary lands on other");
+
+  const outage = await classifyGenre("x", { source: "mcp" }, cfg, subj, { decide: boom });
+  assert(outage.genre === "other" && outage.source === "fallback", "a tier outage falls back to other and never throws");
 }
 
 report();

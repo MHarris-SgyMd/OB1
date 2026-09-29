@@ -24,6 +24,7 @@
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
  *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought)
+ *   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
  *
  * ── The cost, and the switch ────────────────────────────────────────────────
  * One LLM call per thought — per window of a thought over the extraction
@@ -93,7 +94,18 @@
  * parsed are written and the claim is released succeeded with a caveat naming
  * the windows left out, a second kind of partial row, counted and listed
  * apart from a prefix, whenever at least one other window parsed; a thought
- * none of whose windows parsed is failed as malformed. A
+ * none of whose windows parsed is failed as malformed. So a model that
+ * answers a large share of windows malformed writes partial rows, not failed
+ * ones, and the run watches the share instead (SMD-2266, db/config.mjs's
+ * malformedAlarm): when more than a fifth of at least 48 answers — one per
+ * window of each thought that returned — were malformed, it says on stderr
+ * that the model is likely at fault and exits 3, ahead of the 1 of rows
+ * failed, leased or pending. A --follow process judges blocks of 48 or more
+ * after each pass drains the pool, so one started on a backlog says nothing
+ * until the backlog is done (try a new model with --limit 48 first); stopped
+ * by a signal it exits 0, and at its --limit with a block tripped, 3. A
+ * thought's own share is not judged: a reference list is its text's fault,
+ * not the model's. A
  * rate limit, a server error or a lost connection is neither: the worker
  * pauses and retries, and stops if the provider stays down, leaving its leases
  * to return to the pool rather than marking thoughts failed for it. A content
@@ -108,17 +120,20 @@
  * per-thought mixture that nothing repairs.
  */
 
-import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
+import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
+import { blanketGate, classifyError, egressDescription, egressRefusal, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
-import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
+import { decideEntities } from "../server-portable/hybrid-extract.ts";
+import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
+import { databaseUrl, openSql } from "./connect.ts";
+import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
 
 /**
  * Every argument accounted for (db/cli.ts): a flag this worker does not have,
@@ -131,14 +146,10 @@ import { commandLine } from "./cli.ts";
 const cli = commandLine("extract-entities.ts", {
   url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one", limit: "one",
   follow: "optional", dump: "one", job: "one",
-  status: "none", "dry-run": "none", "switch-key": "none", "retry-failed": "none", "retry-partial": "none", "retry-left-out": "none",
+  status: "none", "dry-run": "none", "switch-key": "none", "retry-failed": "none", "retry-partial": "none", "retry-left-out": "none", decide: "none",
 }, { hints: { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>" } });
 
-const url = cli.value("url") ?? process.env.DATABASE_URL;
-if (!url) {
-  console.error("No database URL. Pass --url or set DATABASE_URL.");
-  process.exit(2);
-}
+const url = databaseUrl(cli.value("url"));
 
 const WORKERS = cli.int("workers", { absent: 2, min: 1 });
 // One thought per claim. A claim costs half a millisecond against a model call
@@ -177,8 +188,16 @@ const RETRY_FAILED = cli.has("retry-failed");
 const RETRY_PARTIAL = cli.has("retry-partial");
 /** --retry-partial's rows with windows left out alone: a change of model re-reads them without re-reading every prefix to the place it already reached (review pass 1). */
 const RETRY_LEFT_OUT = cli.has("retry-left-out");
+// SMD-2321: `--decide` re-types the 7B's entities with the Jev decider (validity +
+// type), storing p_true as confidence. Opt-in and only with the tier configured.
+const DECIDE = cli.has("decide");
 
 const cfg = resolveEmbedConfig(process.env as EmbedEnv);
+const jevCfg = DECIDE ? resolveJevConfig(process.env as unknown as JevEnv) : null;
+if (DECIDE && !jevCfg) {
+  console.error("  --decide needs the Jev tier: set OB1_JEV_BASE_URL (and OB1_JEV_LOCAL for a loopback endpoint)");
+  process.exit(2);
+}
 /** The windowing every row is extracted under — its bound is what a partial row's caveat names. */
 const WINDOWING = windowingFor(cfg);
 const JOB = cli.value("job") ?? extractionKey(cfg.metadataModel);
@@ -191,16 +210,16 @@ console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${
 console.log(`  window: ${describeExtractWindow(cfg)}`);
 // What may leave the box (SMD-1903): a row the gate refuses is a failed claim
 // naming the rule; its text never went anywhere, and --retry-failed revisits it.
-console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+console.log(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
 {
   // A policy that refuses whatever the row (SMD-1903): stop before claiming,
   // rather than fail every row in the pool one at a time. A dry run and
   // --status still report — the banner's egress line says why a run would not.
   // The units a row of this pass carries: its metadata and text, and the
   // worker key's name as the actor when one is set (second review pass).
-  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS);
+  const blanket = blanketGate({ endpoint: cfg.chat, policy: cfg.egress, units: process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "extracted", localKnobKey: localKnob(cfg, "chat") });
   if (blanket && !STATUS_ONLY && !DRY_RUN) {
-    console.error(`\n  Nothing would be extracted: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    console.error(`\n  ${blanket}`);
     process.exit(2);
   }
 }
@@ -209,7 +228,7 @@ console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "ch
 // through the pool, and a worker parked on a lock or a long statement holds
 // its own connection, so the spare is what keeps every worker's leases alive
 // then. Tightening this to WORKERS would recreate the lapse 031 removed.
-const sql = new SQL({ url, max: WORKERS + 1 });
+const sql = openSql(url, { max: WORKERS + 1 });
 
 // ── The database's side ─────────────────────────────────────────────────────
 
@@ -238,47 +257,22 @@ let agentId: string | null = null;
 /** The worker key's name, for the egress gate's `actor:` unit (SMD-1903); undefined without a key. */
 let actorName: string | undefined;
 if (!STATUS_ONLY && !DRY_RUN) {
-  const rawKey = process.env.OB1_WORKER_KEY;
-  if (rawKey) {
-    if (!process.env.MCP_ACCESS_KEYS) {
-      console.error("\n  OB1_WORKER_KEY is set but MCP_ACCESS_KEYS is not, so the key cannot be checked or named. Set both, as the server has them.");
-      await sql.close();
-      process.exit(2);
-    }
-    const hash = hashKey(rawKey);
-    const record = parseKeyRecords(process.env.MCP_ACCESS_KEYS).keys.find((k) => k.sha256 === hash);
-    if (!record) {
-      console.error("\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this.");
-      await sql.close();
-      process.exit(2);
-    }
-    try {
-      const [{ r }] = await sql`SELECT resolve_agent(${hash}::text, ${record.name}::text, ${record.scope}::text) AS r`;
-      const res = r as { ok: boolean; error?: string; agent_id?: string; revoked_at?: string; reason?: string | null };
-      if (!res.ok && res.error === "REVOKED") {
-        console.error(`\n  The worker's key was revoked at ${res.revoked_at}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.`);
-        await sql.close();
-        process.exit(2);
-      }
-      if (res.ok && res.agent_id) {
-        agentId = res.agent_id;
-        actorName = record.name;
-        console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
-      } else {
-        console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
-      }
-    } catch (e) {
-      console.error(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
-    }
-  } else {
-    console.error("  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.");
+  const id = await workerIdentity(url, process.env, {
+    noKeyWarning: "  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
+  });
+  if (!id.ok) {
+    console.error(id.message);
+    await sql.close();
+    process.exit(2);
   }
+  agentId = id.identity.agentId;
+  actorName = id.identity.keyName;
   // A key that was set but did not resolve to a name is no actor: the blanket
   // check above credited one, so it is asked again without (third review pass).
-  if (process.env.OB1_WORKER_KEY && actorName === undefined) {
-    const again = refusesEverything(cfg.chat, cfg.egress, ROW_UNITS);
+  if (process.env.OB1_WORKER_KEY && id.identity.keyName === undefined) {
+    const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
     if (again) {
-      console.error(`\n  Nothing would be extracted: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
+      console.error(`\n  ${regateMessage("extracted", again)}`);
       await sql.close();
       process.exit(2);
     }
@@ -448,12 +442,15 @@ if (recordedKey !== JOB) {
   console.log(`  ob1_config.entity_extraction_key = ${JOB} — new and edited thoughts now enqueue for extraction`);
 }
 
+/** Rows a --retry-* flag returned to the pool: the run's first judgement is of rows chosen for failing (SMD-2266, review pass 2). */
+let returned = 0;
 if (RETRY_FAILED) {
   const [{ n }] = await sql`
     WITH retried AS (
       UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
       WHERE work_type = ${JOB} AND status = 'failed' RETURNING 1)
     SELECT count(*)::int AS n FROM retried`;
+  returned += n;
   console.log(`  --retry-failed: ${n} failed row(s) returned to the pool`);
 }
 
@@ -483,6 +480,7 @@ if (RETRY_PARTIAL || RETRY_LEFT_OUT) {
   const again = leftOut > 0 ? `; a row with windows left out is sent again to ${cfg.metadataModel}, and a window it answers malformed again is left out again` : "";
   // Any row, a prefix too: a failure writes nothing (review pass 4).
   const fails = n > 0 ? `; a reading that fails (a window timing out, or none parsing) records its row failed, the earlier reading's entities left in the graph until a later one succeeds` : "";
+  returned += n;
   const what = RETRY_PARTIAL ? `--retry-partial: ${n} row(s) extracted in part` : `--retry-left-out: ${n} row(s) with windows left out`;
   console.log(`  ${what} returned to the pool${n ? ` (${partialKinds(n, leftOut, both)})` : ""}${prefix}${again}${fails}`);
 }
@@ -508,6 +506,23 @@ let escalated = 0;
 /** Thoughts a runaway was aborted on the stream for, before its budget (SMD-1960). */
 let aborted = 0;
 let calls = 0;
+/**
+ * The answers the model gave this run — one a window sent, a one-window
+ * thought's one — and how many were not JSON of the expected shape, in a
+ * thought failed as malformed or left out of a partial one: the run's signal
+ * that the model, not the documents, is at fault (SMD-2266, malformedAlarm).
+ */
+let answers = 0;
+let answersMalformed = 0;
+/**
+ * The answers judged so far, and how many judgements tripped. A run that
+ * exits is judged once, at its end; a follower judges its answers in blocks of
+ * at least EXTRACT_MALFORMED_ALARM_MIN after each poll, so it says so while it
+ * runs — a stopped follower exits 0 — and a breakage that starts late is not
+ * diluted by the good polls before it (review pass 1).
+ */
+const judged = { answers: 0, malformed: 0, escalated: 0 };
+let alarms = 0;
 const totals = { entities: 0, newEntities: 0, mentions: 0, edges: 0, dropped: 0, ambiguous: 0, refused: 0, retyped: 0, gated: false };
 const activeWorkers = new Set<string>();
 const started = Date.now();
@@ -553,6 +568,10 @@ async function processRow(row: Row): Promise<Outcome> {
   // Every call the thought cost: one per window, and one more per window
   // that was retried (first review pass: the retries went uncounted).
   calls += callsOf(extraction);
+  // Every answer counts, whatever the write then does: the signal is the
+  // model's, not the rows'.
+  answers += extraction.windows;
+  answersMalformed += extraction.malformed ? extraction.windows : extraction.coverage?.malformed?.length ?? 0;
   // A per-window record, not a count over one: a prefix of one window of a
   // longer thought is windowed — sent "Part 1 of N" (review pass 2).
   if (extraction.parts) windowed++;
@@ -594,6 +613,15 @@ async function processRow(row: Row): Promise<Outcome> {
     // record of which model produced the answer (SMD-2000), the pass key on the
     // row itself staying the first model's.
     appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.escalated ? { escalated: extraction.escalated } : extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.coverage ? { coverage: extraction.coverage } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
+  }
+  // SMD-2321: the hybrid mode re-types the 7B's entities with the decider —
+  // identifier shapes carved by rule, the rest validity-gated and typed, p_true
+  // the confidence. After the dump above, so the dump keeps the raw generative
+  // answer for replay; a decider outage falls back to the 7B's entities inside
+  // decideEntities. The row's metadata is the egress subject, as extraction's.
+  if (jevCfg && extraction.entities.length) {
+    const decided = await decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
+    extraction = { ...extraction, entities: decided.entities };
   }
   // 061: the pass's recipe — the model, the prompt's version and hash, the
   // windows sent and what was cut — recorded in `derivations` with the rows,
@@ -637,45 +665,6 @@ async function processRow(row: Row): Promise<Outcome> {
   return { outcome: "failed", error: `record_thought_entities: ${res.error}` };
 }
 
-/**
- * What an error from the provider is about.
- *
- *   thought   — a fact about this thought: a timeout (the corpus run showed the
- *               same long documents exceed the limit every time), a 400 naming
- *               the input's length, a body that was not JSON. Recorded failed;
- *               --retry-failed revisits it.
- *   transient — says nothing about the thought: 429, 5xx, a dropped connection.
- *               Paused and retried; if it persists, THIS row is recorded failed
- *               with the error (so a thought that reliably draws a 500 becomes
- *               visible rather than cycling through the pool for ever) and the
- *               worker stops, leaving its other leases to the pool.
- *   fatal     — the request itself is wrong for this provider: 401/403 (the
- *               key), 404 (the model), or a 400 about the request's shape. The
- *               next thought would fail the same way, so every worker stops at
- *               once and the run exits 2, with nothing marked failed.
- */
-type ErrorKind = "thought" | "transient" | "fatal";
-function classifyError(e: unknown): ErrorKind {
-  const status = (e as { status?: number }).status;
-  const msg = (e as Error).message ?? "";
-  const name = (e as Error).name ?? "";
-  if (name === "TimeoutError" || /timed out/i.test(msg)) return "thought";
-  if (status === 429 || (status !== undefined && status >= 500)) return "transient";
-  // The one rule for "this 400 is about the input's length", shared with
-  // embed.ts so the two tools cannot drift. A 413 stays fatal below, as it
-  // was: the extraction request is the same shape for every thought, so a
-  // provider refusing its size would refuse the next one too.
-  // A 400 about the answer budget names the REQUEST — the same max_tokens
-  // shape goes to every thought — and would otherwise read as this thought's
-  // length (refusesLength matches "tokens") and fail the pool one row at a
-  // time (fifth review pass). Fatal: stop every worker, mark nothing.
-  if (status === 400 && /max_tokens|max_completion_tokens|completion tokens/i.test(msg)) return "fatal";
-  if (status === 400 && refusesLength(status, msg)) return "thought";
-  if (status !== undefined && status >= 400 && status < 500) return "fatal";
-  if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
-  return "thought";
-}
-const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
 // Written inside the worker closures below, which control-flow analysis does
 // not follow: declared `: string | null = null`, the read at the end of the
 // run is narrowed to `never`. The cast keeps the declared type as the initial
@@ -746,7 +735,7 @@ async function worker(n: number): Promise<void> {
               // The calls a thrown thought made — its fourth window timing out
               // is four calls — count too (second review pass).
               calls += callsMadeBy(e);
-              const kind = classifyError(e);
+              const kind = classifyError(e, { maxTokensFatal: true });
               const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
               if (kind === "thought") {
                 outcome = { outcome: "failed", error: msg };
@@ -874,6 +863,39 @@ const stop = () => {
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
+/**
+ * The alarm's lines for the answers since the last judgement, when there are
+ * at least EXTRACT_MALFORMED_ALARM_MIN of them and more than the share were
+ * malformed (SMD-2266, db/config.mjs's malformedAlarm): the verdict, then what
+ * to check and retry. Undefined otherwise. Either way they are judged, and the
+ * next judgement starts after them. The first judgement of a run that returned
+ * rows for failing (--retry-*) is of documents chosen for it, so it is not told
+ * they are not at fault, and a follower's later blocks, new captures, are
+ * (review passes 1 and 2). The models named are those that answered the
+ * block, the escalation's when it took a runaway (SMD-2000); the retries named
+ * are for the kinds of row the run left.
+ */
+function judge(): string | undefined {
+  const n = answers - judged.answers;
+  const bad = answersMalformed - judged.malformed;
+  if (n < EXTRACT_MALFORMED_ALARM_MIN) return undefined;
+  const chosen = returned > 0 && judged.answers === 0;
+  const esc = escalated - judged.escalated;
+  judged.answers = answers;
+  judged.malformed = answersMalformed;
+  judged.escalated = escalated;
+  if (!malformedAlarm(n, bad)) return undefined;
+  alarms++;
+  const models = esc ? `OB1_METADATA_MODEL (${cfg.metadataModel}) and OB1_EXTRACT_ESCALATE_MODEL (${WINDOWING.escalateModel}), which answered the runaways of ${esc} thought(s)` : `OB1_METADATA_MODEL (${cfg.metadataModel})`;
+  const retries = [leftOut ? "--retry-left-out re-reads the partial rows" : "", failed ? "--retry-failed re-reads the failed ones" : ""].filter(Boolean).join(" and ");
+  return `  ${bad} of ${FOLLOW ? `the follower's last ${n} answers` : `the ${n} answers this run`} were ${MALFORMED_WINDOWS_MARK} — more than ${Math.round(EXTRACT_MALFORMED_ALARM_SHARE * 100)}% of at least ${EXTRACT_MALFORMED_ALARM_MIN} (db/config.mjs, EXTRACT_MALFORMED_ALARM_SHARE): ` +
+    (chosen
+      ? `the ${returned} row(s) this run returned were chosen for failing or leaving windows out, so their documents may be at fault; if not, the model is.`
+      : "the model, not the documents, is likely at fault — documents it can answer only in part, such as reference lists, leave out far fewer.") +
+    `\n    Check ${models}, the endpoint and the prompt. ${done ? `The rows written stand${leftOut ? ", each partial one naming its windows left out" : ""}` : "No row was written"}` +
+    `${retries ? `; once the model is right, ${retries}, with --job ${JOB} if OB1_METADATA_MODEL changes` : ""}.`;
+}
+
 let firstPass = true;
 async function pass(): Promise<Counts> {
   // The backlog is pooled once. While following, the trigger enqueues every
@@ -897,11 +919,21 @@ console.log(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renew
 
 let after = await pass();
 if (FOLLOW) {
+  // Only a block it will poll after: the last pass's — the limit reached, or
+  // stopped — is the final judgement's, which says the exit the run takes
+  // (review pass 2: a follower at its --limit said "exits 0" and exited 3).
+  const say = () => {
+    if (stopping || limitReached()) return;
+    const line = judge();
+    if (line) console.error(`${line} The follower keeps polling; stopped by a signal, it exits 0${LIMIT ? ", and at its --limit, 3" : ""}.`);
+  };
+  say();
   // "This many thoughts, then stop" holds while following too.
   while (!stopping && !limitReached()) {
     await Bun.sleep(FOLLOW * 1000);
     if (stopping) break;
     after = await pass();
+    say();
   }
 }
 
@@ -927,6 +959,18 @@ console.log(
 // Thoughts none of whose windows parsed; a window left out beside parsed ones
 // is in the summary's partial clause instead (SMD-2260, review pass 2).
 if (malformed > 0) console.error(`  ${malformed} thought(s) whose every answer was not JSON of the expected shape — recorded failed`);
+// A run whose model answers a large share of windows malformed writes partial
+// rows, each succeeded, where one malformed window used to fail its thought:
+// say so, and exit 3 below, rather than let the exit code pass it (SMD-2266).
+// The exit code is settled first, so the line says the one the run exits with
+// (review pass 1: a signal or the provider's refusal exits otherwise).
+const alarmLine = judge();
+const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
+// The alarm before the failures: a model at fault explains them, and
+// --retry-failed under it would fail them again. Leased and pending rows keep
+// their own lines below.
+const exitCode = configError ? 2 : stopping ? (FOLLOW ? 0 : 130) : alarms > 0 ? 3 : incomplete ? 1 : 0;
+if (alarmLine) console.error(`${alarmLine} ${exitCode === 3 ? "Exiting 3." : `Exiting ${exitCode}, not 3: ${exitCode === 2 ? "the provider refused the request itself (below)" : "stopped by a signal"}.`}`);
 printCounts(after, "after");
 await printGraph();
 if (after.partial > 0) await printPartials(after);
@@ -950,5 +994,4 @@ if (configError) {
   await Promise.resolve();
   process.exit(2);
 }
-const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
-process.exit(stopping ? (FOLLOW ? 0 : 130) : incomplete ? 1 : 0);
+process.exit(exitCode);

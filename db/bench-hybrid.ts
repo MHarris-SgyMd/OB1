@@ -67,6 +67,7 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { applyMigrations, migrationFiles, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 import { commandLine } from "./cli.ts";
+import { openSql } from "./connect.ts";
 
 commandLine("bench-hybrid.ts", {}, { note: "its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-hybrid.ts");
@@ -129,7 +130,7 @@ const keyedBudget = new Map<number, number>();
 for (const n of SCALES) {
   console.log(`\n  ${n.toLocaleString()} rows, ${DIM} dimensions, ${MARKED} rows carry ${IDENT}, ${MARKED} carry the decoy ${DECOY}`);
   await resetSchema(URL_, { dim: DIM, model: "stub-embed", trgm: true });
-  const sql = new SQL({ url: URL_, max: 1 });
+  const sql = openSql(URL_);
   const q = lit(await load(sql, n));
   const text = `the scheduler timeout around ${IDENT}`;
   const hybrid = () => sql`SELECT content, matched_needles FROM search_thoughts_hybrid(${q}::vector, ${text}, 0.0, 10, '{}'::jsonb)`;

@@ -26,10 +26,17 @@
  */
 
 import { AdapterRefusal, IDENTITY_MAX, normaliseLinks, normaliseMentions, stableJson, type Adapter, type Derived, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
+import { presignalGenre } from "../server-portable/genre.ts";
 import { commandLine } from "./cli.ts";
 
 export const LINEAR_SYSTEM = "linear";
 export const LINEAR_MEDIA_TYPE = "application/vnd.linear.issue+json";
+// The genre of everything this adapter emits (SMD-2323): a Linear row — a ticket
+// head or a dated section of one — is a project-issue by construction. Read off
+// the classifier's own pre-signal so the mapping stays one definition; a facet
+// like `source`, so the sync patches it onto a ticket's row the next time that
+// ticket is re-processed (a full sync backfills them all at once).
+const LINEAR_GENRE = presignalGenre({ source: LINEAR_SYSTEM }) ?? "project-issue";
 
 /** An issue as the sync's GraphQL query returns it. `relations` / `inverseRelations` arrive from db/sync-linear.ts's fetch; a dump without them yields no relation links. */
 export type LinearIssue = {
@@ -107,6 +114,7 @@ export function issueFacets(issue: LinearIssue): Record<string, unknown> {
     url: issue.url,
     linear_updated_at: issue.updatedAt,
     archived_at: issue.archivedAt ?? null,
+    genre: LINEAR_GENRE,
   };
 }
 
@@ -281,7 +289,7 @@ export function derivedSections(issue: LinearIssue): Derived[] {
       text,
       links: normaliseLinks(links, key).links,
       mentions: [],
-      facets: { ticket: issue.identifier, section: s.heading, observed_at: s.date, type: "observation", url: issue.url, [WATERMARK_KEY]: issue.updatedAt },
+      facets: { ticket: issue.identifier, section: s.heading, observed_at: s.date, type: "observation", url: issue.url, [WATERMARK_KEY]: issue.updatedAt, genre: LINEAR_GENRE },
       createdAt: `${s.date}T00:00:00.000Z`,
     });
   }

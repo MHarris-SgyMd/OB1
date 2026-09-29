@@ -43,18 +43,22 @@ supabase
 
 # db/: the server image copies config.mjs, version.mjs and their types; the
 # migrate image (db/Dockerfile, SMD-1860) copies migrate.ts, the flag scanner it
-# imports (cli.ts, SMD-2134) and migrations/. Both are built from this root, so
-# both stay in the context; the tests, benches, workers and the tests' package do
-# not.
+# imports (cli.ts, SMD-2134), its connection module (connect.ts, SMD-2302) and
+# migrations/. Both are built from this root, so both stay in the context; the
+# tests, benches, workers and the tests' package do not.
 db/*.ts
 !db/migrate.ts
 !db/cli.ts
+!db/connect.ts
 # The orchestration profile's import runner (deploy/orchestration/runner.Dockerfile,
 # SMD-2212) runs the ingestion pipeline, so its import graph is let back in:
-# these db/ modules (cli.ts above among them: every db/ script's flag scanner),
+# these db/ modules (cli.ts and connect.ts above among them: every db/ script's
+# flag scanner and connection module, and worker-bootstrap.ts, reembed's egress
+# bootstrap, SMD-2303),
 # and the two files outside db/ it reaches.
 !db/ingest-*.ts
 !db/reembed.ts
+!db/worker-bootstrap.ts
 !db/lease.ts
 !evals/linear-corpus.ts
 db/*.sh

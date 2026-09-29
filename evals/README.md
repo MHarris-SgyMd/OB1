@@ -1627,6 +1627,74 @@ does not change what a retry answers: the loop is the model's, the stream
 makes it cheap. `providerCall`'s chat path and `judgePair` are unchanged;
 neither was measured to run away.
 
+### Reference-list windows: a budget-and-runaway problem, not a JSON one (SMD-2269)
+
+`eval-reference-windows.ts` (SMD-2269). SMD-2260 keeps a windowed thought's parsed
+windows and leaves the malformed ones out; on the stable brain those left-out
+windows are the reference-list windows of three research papers (`0c959c19`,
+`400669a3`, `cb6b844e`). SMD-2260's Work item 3 asked whether a larger answer
+budget, or detecting-and-skipping the bibliography window, recovers them — measured,
+not assumed. The eval runs read-only against the stable brain and the host 7B,
+through the same `extractEntities` the worker calls, with two inert windowing hooks
+(`budgetTimes`, `observe`; never set by `windowingFor`, so the worker is unchanged).
+
+**The failure is not what the ticket assumed.** Over the three papers' 72 windows, 21
+failed on the first attempt — and **none was wrong-shape JSON, and none was prose.**
+Every one was a runaway: 12 aborted on the stream (the detector's three-copies rule)
+and 9 ran to the answer budget (`finish_reason: length`). The `observe` samples show
+the model emitting well-formed JSON that simply does not end — `{"entities": [{"name":
+"Genglin Liu", …` — because a window naming dozens of authors has dozens of entities
+to emit, more than `extractOutputBudget` (3× the input tokens + 1,536) leaves room
+for. But a first-attempt failure is not a loss: the shipped windowing retries a
+runaway read whole, which rescues the false stream-aborts. **After the retry only 8
+windows are actually left out of the graph** (`coverage.malformed`): `0c959c19`
+{18,21,24}, `400669a3` {14,16,18,20}, `cb6b844e` {24} — six of them cut at the budget,
+two genuine loops. So the ticket's premise ("qwen2.5:7b's answer does not parse as JSON
+… none was a stream-aborted runaway") does not hold: the losses are budget-and-loop
+failures on dense-name **content**, not a model that cannot produce JSON.
+
+**A larger budget recovers almost all of the left-out windows.** Re-answering each of
+the 8 left-out windows on its own, read whole, no penalty (so ×1→×2 isolates the
+budget):
+
+| budget | recovered | entities | median s |
+| --- | ---: | ---: | ---: |
+| ×1 (same budget, unpenalised) | 3 / 8 | 213 | 101.6 |
+| ×2 | **7 / 8** | 722 | 139.9 |
+| ×3 | 7 / 8 | 722 | 129.6 |
+
+At the same budget, unpenalised, 3 of the 8 already parse — the shipped retry's 0.5
+frequency penalty had thinned those dense answers into malformed ones, so dropping the
+penalty, not raising the budget, is what recovers them (a lever worth its own look).
+**Doubling the budget recovers 7 of 8**, the four that genuinely overflow; ×3 adds
+nothing. The one that never recovers (`400669a3` w18, an aborted 658-token window) is a
+true loop the runaway machinery already owns. The recovered windows are not junk —
+window 18 of `0c959c19` yields 143 entities, its own author list.
+
+**Detecting and skipping the bibliography is the wrong fix.** A deterministic
+`looksLikeBibliography` (dense "Lastname, F." author-initials and years, or a
+References heading with several authors) flagged **0 of the 8** left-out windows —
+these papers list authors by full name ("Genglin Liu", not "Liu, G."), the shape the
+heuristic keys on. Over the 16 graded long-doc corpus documents (245 windows) it
+flagged 8 (3.3%); skipping them would lose 2 of 117 locatable gold-valid entity names
+(1.71%), and 4 of the flagged windows still held a gold-valid name — a content window
+wrongly skipped. So the detector both misses the windows it was meant to catch and
+discards real entities where it fires. And since the left-out windows carry the paper's
+own authors as valid entities, skipping them throws away exactly the data the graph
+wants.
+
+**Verdict.** Candidate 1 (a larger answer budget for dense-name windows), not
+candidate 2 (bibliography skip). The cheap fix is to size the budget by a window's
+entity density — the count of capitalised/name-like tokens, not only the input-token
+count — and, on the retry, to reconsider the frequency penalty that thins a dense
+answer (3 of 8 recover once it is dropped); the residual true loops stay the runaway
+retry's job. That mechanism, with the distinct skipped-vs-malformed bookkeeping
+SMD-2266's alarm would need only if anything were skipped (nothing is), is the
+follow-up — this ticket measures and decides. The typed-decision path
+(SMD-2017/2252/2321), which proposes spans deterministically and decides each without
+generating a JSON list, would sidestep the generation budget for these windows
+entirely and is the longer-term answer.
+
 ## Entity extraction, measured through the real write path
 
 `eval-entities.ts` scores the extraction pass that migration 016 and
@@ -6259,6 +6327,37 @@ Ollama. The capture path's metadata model then timed out (the server's log),
 though that path is unchanged by SMD-2212. An earlier attempt met a wedged
 Ollama. The runner then reported its rows written and reembed failed, which
 is its answer to a provider outage.
+
+**Emitter egress (SMD-2289).** The kit's allowlist gains a fourth pipeline,
+`vendor`, whose line names `server:8000`, and I two more demands:
+- `snoop` must also reach nothing: no DNS answer, not the host alias's
+  Ollama, Postgres, n8n, 1.1.1.1 or the runner's own port. Its run takes
+  about 15 s, most of it the lookups that get no answer;
+- `vendor` must reach `server:8000` through its proxy with TLS naming it:
+  the brain answers the ClientHello in plain HTTP, which Python reports as a
+  wrong TLS version, and that is proof it arrived. TLS naming `other.example`
+  through the same tunnel must be cut off before it reaches anything (review
+  pass 1: the tunnel carried any bytes, so a vendor behind a CDN was a way to
+  every site on it). A CONNECT to Postgres must be refused, and no direct
+  connection open, the runner's own port included. Its report must name the
+  two refusals. It also stands in for `snoop` as the runner-down leg's "is
+  it back" probe, since it answers at once.
+
+Every check passed on the change's code, plain (C1s after 301 s) and
+sealed, on review pass 1's and 2's, plain and sealed, on pass 3's, plain and
+sealed, and on pass 4's merged with main, plain (C1s after 60 s) (2026-09-27
+and 28). With the rules deleted inside the running container, `snoop`
+reported every target reached (a DNS answer, the host alias's `:11434`,
+`postgres:5432`, `n8n:5678`, `1.1.1.1:443`, `127.0.0.1:8090`) and `vendor`
+a direct connection, and a restart set the rules again. The runner, started with a
+stand-in key on its own image:
+- by its plain command, holding NET_ADMIN and SETPCAP: refused, naming both;
+- by its plain command without them, so with no rules: refused before it
+  listens, an emitter uid having reached a listener of its on 127.0.0.1;
+- by the image's command without NET_ADMIN, or without SETPCAP: refused
+  before any rule is set;
+- as compose starts it: up, the runner's own process at CapEff `e0` (KILL,
+  SETGID, SETUID).
 
 ## Related
 

@@ -23,6 +23,7 @@
  */
 
 import { SQL } from "bun";
+import type { JobSink, JobRow, PublicJob, JobStatus, JobProgress } from "./jobs.ts";
 import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import type { Lineage } from "./lineage.ts";
@@ -47,6 +48,7 @@ import type {
   RetryFailedResult,
   ReleaseLeasesOpts,
   ReleaseLeasesResult,
+  DryRunClaimResult,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -414,6 +416,59 @@ export class SqlStore implements ThoughtStore {
     return { released: ids.length, ids, workers };
   }
 
+  async dryRunClaim(workType: string, limit?: number): Promise<DryRunClaimResult> {
+    // The dry_run half of run_worker (SMD-2272): a pure SELECT preview, claiming
+    // nothing. The census is workerStatus's per-work_type row, scoped to one pool
+    // — the SAME four status counts and stale subset, and `unpooled` = corpus −
+    // pooled — so a dry run and worker_status agree by construction (the guard's
+    // "reports the same pool worker_status shows"). No GROUP BY: the aggregate over
+    // a single work_type always returns exactly one row (all-zero when the pool has
+    // no claim rows yet), so an un-enqueued pool reads unpooled = the whole corpus.
+    // `thoughts` rides the same statement as the per-pool counts (one snapshot, so
+    // unpooled can never read negative under a concurrent delete — workerStatus's
+    // review-pass-2 reasoning). NO claim_thoughts, enqueue_thoughts or lease — the
+    // executing drain is deferred to SMD-2304's callable core. SQL-backend only.
+    const rows = await this.sql`
+      SELECT count(*) FILTER (WHERE status = 'pending')::int   AS pending,
+             count(*) FILTER (WHERE status = 'claimed')::int   AS claimed,
+             count(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+             count(*) FILTER (WHERE status = 'failed')::int    AS failed,
+             count(*) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now())::int AS stale,
+             (SELECT count(*)::int FROM thoughts) AS thoughts
+        FROM thought_work_claims
+       WHERE work_type = ${workType}`;
+    const r = (rows[0] ?? {}) as Record<string, unknown>;
+    const pending = Number(r.pending ?? 0);
+    const claimed = Number(r.claimed ?? 0);
+    const succeeded = Number(r.succeeded ?? 0);
+    const failed = Number(r.failed ?? 0);
+    const total = Number(r.thoughts ?? 0);
+    const stale = Number(r.stale ?? 0);
+    const unpooled = total - (pending + claimed + succeeded + failed);
+    // A full pass reaps expired (stale) leases back to the pool BEFORE it claims —
+    // claim_thoughts() "returns expired leases for the work_type to the pool, then
+    // takes up to p_batch pending rows" (migration 015) — so a stale lease is
+    // drainable now too, not only a `pending` or `unpooled` row. Hence backlog =
+    // pending + stale + unpooled (the three disjoint drainable sets; live `claimed`
+    // rows are held by a live worker and skipped). A stale row already at
+    // p_max_attempts is failed rather than re-claimed, so this stays an upper bound.
+    const backlog = pending + stale + unpooled;
+    const wouldClaim = limit !== undefined ? Math.min(backlog, limit) : backlog;
+    return {
+      workType,
+      pending,
+      claimed,
+      succeeded,
+      failed,
+      stale,
+      unpooled,
+      thoughts: total,
+      backlog,
+      wouldClaim,
+      limit: limit ?? null,
+    };
+  }
+
   async databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts> {
     return readDatabaseFacts(this.sql, opts, progress);
   }
@@ -634,10 +689,14 @@ export class SqlStore implements ThoughtStore {
     return rows.map(normaliseDerivative);
   }
 
-  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number }): Promise<SupersessionProposal[]> {
-    // Migration 029. NULL status lists every state; the function caps the limit.
+  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean }): Promise<SupersessionProposal[]> {
+    // Migration 029, under 070's three-argument form. NULL status lists every
+    // state, NULL lineage every pair; the function caps the limit. Three
+    // arguments, always: 029 re-applied by hand lands its two-argument form
+    // beside 070's, and a call short of three is then ambiguous (not unique)
+    // and fails; three resolve (preflight's lineage check names the leftover).
     const rows = await this.sql`
-      SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int)`;
+      SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean)`;
     return rows.map((r: Record<string, unknown>) => normaliseProposal(r));
   }
 
@@ -711,6 +770,81 @@ export class SqlStore implements ThoughtStore {
         FROM unnest(${this.sql.array(clean.map((r) => r.tool), "TEXT")}::text[],
                     ${toUuidArray(clean.map((r) => r.agentId))}::uuid[],
                     ${toUuidArray(clean.map((r) => r.targetId))}::uuid[]) AS t(tool, agent_id, target_id)`;
+  }
+
+  /**
+   * The durable backing store for the async job registry (SMD-2318, migration
+   * 069's `jobs` table). Timestamps cross as epoch ms (the public shape), so the
+   * writes convert to timestamptz with to_timestamp and the read back with
+   * extract(epoch …). The upsert freezes a terminal row: `WHERE jobs.ended_at IS
+   * NULL` on the conflict path means a late write after the startup reconcile (or
+   * any out-of-order arrival the per-record chain did not already serialize)
+   * cannot move a finished job back to a live state.
+   */
+  jobSink(): JobSink {
+    const sql = this.sql;
+    return {
+      async write(row: JobRow): Promise<void> {
+        await sql`
+          INSERT INTO jobs (id, kind, owner_key_hash, actor, status, progress, result, error, created_at, started_at, ended_at, updated_at)
+          VALUES (
+            ${row.id}::uuid, ${row.kind}, ${row.ownerKeyHash}, ${row.actor}, ${row.status},
+            ${row.progress ?? null}::jsonb,
+            ${row.result ?? null}::jsonb,
+            ${row.error ?? null}::jsonb,
+            to_timestamp(${row.createdAt}::double precision / 1000.0),
+            to_timestamp(${row.startedAt ?? null}::double precision / 1000.0),
+            to_timestamp(${row.endedAt ?? null}::double precision / 1000.0),
+            now()
+          )
+          ON CONFLICT (id) DO UPDATE SET
+            status     = EXCLUDED.status,
+            progress   = EXCLUDED.progress,
+            result     = EXCLUDED.result,
+            error      = EXCLUDED.error,
+            started_at = EXCLUDED.started_at,
+            ended_at   = EXCLUDED.ended_at,
+            updated_at = now()
+          WHERE jobs.ended_at IS NULL`;
+      },
+      async read(ownerKeyHash: string, id: string): Promise<PublicJob | null> {
+        // A non-uuid id would throw on the ::uuid cast; the poll answers it as an
+        // unknown id (null → the route's 404), not a 500.
+        if (!UUID_RE.test(id)) return null;
+        const rows = await sql`
+          SELECT id, kind, status, actor, progress, result, error,
+                 (extract(epoch FROM created_at) * 1000)::bigint AS created_ms,
+                 (extract(epoch FROM started_at) * 1000)::bigint AS started_ms,
+                 (extract(epoch FROM ended_at)   * 1000)::bigint AS ended_ms
+            FROM jobs
+           WHERE id = ${id}::uuid AND owner_key_hash = ${ownerKeyHash}`;
+        const r = rows[0];
+        if (!r) return null;
+        return {
+          jobId: String(r.id),
+          kind: String(r.kind),
+          status: String(r.status) as JobStatus,
+          actor: String(r.actor),
+          createdAt: Number(r.created_ms),
+          ...(r.started_ms != null ? { startedAt: Number(r.started_ms) } : {}),
+          ...(r.ended_ms != null ? { endedAt: Number(r.ended_ms) } : {}),
+          ...(r.progress != null ? { progress: r.progress as JobProgress } : {}),
+          ...(r.result != null ? { result: r.result } : {}),
+          ...(r.error != null ? { error: r.error as { message: string; code?: string } } : {}),
+        };
+      },
+      async reconcileRunningLost(): Promise<number> {
+        const rows = await sql`
+          UPDATE jobs
+             SET status     = 'lost',
+                 ended_at   = now(),
+                 updated_at = now(),
+                 error      = ${{ message: "the server restarted before the job finished; re-run it (a detached run does not survive a restart)", code: "SERVER_RESTARTED" }}::jsonb
+           WHERE status IN ('pending', 'running')
+          RETURNING id`;
+        return rows.length;
+      },
+    };
   }
 
   async close(): Promise<void> {

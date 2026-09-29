@@ -23,8 +23,8 @@
  *   bun db/consolidate.ts --url … --dry-run               # what a run would do; writes nothing
  *   bun db/consolidate.ts --url … --retry-failed          # failed rows back into the pool first
  *   bun db/consolidate.ts --url … --dump verdicts.jsonl   # also append every verdict, for evals/eval-consolidate.ts
- *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|all]   # the queue, with both thoughts
- *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged
+ *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
+ *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, or a lineage pair (070)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
  *   --k N (3)   --min-sim F (0.6)   --min-confidence F (0.5)
@@ -112,22 +112,22 @@
  * itself, stops every worker at once with nothing marked failed.
  */
 
-import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
+import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
+import { blanketGate, classifyError, egressDescription, egressRefusal, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import {
   actorKindOf, cleanForDisplay, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
-import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
-import { isoTimestampOrNull } from "../server-portable/store.ts";
+import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
+import { databaseUrl, openSql } from "./connect.ts";
 
 /**
  * Every argument accounted for (db/cli.ts): a flag this worker does not have
@@ -141,14 +141,10 @@ const cli = commandLine("consolidate.ts", {
   k: "one", "min-sim": "one", "min-confidence": "one", limit: "one", follow: "optional", stale: "optional", dump: "one",
   list: "optional", accept: "one", reject: "one", direction: "one", note: "one", force: "none",
   status: "none", "dry-run": "none", "retry-failed": "none",
-}, { hints: { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|all]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" } });
+}, { hints: { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" } });
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const url = cli.value("url") ?? process.env.DATABASE_URL;
-if (!url) {
-  console.error("No database URL. Pass --url or set DATABASE_URL.");
-  process.exit(2);
-}
+const url = databaseUrl(cli.value("url"));
 
 const WORKERS = cli.int("workers", { absent: 2, min: 1 });
 // One thought per claim: up to --k model calls per thought against a claim of
@@ -187,8 +183,8 @@ const STALE_DAYS = cli.int("stale", { absent: 0, bare: 90, min: 1 });
 const DIRECTION = cli.value("direction");
 const FORCE = cli.has("force");
 const NOTE = cli.value("note");
-if (LIST !== undefined && !["pending", "accepted", "rejected", "stale", "all"].includes(LIST)) {
-  console.error("--list takes pending, accepted, rejected, stale or all (or nothing, for pending).");
+if (LIST !== undefined && !["pending", "accepted", "rejected", "stale", "lineage", "all"].includes(LIST)) {
+  console.error("--list takes pending, accepted, rejected, stale, lineage or all (or nothing, for pending).");
   process.exit(2);
 }
 for (const [name, v] of [["accept", ACCEPT], ["reject", REJECT]] as const) {
@@ -206,7 +202,13 @@ if (DIRECTION !== undefined && (!ACCEPT || !["newer", "older"].includes(DIRECTIO
   process.exit(2);
 }
 if (FORCE && !ACCEPT) {
-  console.error("--force goes with --accept: it accepts a proposal whose thought was edited after it was judged.");
+  console.error("--force goes with --accept: it accepts a proposal whose thought was edited after it was judged, one gone stale, or one standing on a lineage pair (070).");
+  process.exit(2);
+}
+// The pass's thought cap: beside --list it would be dropped without a word (SMD-2015's kind) — the
+// listing prints up to 50 of a status and --status counts them all (adversarial re-run, third review pass).
+if (cli.has("limit") && LIST !== undefined) {
+  console.error("--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status (--status counts them all).");
   process.exit(2);
 }
 // Read only by the decision: beside anything else it would be dropped without a word (SMD-2015's kind).
@@ -236,7 +238,7 @@ console.log(`  job:    ${JOB}`);
 if (!REVIEW_ONLY) console.log(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
 // What may leave the box (SMD-1903): a pair either row of which the gate
 // refuses is not judged, and the thought's claim fails naming the rule.
-if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+if (!REVIEW_ONLY) console.log(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
 {
   // A policy that refuses whatever the row (SMD-1903): stop before claiming,
   // rather than fail every row in the pool one at a time. A dry run and
@@ -244,9 +246,9 @@ if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, 
   // The units a row of this pass carries: its metadata and text, and the
   // worker key's name as the actor when one is set — re-checked below once
   // the key has, or has not, resolved (third review pass).
-  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS);
+  const blanket = blanketGate({ endpoint: cfg.chat, policy: cfg.egress, units: process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "judged", localKnobKey: localKnob(cfg, "chat") });
   if (blanket && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY) {
-    console.error(`\n  Nothing would be judged: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    console.error(`\n  ${blanket}`);
     process.exit(2);
   }
 }
@@ -255,7 +257,7 @@ if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, 
 // through the pool, and a worker parked on a lock or a long statement holds
 // its own connection, so the spare is what keeps every worker's leases alive
 // then. Tightening this to WORKERS would recreate the lapse 031 removed.
-const sql = new SQL({ url, max: WORKERS + 1 });
+const sql = openSql(url, { max: WORKERS + 1 });
 
 // ── The database's side ─────────────────────────────────────────────────────
 
@@ -283,48 +285,25 @@ let keyName: string | undefined;
 // A run, or a review: both write and are attributed. --status, --dry-run, --list and --stale only read.
 const WRITES = ACCEPT !== undefined || REJECT !== undefined || !(STATUS_ONLY || DRY_RUN || REVIEW_ONLY);
 if (WRITES) {
-  const rawKey = process.env.OB1_WORKER_KEY;
-  if (rawKey) {
-    if (!process.env.MCP_ACCESS_KEYS) {
-      console.error("\n  OB1_WORKER_KEY is set but MCP_ACCESS_KEYS is not, so the key cannot be checked or named. Set both, as the server has them.");
-      await sql.close();
-      process.exit(2);
-    }
-    const hash = hashKey(rawKey);
-    const record = parseKeyRecords(process.env.MCP_ACCESS_KEYS).keys.find((k) => k.sha256 === hash);
-    if (!record) {
-      console.error("\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this.");
-      await sql.close();
-      process.exit(2);
-    }
-    try {
-      const [{ r }] = await sql`SELECT resolve_agent(${hash}::text, ${record.name}::text, ${record.scope}::text) AS r`;
-      const res = r as { ok: boolean; error?: string; agent_id?: string; revoked_at?: string; reason?: string | null };
-      if (!res.ok && res.error === "REVOKED") {
-        console.error(`\n  The worker's key was revoked at ${res.revoked_at}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.`);
-        await sql.close();
-        process.exit(2);
-      }
-      if (res.ok && res.agent_id) {
-        agentId = res.agent_id;
-        actorName = record.name;
-        keyName = record.name;
-        console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
-      } else {
-        console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
-      }
-    } catch (e) {
-      console.error(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
-    }
-  } else {
-    console.error(`  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`);
+  const id = await workerIdentity(url, process.env, {
+    noKeyWarning: `  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`,
+  });
+  if (!id.ok) {
+    console.error(id.message);
+    await sql.close();
+    process.exit(2);
   }
+  agentId = id.identity.agentId;
+  keyName = id.identity.keyName;
+  // The audit label above is not an actor; the resolved key's name, when there
+  // is one, is (third review pass).
+  if (keyName) actorName = keyName;
   // A key that was set but did not resolve to a name is no actor: the blanket
   // check above credited one, so it is asked again without (third review pass).
   if (process.env.OB1_WORKER_KEY && keyName === undefined && !REVIEW_ONLY) {
-    const again = refusesEverything(cfg.chat, cfg.egress, ROW_UNITS);
+    const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
     if (again) {
-      console.error(`\n  Nothing would be judged: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
+      console.error(`\n  ${regateMessage("judged", again)}`);
       await sql.close();
       process.exit(2);
     }
@@ -337,54 +316,85 @@ if (WRITES) {
  * `via`, the door (046's origin column) — `source` until SMD-1730, when the
  * trigger stopped reading an actor's source.
  */
-const passActor = () => ({ name: actorName, via: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) });
+const passActor = () => actorPayload({ name: actorName, via: "consolidate", session: JOB, agentId: agentId ?? undefined });
 
 /** 067: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). */
 const readStaleStandings = async () => staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], JOB);
+/** 070: --status's clause for the unreviewed rows standing on a lineage pair — the listing named, or the file it needs first (its own SQL reads on a brain at 068). */
+const lineageClause = (n: number, has069: boolean): string =>
+  `${n} unreviewed standing on a lineage pair (${has069 ? "--list lineage shows them" : "apply migration 070 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
 const staleClause = (st: ReturnType<typeof staleStandings>): string =>
   `${st.total} stale (a text moved under the verdict: ${staleStandingsText(st, JOB)}; the pass replaces one it finds in conflict again and settles one it does not)`;
 
 // ── Review: --list, --accept, --reject, --stale ─────────────────────────────
 
+// A timestamptz as Bun's driver hands it over on these raw reads: a Date, the
+// number ±Infinity for infinity, null — not the store's ISO string (SMD-1842).
+type Stamp = Date | number | string | null;
 type Listed = {
   id: string; status: string; verdict: string; confidence: string; reason: string | null; similarity: number | null;
-  judge_key: string; judged_at: string; reviewed_at: string | null; review_note: string | null; superseding_id: string | null;
-  older_id: string; older_content: string; older_created_at: string | null; newer_id: string; newer_content: string; newer_created_at: string | null;
+  judge_key: string; judged_at: Stamp; reviewed_at: Stamp; review_note: string | null; superseding_id: string | null;
+  older_id: string; older_content: string; older_created_at: Stamp; newer_id: string; newer_content: string; newer_created_at: Stamp;
   older_edited: boolean; newer_edited: boolean;
+  /** 070 (SMD-2313): one side's derived_from names the other — a pair 066's candidate filter never proposes; a standing row is the reviewer's to reject. */
+  lineage: boolean;
 };
+/** The reject a reviewer runs on a lineage pair, as --list prints it beside the row and preflight names it. */
+const rejectLineage = (id: string) => `--reject ${id} --note "lineage pair (066)"`;
+/** 070: the row's lineage line — the reject while the row is the reviewer's, the repair once a pointer was written, the fact alone on a rejected row. */
+const lineageLine = (p: Listed) =>
+  `     lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066${p.status === "pending" || p.status === "stale" ? `; reject it: ${rejectLineage(p.id)}` : p.status === "accepted" ? `; accepted while the derivation names its input — --reject ${p.id} clears the pointer (029)` : ""}`;
+/** review_supersession_proposal's answer (029/036), plus the CLI's own LINEAGE_PAIR refusal (070). */
+type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
 // Thought content and entity names are untrusted; cleanForDisplay strips what
 // would move the cursor or rewrite the ID: line a reviewer is about to paste.
 const snippet = (s: string, n = 160) => { const t = cleanForDisplay(s).replace(/\s+/g, " ").trim(); return t.slice(0, n) + (t.length > n ? "…" : ""); };
 // SMD-1803: the CLI twin of the server's proposal renderer. Through the store's
-// canonical rule (isoTimestampOrNull), not new Date().toISOString(), which
-// fabricated 1970-01-01 on a NULL created_at and THREW on an infinity-dated one,
-// taking the whole listing down. A sentinel ("infinity") or no-ISO-form value
-// has no "T", so it prints whole rather than being sliced to a stub.
-const day = (d: string | null) => {
-  const iso = isoTimestampOrNull(d);
-  return iso == null ? "undated" : iso.includes("T") ? iso.slice(0, 10) : iso;
-};
+// canonical rule (isoDay), not new Date().toISOString(), which fabricated
+// 1970-01-01 on a NULL created_at and THREW on an infinity-dated one, taking
+// the whole listing down.
+const day = (d: Stamp) => isoDay(d) ?? "undated";
 const verdictPhrase = (v: string) =>
   v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
   : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
   : "conflict, direction not stated";
 
 async function printList(status: string | undefined, limit = 50): Promise<number> {
-  const rows = (await sql`SELECT * FROM list_supersession_proposals(${status ?? null}::text, ${limit}::int)`) as Listed[];
+  // 070's three-argument form, always: 029 re-applied by hand lands its
+  // two-argument form beside 070's, and a call short of three is then
+  // ambiguous (not unique) and fails; three resolve (preflight's lineage
+  // check names the leftover).
+  const listed = async (st: string | null, lineage: boolean | null) =>
+    (await sql`SELECT * FROM list_supersession_proposals(${st}::text, ${limit}::int, ${lineage}::boolean)`) as Listed[];
+  // --list lineage: the unreviewed rows standing on a lineage pair — the
+  // reviewer's alone (a pending row holds its pair, 066 never re-finds it;
+  // a stale one waits for the pass's settle, 067) — pending first, then
+  // stale, each most confident first.
+  const lineageMode = status === "lineage";
+  const rows = lineageMode ? [...await listed("pending", true), ...await listed("stale", true)] : await listed(status ?? null, null);
+  const what = lineageMode ? "unreviewed proposals standing on a lineage pair" : `${status ? `${status} ` : ""}proposals`;
   if (rows.length === 0) {
-    console.log(`  no ${status ?? ""} proposals`);
+    console.log(`  no ${what}`);
     return 0;
   }
-  console.log(`  ${rows.length} ${status ?? ""} proposal(s), most confident first:\n`);
+  // A list that hits its cap says so: --status counts every row (definitions
+  // probe, second review pass: 61 rows, 50 printed, the header counted 50).
+  const hit = (st: string) => rows.filter((r) => r.status === st).length === limit;
+  const capped = lineageMode ? hit("pending") || hit("stale") : rows.length === limit;
+  console.log(`  ${rows.length} ${what.replace("proposals", "proposal(s)")}${lineageMode ? " (pending, then stale)" : ""}, most confident first${capped ? ` — ${lineageMode ? `pending and stale capped at ${limit} each` : `the first ${limit}`}; --status counts them all` : ""}:\n`);
   // 067: a stale row's standing against the pools, beside its status. (A
   // row the pass settled needs no tag: its note begins with the marker.)
   const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
   rows.forEach((p, i) => {
-    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.status !== "pending" ? `  (${p.status}${p.status === "stale" ? ` — ${staleStandingText(standing.get(p.id) ?? { s: "waiting", keys: [] }, JOB)}` : ""}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
+    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${p.status !== "pending" ? `  (${p.status}${p.status === "stale" ? ` — ${staleStandingText(standing.get(p.id) ?? { s: "waiting", keys: [] }, JOB)}` : ""}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
     if (p.reason) console.log(`     ${cleanForDisplay(p.reason)}`);
     console.log(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
     console.log(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
     console.log(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${p.judge_key} on ${day(p.judged_at)}`);
+    // 070: a lineage pair — one side derived from the other — is never
+    // proposed since 066; a row standing on one is said so, with the reject
+    // while the row is the reviewer's.
+    if (p.lineage) console.log(lineageLine(p));
     if (p.status === "pending" || p.status === "stale") {
       // Commands as they run: a placeholder the shell cannot parse rather
       // than `newer|older`, which it would read as a pipe (review pass 3).
@@ -392,7 +402,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
       // to replace or settle (067), and a reviewer's to decide sooner — its
       // texts moved, so an accept takes --force.
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
-      const force = p.older_edited || p.newer_edited || p.status === "stale" ? " --force" : "";
+      const force = p.older_edited || p.newer_edited || p.status === "stale" || p.lineage ? " --force" : "";
       console.log(`     --accept ${p.id}${dir}${force}    --reject ${p.id}`);
     }
     console.log("");
@@ -402,7 +412,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
 
 async function printStale(days: number): Promise<void> {
   const rows = (await sql`SELECT * FROM stale_entities(make_interval(days => ${days}), 50)`) as
-    { entity_id: string; entity_type: string; name: string; thoughts: number; newest_at: string }[];
+    { entity_id: string; entity_type: string; name: string; thoughts: number; newest_at: Stamp }[];
   if (rows.length === 0) {
     console.log(`  stale: no entity has gone ${days} days without a mention`);
     return;
@@ -418,9 +428,27 @@ if (REVIEW_ONLY) {
   if (ACCEPT || REJECT) {
     const decision = ACCEPT ? "accept" : "reject";
     const id = (ACCEPT ?? REJECT)!;
-    const [{ r }] = await sql`
-      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`;
-    const res = r as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
+    // 070 (SMD-2313): an accept on a lineage pair — one side's derived_from
+    // names the other — is the harm 066 exists to prevent (the derivation
+    // archives its input while still naming it), so it is refused here
+    // unless --force says the reviewer has read both texts and means it —
+    // 029's rule for a text edited since judged, applied CLI-side (this is
+    // the one accept door; the stores and the tool have none). Read from the
+    // row's own predicate, not the 200-capped listing, and only while the
+    // row is unreviewed — a decided row is 029's to answer (ALREADY_ACCEPTED
+    // on an accepted one; fourth review pass: the guard described a pointer
+    // as not yet written). A guard, not a verdict — nothing is written
+    // (definitions probe, second review pass: the accept went through under
+    // the reject's own advice).
+    const lineageRow = decision === "accept" && !FORCE
+      ? (await sql`SELECT (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)) AS lineage
+                     FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
+                    WHERE p.id = ${id}::uuid AND p.status IN ('pending', 'stale')`) as { lineage: boolean }[]
+      : [];
+    const res: ReviewResult = lineageRow[0]?.lineage === true
+      ? { ok: false, error: "LINEAGE_PAIR" }
+      : (await sql`
+      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`)[0].r as ReviewResult;
     if (res.ok) {
       if (decision === "accept") {
         console.log(`  accepted ${id}: ${res.superseding_id} now supersedes ${res.superseded_id}${res.written ? "" : " (the pointer already held that value)"}; the change is in thought_audit under ${actorName}`);
@@ -431,6 +459,7 @@ if (REVIEW_ONLY) {
       code = 1;
       const why: Record<string, string> = {
         NOT_FOUND: "no such proposal (or the thought it names is gone)",
+        LINEAGE_PAIR: `one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${rejectLineage(id)} is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`,
         DIRECTION_REQUIRED: `the judge did not say which is current (${res.verdict}); pass --direction newer or --direction older`,
         ALREADY_ACCEPTED: `already accepted (${res.superseding_id} carries the pointer); --reject it first to undo`,
         EDITED_SINCE: `the ${res.older_edited && res.newer_edited ? "older and newer thoughts have" : res.older_edited ? "older thought has" : "newer thought has"} been edited since the pair was judged, so the verdict is about a text that is gone; read both with --list and pass --force if it still holds`,
@@ -443,7 +472,16 @@ if (REVIEW_ONLY) {
       console.error(`  ${decision} refused: ${why[res.error ?? ""] ?? res.error}`);
     }
   }
-  if (LIST !== undefined) await printList(LIST === "all" ? undefined : LIST);
+  if (LIST !== undefined) {
+    // 070 (SMD-2313): a brain at 068 under this tree has no three-argument
+    // listing — the one error every --list meets there, named with its file
+    // rather than a driver stack (definitions probe, second review pass).
+    try { await printList(LIST === "all" ? undefined : LIST); } catch (e) {
+      if (!/list_supersession_proposals\(text, ?integer, ?boolean\) does not exist/.test((e as Error).message)) throw e;
+      console.error("  --list needs migration 070 (db/migrations/070_listing_flags_lineage_pair.sql), which this brain has not applied: cd db && bun migrate.ts --url <url>");
+      code = 1;
+    }
+  }
   if (STALE_DAYS > 0) await printStale(STALE_DAYS);
   await sql.close();
   process.exit(code);
@@ -484,10 +522,17 @@ async function printQueue(): Promise<void> {
            count(*) FILTER (WHERE status = 'accepted')::int AS accepted,
            count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
            count(*) FILTER (WHERE status = 'rejected' AND review_note LIKE ${`${PASS_SETTLED_PREFIX}%`})::int AS settled,
-           count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected
+           count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected,
+           -- 070 (SMD-2313): the unreviewed rows standing on a lineage pair — 066's predicate, as the stale read above spells it — the reviewer's alone.
+           (SELECT count(*)::int FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
+             WHERE p.status IN ('pending', 'stale')
+               AND (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false))) AS lineage,
+           -- The count above is this file's own SQL and reads on a brain at 068; the listing it points at is 070's, so its absence is
+           -- said here rather than one command later (operator walkthrough, fourth review pass).
+           to_regprocedure('list_supersession_proposals(text, int, boolean)') IS NOT NULL AS has_070
     FROM supersession_proposals`;
   const stale = await readStaleStandings();
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""} — --list shows them; --accept / --reject decides one`);
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${lineageClause(q.lineage, q.has_070)}` : ""} — --list shows them; --accept / --reject decides one`);
 }
 
 /**
@@ -791,20 +836,6 @@ async function processRow(row: Row): Promise<Outcome> {
   return { outcome: "succeeded" };
 }
 
-/** What an error from the provider is about — extract-entities.ts's classifier, the same three kinds. */
-type ErrorKind = "thought" | "transient" | "fatal";
-function classifyError(e: unknown): ErrorKind {
-  const status = (e as { status?: number }).status;
-  const msg = (e as Error).message ?? "";
-  const name = (e as Error).name ?? "";
-  if (name === "TimeoutError" || /timed out/i.test(msg)) return "thought";
-  if (status === 429 || (status !== undefined && status >= 500)) return "transient";
-  if (status === 400 && refusesLength(status, msg)) return "thought";
-  if (status !== undefined && status >= 400 && status < 500) return "fatal";
-  if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
-  return "thought";
-}
-const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
 // Written inside the worker closures below, which control-flow analysis does
 // not follow: declared `: string | null = null`, the read at the end of the
 // run is narrowed to `never`. The cast keeps the declared type as the initial

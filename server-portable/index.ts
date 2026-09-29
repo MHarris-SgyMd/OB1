@@ -4,6 +4,8 @@ import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
 import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
 import { captureLineage } from "./lineage.ts";
+import { classifyGenre } from "./genre.ts";
+import { resolveJevConfig } from "./jev.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
@@ -15,7 +17,7 @@ import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
 import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
-import { startJob, readJob, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
+import { startJob, readJob, subscribe as subscribeJob, markRunningLost, setJobSink } from "./jobs.ts";
 
 /**
  * Runtime-portable env access.
@@ -226,11 +228,35 @@ function env(): Env {
 // moment the selection takes effect (change 97); preflight says it at the
 // entrypoint as well, so a container sees it before the first request.
 let _store: Promise<ThoughtStore> | null = null;
+let jobStoreWired = false;
 function db(): Promise<ThoughtStore> {
   if (!_store) {
     const notice = postgrestOnBunNotice(storeKind(env()));
     if (notice) console.warn(notice);
     _store = createStore(env());
+    // Once, on the Bun server and the moment the store is first built (env() is
+    // seeded by then): wire the durable job store (SMD-2318) and reconcile jobs a
+    // prior process left running — a clean stop's `lost` write that did not land,
+    // or a hard crash — so a poll after the restart sees a terminal answer, not a
+    // live job with no runner. Detached and best-effort: the handle routes never
+    // gate on it, the SQL store returns a sink, the PostgREST store returns null
+    // (the registry stays in-memory), and a store that fails to build leaves it
+    // in-memory too. A suite drives the sink itself (it holds the store).
+    if (SERVES_ON_BUN && !jobStoreWired) {
+      jobStoreWired = true;
+      void _store.then(async (store) => {
+        const s = store.jobSink();
+        if (!s) return;
+        // Reconcile BEFORE wiring the sink: only after setJobSink does a job of
+        // this process get persisted as running, so running the reconcile first
+        // means it can only touch a prior process's rows — never a job this
+        // process just started (which would race the reconcile's UPDATE and be
+        // wrongly cut to lost).
+        const lost = await s.reconcileRunningLost();
+        setJobSink(s);
+        if (lost > 0) console.warn(`startup reconciled ${lost} job${lost === 1 ? "" : "s"} left running by a prior process: marked lost (SMD-2318)`);
+      }).catch(() => { /* no durable store: the registry stays in-memory */ });
+    }
   }
   return _store;
 }
@@ -308,6 +334,14 @@ function embedConfig(): EmbedConfig {
 // The tag extraction is metadata.ts (shared with db/sync-linear.ts); this is
 // the server's reader over it, lazy like embedConfig for the same reason.
 const extractMetadata = (text: string, subject: EgressSubject) => extractMetadataWith(text, subject, embedConfig());
+
+// The genre classifier (SMD-2323): a deterministic pre-signal over the metadata
+// first, then the typed-decision tier when OB1_JEV_BASE_URL names one — opt-in
+// and null-by-default, so a capture pays nothing for it unless the tier is
+// configured (the classifier is pre-signal-only and falls back to `other`).
+const jevConfig = () => resolveJevConfig(env());
+const classifyThoughtGenre = (content: string, metadata: Record<string, unknown>, subject: EgressSubject) =>
+  classifyGenre(content, metadata, jevConfig(), subject);
 
 function citationBase(): string {
   return env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
@@ -390,6 +424,7 @@ type ToolErrorCode =
   | "SUPERSEDES_UNJUDGED"          // the server could not check/attribute the supersedes; retry
   | "REFUSED_EMPTY_WORK_TYPE"      // retry_failed / release_stale_leases given a blank work_type
   | "REFUSED_LIVE_LEASE_NEEDS_WORKER" // release_stale_leases include_live without a worker_id
+  | "RUN_WORKER_DRAIN_NOT_AVAILABLE"  // run_worker called without dry_run:true; the executing drain is deferred (SMD-2272/2304)
   | "STORE_UNAVAILABLE";           // the store did not answer; retry
 type ToolErrorInfo = { code: ToolErrorCode; retryable: boolean; positions?: number[] };
 
@@ -1468,20 +1503,24 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "List Supersession Proposals",
       description:
-        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all.",
+        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070).",
       annotations: {
         readOnlyHint: true,
       },
       inputSchema: {
         status: z.enum(["pending", "accepted", "rejected", "stale", "all"]).optional().default("pending"),
         limit: z.number().int().min(1).max(200).optional().default(10),
+        lineage: z.boolean().optional().describe("true: only proposals standing on a lineage pair (one side's derived_from names the other); false: only the rest; absent: every pair (migration 070)"),
       },
     },
-    async ({ status, limit }) => {
+    async ({ status, limit, lineage }) => {
       try {
-        const data = await (await db()).listSupersessionProposals({ status: status === "all" ? null : status, limit });
+        const data = await (await db()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }) });
+        const onLineage = lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "";
         if (!data.length) {
-          return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals. The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by).` }] };
+          // A lineage pair is never proposed since 066, so an empty lineage
+          // selection is not the pass's to fill (maintainer read, third pass).
+          return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}.${lineage === true ? "" : " The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by)."}` }] };
         }
         // SMD-1803: through displayDate, never new Date() on a raw column — an
         // undated thought reads "undated", an infinity/BC one its own text, not
@@ -1498,11 +1537,18 @@ function buildServer(principal: Principal): McpServer {
         const results = data.map((p, i) => {
           const edited = p.older.edited || p.newer.edited;
           const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
+          // 070: the CLI refuses an accept on a lineage pair without --force.
           const review = p.status === "pending"
-            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited ? " --force" : ""}   reject: … --reject ${p.id}` +
+            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited || p.lineage ? " --force" : ""}   reject: … --reject ${p.id}` +
               (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
             : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${p.reviewNote ? `: ${cleanForDisplay(p.reviewNote)}` : ""}`;
-          return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.reason ? `\n   ${cleanForDisplay(p.reason)}` : ""}` +
+          // 070 (SMD-2313): a lineage pair — one side derived from the other
+          // — is never proposed since 066; a row standing on one is the
+          // reviewer's to reject, said with the command while it is theirs.
+          const lineageLine = p.lineage
+            ? `\n   LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066${p.status === "pending" || p.status === "stale" ? `; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} --note "lineage pair (066)"` : p.status === "accepted" ? `; accepted while the derivation names its input — cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} clears the pointer (029)` : ""}`
+            : "";
+          return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${p.reason ? `\n   ${cleanForDisplay(p.reason)}` : ""}${lineageLine}` +
             `\n   newer [${day(p.newer.created_at)}]${p.newer.edited ? " (edited since judged)" : ""}: ${snip(p.newer.content)}\n      ID: ${p.newer.id}` +
             `\n   older [${day(p.older.created_at)}]${p.older.edited ? " (edited since judged)" : ""}: ${snip(p.older.content)}\n      ID: ${p.older.id}` +
             `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
@@ -1510,13 +1556,18 @@ function buildServer(principal: Principal): McpServer {
         return {
           content: [{
             type: "text" as const,
-            text: `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s), most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`,
+            text: `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`,
           }],
         };
       } catch (err: unknown) {
         const msg = (err as Error).message;
-        const hint = /list_supersession_proposals|supersession_proposals/.test(msg)
-          ? " — migration 029 (db/migrations/029_supersession_proposals.sql) is not applied, or PostgREST has not reloaded its schema cache"
+        // 070 (SMD-2313): both stores call the three-argument form, so a brain
+        // short of 070 — or of 029, whose queue the listing reads — fails
+        // naming that form (PostgREST names p_lineage); the driver's message
+        // is the same either way, so one hint names both files (cold read,
+        // first and fourth review passes).
+        const hint = /list_supersession_proposals|supersession_proposals|p_lineage/.test(msg)
+          ? " — the migrations through 070 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 070, db/migrations/070_listing_flags_lineage_pair.sql, its current listing), or PostgREST has not reloaded its schema cache"
           : "";
         return {
           content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],
@@ -1953,10 +2004,16 @@ function buildServer(principal: Principal): McpServer {
         // still RECORDS the label below, for the passes and the per-source weight.
         const subject: EgressSubject = { kind: "capture", actor: principal.name, content };
         const gate = decideCalls(subject, cfg, cfg.egress);
-        // Independent of each other, so they overlap.
-        const [embedded, metadata] = await Promise.all([
+        // Independent of each other, so they overlap. The genre classifier reads
+        // the caller's metadata (a `source:linear`/arXiv pre-signal) and, only
+        // when the tier is configured, the content — never the extractor's tags,
+        // so it need not wait for extractMetadata (SMD-2323). Its own egress is
+        // the tier's, so it runs regardless of the capture's chat gate; a tier
+        // outage falls back to `other` inside the classifier, never here.
+        const [embedded, metadata, genre] = await Promise.all([
           gate.embeddings.allowed ? embedCapture(content, subject) : Promise.resolve(undefined),
           gate.chat.allowed ? extractMetadata(content, subject) : Promise.resolve(metadataRefused()),
+          classifyThoughtGenre(content, { ...clientMetadata, source: origin }, subject),
         ]);
         const chunks = embedded?.chunks ?? [];
         const contextFailures = embedded?.contextFailures ?? 0;
@@ -1966,7 +2023,11 @@ function buildServer(principal: Principal): McpServer {
         // shape check above has already refused a reserved key outright, so this
         // only orders the rest), and `summary_model` and its like survive
         // (SMD-2014).
-        const payload = { metadata: { ...clientMetadata, ...metadata, source: origin } };
+        // `genre` last, over both spreads: the classifier already honours a valid
+        // caller-supplied genre (its pre-signal returns it), so placing the
+        // classified value here lets that one round-trip while a bogus one is
+        // overwritten by the classification (SMD-2323).
+        const payload = { metadata: { ...clientMetadata, ...metadata, source: origin, genre: genre.genre } };
 
         // Atomicity is the store's problem now: the SQL path writes content,
         // metadata and vector in one statement, while the PostgREST path keeps the
@@ -2465,6 +2526,54 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 14: run_worker — the drain SMD-2132 carved out (SMD-2272). The third
+  // worker action, write-scoped like its two siblings. Only its dry_run half is
+  // built: a pure-SQL preview of what a pass over `work_type` would claim,
+  // matching worker_status, claiming nothing. The EXECUTING drain is deferred —
+  // the server deliberately never runs the bulk LLM passes (entities.ts,
+  // consolidate.ts), and the claim loop has no importable core yet (it is inline
+  // in each db/*.ts main(), SMD-2304). So dry_run must be EXPLICITLY true; any
+  // other call is refused as a value (RUN_WORKER_DRAIN_NOT_AVAILABLE), so an
+  // operator never mistakes a silent no-op for a real drain. dry_run mutates
+  // nothing, so — unlike retry_failed/release_stale_leases — it writes no action
+  // log row; the write gate still refuses a read/capture key, and the scope will
+  // not change when the drain lands.
+  if (canWrite(principal)) server.registerTool(
+    "run_worker",
+    {
+      title: "Run Worker (drain a pool)",
+      description:
+        "Drain a background-work pool for a `work_type` — the operator form of a `bun db/<worker>.ts` pass over MCP/REST. Currently the PREVIEW half only: call with `dry_run: true` to report, without claiming anything, what a pass would process now — the same pool `worker_status` shows (pending / claimed / stale / unpooled) plus `backlog` and, if you pass `limit`, `wouldClaim`. `backlog` = pending + stale + unpooled (a pass reaps expired stale leases back to the pool before it claims, so they drain too; a live claimed lease is skipped). It is exact for an extraction pool but an UPPER BOUND for reembed/consolidate, whose eligibility is model-aware (they count every un-pooled thought, not only the ones those pools would enqueue). The executing drain is not yet available (a call without `dry_run: true` is refused): the server does not run the bulk LLM passes, so it will land on a callable worker core. Read `worker_status` first for the exact `workType`. Requires a write key.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
+      inputSchema: {
+        work_type: z.string().describe("The exact work_type to preview — a `workType` from worker_status (e.g. \"extract:qwen2.5:7b@p2\" or \"reembed:<model>@<dim>\")."),
+        dry_run: z.boolean().optional().describe("Must be true — report what a pass would claim without claiming it. The executing drain is not yet available; any other value is refused."),
+        limit: z.number().int().positive().optional().describe("Bound the previewed backlog — `wouldClaim` is the drainable backlog capped at this. Omit to preview the whole backlog."),
+      },
+    },
+    async ({ work_type, dry_run, limit }) => {
+      try {
+        if (work_type.trim() === "") return toolError("Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain.", { code: "REFUSED_EMPTY_WORK_TYPE", retryable: false });
+        if (dry_run !== true) {
+          return toolError("Refused: the executing drain is not yet available — the server does not run the bulk LLM passes, and the drain will land on a callable worker core (SMD-2304). Call with dry_run: true to preview what a pass would claim.", { code: "RUN_WORKER_DRAIN_NOT_AVAILABLE", retryable: false });
+        }
+        const result = await (await db()).dryRunClaim(work_type, limit);
+        // No audit row: a dry run claims and mutates nothing (unlike the two
+        // sibling write actions), so there is no thought to record an action against.
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      } catch (e) {
+        // Codeless, as retry_failed/release_stale_leases are: on a PostgREST
+        // (Workers) deploy the store throws the permanent SQL-only reason.
+        return toolError(`run_worker failed: ${(e as Error).message}`);
+      }
+    }
+  );
+
   // Tool 3b-v: poll an async job by its handle (SMD-2273). GET /jobs/<id> is the
   // curl mirror; an MCP client cannot reach a REST route, so this tool is how a
   // Claude Desktop / claude.ai client fetches the result of a job it started.
@@ -2476,15 +2585,15 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Async Job Status",
       description:
-        "Fetch the status and result of an async job by the `job_id` a long-running tool handed back (SMD-2273). Returns { jobId, kind, status: pending|running|succeeded|failed|lost, progress?, result?, error? }. A succeeded job carries its result; a failed one the error; `lost` means the server stopped before it finished (an in-memory job does not survive a restart — re-run it). Only the key that started the job can read it. Read-only.",
+        "Fetch the status and result of an async job by the `job_id` a long-running tool handed back (SMD-2273). Returns { jobId, kind, status: pending|running|succeeded|failed|lost, progress?, result?, error? }. A succeeded job carries its result; a failed one the error; `lost` means the server stopped before it finished — re-run it. Only the key that started the job can read it. Read-only.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         job_id: z.string().describe("The jobId from a long-running tool's handle (a uuid). Only the key that started the job can read it."),
       },
     },
     async ({ job_id }) => {
-      const job = readJob(principal, job_id);
-      if (!job) return toolError(`No job ${JSON.stringify(job_id)} for this key — an unknown id, another key's job, or one aged out of the in-memory registry.`);
+      const job = await readJob(principal, job_id);
+      if (!job) return toolError(`No job ${JSON.stringify(job_id)} for this key — an unknown id, another key's job, or one pruned from the registry.`);
       return { content: [{ type: "text" as const, text: JSON.stringify(job) }], structuredContent: job as unknown as Record<string, unknown> };
     }
   );
@@ -2863,8 +2972,8 @@ app.get("*", async (c, next) => {
   }
 });
 
-// The worker-queue ACTIONS as keyed POSTs (SMD-2132) — the REST mirror of the
-// retry_failed and release_stale_leases tools. POST at every path is the MCP
+// The worker-queue ACTIONS as keyed POSTs (SMD-2132, SMD-2272) — the REST mirror
+// of the retry_failed, release_stale_leases and run_worker tools. POST at every path is the MCP
 // endpoint (app.on(MCP_METHODS, "*") below), so this guard is registered BEFORE
 // it and falls through with next() for any path it does not own; the two action
 // paths it handles never reach the transport, and no MCP client posts JSON-RPC
@@ -2875,10 +2984,12 @@ app.get("*", async (c, next) => {
 // SQL-only reason (the PostgREST shim throws) is a 200 body as the read mirror's.
 const WORKER_RETRY_PATH = /(^|\/)worker-retry-failed\/?$/;
 const WORKER_RELEASE_PATH = /(^|\/)worker-release-leases\/?$/;
+const WORKER_RUN_PATH = /(^|\/)worker-run\/?$/;
 app.post("*", async (c, next) => {
   const isRetry = WORKER_RETRY_PATH.test(c.req.path);
   const isRelease = WORKER_RELEASE_PATH.test(c.req.path);
-  if (!isRetry && !isRelease) return next();
+  const isRun = WORKER_RUN_PATH.test(c.req.path);
+  if (!isRetry && !isRelease && !isRun) return next();
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
@@ -2909,6 +3020,19 @@ app.post("*", async (c, next) => {
       const result = await (await db()).retryFailed(workType);
       await audit("retry_failed", result.ids);
       return c.json(result, 200, corsHeaders);
+    }
+    if (isRun) {
+      // run_worker's dry_run preview (SMD-2272): the same refusals as the tool —
+      // a missing work_type, and the executing drain being unavailable — as 400s
+      // carrying the same codes. A dry run mutates nothing, so no audit row (the
+      // sibling actions above audit because they requeue/release). limit is
+      // accepted from the body when it is a positive integer, else omitted.
+      const runWorkType = typeof args.work_type === "string" ? args.work_type : "";
+      if (runWorkType.trim() === "") return c.json({ error: "work_type is required — pass the exact workType worker_status reports for the pool to drain.", code: "REFUSED_EMPTY_WORK_TYPE" }, 400, corsHeaders);
+      if (args.dry_run !== true) return c.json({ error: "the executing drain is not yet available — the server does not run the bulk LLM passes; the drain will land on a callable worker core (SMD-2304). Send dry_run: true to preview what a pass would claim.", code: "RUN_WORKER_DRAIN_NOT_AVAILABLE" }, 400, corsHeaders);
+      const runLimit = typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit > 0 ? args.limit : undefined;
+      const runResult = await (await db()).dryRunClaim(runWorkType, runLimit);
+      return c.json(runResult, 200, corsHeaders);
     }
     const workType = args.work_type === undefined ? undefined : String(args.work_type);
     const workerId = args.worker_id === undefined ? undefined : String(args.worker_id);
@@ -2959,14 +3083,14 @@ app.get("*", async (c, next) => {
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
   if (streamMatch) {
-    const stream = subscribeJob(principal, id);
+    const stream = await subscribeJob(principal, id);
     if (!stream) return c.json({ error: "not found" }, 404, corsHeaders);
     const response = new Response(stream, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });
     // Kept alive by the same wrapper as the MCP stream (SMD-1864): the job's
     // events may be minutes apart, and a silent stream is reaped otherwise.
     return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream` });
   }
-  const job = readJob(principal, id);
+  const job = await readJob(principal, id);
   if (!job) return c.json({ error: "not found" }, 404, corsHeaders);
   return c.json(job, 200, corsHeaders);
 });
@@ -3285,14 +3409,16 @@ if (SERVES_ON_BUN) {
     close: async () => (_store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : false),
     onCut: () => {
       cutByStop = true;
-      // In-memory jobs still running when the stop cuts what is in flight are
-      // marked lost, so a poll or stream in flight sees a terminal answer rather
-      // than hanging; after a restart the registry is empty and a poll for one
-      // gets `not found` (SMD-2273). The job bodies are tracked through
-      // toolCalls (startJob's `track`), so the drain above already waited on
-      // them up to its bound; this cuts what did not finish.
+      // Jobs still running when the stop cuts what is in flight are marked lost,
+      // so a poll or stream in flight sees a terminal answer rather than hanging.
+      // The job bodies are tracked through toolCalls (startJob's `track`), so the
+      // drain above already waited on them up to its bound; this cuts what did
+      // not finish. With a durable store (SMD-2318) the `lost` is written through
+      // and survives the restart; without one it is in-memory and a poll after a
+      // restart gets `not found` (SMD-2273). Either way the startup reconcile is
+      // the backstop for a write cut off before it landed.
       const lost = markRunningLost();
-      if (lost > 0) console.warn(`stop cut ${lost} running job${lost === 1 ? "" : "s"}: marked lost — an in-memory job does not survive a restart (SMD-2273)`);
+      if (lost > 0) console.warn(`stop cut ${lost} running job${lost === 1 ? "" : "s"}: marked lost (SMD-2273)`);
     },
   });
 }

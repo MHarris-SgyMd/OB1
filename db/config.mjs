@@ -451,6 +451,27 @@ export const EXTRACT_MIN_WINDOW_TOKENS = 64;
 export const EXTRACT_MAX_WINDOWS = 24;
 
 /**
+ * When a run's malformed answers say the model, not the documents, is at fault
+ * (SMD-2266): more than EXTRACT_MALFORMED_ALARM_SHARE of at least
+ * EXTRACT_MALFORMED_ALARM_MIN answers — one per window sent, a one-window
+ * thought's one included — were not JSON of the expected shape. A windowed
+ * thought with any window parsed is recorded succeeded (SMD-2260), so the
+ * extraction worker watches the run's share instead, says so on stderr and
+ * exits 3. A fifth sits between the stable brain's reference-list papers as
+ * qwen2.5:7b reads them (9–11%) and the wrong model's windowed answers (28%); the
+ * floor keeps a lone paper at the default bound, or a few short thoughts, from
+ * reading as a broken model. The measurements, and why no per-thought floor,
+ * are in db/README.md.
+ */
+export const EXTRACT_MALFORMED_ALARM_SHARE = 1 / 5;
+export const EXTRACT_MALFORMED_ALARM_MIN = 48;
+
+/** Whether `malformed` of a run's `answers` pass the alarm above. */
+export function malformedAlarm(answers, malformed) {
+  return answers >= EXTRACT_MALFORMED_ALARM_MIN && malformed / answers > EXTRACT_MALFORMED_ALARM_SHARE;
+}
+
+/**
  * The window count one thought is extracted in at most: OB1_EXTRACT_MAX_WINDOWS
  * when it is a positive safe integer once floored, else EXTRACT_MAX_WINDOWS.
  * It sets the text bound a run chunk.ts cannot split meets too, so widening
@@ -1377,9 +1398,160 @@ export const HNSW_SEED_SCAN_MEM_MULTIPLIER = HNSW_SEEDS["hnsw.scan_mem_multiplie
  */
 export const HNSW_BOUNDS = Object.keys(HNSW_SEEDS);
 
-/** A database name as an SQL identifier — `open-brain` and `OpenBrain` both need the quotes. */
+/** A name as an SQL identifier, always quoted — a database's (`open-brain` and `OpenBrain` both need the quotes), a schema's or a tablespace's. */
 export function quoteIdent(name) {
   return name == null ? "<database>" : `"${String(name).replace(/"/g, '""')}"`;
+}
+
+/**
+ * A search_path setting's schemas, in order, as Postgres resolves them — its
+ * SplitIdentifierString (SMD-2242, fuzzed against Postgres there). Here, not in
+ * server-portable/search-path.ts, which re-exports it: the migrator's image
+ * copies db/ files alone, and the migrator (the path it gives 021's
+ * transaction) and tier.ts (a list setting a refresh copies) read a path as
+ * preflight does (SMD-2247).
+ *
+ * `current_setting('search_path')` is the session's own text, from the role,
+ * the database or the connection. `SET` and `ALTER ROLE … SET` store it
+ * re-quoted, but a connection string's `options`, `set_config` and `SET …
+ * FROM CURRENT` store it as written, so it is parsed, never echoed. Names are
+ * separated by commas; whitespace around each, as scanner_isspace sees it —
+ * space, tab, newline, carriage return and form feed, and from PostgreSQL 17
+ * vertical tab, nothing outside ASCII, so JavaScript's trim() is wrong here;
+ * a quoted name kept as written, `""` inside it a quote; an unquoted name
+ * folded A–Z only, as downcase_identifier does in a UTF-8 database. The empty
+ * name a `''` path reads back as is dropped — it names no schema — unless
+ * `keepEmpty`: in temp_tablespaces, the other quoted list setting Postgres reads this way,
+ * `""` is the database's default tablespace, a member of the list. Settings
+ * Postgres rejects (`a,,b`, `a b`, an unterminated quote) never reach here: its
+ * check hook refuses them on every route. `serverVersionNum` is the server's
+ * `server_version_num`.
+ */
+export function searchPathSchemas(setting, serverVersionNum, keepEmpty = false) {
+  const isSpace = (c) =>
+    c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || (c === "\v" && serverVersionNum >= 170000);
+  const names = [];
+  let i = 0;
+  while (i < setting.length) {
+    while (isSpace(setting[i])) i++;
+    let name = "";
+    if (setting[i] === '"') {
+      for (i++; i < setting.length; i++) {
+        if (setting[i] !== '"') name += setting[i];
+        else if (setting[i + 1] === '"') { name += '"'; i++; }
+        else { i++; break; }
+      }
+    } else {
+      while (i < setting.length && setting[i] !== "," && !isSpace(setting[i])) name += setting[i++];
+      name = name.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+    }
+    while (i < setting.length && setting[i] !== ",") i++;
+    i++;
+    if (name !== "" || keepEmpty) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * The setting without the temp schema, as a search_path value: each name
+ * quoted, `pg_temp` dropped by its parsed name — Postgres's own test, so an
+ * unquoted `PG_TEMP` and a quoted `"pg_temp"` go and a quoted `"PG_TEMP"`, a
+ * schema of that name, stays. `"$user"` quoted is still the role's schema. ""
+ * when nothing is left, which set_config takes as the empty path.
+ */
+function searchPathWithoutTemp(setting, serverVersionNum) {
+  return searchPathSchemas(setting, serverVersionNum).filter((s) => s !== "pg_temp").map(quoteIdent).join(", ");
+}
+
+/**
+ * Set the transaction's search_path to itself without the temp schema: what
+ * migrate.ts gives 021's transaction, so that a temp view shadows the claim
+ * table (applyShadowed, SMD-1421). The path is read as Postgres reads it,
+ * under the server's version (SMD-2247), and set LOCAL, so it ends with the
+ * transaction. Returns the path it read. Here rather than in the migrator so
+ * that the step itself, not a copy of it, is what db/test-search-path [7] runs
+ * against Postgres. Bun.sql only (a tagged-template client), inside a
+ * transaction.
+ */
+export async function setPathWithoutTemp(tx) {
+  const [{ path, version }] = await tx`SELECT current_setting('search_path') AS path, current_setting('server_version_num')::int AS version`;
+  await tx`SELECT set_config('search_path', ${searchPathWithoutTemp(path, version)}, true)`;
+  return path;
+}
+
+/**
+ * Put public first on the migrating session's search_path, before the
+ * migrator creates or reads anything unqualified (SMD-2247). Every migration
+ * and the ledger are unqualified, so they land in the first schema on the path
+ * and find the first table of a name: with another schema first — the
+ * default path's "$user" when a schema is named for the role, a connection
+ * string's options=, a role's setting — the build went there, or found
+ * another tool's `thoughts` and failed on it, and with no schema on the path
+ * at all the ledger's CREATE failed with 3F000. The brain lives in public,
+ * where preflight and --baseline look, so public goes first and the rest of
+ * the path follows in its order, read as Postgres reads it: an extension's
+ * schema on it (Supabase's `extensions`) still resolves. Session scope
+ * (`set_config(…, false)`), as alignVectorSearchPath's is: it holds for each
+ * migration's transaction on this connection, and for this run alone — the
+ * server's connection keeps its own path, which preflight's `schema` row
+ * judges.
+ *
+ * Judged first, before the path is touched: `{ refused: "ledger", schema }`
+ * where a schema on the path other than public holds this migrator's ledger —
+ * `schema_migrations` of its shape, with `name` and `sha256` — and public
+ * holds no brain: that ledger and `thoughts` beside it. An empty ledger
+ * alone in public, which --dry-run or a first run failed at 001 leaves, is
+ * no brain. `adopting` (--baseline, which records a schema built by hand
+ * and has just found public.thoughts) takes public's `thoughts` alone as
+ * the brain there. `viaUser` is true where the schema is the role's own and
+ * the path names it as `"$user"`, which the operator does not see spelled. Building on would start a second brain in public. Every schema
+ * the path resolves to (current_schemas: those this role may use) is read,
+ * not the first ledger a name resolves to, so another tool's
+ * `schema_migrations` (Rails', Ecto's: a `version`, no `sha256`) neither
+ * hides a brain behind it nor counts as one. This holds where public is
+ * first too: a brain behind an empty public refuses.
+ *
+ * Then, where public is not already the first schema Postgres searches, the
+ * path is set, and re-read: `{ refused: "public", missing, role, owner }`
+ * where public is still not first — there is no schema public, or this role
+ * has no USAGE on it, which Postgres takes as off the path. The path has
+ * been set by then, and resolves as before; the migrator exits on the
+ * refusal. Otherwise
+ * `{ refused: null, was }`: `was` is the path it replaced, or null where
+ * public was already first. Catalog reads by pg_class and pg_attribute,
+ * which need no privilege on the schema. Bun.sql only (a tagged-template
+ * client).
+ */
+export async function pinPublicFirst(sql, adopting = false) {
+  const [state] = await sql`
+    SELECT current_setting('search_path') AS path,
+           current_setting('server_version_num')::int AS version,
+           current_schemas(false)::text[] AS schemas,
+           current_user AS "user"`;
+  /** This migrator's ledger in `schema`: `schema_migrations` with its two columns. */
+  const holdsBrain = async (schema) =>
+    (await sql`
+      SELECT (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = ${schema} AND c.relname = 'schema_migrations' AND a.attname IN ('name', 'sha256')
+                 AND a.attnum > 0 AND NOT a.attisdropped) = 2 AS brain`)[0].brain;
+  const publicThoughts = (await sql`SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                                                     WHERE n.nspname = 'public' AND c.relname = 'thoughts') AS present`)[0].present;
+  if (!(publicThoughts && (adopting || (await holdsBrain("public"))))) {
+    for (const schema of state.schemas) {
+      if (schema !== "public" && (await holdsBrain(schema))) {
+        const viaUser = schema === state.user && searchPathSchemas(state.path, state.version).includes("$user");
+        return { refused: "ledger", schema, viaUser };
+      }
+    }
+  }
+  if (state.schemas[0] === "public") return { refused: null, was: null };
+  const rest = searchPathSchemas(state.path, state.version).filter((s) => s !== "public");
+  await sql`SELECT set_config('search_path', ${["public", ...rest].map(quoteIdent).join(", ")}, false)`;
+  const [after] = await sql`
+    SELECT (current_schemas(false))[1] AS first, to_regnamespace('public') IS NULL AS missing, quote_ident(current_user) AS role,
+           (SELECT quote_ident(pg_get_userbyid(datdba)) FROM pg_database WHERE datname = current_database()) AS owner`;
+  if (after.first !== "public") return { refused: "public", missing: after.missing, role: after.role, owner: after.owner };
+  return { refused: null, was: state.path };
 }
 
 /**
@@ -1597,7 +1769,7 @@ export const SHARED_SETTING_SOURCES = ["environment variable", "configuration fi
  * written five times in three idioms. Parse with parseSetConfig.
  */
 export const DB_LEVEL_SETTINGS_SQL =
-  "SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = current_database() AND s.setrole = 0";
+  "SELECT s.setconfig AS cfg FROM pg_catalog.pg_db_role_setting s JOIN pg_catalog.pg_database d ON d.oid = s.setdatabase WHERE d.datname = pg_catalog.current_database() AND s.setrole = 0";
 
 /** `["a=1","b=x"]` → `{a: "1", b: "x"}`; a value may itself contain `=`. */
 export function parseSetConfig(cfg) {
@@ -1816,6 +1988,17 @@ export const ROLE_GRANTS = Object.freeze({
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
   ]),
+  // The durable async job registry (069, SMD-2318): the server writes a row per
+  // long-running job as the in-memory registry moves it along (INSERT on start,
+  // UPDATE on each state change, SELECT for the poll's read-back), and the owner
+  // or a scheduler prunes terminal rows with prune_jobs (DELETE). Like the query
+  // log, the surface degrades without it — no durable store means the async job
+  // handles fall back to the in-memory registry (SMD-2273), so a role missing
+  // this grant is not refused, only less durable. The dogfood server connects as
+  // owner and is unaffected.
+  jobs: Object.freeze([
+    Object.freeze({ table: "jobs", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "069" }),
+  ]),
   // The page store (064, SMD-1812): a page is a thought (its id, its render as
   // the content — written through the capture group's functions, so a role
   // that writes pages holds `capture` too), and the sections, their pending
@@ -2006,7 +2189,7 @@ export const ROLE_GRANTS = Object.freeze({
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "pages", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs

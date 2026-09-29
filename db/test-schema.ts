@@ -10663,7 +10663,177 @@ console.log("\n[62] Migration 068: node_state reads a stored projection kept cur
   await db.exec(`SELECT prune_orphan_entities()`);
 }
 
-// ── 63. Migration 071: node_state's dependency columns keyed (SMD-2267) ──
+console.log("[63] the durable async job registry: jobs + prune_jobs (069, SMD-2318)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const fails = async (sql: string, params: unknown[] = []): Promise<string> => {
+    try { await db.query(sql, params); return "ok"; } catch (e) { return (e as Error).message.split("\n")[0]; }
+  };
+  const OWNER = "a".repeat(64); // the SHA-256 shape of an owner key
+
+  // The table and its function are present with the columns the sink writes.
+  const cols = (await q<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'jobs'`)).map((r) => r.column_name);
+  for (const c of ["id", "kind", "owner_key_hash", "actor", "status", "progress", "result", "error", "created_at", "started_at", "ended_at", "updated_at"])
+    assert(cols.includes(c), `jobs has column ${c} (${cols.join(", ")})`);
+
+  // The status CHECK and the terminal/ended pairing hold.
+  const badStatus = await fails(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'weird')`, [OWNER]);
+  assert(/violates check constraint/.test(badStatus), `an unknown status is refused (${badStatus})`);
+  const termNoEnd = await fails(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'succeeded')`, [OWNER]);
+  assert(/jobs_terminal_has_ended/.test(termNoEnd), `a terminal row with no ended_at is refused (${termNoEnd})`);
+  const liveWithEnd = await fails(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'running', now())`, [OWNER]);
+  assert(/jobs_terminal_has_ended/.test(liveWithEnd), `a live row with an ended_at is refused (${liveWithEnd})`);
+
+  // Seed one live row, one terminal aged past an hour, one terminal fresh.
+  await db.query(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'running')`, [OWNER]);
+  const [old] = await q<{ id: string }>(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'succeeded', now() - interval '2 hours') RETURNING id::text AS id`, [OWNER]);
+  const [fresh] = await q<{ id: string }>(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'failed', now()) RETURNING id::text AS id`, [OWNER]);
+
+  // prune_jobs(60) drops the aged terminal row, keeps the fresh terminal and the live one.
+  const [{ n: pruned }] = await q<{ n: number }>(`SELECT prune_jobs(60) AS n`);
+  assert(Number(pruned) === 1, `prune_jobs(60) deletes the one aged terminal row (${pruned})`);
+  assert((await q(`SELECT 1 FROM jobs WHERE id = $1`, [old.id])).length === 0, "the aged terminal row is gone");
+  assert((await q(`SELECT 1 FROM jobs WHERE id = $1`, [fresh.id])).length === 1, "the fresh terminal row is kept");
+  assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM jobs WHERE ended_at IS NULL`))[0].n === 1, "a live row (ended_at NULL) is never pruned");
+
+  // prune_jobs(0) drops every terminal row, still never the live one; a negative window raises.
+  const [{ n: pruned0 }] = await q<{ n: number }>(`SELECT prune_jobs(0) AS n`);
+  assert(Number(pruned0) === 1, `prune_jobs(0) deletes the remaining terminal row (${pruned0})`);
+  assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM jobs WHERE ended_at IS NULL`))[0].n === 1, "the live row still stands after prune_jobs(0)");
+  const neg = await fails(`SELECT prune_jobs(-1)`);
+  assert(/must be >= 0/.test(neg), `prune_jobs(-1) raises (${neg})`);
+
+  await db.query(`DELETE FROM jobs WHERE ended_at IS NULL`); // leave the table empty for any later look
+}
+
+console.log("\n[64] Migration 070: a proposal standing on a lineage pair is visible as such — list_supersession_proposals redefined on 029's body with a lineage column (066's predicate: one side's derived_from names the other, either direction, NULL-safe) and a selector for it, the two-argument form gone; the flag reads in every status, a standing row is nobody's but the reviewer's, and the reject is one call (SMD-2313)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const SIG = "list_supersession_proposals(text, int, boolean)";
+  const MODEL = EMBEDDING_MODEL;
+  const ACTOR = { name: "op-key", via: "test-door" };
+  const EXTRACT = "extract:stub@p1";
+  const JUDGE = "consolidate:stub@p1";
+  const cap = async (content: string, at: number, extra: Record<string, unknown> = {}) =>
+    (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL, ...extra }), unit(at)])).r.id;
+  const age = (id: string, days: number) => db.query(`UPDATE thoughts SET created_at = now() - make_interval(days => $2) WHERE id = $1::uuid`, [id, days]);
+  const mention = (id: string, names: string[]) => db.query(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, '[]'::jsonb, NULL, NULL)`, [id, EXTRACT, JSON.stringify(names.map((n) => ({ name: n, type: "topic", confidence: 0.9 })))]);
+  const propose = async (older: string, newer: string, reason: string) =>
+    (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, $3::text, 0.99, $4::text) AS id`, [older, newer, reason, JUDGE])).id;
+  type Row = { id: string; status: string; lineage: boolean };
+  const list = (status: string | null, lineage: boolean | null = null, limit = 50) =>
+    q<Row>(`SELECT id, status, lineage FROM list_supersession_proposals($1::text, $2::int, $3::boolean)`, [status, limit, lineage]);
+  const idsOf = (rows: Row[]) => rows.map((r) => r.id).sort().join();
+  const flagged = (rows: Row[]) => idsOf(rows.filter((r) => r.lineage));
+  const cands = async (id: string) => (await q<{ o: string }>(`SELECT older_id::text AS o FROM consolidation_candidates($1::uuid, 5, 0)`, [id])).map((c) => c.o);
+
+  await restoreShipped("list_supersession_proposals", "consolidation_candidates", "record_supersession_proposal", "rebuild_derived");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+  await db.exec(`DELETE FROM ob1_entities`);
+  await db.exec(`DELETE FROM ob1_agents`);
+  await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
+  await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
+
+  // The shape: one form, 070's — 029's nineteen columns then lineage, the
+  // sentinel, both directions in 066's spelling (the regex pins the array
+  // form: `'["a"]'::jsonb @> '"a"'` is TRUE, so to_jsonb(id::text) would pass
+  // every behavioural assertion below), the two-argument form gone, the
+  // comment.
+  const body = await src(SIG);
+  const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("070") && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)')`)).length === 0 && /ob1:listing-flags-the-lineage-pair/.test(body),
+    `one list_supersession_proposals, 070 its last definer, the two-argument form gone, the sentinel in the body (${lastDefinerOf("list_supersession_proposals")})`);
+  assert(cols === "id,status,verdict,confidence,reason,similarity,judge_key,judged_at,reviewed_at,review_note,superseding_id,older_id,older_content,older_created_at,newer_id,newer_content,newer_created_at,older_edited,newer_edited,lineage",
+    `029's nineteen columns in their order, then lineage (${cols})`);
+  assert(/COALESCE\(n\.derived_from @> jsonb_build_array\(o\.id::text\), false\)/.test(body) && /COALESCE\(o\.derived_from @> jsonb_build_array\(n\.id::text\), false\)/.test(body) && /p_lineage IS NULL/.test(body),
+    "both directions read, NULL-safe, in 066's spelling, and p_lineage NULL selects on nothing");
+  const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
+  assert(/029/.test(comment) && /070/.test(comment) && /066/.test(comment) && /derived_from/.test(comment) && /p_lineage/.test(comment), "the comment names 029, 066 and 070, the rule and the selector");
+
+  // The corpus, ten days old: E, the evidence; D, an unrelated note near E;
+  // X, a second source; R, an older note that names a newer one. Today's:
+  // the page P generated from E (re-embedded through the 11-argument
+  // update_thought and extracted, as [60] built it), the digest G captured
+  // with derived_from [E, X], and N, which R names. Every one mentions
+  // billing.
+  const E = await cap("the evidence: we bill monthly", 0); await age(E, 10);
+  const D = await cap("an unrelated note: we bill monthly too", 0); await age(D, 10);
+  const X = await cap("a second source: invoices go out on the first", 2); await age(X, 10);
+  const N = await cap("a newer note the older one cites", 3);
+  const R = await cap("an older note re-cited to name the newer one", 3, { derived_from: [N] }); await age(R, 10);
+  for (const id of [E, D, X, N, R]) await mention(id, ["billing"]);
+  const P = (await one<{ r: { page_id: string } }>(`SELECT upsert_page('billing-2313', 'Billing 2313', 'topic', '{}'::jsonb, 'alice') AS r`)).r.page_id;
+  await db.query(`SELECT write_page_section($1::uuid, 'body', 'We bill monthly, per the evidence.', 'generated', 'Body', '{"model": "stub"}'::jsonb, $2::uuid[], 10, 'gen')`, [P, [E]]);
+  const render = (await one<{ c: string }>(`SELECT content AS c FROM thoughts WHERE id = $1::uuid`, [P])).c;
+  const re = (await one<{ r: { ok: boolean; error?: string } }>(`SELECT update_thought($1::uuid, $2::text, NULL::jsonb, $3::vector, NULL::jsonb, NULL::timestamptz, $4::jsonb, $5::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`, [P, render, unit(0), JSON.stringify(ACTOR), MODEL])).r;
+  await mention(P, ["billing"]);
+  const G = await cap("digest: monthly billing, invoices on the first", 0, { derived_from: [E, X] });
+  await mention(G, ["billing"]);
+
+  // The proposals, recorded through 063's writer as a pass before 066 would
+  // have recorded them — the writer has no lineage guard (measured in
+  // SMD-2292's second review pass; the state this file exists for): the page
+  // over its evidence, the page over the unrelated note, the digest over its
+  // second source, and the newer note over the older one that names it.
+  const pE = await propose(E, P, "the page over its evidence");
+  const pD = await propose(D, P, "the page over an unrelated note");
+  const pX = await propose(X, G, "the digest over its second source");
+  const pN = await propose(R, N, "the newer note over the older one that cites it");
+  const name = (id: string) => (id === pE ? "pE" : id === pD ? "pD" : id === pX ? "pX" : id === pN ? "pN" : id);
+  const pending = await list("pending");
+  assert(re.ok === true && pending.length === 4 && flagged(pending) === [pE, pX, pN].sort().join(),
+    `four pending, recorded with no guard; the page over its evidence, the digest over its source and the pair whose OLDER side names the newer read lineage, the page over the unrelated note does not (${pending.map((r) => `${name(r.id)}:${r.lineage}`).join()})`);
+  assert(idsOf(await list("pending", true)) === [pE, pX, pN].sort().join() && idsOf(await list("pending", false)) === pD && idsOf(await list(null, null)) === [pE, pD, pX, pN].sort().join(),
+    "p_lineage true selects the lineage pairs, false the rest, NULL every row");
+  assert((await q<{ lineage: boolean }>(`SELECT lineage FROM list_supersession_proposals('pending', 50) WHERE id = $1::uuid`, [pE]))[0].lineage === true,
+    "a two-argument call — the callers' form before 070 — resolves to this body through the default and reads the flag");
+  // The stale shape: the digest's text moves, rebuild_derived sets its
+  // proposal stale, and the flag reads there too — the row 067's pass
+  // settles on its next run (not run here); until then --list stale and
+  // --list lineage both show it. Nobody's but the reviewer's: 029 holds a
+  // pending or decided pair, and a stale one — which 063's body re-found —
+  // 066 keeps out of the digest's candidates, so the pass never judges the
+  // pair again and never replaces the row; the unrelated note is a candidate.
+  // (The edit carries a vector and its label: a text move alone clears the
+  // vector — 021's rule — and a thought without one has no candidates.)
+  const edit = (await one<{ r: { ok: boolean; error?: string } }>(`SELECT update_thought($1::uuid, 'digest, revised: monthly billing, invoices on the first', NULL::jsonb, $2::vector, NULL::jsonb, NULL::timestamptz, $3::jsonb, $4::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`, [G, unit(0), JSON.stringify(ACTOR), MODEL])).r;
+  const rb = (await one<{ r: { ok: boolean; stale_proposals: number } }>(`SELECT rebuild_derived($1::uuid, 'edit') AS r`, [G])).r;
+  const stale = await list("stale", true);
+  assert(edit.ok === true && rb.ok === true && rb.stale_proposals === 1 && stale.length === 1 && stale[0].id === pX && stale[0].lineage === true && idsOf(await list("pending", true)) === [pE, pN].sort().join(),
+    `a text move under the digest's verdict sets its row stale (${rb.stale_proposals}), and the flag reads under stale as under pending (${JSON.stringify(edit)})`);
+  assert(!(await cands(G)).includes(X) && !(await cands(G)).includes(E) && (await cands(G)).includes(D),
+    `…and the stale lineage pair is never a candidate again (066), so the pass never replaces the row — the unrelated note is one (${(await cands(G)).map((o) => (o === E ? "E" : o === D ? "D" : o === X ? "X" : o)).join()})`);
+  // The reject — a reviewer's verdict, with a name on it — is one call; the
+  // flag stays on the decided row, so a rejected lineage pair says what it
+  // was.
+  const rej = (await one<{ r: { ok: boolean; error?: string } }>(`SELECT review_supersession_proposal($1::uuid, 'reject', 'lineage pair (066)', NULL, $2::jsonb) AS r`, [pE, JSON.stringify(ACTOR)])).r;
+  assert(rej.ok === true && idsOf(await list("pending", true)) === pN && idsOf(await list("rejected", true)) === pE && (await list("rejected"))[0].lineage === true,
+    `a reject leaves the pending selection to the rows still standing, and the rejected row still reads lineage (${JSON.stringify(rej)})`);
+  // The evidence deleted: the row goes with it (029's cascade) — no case of
+  // the flag's; the other lineage rows still read.
+  await db.query(`SELECT delete_thought($1::uuid, $2::jsonb)`, [E, JSON.stringify(ACTOR)]);
+  assert((await list("rejected", true)).length === 0 && idsOf(await list(null, true)) === [pX, pN].sort().join(), "with the evidence deleted its proposal is gone with it, and the other lineage rows still read");
+  // The predicate is spelled inline in the TypeScript readers too — the CLI's
+  // accept guard and --status count, preflight's census — and nothing but
+  // this holds them to the body's spelling until SMD-2366 gives every reader
+  // one SQL function (fourth review pass, cold read).
+  const PREDICATE = "COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)";
+  const spelled = (file: string) => readFileSync(join(HERE, file), "utf8").split(PREDICATE).length - 1;
+  assert(spelled("consolidate.ts") === 2 && spelled("../server-portable/preflight.ts") === 1 && (await src(SIG)).split("COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false)").length - 1 === 2,
+    `the TypeScript readers spell 066's predicate as the body does — twice in consolidate.ts (the guard, --status), once in preflight.ts (the census) (${spelled("consolidate.ts")}, ${spelled("../server-portable/preflight.ts")})`);
+  // A re-apply is a no-op: one form, the flag reading the same.
+  await reapply("070");
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && /ob1:listing-flags-the-lineage-pair/.test(await src(SIG)) && idsOf(await list(null, true)) === [pX, pN].sort().join(), "a re-apply leaves one form carrying the flag");
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+  await db.exec(`DELETE FROM ob1_entities`);
+}
+
+// ── 65. Migration 071: node_state's dependency columns keyed (SMD-2267) ──
 //
 // node_dependencies()' gate reads a mirror of the source rows the triggers on
 // thought_sources and thoughts keep current, and node_state's dependency

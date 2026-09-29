@@ -525,6 +525,60 @@ console.log("\n[5f] retryFailed and releaseStaleLeases — the write half of wor
   }
 }
 
+console.log("\n[5g] dryRunClaim — run_worker's dry_run preview: the census matches workerStatus, bounded by limit, claiming nothing (SMD-2272)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    const ids = (await raw`SELECT id::text AS id FROM thoughts ORDER BY id LIMIT 5`).map((r: { id: string }) => r.id);
+    assert(ids.length === 5, "five corpus thoughts to pool");
+    await raw`DELETE FROM thought_work_claims`;
+    const WT = "extract:dryrun-model@p2";
+    const total = await store.countThoughts();
+    // A mixed pool of 5: pending, stale-claimed, live-claimed, succeeded, failed.
+    // ttl_expires_at is set iff status='claimed' (migration 015's CHECK); a
+    // terminal row carries finished_at, not a ttl.
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at, finished_at) VALUES
+      (${ids[0]}::uuid, ${WT}, 'pending',   NULL,     NULL,                       NULL,                          NULL),
+      (${ids[1]}::uuid, ${WT}, 'claimed',   'w-dead', now() - interval '2 hours', now() - interval '2 hours',    NULL),
+      (${ids[2]}::uuid, ${WT}, 'claimed',   'w-live', now(),                      now() + interval '10 minutes', NULL),
+      (${ids[3]}::uuid, ${WT}, 'succeeded', 'w',      now(),                      NULL,                          now()),
+      (${ids[4]}::uuid, ${WT}, 'failed',    'w',      now(),                      NULL,                          now())`;
+    const beforeN = Number((await raw`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${WT}`)[0].n);
+
+    // ── The census: same four counts and stale subset as workerStatus.
+    const dr = await store.dryRunClaim(WT);
+    assert(dr.workType === WT && dr.pending === 1 && dr.claimed === 2 && dr.stale === 1 && dr.succeeded === 1 && dr.failed === 1, `dryRunClaim reports the pool census (${JSON.stringify(dr)})`);
+    assert(dr.thoughts === total && dr.unpooled === total - 5, `unpooled = corpus − pooled (${dr.unpooled} = ${total} − 5)`);
+    assert(dr.backlog === dr.pending + dr.stale + dr.unpooled && dr.wouldClaim === dr.backlog && dr.limit === null, `backlog = pending + stale + unpooled (stale leases reap and drain too), wouldClaim = backlog with no limit (${JSON.stringify(dr)})`);
+    // Concretely: the 1 pending AND the 1 stale lease both count toward the backlog
+    // (a pass reaps the stale one back to pending before claiming), so it is unpooled+2, not unpooled+1.
+    assert(dr.backlog === dr.unpooled + 2, `the stale lease is in the backlog, not only the pending row (unpooled + 2 = ${dr.unpooled} + 2, got ${dr.backlog})`);
+
+    // ── limit bounds wouldClaim, never the backlog; a limit above the backlog does not inflate it.
+    const drLim = await store.dryRunClaim(WT, 1);
+    assert(drLim.wouldClaim === 1 && drLim.limit === 1 && drLim.backlog === dr.backlog, `a limit caps wouldClaim (${JSON.stringify(drLim)})`);
+    const drBig = await store.dryRunClaim(WT, dr.backlog + 100);
+    assert(drBig.wouldClaim === dr.backlog && drBig.limit === dr.backlog + 100, "a limit above the backlog leaves wouldClaim at the backlog");
+
+    // ── It claims NOTHING — the pool is unchanged (count and the status multiset).
+    assert(Number((await raw`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${WT}`)[0].n) === beforeN, "dryRunClaim inserted/claimed nothing");
+    const statuses = (await raw`SELECT status FROM thought_work_claims WHERE work_type = ${WT}`).map((r: { status: string }) => r.status).sort();
+    assert(JSON.stringify(statuses) === JSON.stringify(["claimed", "claimed", "failed", "pending", "succeeded"]), `no status changed (${JSON.stringify(statuses)})`);
+
+    // ── An un-enqueued pool: no claim rows → all-zero census, unpooled = the whole corpus.
+    const drEmpty = await store.dryRunClaim("extract:never-enqueued@p9");
+    assert(drEmpty.pending === 0 && drEmpty.claimed === 0 && drEmpty.stale === 0 && drEmpty.unpooled === total && drEmpty.backlog === total, `an un-enqueued pool reads all-zero with unpooled = corpus (${JSON.stringify(drEmpty)})`);
+
+    // ── It agrees with workerStatus for the same pool (the guard's "same pool worker_status shows").
+    const ws = (await store.workerStatus()).find((r) => r.workType === WT);
+    assert(!!ws && ws.pending === dr.pending && ws.claimed === dr.claimed && ws.stale === dr.stale && ws.unpooled === dr.unpooled && ws.thoughts === dr.thoughts, `dryRunClaim and workerStatus agree on the pool (${JSON.stringify(ws)})`);
+
+    await raw`DELETE FROM thought_work_claims`;
+  } finally {
+    await raw.close();
+  }
+}
+
 console.log("\n[6] Dedup and merge behave as the tools expect");
 {
   const before = await store.countThoughts();
@@ -725,6 +779,17 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   const all = await store.listSupersessionProposals({ status: null });
   assert(all.length === 1 && all[0].status === "accepted" && all[0].supersedingId === newer.id && all[0].reviewNote === "confirmed" && all[0].reviewedAt !== null,
          "null lists every state, and the accepted row names the thought it wrote");
+  // 070 (SMD-2313): the flag, false on this pair; the newer thought's
+  // derived_from set raw to name the older — the shape 066 stops the pass
+  // proposing, a page and its evidence — and the row reads lineage, the
+  // selector picks it, false leaves it out.
+  assert(all[0].lineage === false && (await store.listSupersessionProposals({ status: null, lineage: false })).length === 1 && (await store.listSupersessionProposals({ status: null, lineage: true })).length === 0,
+         "…and lineage is false on a pair neither side of which names the other (070): false selects it, true does not");
+  await admin5`UPDATE thoughts SET derived_from = jsonb_build_array(${older.id}::text) WHERE id = ${newer.id}::uuid`;
+  const flaggedRows = await store.listSupersessionProposals({ status: null });
+  assert(flaggedRows.length === 1 && flaggedRows[0].lineage === true, "with the newer thought's derived_from naming the older, the row reads lineage");
+  assert((await store.listSupersessionProposals({ status: null, lineage: true })).length === 1 && (await store.listSupersessionProposals({ status: null, lineage: false })).length === 0,
+         "lineage: true selects it, false leaves it out — the third argument on every call");
   await admin5.close();
 }
 
