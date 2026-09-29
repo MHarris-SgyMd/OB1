@@ -15,12 +15,13 @@
  * - It refuses a role that is a superuser, a member of any other role (it
  *   would hold that role's privileges, and a member of postgres can SET ROLE
  *   to it), or the owner of anything in any database — a relation, schema,
- *   function, type, large object or the database itself (a schema's owner can
- *   drop the tables in it). Such a role is not one to give a service. It
- *   refuses, too, when a schema named for the role exists in this database
- *   (first on the role's search_path, "$user"), and when a setting outlives
- *   the reset (a migrator that is not a superuser cannot reset one only a
- *   superuser may set).
+ *   function, type, large object, user mapping or the database itself (a
+ *   schema's owner can drop the tables in it). Such a role is not one to give
+ *   a service. It refuses, too, when a schema named for the role exists in
+ *   this database (first on the role's search_path, "$user"), when the role
+ *   holds an attribute this connection may not clear, and when a setting
+ *   outlives the reset (a migrator that is not a superuser cannot reset one
+ *   only a superuser may set).
  * - Its privileges are not this step's: `migrate.ts --grant --groups …
  *   --exact`, run after it, replaces what the role's grants hold in this
  *   database (schema USAGE, CONNECT and TEMP stay) with the groups' privileges
@@ -107,14 +108,12 @@ if (import.meta.main) {
           // pg_shdepend is shared: it holds an owner row for every object the role owns in any database, the database itself included (review pass 2: a pg_class count beside it counted each table again).
           const [{ owned }] = (await tx`SELECT count(*)::int AS owned FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = ${row.oid} AND deptype = 'o'`) as { owned: number }[];
           if (owned > 0) throw new Refusal(`${role} owns ${owned} object(s) (a relation, schema, function, type, large object, user mapping or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
-        }
-        found = row;
-        if (row) {
           // Who may clear an attribute: on Postgres 16 a role holding it (with ADMIN OPTION on the role); on 15 CREATEROLE clears CREATEDB, and REPLICATION or BYPASSRLS take a superuser. The driver shows only "permission denied to alter role", not which (review passes 6-8).
           const [me] = (await tx`SELECT rolsuper, rolcreatedb, rolreplication, rolbypassrls, current_setting('server_version_num')::int >= 160000 AS pg16 FROM pg_roles WHERE rolname = current_user`) as { rolsuper: boolean; rolcreatedb: boolean; rolreplication: boolean; rolbypassrls: boolean; pg16: boolean }[];
           const cannot = me.rolsuper ? [] : [row.rolcreatedb && me.pg16 && !me.rolcreatedb && "CREATEDB", row.rolreplication && !(me.pg16 && me.rolreplication) && "REPLICATION", row.rolbypassrls && !(me.pg16 && me.rolbypassrls) && "BYPASSRLS"].filter(Boolean);
           if (cannot.length) throw new Refusal(`${role} holds ${cannot.join(", ")}, which this connection's role may not clear (${me.pg16 ? "on Postgres 16 and later only a role holding the attribute may" : "on Postgres 15 REPLICATION and BYPASSRLS take a superuser"}). Clear it as a superuser, or name another role. Nothing changed.`);
         }
+        found = row;
         // ALTER names only the attributes to clear: Postgres refuses NOCREATEDB, NOREPLICATION and NOBYPASSRLS from a migrator that is not a superuser even when nothing would change (review pass 5: every re-run on a managed Postgres failed "permission denied to alter role").
         const attributes = row ? ["LOGIN NOCREATEROLE", row.rolcreatedb && "NOCREATEDB", row.rolreplication && "NOREPLICATION", row.rolbypassrls && "NOBYPASSRLS"].filter(Boolean).join(" ") : ROLE_ATTRIBUTES;
         await tx.unsafe(`${row ? "ALTER" : "CREATE"} ROLE ${ident} ${attributes} CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD '${verifier}'`);
