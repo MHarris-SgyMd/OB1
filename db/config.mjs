@@ -1490,47 +1490,54 @@ export async function setPathWithoutTemp(tx) {
  * at all the ledger's CREATE failed with 3F000. The brain lives in public,
  * where preflight and --baseline look, so public goes first and the rest of
  * the path follows in its order, read as Postgres reads it: an extension's
- * schema on it (Supabase's `extensions`) still resolves. A no-op where public
- * is already the first schema Postgres searches. Session scope
+ * schema on it (Supabase's `extensions`) still resolves. Session scope
  * (`set_config(…, false)`), as alignVectorSearchPath's is: it holds for each
- * migration's transaction on the connection, and is no persistent change.
+ * migration's transaction on this connection, and for this run alone — the
+ * server's connection keeps its own path, which preflight's `schema` row
+ * judges.
  *
- * Judged first, and nothing is changed where it refuses:
- *   - `{ refused: "ledger", schema }`: the path reaches a brain's ledger —
- *     `schema_migrations` beside a `thoughts` — in another schema, and public
- *     has no ledger. Building in public would start a second brain beside it.
- *     Another tool's `schema_migrations` (Rails', Ecto's…), with no `thoughts`
- *     beside it, is not the brain's and does not refuse.
- *   - `{ refused: "public", missing, role }`: with the path set, public is
- *     still not first — there is no schema public, or this role has no USAGE
- *     on it, which Postgres takes as off the path. The session keeps the path
- *     it was given; the migrator exits on the refusal, before any SQL of its
- *     own.
+ * Judged first, before the path is touched: `{ refused: "ledger", schema }`
+ * where a schema on the path other than public holds this migrator's ledger —
+ * `schema_migrations` of its shape, with `name` and `sha256` — and public
+ * holds none. Building on would start a second brain in public. Every schema
+ * on the path is read, not the first ledger a name resolves to, so another
+ * tool's `schema_migrations` (Rails', Ecto's: a `version`, no `name` or
+ * `sha256`) neither hides a brain behind it nor counts as one. This holds
+ * where public is first too: a brain behind an empty public refuses.
  *
- * Otherwise `{ refused: null, was }`: `was` is the path it replaced, or null
- * where public was already first. Bun.sql only (a tagged-template client).
+ * Then, where public is not already the first schema Postgres searches, the
+ * path is set, and re-read: `{ refused: "public", missing, role, owner }`
+ * where public is still not first — there is no schema public, or this role
+ * has no USAGE on it, which Postgres takes as off the path. The session keeps
+ * the path it was given; the migrator exits on the refusal. Otherwise
+ * `{ refused: null, was }`: `was` is the path it replaced, or null where
+ * public was already first. Catalog reads by pg_class and pg_attribute,
+ * which need no privilege on the schema. Bun.sql only (a tagged-template
+ * client).
  */
 export async function pinPublicFirst(sql) {
   const [state] = await sql`
     SELECT current_setting('search_path') AS path,
            current_setting('server_version_num')::int AS version,
-           (current_schemas(false))[1] AS first,
-           (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.oid = to_regclass('schema_migrations')) AS ledger`;
-  // By pg_class, not a qualified to_regclass, which needs USAGE on the schema:
-  // a role without it on public is the refusal below, not an error here.
-  const inSchema = async (schema, rel) =>
-    (await sql`SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                               WHERE n.nspname = ${schema} AND c.relname = ${rel}) AS present`)[0].present;
-  if (state.ledger !== null && state.ledger !== "public" && !(await inSchema("public", "schema_migrations")) && (await inSchema(state.ledger, "thoughts"))) {
-    return { refused: "ledger", schema: state.ledger };
+           current_schemas(false)::text[] AS schemas`;
+  /** This migrator's ledger in `schema`: `schema_migrations` with its two columns. */
+  const holdsBrain = async (schema) =>
+    (await sql`
+      SELECT (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = ${schema} AND c.relname = 'schema_migrations' AND a.attname IN ('name', 'sha256')
+                 AND a.attnum > 0 AND NOT a.attisdropped) = 2 AS brain`)[0].brain;
+  if (!(await holdsBrain("public"))) {
+    for (const schema of state.schemas) {
+      if (schema !== "public" && (await holdsBrain(schema))) return { refused: "ledger", schema };
+    }
   }
-  if (state.first === "public") return { refused: null, was: null };
+  if (state.schemas[0] === "public") return { refused: null, was: null };
   const rest = searchPathSchemas(state.path, state.version).filter((s) => s !== "public");
   await sql`SELECT set_config('search_path', ${["public", ...rest].map(quoteIdent).join(", ")}, false)`;
   const [after] = await sql`
-    SELECT (current_schemas(false))[1] AS first, to_regnamespace('public') IS NULL AS missing, quote_ident(current_user) AS role`;
-  if (after.first !== "public") return { refused: "public", missing: after.missing, role: after.role };
+    SELECT (current_schemas(false))[1] AS first, to_regnamespace('public') IS NULL AS missing, quote_ident(current_user) AS role,
+           (SELECT quote_ident(pg_get_userbyid(datdba)) FROM pg_database WHERE datname = current_database()) AS owner`;
+  if (after.first !== "public") return { refused: "public", missing: after.missing, role: after.role, owner: after.owner };
   return { refused: null, was: state.path };
 }
 
