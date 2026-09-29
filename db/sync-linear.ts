@@ -102,7 +102,8 @@ import { fileURLToPath } from "node:url";
 import { SQL } from "bun";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv, type EmbeddedCapture } from "../server-portable/embed.ts";
-import { decideCalls, refusesEverything, type EgressSubject } from "../server-portable/egress.ts";
+import { decideCalls, type EgressSubject } from "../server-portable/egress.ts";
+import { egressRefusal } from "./worker-bootstrap.ts";
 import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { captureLineage } from "../server-portable/lineage.ts";
 import type { Actor } from "../server-portable/store.ts";
@@ -1609,8 +1610,8 @@ async function main(): Promise<void> {
   // Both endpoints (tenth review pass): a chat endpoint refused wholesale would
   // land every ticket with a vector and `egress_denied` for its tags, which
   // nothing revisits until the ticket next moves in Linear.
-  const wholesale = refusesEverything(cfg.embeddings, cfg.egress)
-    ?? (cfg.chat.base !== cfg.embeddings.base || cfg.chat.local !== cfg.embeddings.local ? refusesEverything(cfg.chat, cfg.egress) : null);
+  const wholesale = egressRefusal(cfg.embeddings, cfg.egress)
+    ?? (cfg.chat.base !== cfg.embeddings.base || cfg.chat.local !== cfg.embeddings.local ? egressRefusal(cfg.chat, cfg.egress) : null);
   if (wholesale && !cli.has("allow-refused") && !cli.has("audit")) {
     console.error(`  Refusing to run: ${wholesale}. Declare the endpoint local (OB1_LLM_LOCAL=1 / OB1_CHAT_LOCAL=1) when it is, allow this writer (OB1_EGRESS_ALLOW=actor:${ACTOR_NAME}), or pass --allow-refused to land every ticket without the refused call's result on purpose.\n  Read: ${describeEnv(envSources)}`);
     process.exit(2);

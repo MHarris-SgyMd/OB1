@@ -158,11 +158,27 @@ const entries = sources.filter((f) => {
   ok(entries.length >= 20, `the entry-point census finds the scripts (${entries.length}: ${entries.join(", ")})`);
   for (const must of ["extract-entities.ts", "consolidate.ts", "reembed.ts", "migrate.ts", "tier.ts", "sync-linear.ts", "graph-centrality.ts", "bench-hnsw.ts"])
     ok(entries.includes(must), `the census counts ${must} as an entry point`);
-  for (const lib of ["cli.ts", "lease.ts", "env.ts", "brain-compare.ts", "ingest-contract.ts", "bench-oracle.ts"])
+  for (const lib of ["cli.ts", "lease.ts", "env.ts", "brain-compare.ts", "ingest-contract.ts", "bench-oracle.ts", "worker-bootstrap.ts"])
     ok(!entries.includes(lib), `the census does not count the library ${lib}`);
   for (const f of entries) ok(/from "\.\/cli\.ts"/.test(readFileSync(join(HERE, f), "utf8")), `${f} imports ./cli.ts`);
   for (const f of sources.filter((s) => s !== "cli.ts"))
     ok(!/process\.argv/.test(readFileSync(join(HERE, f), "utf8")), `${f} reads no process.argv of its own — its arguments go through cli.ts`);
+}
+
+// ---------------------------------------------------------------------------
+// SMD-2303. The db/ claim workers bootstrap their provider egress and identity
+// through one module, db/worker-bootstrap.ts: no other db/ file reaches
+// egress.ts's `refusesEverything`/`describeEgress` or resolves a worker key
+// (`resolve_agent(`, `parseKeyRecords`) directly, so the blanket-gate wording
+// and the capped resolve cannot drift back into per-worker copies.
+// ---------------------------------------------------------------------------
+{
+  const MODULE = "worker-bootstrap.ts";
+  for (const f of sources.filter((s) => s !== MODULE)) {
+    const text = readFileSync(join(HERE, f), "utf8");
+    for (const banned of ["refusesEverything", "describeEgress", "resolve_agent(", "parseKeyRecords"])
+      ok(!text.includes(banned), `${f} does not reach ${banned} directly — the worker bootstrap goes through ${MODULE} (SMD-2303)`);
+  }
 }
 
 // ---------------------------------------------------------------------------

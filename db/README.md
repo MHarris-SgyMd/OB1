@@ -16,7 +16,12 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   provider pre-installs pgvector into a schema off the connection's `search_path`
   (Supabase uses `extensions`), the runner adds it to its own session so the
   migrations apply, and preflight names the persistent fix for the server — see
-  the `test-search-path.ts` note under Testing.
+  the `test-search-path.ts` note under Testing. The runner also puts `public`
+  first on its own session's path, the rest after it, so the brain is built in
+  `public` whatever the role's or the connection string's path puts first. It
+  refuses, changing nothing, where the path reaches a brain's ledger in another
+  schema and `public` holds no brain, or `public` cannot come first
+  (test-upgrade [23]).
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
@@ -166,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2300 assertions: 2300 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy (70) migrations applied, and
+`bun test-schema.ts` prints `2315 assertions: 2315 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-one (71) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -208,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -803,8 +808,8 @@ included, and the log carries no `created_at` move; SMD-1997's fold can later
 feed the heads' status. `node_lifecycle()` and `node_state()` keep their
 signatures and rows and read the tables; `node_state` lost its top-level WITH,
 so a caller's planner pulls it up, drops the dependency joins it does not read
-(still whole-brain reads — `blockers`, `unknown_blockers`, `in_dependencies`,
-and `node_dependencies()`' gate on the status scalar — SMD-2267) and looks the
+(whole-brain reads until 071 keyed them — `blockers`, `unknown_blockers`,
+`in_dependencies`, and `node_dependencies()`' gate — SMD-2267) and looks the
 rest up by primary key. `search_thoughts_hybrid` is estimated at 100 rows, its
 window's bound, so a ten-thousand-thought brain does not hash-join the whole
 table to it. Measured on `bench-hybrid.ts`'s arm: `prefer_current` adds, in the
@@ -869,6 +874,61 @@ test-schema [64], test-upgrade [20v], test-live [16];
 `server-portable/test-preflight.ts` drives the census, the leftover-form and
 the older-body arms; the store and e2e suites read the column.
 
+Migration 071 makes `node_state`'s dependency columns read the ids they are
+asked for (SMD-2267). The gate — whether some source row of a system states a
+known status on its own metadata (058's, SMD-2218) — is the one answer not local
+to a few rows, so it is the one stored: `ob1_source_gate` mirrors every
+`thought_sources` row with its system and whether its thought's `status_type` is
+one `node_lifecycle_types()` knows, and a system gates while some row of it does
+(one probe of a partial index). Statement triggers keep it current: on
+`thought_sources` (AFTER INSERT, UPDATE and DELETE with transition tables, and
+TRUNCATE) for the rows that appeared, vanished or changed system — a
+canonical-only re-record returns at once, and a delete drops its mirror rows by
+key, reading nothing else — and on `thoughts` (AFTER UPDATE) for the rows whose
+`status_type` moved between known and unknown; any other write returns at once.
+A source write and a status move of one thought take turns on an advisory
+lock — a bucket of the thought's id, 256 buckets in class 22563, taken in
+bucket order after 068's classes, exclusive for both — so whichever goes second reads what the
+first committed; a source row's delete takes none (it drops the mirror row by
+key).
+Not the thought's row: a source writer's share lock there, until the second
+review pass, deadlocked with multi-row updates, cascades and takes where main
+waited. A bucket is held until commit, so a transaction that writes source rows or
+moves statuses holds up both in its buckets, and transactions that do either
+for several thoughts in separate statements can deadlock, as 068's ticket
+writes can: write a thought before its source row, one thought per transaction
+(the bucket is then taken once, for both). Shared buckets for status moves
+were tried and reverted: a status move then a source write, in one
+transaction, upgraded the lock and deadlocked bucket-mates ten times in ten. REPEATABLE READ is refused for a source row's insert or move and for
+every status move between known and unknown (a source row's delete and a
+re-record that changes nothing run; the delete raises 40001 if its thought's
+status moved since the snapshot). `ob1_rebuild_source_gate()` repairs the mirror after a write made with
+triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm.
+`node_dependencies()` keeps its rows and tests each link's system against the
+gating systems, read once per call, instead of grouping every source row with
+its thought. `source_thought()` keeps its
+results and finds the board sync's claim for a linear identity no source row
+holds by 068's issue index: 001's GIN index read every issue row's posting per
+such blocker, which on a brain where most links name a ticket it does not hold
+cost the keyed read 47 ms and a whole-brain read 5 s. `ob1_node_dependencies_of(ids)` is
+the dependency read: for ids, each thought's ticket identities (its source row,
+its `ticket` or `issue` claim), each identity's links from both ends through
+053's indexes, the gate by index (`ob1_system_gates()`, planned on the partial
+index: inline, a system that never gates cost a scan of the whole mirror per
+link) and each blocker's lifecycle by primary key;
+for NULL, 058's whole-brain read as 068 ran it — two branches behind one-time
+filters under one `GROUP BY thought_id`, which a caller that reads none of the
+columns still drops. `node_state()` joins it once. On `bench-hybrid.ts`'s arm
+(two links in three naming a ticket the brain does not hold), `SELECT * FROM
+node_state(<40 ids>)` costs 2.9 ms at 10,000 thoughts and 2.9 at 100,000 (6.5 s
+and 656 s on the reads 068 left), every thought's dependency columns 31 and 308
+ms (6.1 s and 732 s), and `node_dependencies()` read for its gates 2.1 and 15.7 (3.5 and 45.8); a
+writer pays +0.09 ms at most (a new source row), measured paired. A caller that passes NULL and
+joins its own ids still computes every thought: pass the ids. The triggers run as
+the writer, so the **capture** group gains the four privileges on
+`ob1_source_gate`: a role granted before 071 fails preflight until `migrate.ts
+--grant` runs again. test-schema [65], test-live [35], test-upgrade [20w].
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -927,6 +987,7 @@ issues every group at once.
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
 | | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
 | | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
+| | `ob1_source_gate` (071) | `SELECT, INSERT, UPDATE, DELETE` — 071's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()`' gates and the dependency columns read it (SMD-2267); a plain capture, an edit that moves no status and a delete of an unsourced thought never touch it. |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
@@ -3048,11 +3109,13 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 954 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2315 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 975 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
+bun test-engines.ts                         # the engines (migrate.ts) import with no side effect, refuse through run() — no database
+bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -3105,6 +3168,45 @@ themselves, SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks
 that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.
+
+`migrate.ts` is also an engine (SMD-2304): `import { run } from "./migrate.ts"`
+defines it and does nothing else, and `run({ url, dryRun, baseline, reapply,
+force, grant, sql, writer })` is the CLI's run, returning the exit code — its
+lines go to the `Writer` it is given (`cli.ts`; the CLI passes the console),
+the migration files are read per call, and a client passed in is used in
+place of the URL and never closed. It must be one connection (the `max: 1`
+option), and it keeps the session state the run sets — lock_timeout, pgvector's
+schema on search_path when it is off the path, the `ob1.acl_*` settings — so
+pass one dedicated to the run, not a pooled connection another caller gets
+next. The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
+holds each engine to that: an import opens no connection, prints nothing and
+installs no process listener; the engine's code holds no exit, handler, argv
+scan or console call; and `run()` refuses in the CLI's words before
+connecting. Extraction, consolidation and re-embedding become engines next,
+one PR each, over the bootstrap below.
+
+The claim workers bootstrap their egress, identity and error handling through
+`worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket
+gate that stops a pass before it claims when the policy would refuse the call
+whatever the row — its wording one text per case, the pass's verb ("extracted" /
+"judged" / "re-embedded") the only difference — plus the identity re-gate.
+`reembed.ts` gates its embeddings endpoint (and, with `OB1_CHUNK_CONTEXT`, warns
+on the blurbs endpoint); `sync-linear.ts` wraps the bare reason in its own
+sentence. **Identity** (`extract-entities.ts` and `consolidate.ts`):
+`workerIdentity` checks `OB1_WORKER_KEY` against `MCP_ACCESS_KEYS` and resolves
+it through the store's capped path (`SqlStore.resolveAgent`, which bounds
+`lock_timeout` — the raw call the workers ran did not), refusing a revoked key
+and warning when none is set. **Errors and actors:** one `classifyError`
+classifies a provider error into thought / transient / fatal for both workers
+(extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
+`reembed.ts` and `ingest-records.ts` build their audit actors through
+`actorPayload` rather than by hand. The module returns its outcome rather than
+exiting, so SMD-2304's importable `run()` will turn it into a return code.
+`test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
+the `classifyError` rules and the identity cases that refuse before connecting;
+`test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that
+no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
+`resolve_agent(` or `parseKeyRecords`.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
