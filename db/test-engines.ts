@@ -88,30 +88,63 @@ for (const engine of ENGINES) {
 // The engine's code: no exit, no process handler, no argv, no console.
 // ---------------------------------------------------------------------------
 const FORBIDDEN: [RegExp, string][] = [
-  [/\bprocess\.exit\b/, "process.exit"],
-  [/\bprocess\.on\(|\bprocess\.once\(|\bprocess\.addListener\(/, "a process listener"],
+  // test-connect's exit shapes (a bare exit( is an alias or a node:process import), plus the other ways to end the process.
+  [/\bexit\s*\(|process\s*\[\s*["'`]exit["'`]\s*\]|=\s*process\.exit\b|\bprocess\.exit\b|\bprocess\.exitCode\b|\bBun\.exit\b/, "an exit"],
+  [/\bprocess\s*\.\s*(on|once|addListener|prependListener|prependOnceListener)\s*\(/, "a process listener"],
   [/\bcommandLine\(|\bscriptArgv\(|\bprocess\.argv\b/, "an argv scan"],
   [/\bdatabaseUrl\(/, "databaseUrl (the CLI's resolver, which exits)"],
   [/\bcloseThenExit\(/, "the door (it ends stdout and stderr, then exits)"],
-  [/\bconsole\.(log|error|warn|info|debug)\(/, "a console call (the Writer is the engine's output)"],
-  [/\bprocess\.(stdout|stderr)\b/, "a direct stream write"],
+  [/\bconsole\s*(\.|\[)/, "a console call (the Writer is the engine's output)"],
+  [/\bconsoleWriter\s*(\.|\[)/, "a line written to the console past the Writer (only `opts.writer ?? consoleWriter` may name it)"],
+  [/\bprocess\.(stdout|stderr)\b|\bBun\.(stdout|stderr)\b|\{[^}]*\b(stdout|stderr|exit|exitCode|argv|on)\b[^}]*\}\s*=\s*process\b/, "a direct stream write or a destructured process"],
 ];
+
+/** Comments out: a doc comment naming console.log( is prose, not a call. Line comments only after whitespace or line start (not `postgres://`). */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[ \t])\/\/.*$/gm, "$1");
+}
+
+/** The `if (import.meta.main) { … }` block and what follows it — the block read to its matching brace. */
+function mainBlock(text: string): { block: string; after: string; before: string } | null {
+  const at = text.indexOf("if (import.meta.main) {");
+  if (at === -1) return null;
+  let depth = 0;
+  for (let i = text.indexOf("{", at); i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}" && --depth === 0) return { before: text.slice(0, at), block: text.slice(at, i + 1), after: text.slice(i + 1) };
+  }
+  return null;
+}
+
 for (const engine of ENGINES) {
   const text = readFileSync(join(HERE, engine), "utf8");
   const mains = text.split("if (import.meta.main)").length - 1;
   ok(mains === 1, `${engine} has one \`if (import.meta.main)\` (${mains})`);
   ok(/export async function run\(/.test(text), `${engine} exports run()`);
-  const engineText = text.slice(0, text.indexOf("if (import.meta.main)"));
+  const main = mainBlock(stripComments(text));
+  ok(main !== null && main.after.trim() === "", `${engine}'s CLI block is the file's last thing — nothing after it escapes the census (${JSON.stringify(main?.after.trim().slice(0, 40))})`);
+  const engineText = main ? main.before + main.after : stripComments(text);
   for (const [re, what] of FORBIDDEN) {
     const hit = engineText.match(re);
-    ok(hit === null, `${engine}'s engine code (before \`if (import.meta.main)\`) holds no ${what}${hit ? ` — found ${JSON.stringify(hit[0])}` : ""}`);
+    ok(hit === null, `${engine}'s engine code (all but its CLI block) holds no ${what}${hit ? ` — found ${JSON.stringify(hit[0])}` : ""}`);
   }
-  const mainText = text.slice(text.indexOf("if (import.meta.main)"));
-  ok(/closeThenExit\(/.test(mainText) && /\brun\(/.test(mainText), `${engine}'s CLI block exits through the door with run()'s code`);
+  const noImports = engineText.replace(/^import\s[\s\S]*?\sfrom\s*["'][^"']+["'];?$/gm, "");
+  const named = (noImports.match(/\bconsoleWriter\b/g) ?? []).length, asDefault = (noImports.match(/\?\?\s*consoleWriter\b/g) ?? []).length;
+  ok(named === asDefault && asDefault >= 1, `${engine} names consoleWriter only as the default writer (${named} use(s), ${asDefault} as the default)`);
+  ok(main !== null && /closeThenExit\(/.test(main.block) && /\brun\(/.test(main.block), `${engine}'s CLI block exits through the door with run()'s code`);
 }
-// The census has teeth: the shapes it forbids are seen.
-for (const [s, i] of [["process.exit(2)", 0], [`process.on("SIGINT", stop)`, 1], [`commandLine("x.ts", {})`, 2], ["databaseUrl(flag)", 3], ["closeThenExit(sql, async () => { return 0; })", 4], ["console.error(line)", 5], ["process.stdout.write(s)", 6]] as const)
+// The census has teeth: the shapes a regression would write are seen, and prose is not.
+for (const [s, i] of [
+  ["process.exit(2)", 0], [`process["exit"](2)`, 0], ["const { exit } = process; exit(2)", 0], ["process.exitCode = 1", 0], ["Bun.exit(1)", 0],
+  [`process.on("SIGINT", stop)`, 1], [`process.prependListener("SIGINT", stop)`, 1],
+  [`commandLine("x.ts", {})`, 2], ["databaseUrl(flag)", 3], ["closeThenExit(sql, async () => { return 0; })", 4],
+  ["console.error(line)", 5], [`console["log"](line)`, 5], ["consoleWriter.err(line)", 6],
+  ["process.stdout.write(s)", 7], ["await Bun.write(Bun.stdout, s)", 7], ["const { stdout } = process; stdout.write(s)", 7],
+] as const)
   ok(FORBIDDEN[i][0].test(s), `the engine census sees ${s}`);
+ok(!FORBIDDEN.some(([re]) => re.test(stripComments("/** prints with console.log(line) and exits via process.exit(2) */\nconst u = \"postgres://h/x\"; // closeThenExit(sql)"))), "…and not a comment naming them, nor a URL's //");
+ok(!FORBIDDEN[0][0].test("await closeThenExit(sql, body)"), "…and the door's name is not an exit");
+ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: 1 });\n}\nfunction late() {}\n")?.after.trim() === "function late() {}", "…and code after the CLI block is found");
 
 // ---------------------------------------------------------------------------
 // run() refuses in the CLI's words, before connecting.
@@ -138,8 +171,10 @@ for (const [s, i] of [["process.exit(2)", 0], [`process.on("SIGINT", stop)`, 1],
     const r = await inProcess(opts);
     const cli = await counted(["migrate.ts", ...argv], env);
     ok(r.code === 2 && cli.code === 2, `migrate run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
-    ok(r.w.errs.length === 1 && r.w.errs[0] === firstErr(cli.err) && r.w.outs.length === 0, `…the refusal in the CLI's words (${JSON.stringify(r.w.errs[0]?.slice(0, 90))})`);
-    ok(r.seen === 0 && cli.seen === 0 && !r.w.errs.join("").includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
+    // The whole of each stream, not a first line: the CLI printing more after
+    // the refusal, or on stdout, would differ.
+    ok(r.w.errs.length === 1 && cli.err === r.w.errs.map((l) => `${l}\n`).join("") && cli.out === "" && r.w.outs.length === 0, `…the refusal in the CLI's words, the whole of both streams (${JSON.stringify(firstErr(cli.err).slice(0, 90))})`);
+    ok(r.seen === 0 && cli.seen === 0 && !r.w.errs.join("").includes(MARK) && !cli.err.includes(MARK) && !cli.out.includes(MARK), `…before connecting, and without the password, in-process or spawned (${r.seen}, ${cli.seen})`);
   }
   ok((await inProcess({})).w.errs[0] === NO_DATABASE_URL && (await inProcess({ url: "mysql://h/x" })).w.errs[0] === UNPARSEABLE_DATABASE_URL, "migrate run()'s URL refusals are connect.ts's own");
 

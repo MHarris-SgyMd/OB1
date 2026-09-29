@@ -78,7 +78,8 @@ function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
  */
 async function migrateInProcess(opts: Omit<MigrateOptions, "writer"> = {}): Promise<{ code: number; out: string }> {
   const outs: string[] = [], errs: string[] = [];
-  const code = await runMigrate({ url: URL_!, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+  // A caller's client in place of the URL, not beside it: the run must be the client's.
+  const code = await runMigrate({ ...(opts.sql ? {} : { url: URL_! }), ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
   return { code, out: [...outs, ...errs].map((l) => `${l}\n`).join("") };
 }
 
@@ -101,8 +102,16 @@ console.log("[1] migrate.ts against a real server");
   const dry = await migrate("--dry-run");
   assert(dry.code === 0, "--dry-run exits 0");
   assert(/would apply \d+, skipped 0/.test(dry.out), "--dry-run reports everything pending");
+  // The connections on this database before and after an in-process run on a
+  // URL: run() opens its own and closes it. A closed backend can take a moment
+  // to leave pg_stat_activity, so the count is read until it settles.
+  const backends = async () => Number((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database()`)[0].n);
+  const backendsBefore = await backends();
   const dryIn = await migrateInProcess({ dryRun: true });
   assert(dryIn.code === 0 && dryIn.out === dry.out, "run() in-process dry-runs the same, byte for byte (SMD-2304)");
+  let backendsAfter = await backends();
+  for (let i = 0; i < 20 && backendsAfter > backendsBefore; i++) { await Bun.sleep(100); backendsAfter = await backends(); }
+  assert(backendsAfter === backendsBefore, `…and closes the connection it opened (${backendsBefore} before, ${backendsAfter} after)`);
   const none = await sql`SELECT to_regclass('public.thoughts') IS NULL AS absent`;
   assert(none[0].absent === true, "--dry-run created nothing");
 
@@ -126,10 +135,16 @@ console.log("[1] migrate.ts against a real server");
   // still open after — run() closes only a client it opened (SMD-2304).
   const caller = new SQL({ url: URL_, max: 1 });
   try {
-    const againIn = await migrateInProcess({ sql: caller });
-    assert(againIn.code === 0 && againIn.out === again.out, "run() in-process re-runs the same no-op, byte for byte");
-    const [{ one }] = await caller`SELECT 1 AS one`;
+    // The caller's own session settings, which the run changes for its
+    // statements (lock_timeout; search_path when pgvector is off the path) and
+    // must put back.
+    await caller.unsafe(`SET lock_timeout = '3s'`);
+    const [{ path: pathBefore }] = await caller`SELECT current_setting('search_path') AS path`;
+    const againIn = await migrateInProcess({ sql: caller, url: "postgres://u@127.0.0.1:1/none" });
+    assert(againIn.code === 0 && againIn.out === again.out, "run() in-process on a caller's client re-runs the same no-op, byte for byte — the client, not the dead URL beside it");
+    const [{ one, timeout, path }] = await caller`SELECT 1 AS one, current_setting('lock_timeout') AS timeout, current_setting('search_path') AS path`;
     assert(one === 1, "…and leaves the caller's client open");
+    assert(timeout === "3s" && path === pathBefore, `…with its session as it went in: lock_timeout ${timeout} (was 3s), search_path ${path === pathBefore ? "unchanged" : `${path} (was ${pathBefore})`}`);
   } finally {
     await caller.close();
   }

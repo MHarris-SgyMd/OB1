@@ -84,9 +84,13 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations
 
 /**
  * What one migrator run is asked to do — the CLI's flags, typed (SMD-2304).
- * `sql`, when given, is the caller's client and is never closed here; it must
- * be a single connection, since the run's lock_timeout and 021's temp view are
- * session state. Without it, the run opens one on `url` and closes it.
+ * `sql`, when given, is the caller's client — used in place of `url`, and never
+ * closed here. It must be a single connection (opened with the `max: 1`
+ * option, or a reserved connection): the run sets lock_timeout for the session
+ * and may put pgvector's schema on the session's search_path, and both must
+ * hold on the connection its statements run on. Both are put back as they were
+ * when the run returns, so the caller's client comes back as it went in.
+ * Without `sql`, the run opens one connection on `url` and closes it.
  */
 export interface MigrateOptions {
   url?: string;
@@ -117,18 +121,32 @@ export async function run(opts: MigrateOptions): Promise<number> {
       return 2;
     }
   } else if (Number((opts.sql.options as { max?: number }).max ?? 1) !== 1) {
-    err("migrate.ts needs a single connection: the run's lock_timeout and 021's temp view are session state. Pass a client opened with max: 1, or a URL.");
+    err("migrate.ts needs a single connection: the run sets lock_timeout and may extend search_path for the session. Pass a client opened with the max: 1 option (not ?max= in the URL), a reserved connection, or a URL.");
     return 2;
   }
   const sql = opts.sql ?? openSql(opts.url as string);
+  // The caller's session settings, read just before the run first changes them
+  // (so a refusal before any query still opens nothing) and put back after.
+  const session: SessionSettings = { restore: opts.sql !== undefined, saved: null };
   try {
-    return await migrateWith(sql, opts, out, err);
+    return await migrateWith(sql, opts, out, err, session);
   } finally {
-    if (opts.sql === undefined) await sql.close();
+    // Neither step may mask the run's own error: a connection the run broke
+    // cannot be restored, and the caller finds that out on its next query.
+    if (session.saved !== null) {
+      await sql`SELECT set_config('lock_timeout', ${session.saved.lockTimeout}, false), set_config('search_path', ${session.saved.searchPath}, false)`.catch(() => {});
+    }
+    if (opts.sql === undefined) await sql.close().catch(() => {});
   }
 }
 
-async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], err: Writer["err"]): Promise<number> {
+/** A caller's lock_timeout and search_path, saved to be put back — only when the client is the caller's. */
+interface SessionSettings {
+  restore: boolean;
+  saved: { lockTimeout: string; searchPath: string } | null;
+}
+
+async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], err: Writer["err"], session: SessionSettings): Promise<number> {
   const dryRun = opts.dryRun === true;
   const baseline = opts.baseline === true;
   const reapply = opts.reapply === true;
@@ -324,6 +342,10 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // the bound must hold where the locks are taken. (A pooled URL is not the
   // migrator's — README §5 says so: the search_path it aligns is session state
   // too.) 023's call sets its own, locally, for its transaction.
+  if (session.restore) {
+    const [row] = (await sql`SELECT current_setting('lock_timeout') AS lock_timeout, current_setting('search_path') AS search_path`) as { lock_timeout: string; search_path: string }[];
+    session.saved = { lockTimeout: row.lock_timeout, searchPath: row.search_path };
+  }
   await sql.unsafe(`SET lock_timeout = '${LOCK_TIMEOUT_S}s'`);
   /**
    * A transaction under READ COMMITTED with the run's lock_timeout set inside it,
@@ -548,18 +570,18 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
 
   /** search_path's entries: split on the commas outside double quotes, since a quoted schema name may hold one. */
   function searchPathEntries(path: string): string[] {
-    const out: string[] = [];
+    const entries: string[] = [];
     let entry = "";
     let quoted = false;
     for (const ch of path) {
       if (ch === '"') quoted = !quoted;
       if (ch === "," && !quoted) {
-        out.push(entry.trim());
+        entries.push(entry.trim());
         entry = "";
       } else entry += ch;
     }
-    if (entry.trim()) out.push(entry.trim());
-    return out;
+    if (entry.trim()) entries.push(entry.trim());
+    return entries;
   }
 
   /**
