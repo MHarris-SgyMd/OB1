@@ -14,7 +14,11 @@
  *     console call or a stream write: run() returns its code and writes
  *     through the Writer it is given. What reads like one fails the census
  *     loudly — a string (`"will exit (code 1)"`), any `.exit(` method
- *     (`child.exit()`), a `worker.process.kill()`; reword it or name it apart;
+ *     (`child.exit()`), a `worker.process.kill()`; reword it or name it apart.
+ *     What it cannot see is an alias — `const p = process; p.on(…)`, a
+ *     default import of node:process, `const c = console` — nor a read of
+ *     process.env (DATABASE_URL, say) or a write to it: a spelling list over
+ *     text is never complete, and those are left to review (review pass 4);
  *   - run() refuses what the CLI refuses, in the CLI's words (the spawned
  *     script's whole stdout and stderr) and with its exit code, before
  *     connecting;
@@ -213,6 +217,15 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   const refused = await inProcess({ sql: stub, reapply: true, baseline: true });
   ok(refused.code === 2 && !closed, "migrate run() does not close a client the caller passed it");
   ok(process.listenerCount("SIGINT") === 0 && process.listenerCount("SIGTERM") === 0, "…and leaves no signal listener after its refusals");
+
+  // An option given as null is absent, as `sql: null` is: `url: null` is no
+  // URL, and `grant: null` is no --grant — so `--baseline` beside it is a
+  // baseline run (which queries the client), not --grant's refusal (review pass 4).
+  const nullUrl = await inProcess({ url: null });
+  const queried = Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 1 }, close: async () => {}, unsafe: () => { throw new Error("stub queried"); } });
+  const nw = capture();
+  const nullGrant = await run({ sql: queried, grant: null, baseline: true, writer: nw } as never).then((c) => String(c), (e: Error) => e.message);
+  ok(nullUrl.code === 2 && nullUrl.w.errs[0] === NO_DATABASE_URL && !nw.errs.some((l) => l.startsWith("--grant")) && nullGrant !== "2", `migrate run() reads a null url or grant as absent (url: exit ${nullUrl.code}; grant: ${nullGrant.slice(0, 40)})`);
 }
 
 listener.stop(true);

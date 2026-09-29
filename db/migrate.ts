@@ -92,8 +92,10 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations
  * statements run on, and leaves it there — lock_timeout, pgvector's schema on
  * search_path when it is off the path, and the `ob1.acl_*` settings several
  * migrations set. So pass a client dedicated to the run (the CLI passes its
- * own), not a connection a pool will hand to someone else after. Without
- * `sql`, the run opens one connection on `url` and closes it.
+ * own), not a connection a pool will hand to someone else after — and not a
+ * transaction's handle, which the check passes but whose migrations then fail
+ * on their own BEGIN. Without `sql`, the run opens one connection on `url` and
+ * closes it. An absent option may also be null.
  */
 export interface MigrateOptions {
   url?: string;
@@ -112,8 +114,10 @@ export interface MigrateOptions {
  * exits with — 0 applied or nothing to do, 1 a failure, a drift or the pgvector
  * floor, 2 a refusal. Nothing happens at import; the migration files are read
  * here, per call, so a caller sees the tree as it is when it runs. The
- * embedding model, width and trigram choice are config.mjs's, read from the
- * environment when that module was first imported. A database error outside
+ * embedding model, width, trigram choice and chunk-context flag are
+ * config.mjs's, read from the environment when that module was first
+ * imported — setting OB1_CHUNK_CONTEXT after the import does not change what
+ * 013 records, nor what --reapply compares with it. A database error outside
  * a migration's own transaction — the ledger's CREATE TABLE refused, say —
  * rejects, as the CLI's stack dump always showed; run()'s own connection is
  * closed first.
@@ -173,7 +177,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // privilege without grant option "grants" it with a WARNING and no effect,
   // which the driver does not surface (SMD-1796, third review pass).
   const grantRole = opts.grant;
-  if (grantRole !== undefined) {
+  if (grantRole != null) {
     if (baseline || reapply) {
       err("--grant issues privileges; it does not apply or record migrations. Run it on its own.");
       return 2;

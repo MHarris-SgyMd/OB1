@@ -44,7 +44,7 @@ export function databaseUrl(flag: string | undefined, env: Record<string, string
  * returns 2 rather than exiting (SMD-2304).
  */
 export function databaseUrlProblem(url: string | undefined): string | null {
-  if (url === undefined || url.trim() === "") return NO_DATABASE_URL;
+  if (url == null || url.trim() === "") return NO_DATABASE_URL;
   if (parsedDatabaseUrl(url) === null) return UNPARSEABLE_DATABASE_URL;
   return null;
 }
