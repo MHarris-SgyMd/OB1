@@ -29,12 +29,16 @@ export const NO_DATABASE_URL = "No database URL. Pass --url or set DATABASE_URL.
  */
 export function databaseUrl(flag: string | undefined, env: Record<string, string | undefined> = process.env): string {
   const url = flag ?? env.DATABASE_URL;
+  if (url === undefined || url.trim() === "") {
+    console.error(NO_DATABASE_URL);
+    process.exit(2);
+  }
   const problem = databaseUrlProblem(url);
   if (problem !== null) {
     console.error(problem);
     process.exit(2);
   }
-  return url as string;
+  return url;
 }
 
 /**
@@ -92,9 +96,7 @@ export const URL_QUERY_KEYS: ReadonlySet<string> = new Set(["sslmode", "applicat
 /**
  * Why `url` is not a database URL every reader here takes to the same place,
  * or null when it is. The reason never quotes the URL; it names a query key
- * only when the key is a plain word. databaseUrl's rule without its exit, so
- * an engine's run() refuses in the CLI's words and returns 2 (SMD-2304).
- *   • There must be one: absent, null or blank is NO_DATABASE_URL.
+ * only when the key is a plain word.
  *   • It must parse (parsedDatabaseUrl), start with a lowercase `postgres://`
  *     or `postgresql://`, and hold no whitespace or control character.
  *   • No fragment. libpq has none, so `…/db#?host=prod` is a query to it and
@@ -113,8 +115,7 @@ export const URL_QUERY_KEYS: ReadonlySet<string> = new Set(["sslmode", "applicat
  * Checked before the URL reaches a client, so a refused URL opens no
  * connection (test-connect.ts counts them).
  */
-export function databaseUrlProblem(url: string | undefined): string | null {
-  if (url == null || url.trim() === "") return NO_DATABASE_URL;
+export function databaseUrlProblem(url: string): string | null {
   if (!parses(url)) return UNPARSEABLE_DATABASE_URL;
   const split = readersSplit(url);
   if (split === null) return null;

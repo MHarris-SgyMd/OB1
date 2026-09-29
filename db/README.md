@@ -3110,7 +3110,8 @@ next. The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
 holds each engine to that: an import opens no connection, prints nothing and
 installs no process listener; the engine's code holds no exit, handler, argv
 scan or console call; and `run()` refuses in the CLI's words before
-connecting. The claim workers follow, one PR each.
+connecting. Extraction, consolidation and re-embedding become engines next,
+one PR each, over the bootstrap below.
 
 The claim workers bootstrap their egress through `worker-bootstrap.ts`
 (SMD-2303): one banner line, and one blanket gate that stops a pass before it

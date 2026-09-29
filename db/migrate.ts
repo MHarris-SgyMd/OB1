@@ -80,7 +80,7 @@ import {
 } from "./config.mjs";
 import { migrationSha, versionForMigration, readReleases } from "./version.mjs";
 import { commandLine, consoleWriter, type Writer } from "./cli.ts";
-import { closeThenExit, databaseUrl, databaseUrlProblem, openSql } from "./connect.ts";
+import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
 
@@ -125,7 +125,9 @@ export interface MigrateOptions {
 export async function run(opts: MigrateOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
   if (opts.sql == null) {
-    const problem = databaseUrlProblem(opts.url);
+    // databaseUrl's two refusals without its exit: none (absent, null or
+    // blank), then connect.ts's rule for the URL itself.
+    const problem = opts.url == null || opts.url.trim() === "" ? NO_DATABASE_URL : databaseUrlProblem(opts.url);
     if (problem !== null) {
       err(problem);
       return 2;

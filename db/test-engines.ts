@@ -193,6 +193,9 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["no URL", {}, [], {}],
     ["an unparseable URL", { url: `postgres://u:${MARK}/x@127.0.0.1:1/x` }, ["--url", `postgres://u:${MARK}/x@127.0.0.1:1/x`], {}],
     ["--reapply with --baseline", { url: AT, reapply: true, baseline: true }, ["--url", AT, "--reapply", "--baseline"], {}],
+    // connect.ts's whole rule, not only the parse (SMD-2317): Bun would send
+    // ?database= to the server and connect to another database (review pass 5).
+    ["a URL the readers split (?database=)", { url: `${AT}?database=other` }, ["--url", `${AT}?database=other`], {}],
     ["--force alone", { url: AT, force: true }, ["--url", AT, "--force"], {}],
     ["--grant with --baseline", { url: AT, grant: "reader", baseline: true }, ["--url", AT, "--grant", "reader", "--baseline"], {}],
   ];
@@ -222,6 +225,10 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   // URL, and `grant: null` is no --grant — so `--baseline` beside it is a
   // baseline run (which queries the client), not --grant's refusal (review pass 4).
   const nullUrl = await inProcess({ url: null });
+  // `sql: null` beside an unparseable URL: the URL's refusal, not a TypeError
+  // reading null's options (review pass 5: nothing passed a null client).
+  const nullSql = await inProcess({ sql: null, url: "mysql://h/x" });
+  ok(nullSql.code === 2 && nullSql.w.errs[0] === UNPARSEABLE_DATABASE_URL, `migrate run() reads a null sql as absent, refusing the URL beside it (exit ${nullSql.code})`);
   const queried = Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 1 }, close: async () => {}, unsafe: () => { throw new Error("stub queried"); } });
   const nw = capture();
   const nullGrant = await run({ sql: queried, grant: null, baseline: true, writer: nw } as never).then((c) => String(c), (e: Error) => e.message);
