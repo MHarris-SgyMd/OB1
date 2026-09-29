@@ -125,9 +125,8 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, egressDescription, egressRefusal, regateMessage } from "./worker-bootstrap.ts";
+import { blanketGate, egressDescription, egressRefusal, regateMessage, workerIdentity } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
-import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
@@ -258,44 +257,19 @@ let agentId: string | null = null;
 /** The worker key's name, for the egress gate's `actor:` unit (SMD-1903); undefined without a key. */
 let actorName: string | undefined;
 if (!STATUS_ONLY && !DRY_RUN) {
-  const rawKey = process.env.OB1_WORKER_KEY;
-  if (rawKey) {
-    if (!process.env.MCP_ACCESS_KEYS) {
-      console.error("\n  OB1_WORKER_KEY is set but MCP_ACCESS_KEYS is not, so the key cannot be checked or named. Set both, as the server has them.");
-      await sql.close();
-      process.exit(2);
-    }
-    const hash = hashKey(rawKey);
-    const record = parseKeyRecords(process.env.MCP_ACCESS_KEYS).keys.find((k) => k.sha256 === hash);
-    if (!record) {
-      console.error("\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this.");
-      await sql.close();
-      process.exit(2);
-    }
-    try {
-      const [{ r }] = await sql`SELECT resolve_agent(${hash}::text, ${record.name}::text, ${record.scope}::text) AS r`;
-      const res = r as { ok: boolean; error?: string; agent_id?: string; revoked_at?: string; reason?: string | null };
-      if (!res.ok && res.error === "REVOKED") {
-        console.error(`\n  The worker's key was revoked at ${res.revoked_at}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.`);
-        await sql.close();
-        process.exit(2);
-      }
-      if (res.ok && res.agent_id) {
-        agentId = res.agent_id;
-        actorName = record.name;
-        console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
-      } else {
-        console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
-      }
-    } catch (e) {
-      console.error(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
-    }
-  } else {
-    console.error("  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.");
+  const id = await workerIdentity(url, process.env, {
+    noKeyWarning: "  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
+  });
+  if (!id.ok) {
+    console.error(id.message);
+    await sql.close();
+    process.exit(2);
   }
+  agentId = id.identity.agentId;
+  actorName = id.identity.keyName;
   // A key that was set but did not resolve to a name is no actor: the blanket
   // check above credited one, so it is asked again without (third review pass).
-  if (process.env.OB1_WORKER_KEY && actorName === undefined) {
+  if (process.env.OB1_WORKER_KEY && id.identity.keyName === undefined) {
     const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
     if (again) {
       console.error(`\n  ${regateMessage("extracted", again)}`);

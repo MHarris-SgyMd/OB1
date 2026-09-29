@@ -36,6 +36,8 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
+import { workerIdentity } from "./worker-bootstrap.ts";
+import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
@@ -7572,6 +7574,36 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
     for (const db of [A, B]) await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     await admin.close();
   }
+}
+
+// ── 24b. workerIdentity through the store's capped path (SMD-2303) ───────────
+//
+// The db/ claim workers' identity bootstrap (db/worker-bootstrap.ts). The
+// refuse-before-connect cases are DB-free and live in test-worker-bootstrap.ts;
+// this is the resolve half, which needs resolve_agent: a valid key gets an agent
+// id and its name through SqlStore.resolveAgent (the lock_timeout cap the raw
+// call the workers ran did not have), and a revoked one is refused.
+console.log("\n[24b] workerIdentity: a valid worker key resolves to an agent id and its name through the capped path; a revoked key is refused (SMD-2303)");
+{
+  const raw = "live-2303-worker-key";
+  const hash = hashKey(raw);
+  const spec = `extract-worker:write:${hash}`;
+  const lines: string[] = [];
+  const first = await workerIdentity(URL_, { OB1_WORKER_KEY: raw, MCP_ACCESS_KEYS: spec }, { noKeyWarning: "unused", write: (l) => lines.push(l) });
+  assert(first.ok && first.identity.keyName === "extract-worker" && typeof first.identity.agentId === "string" && first.identity.agentId.length > 0,
+    "a valid worker key resolves to an agent id and carries the key's name");
+  assert(first.ok && lines.some((l) => l.startsWith("  agent:  extract-worker (write, ")), "…and the agent line names it");
+  const second = await workerIdentity(URL_, { OB1_WORKER_KEY: raw, MCP_ACCESS_KEYS: spec }, { noKeyWarning: "unused", write: () => {} });
+  assert(first.ok && second.ok && second.identity.agentId === first.identity.agentId, "…and a second resolve returns the same agent id (registration is idempotent)");
+  const revoker = new SQL({ url: URL_, max: 1 });
+  try {
+    await revoker`SELECT revoke_agent_key(${hash}, 'SMD-2303 live')`;
+  } finally {
+    await revoker.close();
+  }
+  const revoked = await workerIdentity(URL_, { OB1_WORKER_KEY: raw, MCP_ACCESS_KEYS: spec }, { noKeyWarning: "unused" });
+  assert(!revoked.ok && /The worker's key was revoked at .+ \(SMD-2303 live\)\. Refusing to run\./.test(revoked.message),
+    "a revoked key is refused with its revocation time and reason, and never runs");
 }
 
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");

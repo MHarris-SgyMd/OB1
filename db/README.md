@@ -3044,12 +3044,12 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 950 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 954 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-engines.ts                         # the engines (migrate.ts) import with no side effect, refuse through run() — no database
-bun test-worker-bootstrap.ts                # every claim worker's egress bootstrap through worker-bootstrap.ts — no database
+bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -3118,17 +3118,24 @@ scan or console call; and `run()` refuses in the CLI's words before
 connecting. Extraction, consolidation and re-embedding become engines next,
 one PR each, over the bootstrap below.
 
-The claim workers bootstrap their egress through `worker-bootstrap.ts`
-(SMD-2303): one banner line, and one blanket gate that stops a pass before it
-claims when the policy would refuse the call whatever the row — its wording one
-text per case, the pass's verb ("extracted" / "judged" / "re-embedded") the
-only difference — plus the identity re-gate. `reembed.ts` gates its embeddings
-endpoint (and, with `OB1_CHUNK_CONTEXT`, warns on the blurbs endpoint);
-`sync-linear.ts` wraps the bare reason in its own sentence. The module returns
-its outcome rather than exiting, so SMD-2304's importable `run()` will turn it
-into a return code. `test-worker-bootstrap.ts` holds the wording and the
-drop-the-gate mutant, and `test-cli.ts`'s census checks that no `db/` file
-outside the module reaches `refusesEverything` or `describeEgress`.
+The claim workers bootstrap their egress and identity through
+`worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket
+gate that stops a pass before it claims when the policy would refuse the call
+whatever the row — its wording one text per case, the pass's verb ("extracted" /
+"judged" / "re-embedded") the only difference — plus the identity re-gate.
+`reembed.ts` gates its embeddings endpoint (and, with `OB1_CHUNK_CONTEXT`, warns
+on the blurbs endpoint); `sync-linear.ts` wraps the bare reason in its own
+sentence. **Identity** (`extract-entities.ts` and `consolidate.ts`):
+`workerIdentity` checks `OB1_WORKER_KEY` against `MCP_ACCESS_KEYS` and resolves
+it through the store's capped path (`SqlStore.resolveAgent`, which bounds
+`lock_timeout` — the raw call the workers ran did not), refusing a revoked key
+and warning when none is set. The module returns its outcome rather than
+exiting, so SMD-2304's importable `run()` will turn it into a return code.
+`test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant
+and the identity cases that refuse before connecting; `test-live.ts` [24b] the
+capped resolve; and `test-cli.ts`'s census checks that no `db/` file outside the
+module reaches `refusesEverything`, `describeEgress`, `resolve_agent(` or
+`parseKeyRecords`.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`

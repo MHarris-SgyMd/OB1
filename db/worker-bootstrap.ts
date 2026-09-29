@@ -19,6 +19,8 @@
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
 import type { ProviderEndpoint } from "../server-portable/embed.ts";
+import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
+import { SqlStore } from "../server-portable/store-sql.ts";
 
 /**
  * One banner line: what the gate does for calls to this endpoint under this
@@ -71,4 +73,75 @@ export function blanketGate(opts: {
  */
 export function regateMessage(verb: string, reason: string): string {
   return `Nothing would be ${verb}: ${reason} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`;
+}
+
+// ── Identity ─────────────────────────────────────────────────────────────────
+
+/** What a worker key resolved to: an agent id (null when it did not resolve) and the key's own name (undefined then), the egress gate's `actor:` unit. */
+export type WorkerIdentity = { agentId: string | null; keyName: string | undefined };
+
+/**
+ * The claim workers' identity bootstrap (SMD-2303), extract-entities.ts's and
+ * consolidate.ts's ~45-line block in one place. The same decision the server
+ * makes: OB1_WORKER_KEY must be a key MCP_ACCESS_KEYS holds — one the server
+ * would refuse is no identity here either — and the record's own name and scope
+ * are what get registered. Resolution goes through the store's capped path
+ * (SqlStore.resolveAgent, which bounds lock_timeout so a lookup of a locked
+ * registry holds its connection for the cap, not the lock — what the raw
+ * `resolve_agent` the workers ran did not), on a one-connection store of its
+ * own that it opens and closes.
+ *
+ * Returns the resolved identity, or a refusal the caller prints before it closes
+ * its own sql and exits 2. It never calls process.exit or touches the caller's
+ * sql; the `agent:` line and the warnings go through the injectable writers
+ * (SMD-2304's run() captures them). The caller decides its own actor label from
+ * `keyName` — extract carries the key's name or none, consolidate falls back to
+ * its audit label — and re-gates egress when `keyName` is undefined.
+ */
+export async function workerIdentity(
+  url: string,
+  /** The environment, read for OB1_WORKER_KEY and MCP_ACCESS_KEYS (process.env at the call sites). */
+  env: Record<string, string | undefined>,
+  opts: {
+    /** The warning printed when OB1_WORKER_KEY is unset — its wording differs per worker. */
+    noKeyWarning: string;
+    write?: (line: string) => void;
+    warn?: (line: string) => void;
+  },
+): Promise<{ ok: true; identity: WorkerIdentity } | { ok: false; message: string }> {
+  const write = opts.write ?? ((l: string) => console.log(l));
+  const warn = opts.warn ?? ((l: string) => console.error(l));
+  const none: WorkerIdentity = { agentId: null, keyName: undefined };
+
+  const rawKey = env.OB1_WORKER_KEY;
+  if (!rawKey) {
+    warn(opts.noKeyWarning);
+    return { ok: true, identity: none };
+  }
+  if (!env.MCP_ACCESS_KEYS) {
+    return { ok: false, message: "\n  OB1_WORKER_KEY is set but MCP_ACCESS_KEYS is not, so the key cannot be checked or named. Set both, as the server has them." };
+  }
+  const hash = hashKey(rawKey);
+  const record = parseKeyRecords(env.MCP_ACCESS_KEYS).keys.find((k) => k.sha256 === hash);
+  if (!record) {
+    return { ok: false, message: "\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this." };
+  }
+  const store = new SqlStore(url, { max: 1 });
+  try {
+    const res = await store.resolveAgent({ keyHash: hash, label: record.name, scope: record.scope });
+    if (!res.ok && res.error === "REVOKED") {
+      return { ok: false, message: `\n  The worker's key was revoked at ${res.revokedAt}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.` };
+    }
+    if (res.ok) {
+      write(`  agent:  ${record.name} (${record.scope}, ${res.agentId})`);
+      return { ok: true, identity: { agentId: res.agentId, keyName: record.name } };
+    }
+    warn(`  ⚠  resolve_agent answered ${res.detail}; rows will carry no agent id`);
+    return { ok: true, identity: none };
+  } catch (e) {
+    warn(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
+    return { ok: true, identity: none };
+  } finally {
+    await store.close();
+  }
 }
