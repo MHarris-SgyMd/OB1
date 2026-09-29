@@ -40,7 +40,7 @@ function ok(cond: boolean, msg: string): void {
 const HERE = import.meta.dir;
 const MARK = "SECRET-2304";
 /** The engines, one more per SMD-2304 PR. */
-const ENGINES = ["migrate.ts"] as const;
+const ENGINES = ["migrate.ts", "extract-entities.ts"] as const;
 
 /** A child's environment: this one without a database URL, any OB1_* knob or PG* variable; no .env file read. */
 const BASE_ENV: Record<string, string> = {};
@@ -85,8 +85,9 @@ const listenerCounts = () => SIGNALS.map((s) => process.listenerCount(s)).join("
 for (const engine of ENGINES) {
   const r = await counted(["-e", `const m = await import("./${engine}"); console.log(typeof m.run);`], { DATABASE_URL: AT });
   ok(r.code === 0 && r.out === "function\n" && r.err === "" && r.seen === 0, `${engine} imports with no side effect: run is exported, nothing printed, no connection opened with DATABASE_URL set (exit ${r.code}, out ${JSON.stringify(r.out)}, err ${JSON.stringify(r.err.slice(0, 120))}, ${r.seen} connection(s))`);
-  // The control: the same import, run, does reach the listener — so the zero above counts.
-  const control = await counted(["-e", `const m = await import("./${engine}"); await m.run({ url: ${JSON.stringify(AT)} });`], {}, true);
+  // The control: the same import, run, does reach the listener — so the zero
+  // above counts. A dry run: extract's egress gate refuses a real one first here.
+  const control = await counted(["-e", `const m = await import("./${engine}"); await m.run({ url: ${JSON.stringify(AT)}, dryRun: true });`], {}, true);
   ok(control.seen > 0, `…the control: ${engine}'s run() on that URL does connect (${control.seen} connection(s))`);
 
   const before = listenerCounts();
@@ -155,6 +156,10 @@ for (const engine of ENGINES) {
   const named = (noImports.match(/\bconsoleWriter\b/g) ?? []).length, asDefault = (noImports.match(/\?\?\s*consoleWriter\b/g) ?? []).length;
   ok(named === asDefault && asDefault >= 1, `${engine} names consoleWriter only as the default writer (${named} use(s), ${asDefault} as the default)`);
   ok(main !== null && /closeThenExit\(/.test(main.block) && /\brun\(/.test(main.block), `${engine}'s CLI block exits through the door with run()'s code`);
+  // lease.ts's reportLost writes to stderr unless given a writer; an engine
+  // gives it the Writer's err (no suite loses a row in-process to see the line).
+  const lostCalls = [...engineText.matchAll(/\breportLost\(([^()]*)\)/g)];
+  ok(lostCalls.every((c) => /,\s*err\s*$/.test(c[1])), `${engine}'s every reportLost call passes the Writer's err (${lostCalls.length} call(s))`);
 }
 // The census has teeth: the shapes a regression would write are seen, and the
 // shapes PRs 2-4's engines will need are not.
@@ -233,6 +238,105 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   const nw = capture();
   const nullGrant = await run({ sql: queried, grant: null, baseline: true, writer: nw } as never).then((c) => String(c), (e: Error) => e.message);
   ok(nullUrl.code === 2 && nullUrl.w.errs[0] === NO_DATABASE_URL && !nw.errs.some((l) => l.startsWith("--grant")) && nullGrant !== "2", `migrate run() reads a null url or grant as absent (url: exit ${nullUrl.code}; grant: ${nullGrant.slice(0, 40)})`);
+}
+
+// ---------------------------------------------------------------------------
+// extract-entities.ts: run() refuses in the CLI's words, before connecting.
+// ---------------------------------------------------------------------------
+{
+  const { run } = await import("./extract-entities.ts");
+  /** run() in-process under the child's environment, counting the listener's connections; its streams as a child's. */
+  const inProcess = async (opts: Record<string, unknown>) => {
+    seen = 0;
+    const w = capture();
+    const code = await run({ env: BASE_ENV, ...opts, writer: w } as never);
+    await Bun.sleep(50);
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, out: lines(w.outs), err: lines(w.errs), seen };
+  };
+
+  const cases: [string, Record<string, unknown>, string[], Record<string, string>][] = [
+    ["no URL", {}, [], {}],
+    ["an unparseable URL", { url: `postgres://u:${MARK}/x@127.0.0.1:1/x` }, ["--url", `postgres://u:${MARK}/x@127.0.0.1:1/x`], {}],
+    ["a URL the readers split (?database=)", { url: `${AT}?database=other` }, ["--url", `${AT}?database=other`], {}],
+    ["--workers 0", { url: AT, workers: 0 }, ["--url", AT, "--workers", "0"], {}],
+    ["--batch 1.5", { url: AT, batch: 1.5 }, ["--url", AT, "--batch", "1.5"], {}],
+    ["--heartbeat past 2^53", { url: AT, heartbeat: 2 ** 60 }, ["--url", AT, "--heartbeat", String(2 ** 60)], {}],
+    ["a lease under two heartbeats", { url: AT, ttl: 3, heartbeat: 2 }, ["--url", AT, "--ttl", "3", "--heartbeat", "2"], {}],
+    ["a one-second lease (its heartbeat derived)", { url: AT, ttl: 1 }, ["--url", AT, "--ttl", "1"], {}],
+    // Two rules broken: the lease pair is refused first, before --limit, as the script always did.
+    ["a short lease and --limit 0", { url: AT, ttl: 3, heartbeat: 2, limit: 0 }, ["--url", AT, "--ttl", "3", "--heartbeat", "2", "--limit", "0"], {}],
+    ["--timeout 0 and a short lease", { url: AT, timeout: 0, ttl: 1 }, ["--url", AT, "--timeout", "0", "--ttl", "1"], {}],
+    ["--follow 0", { url: AT, follow: 0 }, ["--url", AT, "--follow", "0"], {}],
+    ["--decide without the Jev tier", { url: AT, decide: true }, ["--url", AT, "--decide"], {}],
+    // The banner on stdout, then the blanket gate (SMD-1903): the default policy with nothing declared local.
+    ["an egress policy that refuses every row", { url: AT }, ["--url", AT], {}],
+    // …under a model named in the environment run() is given: its banner names it, as the CLI's does.
+    ["the gate's refusal under OB1_METADATA_MODEL from env", { url: AT }, ["--url", AT], { OB1_METADATA_MODEL: "env-model" }],
+  ];
+  for (const [what, opts, argv, env] of cases) {
+    const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
+    const cli = await counted(["extract-entities.ts", ...argv], env);
+    ok(r.code === 2 && cli.code === 2, `extract run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
+    ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
+    ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
+  }
+  // A caller's client: one short of a connection per worker and a spare is
+  // refused, a worker key without the URL it resolves on is refused, and the
+  // client is never closed.
+  const narrow = openSql(AT, { max: 2 });
+  const n = await inProcess({ sql: narrow });
+  ok(n.code === 2 && /needs a client of at least 3 connections for 2 worker\(s\)/.test(n.err) && n.seen === 0, `extract run() refuses a client narrower than its workers and a spare (exit ${n.code}: ${n.err.slice(0, 70)})`);
+  await narrow.close();
+  let closed = false;
+  const stub = Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 3 }, close: async () => { closed = true; }, unsafe: () => { throw new Error("stub queried"); } });
+  const keyed = await inProcess({ sql: stub, env: { ...BASE_ENV, OB1_WORKER_KEY: "k" } });
+  ok(keyed.code === 2 && /resolves OB1_WORKER_KEY on a connection of its own/.test(keyed.err) && !closed, `extract run() refuses a worker key beside a client without a URL, and leaves the client open (exit ${keyed.code})`);
+  // A URL beside the client is the worker key's, held to connect.ts's rule too.
+  const beside = await inProcess({ sql: stub, url: "mysql://h/x" });
+  ok(beside.code === 2 && beside.err === `${UNPARSEABLE_DATABASE_URL}\n` && !closed, `extract run() refuses a bad URL beside a caller's client (exit ${beside.code})`);
+  const late = await inProcess({ sql: stub });
+  ok(late.code === 2 && /Nothing would be extracted/.test(late.err) && !closed, `…and the egress gate's refusal, after the client is accepted, does not close it either (exit ${late.code})`);
+  // null is absent: no URL, the default workers (so a max-3 client passes the width check and is queried).
+  const nullUrl = await inProcess({ url: null });
+  const nullWorkers = await run({ sql: stub, workers: null, dryRun: true, env: BASE_ENV, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  ok(nullUrl.code === 2 && nullUrl.err === `${NO_DATABASE_URL}\n` && nullWorkers === "stub queried", `extract run() reads a null url or workers as absent (url: exit ${nullUrl.code}; workers: ${nullWorkers.slice(0, 40)})`);
+  ok(process.listenerCount("SIGINT") === 0 && process.listenerCount("SIGTERM") === 0, "…and leaves no signal listener after its refusals");
+}
+
+// ---------------------------------------------------------------------------
+// db/lease.ts's stopOnSignals: a first stop is the engine's, a hard one exits 130.
+// ---------------------------------------------------------------------------
+{
+  const { stopOnSignals } = await import("./lease.ts");
+  const exits: number[] = [];
+  let calls = 0;
+  let release: Promise<unknown> | null = null;
+  const before = listenerCounts();
+  const uninstall = stopOnSignals(() => { calls++; return release; }, (c) => exits.push(c), 60);
+  process.emit("SIGINT");
+  await Bun.sleep(80);
+  ok(calls === 1 && exits.length === 0, `a stop that returns null is the engine's: SIGINT calls it, nothing exits (${calls} call(s), exits ${JSON.stringify(exits)})`);
+  let settle = () => {};
+  release = new Promise<void>((r) => { settle = r; });
+  process.emit("SIGTERM");
+  await Bun.sleep(10);
+  ok(calls === 2 && exits.length === 0, "a hard stop waits for its release…");
+  settle();
+  await Bun.sleep(10);
+  ok(exits.length === 1 && exits[0] === 130, `…and exits 130 once it settles (${JSON.stringify(exits)})`);
+  release = Promise.reject(new Error("release failed"));
+  process.emit("SIGINT");
+  await Bun.sleep(10);
+  ok(exits.length === 2 && exits[1] === 130, "a release that fails still exits 130");
+  release = new Promise(() => {});
+  process.emit("SIGINT");
+  await Bun.sleep(30);
+  const early = exits.length;
+  await Bun.sleep(80);
+  ok(early === 2 && exits.length === 3 && exits[2] === 130, `a release that never settles exits 130 after the grace (${early} → ${exits.length})`);
+  uninstall();
+  ok(listenerCounts() === before, `the uninstall takes both handlers off (${before} → ${listenerCounts()})`);
 }
 
 listener.stop(true);
