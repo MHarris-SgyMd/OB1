@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * worker-bootstrap.ts — the one place the db/ claim workers bootstrap their
  * provider egress (and, from SMD-2303's later slices, identity and error
