@@ -960,8 +960,9 @@ no other role.
   privilege naming it, a grant in another database). `login-role.ts` commits
   first, so when `--exact` refuses, the new password is already set and the
   runner, if its config changed, is left created and not started.
-- The step's image is built on every `up` (from cache when nothing changed),
-  so a new migration's grants reach it on the next start. To rotate the
+- The step runs `migrate`'s image, by name, so the build that brings a new
+  migration (`up --build server` included) brings its grants to the step's
+  next run. To rotate the
   password, edit `OB1_RUNNER_DB_PASSWORD` and start the profile again
   (`compose --profile orchestration up -d`).
 - The runner's environment holds what its ingester and reembed read: the

@@ -357,8 +357,9 @@ export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "s
  * --grant`, and db/README.md.
  */
 export const ROLE_GRANTS: Readonly<Record<RoleGrantGroup, readonly RoleGrant[]>>;
-/** The order groups are issued and documented in. */
+/** The advisory lock every `migrate.ts --grant` and `db/login-role.ts` take (SMD-2289). */
 export const GRANT_LOCK: string;
+/** The order groups are issued and documented in. */
 export const ROLE_GRANT_GROUPS: readonly RoleGrantGroup[];
 /** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
 export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];

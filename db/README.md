@@ -924,7 +924,8 @@ holds anything else (named by catalog and database); then the groups are
 granted, so what it holds here is theirs. Every `--grant`, and `login-role.ts`,
 holds one advisory lock, so two at once in one database queue. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
-a member of no role, its settings in every database cleared),
+a member of no role, its settings in every database cleared; refused if one
+survives, as a setting only a superuser may reset does a migrator that is not),
 its password sent as a SCRAM verifier, for a compose service that connects as
 a role of its own: the orchestration runner's `ob1_orchestration_runner`
 holds capture, worker, structure and extraction, what its ingester

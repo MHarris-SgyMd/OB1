@@ -17,8 +17,10 @@
  *   to it), or the owner of anything in any database — a relation, schema,
  *   function, type, large object or the database itself (a schema's owner can
  *   drop the tables in it). Such a role is not one to give a service. It
- *   refuses, too, when a schema named for the role exists in this database:
- *   that schema is first on the role's search_path ("$user").
+ *   refuses, too, when a schema named for the role exists in this database
+ *   (first on the role's search_path, "$user"), and when a setting outlives
+ *   the reset (a migrator that is not a superuser cannot reset one only a
+ *   superuser may set).
  * - Its privileges are not this step's: `migrate.ts --grant --groups …
  *   --exact`, run after it, replaces what the role's grants hold in this
  *   database (schema USAGE, CONNECT and TEMP stay) with the groups' privileges
@@ -107,6 +109,12 @@ if (import.meta.main) {
           if (owned > 0) throw new Refusal(`${role} owns ${owned} object(s) (a relation, schema, function, type, large object or database, here or in another database), so it is a migrator's role, not one to give a service. Name another role. Nothing changed.`);
         }
         found = row;
+        if (row) {
+          // Clearing CREATEDB takes CREATEDB, and REPLICATION or BYPASSRLS a superuser; the driver shows only "permission denied to alter role", not which (review pass 6).
+          const [me] = (await tx`SELECT rolsuper, rolcreatedb FROM pg_roles WHERE rolname = current_user`) as { rolsuper: boolean; rolcreatedb: boolean }[];
+          const cannot = [row.rolcreatedb && !me.rolsuper && !me.rolcreatedb && "CREATEDB", row.rolreplication && !me.rolsuper && "REPLICATION", row.rolbypassrls && !me.rolsuper && "BYPASSRLS"].filter(Boolean);
+          if (cannot.length) throw new Refusal(`${role} holds ${cannot.join(", ")}, which this connection's role may not clear (CREATEDB takes CREATEDB; REPLICATION and BYPASSRLS a superuser). Clear it as a superuser, or name another role. Nothing changed.`);
+        }
         // ALTER names only the attributes to clear: Postgres refuses NOCREATEDB, NOREPLICATION and NOBYPASSRLS from a migrator that is not a superuser even when nothing would change (review pass 5: every re-run on a managed Postgres failed "permission denied to alter role").
         const attributes = row ? ["LOGIN NOCREATEROLE", row.rolcreatedb && "NOCREATEDB", row.rolreplication && "NOREPLICATION", row.rolbypassrls && "NOBYPASSRLS"].filter(Boolean).join(" ") : ROLE_ATTRIBUTES;
         await tx.unsafe(`${row ? "ALTER" : "CREATE"} ROLE ${ident} ${attributes} CONNECTION LIMIT -1 VALID UNTIL 'infinity' PASSWORD '${verifier}'`);
@@ -115,12 +123,15 @@ if (import.meta.main) {
         await tx.unsafe(`ALTER ROLE ${ident} RESET ALL`);
         const settingDbs = (await tx`SELECT d.datname FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE s.setrole = ${row.oid}`) as { datname: string }[];
         for (const { datname } of settingDbs) await tx.unsafe(`ALTER ROLE ${ident} IN DATABASE ${quoteIdent(datname)} RESET ALL`);
+        // RESET ALL from a migrator that is not a superuser keeps, without a word, each setting only a superuser may change (review pass 6: session_replication_role = replica survived, and the runner's writes skipped the audit trigger).
+        const kept = ((await tx`SELECT coalesce(d.datname, 'every database') AS db, unnest(s.setconfig) AS setting FROM pg_db_role_setting s LEFT JOIN pg_database d ON d.oid = s.setdatabase WHERE s.setrole = ${row.oid} ORDER BY 1, 2`) as { db: string; setting: string }[]).map((r) => `${r.setting.split("=")[0]} (${r.db})`);
+        if (kept.length) throw new Refusal(`${role} keeps setting(s) this connection's role may not reset: ${kept.join(", ")}. Reset them as a superuser (ALTER ROLE ${ident} [IN DATABASE …] RESET ALL), then run this again. Nothing changed.`);
       });
       console.log(`login-role.ts: ${role} ${found ? "updated, its settings cleared" : "created"} (${ROLE_ATTRIBUTES}; password from ${passwordEnv}, stored as a SCRAM verifier)`);
       return 0;
     } catch (e) {
-      // A migrator that is not a superuser alters only a role it holds ADMIN OPTION on (Postgres 16: the roles it created); another's is refused 42501.
-      const hint = (e as { errno?: string }).errno === "42501" ? ` — connect as a superuser, or as a role holding ADMIN OPTION on ${role} (the one that created it)` : "";
+      // A migrator that is not a superuser alters only a role it holds ADMIN OPTION on (Postgres 16: the roles it created); another's is refused so (an attribute it may not clear is refused by name before the ALTER).
+      const hint = /^permission denied to alter role/.test((e as Error).message) ? ` — connect as a superuser, or as a role holding ADMIN OPTION on ${role} (the one that created it)` : "";
       console.error(`login-role.ts: ${(e as Error).message}${hint}`);
       return e instanceof Refusal ? 2 : 1;
     }

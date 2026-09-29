@@ -103,6 +103,9 @@ services:
   # bytes. Root context, as server's: migrate.ts imports db/config.mjs, and the
   # root .dockerignore keeps the context to what the two images need.
   migrate:
+    # Named, so orchestration-runner-role runs the same image: building either
+    # (`up --build server` builds this one) refreshes both.
+    image: ${COMPOSE_PROJECT_NAME}-migrate
     build:
       context: ..
       dockerfile: db/Dockerfile
@@ -619,13 +622,14 @@ services:
   # password and the grants a new migration adds land before the runner
   # starts.
   orchestration-runner-role:
+    # migrate's image, by name: an image of its own kept an old config.mjs's
+    # grants after `up --build server` rebuilt migrate and a new migration's
+    # tables (review pass 5), and building it on every `up` made an offline
+    # `up` wait ~16 min on the registry and fail (review pass 6).
+    image: ${COMPOSE_PROJECT_NAME}-migrate
     build:
       context: ..
       dockerfile: db/Dockerfile
-    # Built on every `up`, from cache when nothing changed: an image of its own
-    # would otherwise keep an old config.mjs's grants after `up --build server`
-    # rebuilt migrate and a new migration's tables (review pass 5).
-    pull_policy: build
     profiles: ["orchestration"]
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain

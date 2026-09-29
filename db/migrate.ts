@@ -265,8 +265,8 @@ async function exactTransaction(tx: any, role: string): Promise<string[]> {
 // and 4). Every --grant, and db/login-role.ts, holds one advisory lock
 // (GRANT_LOCK), so two at once in one database queue rather than deadlock (an
 // advisory lock is per database; a role is the cluster's). --dry-run --exact
-// runs the revokes and the check in a transaction it rolls back, so it shows
-// a refusal to come.
+// runs the revokes, the check and the grants in a transaction it rolls back,
+// so it shows a refusal or a failure to come.
 const grantRole = cli.value("grant");
 const grantGroups = groupsArg === undefined ? ROLE_GRANT_GROUPS : [...new Set(groupsArg.split(",").map((g) => g.trim()).filter(Boolean))];
 {
@@ -301,35 +301,9 @@ if (grantRole !== undefined) {
     // "; " between names: a function's name carries ", " inside its argument list.
     const skippedHint = `not yet present, skipped (run --grant again after applying the migration, community schema or extension/recipe schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach${missing.includes("schema_migrations") ? "; schema_migrations is this migrator's own ledger, which its first run makes" : ""}): ${missing.join("; ")}`;
     const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { groups: grantGroups, present })];
-    if (dryRun && exact) {
-      // A preview in a transaction that is rolled back: the revokes it would run, and a refusal it would meet (review pass 4).
-      let preview: string[] = [];
-      let refusal: string | null = null;
-      await gsql.begin(async (tx) => {
-        await tx`SELECT pg_advisory_xact_lock(hashtext(${GRANT_LOCK}))`;
-        try { preview = await exactTransaction(tx, grantRole); } catch (e) { if (e instanceof GrantRefusal) refusal = e.message; else throw e; }
-        throw new RolledBack();
-      }).catch((e) => { if (!(e instanceof RolledBack)) throw e; });
-      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`} --exact  (--dry-run: nothing kept)\n`);
-      for (const st of [...preview, ...statements]) console.log(`  ${st}`);
-      if (refusal) console.log(`\n  ${refusal}`);
-      if (missing.length) console.log(`\n  ${skippedHint}`);
-      await gsql.close();
-      process.exit(refusal ? 2 : 0);
-    }
-    if (dryRun) {
-      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`}  (--dry-run: nothing run)\n`);
-      for (const s of statements) console.log(`  ${s}`);
-      if (missing.length) console.log(`\n  ${skippedHint}`);
-      await gsql.close();
-      process.exit(0);
-    }
     const merged = mergedGrants(grantGroups, present);
-    let revoked: string[] = [];
-    await gsql.begin(async (tx) => {
-      // Every --grant, and login-role.ts, holds one lock: two at once queue rather than deadlock on the same catalog rows (review pass 4: a plain --grant for another role deadlocked with --exact).
-      await tx`SELECT pg_advisory_xact_lock(hashtext(${GRANT_LOCK}))`;
-      if (exact) revoked = await exactTransaction(tx, grantRole);
+    // The grants, then the catalog asked whether the role holds each: the real run's and --dry-run --exact's alike.
+    const grantAndVerify = async (tx: any) => {
       for (const s of statements) await tx.unsafe(s);
       const notHeld = ((await tx.unsafe(grantVerifySql(grantRole, merged))) as { kind: string; name: string; privilege: string; held: boolean }[]).filter((r) => !r.held);
       if (notHeld.length) {
@@ -339,6 +313,44 @@ if (grantRole !== undefined) {
             ". Connect as the objects' owner — the role that ran the migrations or applied the community schema — or a superuser, and run --grant again. Nothing was committed."
         );
       }
+    };
+    if (dryRun && exact) {
+      // A preview in a transaction that is rolled back: the revokes it would run, a refusal it would meet (review pass 4), and a grant that would fail (review pass 6: the preview ran no grant, and said 0 where the run failed).
+      let preview: string[] = [];
+      let refusal: string | null = null;
+      let failure: string | null = null;
+      await gsql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${GRANT_LOCK}))`;
+        try {
+          preview = await exactTransaction(tx, grantRole);
+          await grantAndVerify(tx);
+        } catch (e) {
+          if (e instanceof GrantRefusal) refusal = e.message;
+          else failure = (e as Error).message;
+        }
+        throw new RolledBack();
+      }).catch((e) => { if (!(e instanceof RolledBack)) throw e; });
+      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`} --exact  (--dry-run: nothing kept)\n`);
+      for (const st of [...preview, ...statements]) console.log(`  ${st}`);
+      if (refusal) console.log(`\n  ${refusal}`);
+      if (failure) console.log(`\n  --grant would fail: ${failure}`);
+      if (missing.length) console.log(`\n  ${skippedHint}`);
+      await gsql.close();
+      process.exit(refusal ? 2 : failure ? 1 : 0);
+    }
+    if (dryRun) {
+      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`}  (--dry-run: nothing run)\n`);
+      for (const s of statements) console.log(`  ${s}`);
+      if (missing.length) console.log(`\n  ${skippedHint}`);
+      await gsql.close();
+      process.exit(0);
+    }
+    let revoked: string[] = [];
+    await gsql.begin(async (tx) => {
+      // Every --grant, and login-role.ts, holds one lock: two at once queue rather than deadlock on the same catalog rows (review pass 4: a plain --grant for another role deadlocked with --exact).
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${GRANT_LOCK}))`;
+      if (exact) revoked = await exactTransaction(tx, grantRole);
+      await grantAndVerify(tx);
     });
     console.log(`\nGranted ${grantRole} ${groupsArg === undefined ? "the capturing-role privileges" : `the privileges of ${grantGroups.join(", ")}`} over ${present.size} object(s)${exact ? ", and nothing else in this database" : ""}:\n`);
     for (const s of [...revoked, ...statements]) console.log(`  ${s}`);
