@@ -115,15 +115,15 @@
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, egressDescription, egressRefusal, regateMessage, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, egressDescription, egressRefusal, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import {
   actorKindOf, cleanForDisplay, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
-import { isoDay } from "../server-portable/store.ts";
+import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
@@ -316,7 +316,7 @@ if (WRITES) {
  * `via`, the door (046's origin column) — `source` until SMD-1730, when the
  * trigger stopped reading an actor's source.
  */
-const passActor = () => ({ name: actorName, via: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) });
+const passActor = () => actorPayload({ name: actorName, via: "consolidate", session: JOB, agentId: agentId ?? undefined });
 
 /** 067: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). */
 const readStaleStandings = async () => staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], JOB);
@@ -836,20 +836,6 @@ async function processRow(row: Row): Promise<Outcome> {
   return { outcome: "succeeded" };
 }
 
-/** What an error from the provider is about — extract-entities.ts's classifier, the same three kinds. */
-type ErrorKind = "thought" | "transient" | "fatal";
-function classifyError(e: unknown): ErrorKind {
-  const status = (e as { status?: number }).status;
-  const msg = (e as Error).message ?? "";
-  const name = (e as Error).name ?? "";
-  if (name === "TimeoutError" || /timed out/i.test(msg)) return "thought";
-  if (status === 429 || (status !== undefined && status >= 500)) return "transient";
-  if (status === 400 && refusesLength(status, msg)) return "thought";
-  if (status !== undefined && status >= 400 && status < 500) return "fatal";
-  if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
-  return "thought";
-}
-const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
 // Written inside the worker closures below, which control-flow analysis does
 // not follow: declared `: string | null = null`, the read at the end of the
 // run is narrowed to `never`. The cast keeps the declared type as the initial

@@ -412,7 +412,7 @@ import {
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, egressDescription, egressRefusal } from "./worker-bootstrap.ts";
-import { maskUrl, UUID_RE } from "../server-portable/store.ts";
+import { actorPayload, maskUrl, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
@@ -1431,7 +1431,7 @@ if (total === 0) {
 const toVector = (v: number[]) => `[${v.join(",")}]`;
 // `via`, the door (046's origin column) — `source` until SMD-1730, when the
 // trigger stopped reading an actor's source; the row's own stays the column.
-const actor = { name: "reembed", via: "db/reembed.ts", session: JOB };
+const actor = actorPayload({ name: "reembed", via: "db/reembed.ts", session: JOB });
 
 let stopping = false;
 let done = 0;

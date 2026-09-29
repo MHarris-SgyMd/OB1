@@ -18,7 +18,7 @@
  */
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
-import type { ProviderEndpoint } from "../server-portable/embed.ts";
+import { refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 
@@ -144,4 +144,54 @@ export async function workerIdentity(
   } finally {
     await store.close();
   }
+}
+
+// ── Errors ───────────────────────────────────────────────────────────────────
+
+/**
+ * What an error from the provider is about.
+ *
+ *   thought   — a fact about this thought: a timeout (the corpus run showed the
+ *               same long documents exceed the limit every time), a 400 naming
+ *               the input's length, a body that was not JSON. Recorded failed;
+ *               --retry-failed revisits it.
+ *   transient — says nothing about the thought: 429, 5xx, a dropped connection.
+ *               Paused and retried; if it persists, THIS row is recorded failed
+ *               with the error (so a thought that reliably draws a 500 becomes
+ *               visible rather than cycling through the pool for ever) and the
+ *               worker stops, leaving its other leases to the pool.
+ *   fatal     — the request itself is wrong for this provider: 401/403 (the
+ *               key), 404 (the model), or a 400 about the request's shape. The
+ *               next thought would fail the same way, so every worker stops at
+ *               once and the run exits 2, with nothing marked failed.
+ */
+export type ErrorKind = "thought" | "transient" | "fatal";
+
+/** The back-off between retries of a transient provider failure, one pause per attempt. */
+export const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
+
+/**
+ * Classify a provider error for a claim worker (SMD-2303) — extract-entities.ts's
+ * and consolidate.ts's identical function, less the one rule extract adds. A
+ * timeout is the thought's (retry it later); a 429 or 5xx is transient (pause and
+ * retry the call); a 400 about the input's length (refusesLength, shared with
+ * embed.ts) is the thought's; any other 4xx is fatal (stop the pass); a connection
+ * error is transient; anything else is the thought's.
+ *
+ * `maxTokensFatal` (extract only): a 400 naming the answer budget
+ * (max_tokens/max_completion_tokens) is about the REQUEST — the same shape goes to
+ * every thought — so it is fatal rather than read as this thought's length
+ * (refusesLength matches "tokens") and failing the pool one row at a time.
+ */
+export function classifyError(e: unknown, opts: { maxTokensFatal?: boolean } = {}): ErrorKind {
+  const status = (e as { status?: number }).status;
+  const msg = (e as Error).message ?? "";
+  const name = (e as Error).name ?? "";
+  if (name === "TimeoutError" || /timed out/i.test(msg)) return "thought";
+  if (status === 429 || (status !== undefined && status >= 500)) return "transient";
+  if (opts.maxTokensFatal && status === 400 && /max_tokens|max_completion_tokens|completion tokens/i.test(msg)) return "fatal";
+  if (status === 400 && refusesLength(status, msg)) return "thought";
+  if (status !== undefined && status >= 400 && status < 500) return "fatal";
+  if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
+  return "thought";
 }
