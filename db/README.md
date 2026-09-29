@@ -208,7 +208,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2267).
+068 SMD-2256, 071 SMD-2267).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -802,7 +802,7 @@ included, and the log carries no `created_at` move; SMD-1997's fold can later
 feed the heads' status. `node_lifecycle()` and `node_state()` keep their
 signatures and rows and read the tables; `node_state` lost its top-level WITH,
 so a caller's planner pulls it up, drops the dependency joins it does not read
-(whole-brain reads until 069 keyed them — `blockers`, `unknown_blockers`,
+(whole-brain reads until 071 keyed them — `blockers`, `unknown_blockers`,
 `in_dependencies`, and `node_dependencies()`' gate — SMD-2267) and looks the
 rest up by primary key. `search_thoughts_hybrid` is estimated at 100 rows, its
 window's bound, so a ten-thousand-thought brain does not hash-join the whole
@@ -831,7 +831,7 @@ longer read `thought_sources` (a removed join's tables are not
 permission-checked — observed, not documented), so the server group keeps that
 grant.
 
-Migration 069 makes `node_state`'s dependency columns read the ids they are
+Migration 071 makes `node_state`'s dependency columns read the ids they are
 asked for (SMD-2267). The gate — whether some source row of a system states a
 known status on its own metadata (058's, SMD-2218) — is the one answer not local
 to a few rows, so it is the one stored: `ob1_source_gate` mirrors every
@@ -883,8 +883,8 @@ ms (6.1 s and 732 s), and `node_dependencies()` read for its gates 2.1 and 15.7 
 writer pays +0.09 ms at most (a new source row), measured paired. A caller that passes NULL and
 joins its own ids still computes every thought: pass the ids. The triggers run as
 the writer, so the **capture** group gains the four privileges on
-`ob1_source_gate`: a role granted before 069 fails preflight until `migrate.ts
---grant` runs again. test-schema [63], test-live [34], test-upgrade [20u].
+`ob1_source_gate`: a role granted before 071 fails preflight until `migrate.ts
+--grant` runs again. test-schema [65], test-live [35], test-upgrade [20w].
 
 ## What changed relative to the guide
 
@@ -944,7 +944,7 @@ issues every group at once.
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
 | | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
 | | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
-| | `ob1_source_gate` (069) | `SELECT, INSERT, UPDATE, DELETE` — 069's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()`' gates and the dependency columns read it (SMD-2267); a plain capture, an edit that moves no status and a delete of an unsourced thought never touch it. |
+| | `ob1_source_gate` (071) | `SELECT, INSERT, UPDATE, DELETE` — 071's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()`' gates and the dependency columns read it (SMD-2267); a plain capture, an edit that moves no status and a delete of an unsourced thought never touch it. |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |

@@ -1572,13 +1572,13 @@ else {
     // Since 068 a fail: the projection's triggers refuse every ticket or
     // pointer write under repeatable read (SMD-2256, second review pass).
     assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
-             && /and 069's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type/.test(rr.out)
+             && /and 071's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type/.test(rr.out)
              && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a connection defaulting to repeatable read is refused, naming 068's and 069's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
+           `a connection defaulting to repeatable read is refused, naming 068's and 071's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''serializable''");
     const ser = await run(SQL_ENV);
-    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable, and 069's gate only if every writer of source rows and statuses is/.test(ser.out),
-           `a connection defaulting to serializable starts with a warning that names 068's and 069's conditions (exit ${ser.code})`);
+    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable, and 071's gate only if every writer of source rows and statuses is/.test(ser.out),
+           `a connection defaulting to serializable starts with a warning that names 068's and 071's conditions (exit ${ser.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
     // …and nowhere else: a session as the same role in `postgres` is still at
     // read committed. The suite's own database is asked of the server, not
@@ -1947,7 +1947,7 @@ else {
       // 068's projection writes, held from the start so the steps below name
       // only what they revoke; its own step follows the base set (SMD-2256).
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
-      // 069's gate writes, likewise (SMD-2267).
+      // 071's gate writes, likewise (SMD-2267).
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_source_gate TO ob1_pf_capture");
 
       // thoughts satisfied, but no INSERT/DELETE on thought_chunks, no INSERT
@@ -2033,7 +2033,7 @@ else {
              `with only SELECT missing it names the reads and the writes, since the triggers read the tables (exit ${projectionSelect.code})`);
       await claims.unsafe("GRANT SELECT ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
 
-      // 069's triggers keep node_state's gate as the caller on a source row's
+      // 071's triggers keep node_state's gate as the caller on a source row's
       // write and a status move between known and unknown; the dependency
       // reads read it. Split by privilege as 068's: the writes alone missing
       // name those writes and not the reads, a plain capture or every delete;
@@ -2041,10 +2041,10 @@ else {
       await claims.unsafe("REVOKE INSERT, UPDATE, DELETE ON ob1_source_gate FROM ob1_pf_capture");
       const gateWrites = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(gateWrites.code === 1 &&
-             /INSERT, UPDATE, DELETE on ob1_source_gate — so the writes that keep the gate — a source row's insert, move or delete \(a structured pass, and a delete of a thought that has one\) and a status_type moving between a known and an unknown one, each needing some of these \(069's triggers keep node_state's gate as the caller\) would fail/.test(writeLine(gateWrites.out)) &&
+             /INSERT, UPDATE, DELETE on ob1_source_gate — so the writes that keep the gate — a source row's insert, move or delete \(a structured pass, and a delete of a thought that has one\) and a status_type moving between a known and an unknown one, each needing some of these \(071's triggers keep node_state's gate as the caller\) would fail/.test(writeLine(gateWrites.out)) &&
              !/windowed capture|every delete|lifecycle read|dependency columns/.test(writeLine(gateWrites.out)) &&
              /GRANT INSERT, UPDATE, DELETE ON ob1_source_gate TO ob1_pf_capture;/.test(gateWrites.out),
-             `without 069's gate writes the check names source writes and status moves — not the dependency reads, not a plain capture, not every delete — with the GRANT (exit ${gateWrites.code})`);
+             `without 071's gate writes the check names source writes and status moves — not the dependency reads, not a plain capture, not every delete — with the GRANT (exit ${gateWrites.code})`);
       await claims.unsafe("REVOKE SELECT ON ob1_source_gate FROM ob1_pf_capture");
       const gateAll = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(gateAll.code === 1 &&

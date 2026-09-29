@@ -7167,7 +7167,7 @@ console.log("\n[33] Migration 068's projection under two connections: writers of
   await db.close();
 }
 
-console.log("\n[34] Migration 069's gate under two connections: a status move and a source write of one thought take turns on its bucket, either way round, and the mirror reads the later commit; a take and a status move of both its thoughts, and a thought's delete and its source row's, commit without a deadlock; node_state(<ids>) reads its links by index on a brain of twenty thousand; the suite leaves no drift (SMD-2267)");
+console.log("\n[35] Migration 071's gate under two connections: a status move and a source write of one thought take turns on its bucket, either way round, and the mirror reads the later commit; a take and a status move of both its thoughts, and a thought's delete and its source row's, commit without a deadlock; node_state(<ids>) reads its links by index on a brain of twenty thousand; the suite leaves no drift (SMD-2267)");
 {
   // test-schema [63] holds the rules on one connection; what it cannot hold is
   // a second writer's uncommitted row. drift()'s source_gate arm is the check.
@@ -7187,7 +7187,7 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   // upsert — a fresh statement — reads X's new status: the mirror row does not
   // gate. Without the lock B read the status A had not committed yet
   // (started) and its row gated.
-  const x = await row("[34] X, a github issue", { kind: "race2267", status_type: "started" });
+  const x = await row("[35] X, a github issue", { kind: "race2267", status_type: "started" });
   {
     const connA = racer(), connB = racer();
     const { p: doneP, open: done } = gate();
@@ -7289,7 +7289,7 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   for (const which of [0, 1]) {
     // A status move of one thought held open; a two-row source insert of both
     // then waits on that thought's bucket and reads its committed status.
-    const pair = await pairApart(`[34] MI ${which}`);
+    const pair = await pairApart(`[35] MI ${which}`);
     multi.push(await holdThenWrite(`two-row insert, thought ${which + 1} moving`,
       `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = '${pair[which]}'`,
       `INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
@@ -7297,7 +7297,7 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
       async () => (await mirror(pair[which])) === false && (await mirror(pair[1 - which])) === true));
     // A two-row status move held open; a source write of one of its thoughts
     // then waits on that thought's bucket and reads the committed status.
-    const moved = await pairApart(`[34] MS ${which}`);
+    const moved = await pairApart(`[35] MS ${which}`);
     multi.push(await holdThenWrite(`source write, thought ${which + 1} of a two-row move`,
       `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${moved[0]}', '${moved[1]}')`,
       `SELECT record_thought_source('${moved[which]}'::uuid, 'github', 'G-MS-${which}', 'x', 'text/plain')`,
@@ -7314,11 +7314,11 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   // moves Y's, a bucket-mate, and waits on the bucket; A records X's source
   // row and commits; B then records Y's and commits.
   {
-    const x = await row("[34] UP x", { kind: "race2267", status_type: "weird" });
+    const x = await row("[35] UP x", { kind: "race2267", status_type: "weird" });
     const [{ b: bucket }] = await db`SELECT hashtext(${x}) & 255 AS b`;
     let y = "";
     for (let k = 0; !y; k++) {
-      const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[34] UP mate ${k}`}, ${{ kind: "race2267", status_type: "weird" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
+      const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[35] UP mate ${k}`}, ${{ kind: "race2267", status_type: "weird" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
       if (c.b === bucket) y = c.id;
     }
     const connA = racer(), connB = racer();
@@ -7358,8 +7358,8 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   // holding A's bucket as it reaches B's mirror row mid-take — is the
   // header's named case, not raced here.
   {
-    const a = await row("[34] TK A", { kind: "race2267", status_type: "started" });
-    const b = await row("[34] TK B", { kind: "race2267", status_type: "started" });
+    const a = await row("[35] TK A", { kind: "race2267", status_type: "started" });
+    const b = await row("[35] TK B", { kind: "race2267", status_type: "started" });
     await db`SELECT record_thought_source(${b}::uuid, 'linear', 'L-TK', 'x', 'text/plain')`;
     const connA = racer(), connB = racer();
     let errors = "", bPid = -1;
@@ -7386,8 +7386,8 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   // B's mirror row — and holds its transaction; the take waits on B's mirror
   // row, then on nothing, and reads the committed statuses.
   {
-    const a = await row("[34] TK2 A", { kind: "race2267", status_type: "started" });
-    const b = await row("[34] TK2 B", { kind: "race2267", status_type: "started" });
+    const a = await row("[35] TK2 A", { kind: "race2267", status_type: "started" });
+    const b = await row("[35] TK2 B", { kind: "race2267", status_type: "started" });
     await db`SELECT record_thought_source(${b}::uuid, 'linear', 'L-TK2', 'x', 'text/plain')`;
     const connA = racer(), connB = racer();
     const { p: doneP, open: done } = gate();
@@ -7420,7 +7420,7 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   // delete waited for T's row while the cascade waited for the source row: a
   // deadlock.
   {
-    const t = await row("[34] DL T", { kind: "race2267", status_type: "started" });
+    const t = await row("[35] DL T", { kind: "race2267", status_type: "started" });
     await db`SELECT record_thought_source(${t}::uuid, 'github', 'G-DL', 'x', 'text/plain')`;
     const connA = racer(), connB = racer();
     let errors = "", bPid = -1;
@@ -7447,7 +7447,7 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   // transaction open (its mirror row gates: Y states started); B moves Y's
   // status to unknown and its trigger waits on Y's bucket. Once A commits, B's update
   // finds the mirror row and sets it not to gate.
-  const y = await row("[34] Y, a github issue", { kind: "race2267", status_type: "started" });
+  const y = await row("[35] Y, a github issue", { kind: "race2267", status_type: "started" });
   {
     const connA = racer(), connB = racer();
     const { p: doneP, open: done } = gate();
@@ -7481,13 +7481,13 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   // of a few thousand rows is one the planner rightly scans whole for forty
   // ids, so every thought is sourced here), and its rows are the whole-brain
   // read's for those ids.
-  await db`INSERT INTO thoughts (content, metadata) SELECT '[34] note ' || g, jsonb_build_object('kind', 'race2267') FROM generate_series(1, 16000) g`;
-  await db`INSERT INTO thoughts (content, metadata) SELECT '[34] ticket ' || g,
+  await db`INSERT INTO thoughts (content, metadata) SELECT '[35] note ' || g, jsonb_build_object('kind', 'race2267') FROM generate_series(1, 16000) g`;
+  await db`INSERT INTO thoughts (content, metadata) SELECT '[35] ticket ' || g,
              jsonb_build_object('kind', 'race2267', 'source', 'linear', 'issue', 'K-' || g, 'status_type', (ARRAY['started', 'completed', 'weird'])[1 + g % 3])
              FROM generate_series(1, 4000) g`;
   await db`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
            SELECT t.id, CASE WHEN t.metadata ? 'issue' THEN 'linear' ELSE 'markdown' END, coalesce(t.metadata->>'issue', t.content), 'x', 'text/plain', encode(sha256('x'), 'hex')
-             FROM thoughts t WHERE t.metadata->>'kind' = 'race2267' AND t.content LIKE '[34] %'
+             FROM thoughts t WHERE t.metadata->>'kind' = 'race2267' AND t.content LIKE '[35] %'
                AND NOT EXISTS (SELECT 1 FROM thought_sources o WHERE o.thought_id = t.id)`;
   await db`INSERT INTO thought_facets (thought_id, kind, payload)
            SELECT s.thought_id, 'link', jsonb_build_object('relation', 'blocked_by', 'system', 'linear', 'target', 'K-' || (1 + (substr(s.identity, 3)::int * 7) % 4000))
@@ -7496,8 +7496,8 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   // links hold nothing — and its gate is the one a scan finds last (inline,
   // the probe read the whole mirror per such link: SMD-2267's probe).
   await db`INSERT INTO thought_facets (thought_id, kind, payload)
-           SELECT s.thought_id, 'link', jsonb_build_object('relation', 'blocks', 'system', 'markdown', 'target', '[34] note ' || (substr(s.identity, 11)::int + 1))
-             FROM thought_sources s WHERE s.system = 'markdown' AND s.identity LIKE '[34] note %' AND substr(s.identity, 11)::int % 10 = 0`;
+           SELECT s.thought_id, 'link', jsonb_build_object('relation', 'blocks', 'system', 'markdown', 'target', '[35] note ' || (substr(s.identity, 11)::int + 1))
+             FROM thought_sources s WHERE s.system = 'markdown' AND s.identity LIKE '[35] note %' AND substr(s.identity, 11)::int % 10 = 0`;
   await db`ANALYZE thoughts, thought_sources, thought_facets, ob1_source_gate, ob1_ticket_head`;
   // Ten tickets that carry a blocked_by link (two in three of their blockers
   // are open, so some are blocked whatever the draw), ten markdown notes with

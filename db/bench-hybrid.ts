@@ -56,11 +56,11 @@
  * most the hybrid's own median at 10,000 rows); then what 068's triggers cost
  * a writer, against the triggers dropped.
  *
- * ── The dependency read (069, SMD-2267) ──────────────────────────────────────
+ * ── The dependency read (071, SMD-2267) ──────────────────────────────────────
  * Then source rows and blocked_by links on the ticket rows, and node_state's
  * dependency columns timed for forty ids and for every thought, and
- * node_dependencies(), on 069's reads against the reads as 068 left them;
- * then what 069's gate triggers cost a writer, against them dropped.
+ * node_dependencies(), on 071's reads against the reads as 068 left them;
+ * then what 071's gate triggers cost a writer, against them dropped.
  */
 
 import { SQL } from "bun";
@@ -124,7 +124,7 @@ async function time(fn: () => Promise<unknown>): Promise<number> {
   return median(ms);
 }
 
-/** node_state(<40 ids>) at each scale run, for the 100,000-row budget (069). */
+/** node_state(<40 ids>) at each scale run, for the 100,000-row budget (071). */
 const keyedBudget = new Map<number, number>();
 for (const n of SCALES) {
   console.log(`\n  ${n.toLocaleString()} rows, ${DIM} dimensions, ${MARKED} rows carry ${IDENT}, ${MARKED} carry the decoy ${DECOY}`);
@@ -303,13 +303,13 @@ for (const n of SCALES) {
   console.log(`    stamping 40% of the rows                ${fmt(stampOn).padStart(9)} vs ${fmt(tStampOff)}   (${stampOn >= tStampOff ? "+" : ""}${((stampOn / tStampOff - 1) * 100).toFixed(0)}%; budget +20%: ${within(stampOn <= tStampOff * 1.2)})`);
   console.log(`    drift() after the last triggered stamp  ${String(drift).padStart(9)}${drift === 0 ? "" : "  ← the triggers left the projection behind"}`);
 
-  // ── The dependency read (069, SMD-2267) ────────────────────────────────────
+  // ── The dependency read (071, SMD-2267) ────────────────────────────────────
   // After the arms above, so their numbers do not move: the ticket rows get
   // their statuses back (the stamps left unknown ones), each head a linear
   // source row, and every even ticket a blocked_by link to the next. Timed on
-  // 069's reads and on the reads as 068 left them (053's source_thought,
+  // 071's reads and on the reads as 068 left them (053's source_thought,
   // 058's node_dependencies and 068's node_state, re-applied from their
-  // files, then 069 again). The
+  // files, then 071 again). The
   // budget, pre-registered: node_state(<40 ids>) at most 2 ms at 10,000 rows,
   // and at 100,000 at most 1.5 times that — the ids' cost, not the brain's.
   await stampTickets("completed", "started");
@@ -325,7 +325,7 @@ for (const n of SCALES) {
   // at a minute (printed ">60 s"): on this brain 053's resolver costs each
   // unheld blocker a GIN scan, seconds a read at 10,000 rows and ten minutes
   // at 100,000 (fourth review pass: three uncut runs of them added half an
-  // hour). 069's keyed read is timed as SELECT * and its rows hashed apart,
+  // hour). 071's keyed read is timed as SELECT * and its rows hashed apart,
   // untimed; a before read is too slow to run twice, so its one timed call is
   // the hash (fifth review pass: timing the hash for both changed what the
   // budget measured).
@@ -364,13 +364,13 @@ for (const n of SCALES) {
   keyedBudget.set(n, keyedNow.keyed);
   const keyedVerdict = n === 10000 ? `budget 2.00 ms: ${within(keyedNow.keyed <= 2)}`
     : keyedBudget.has(10000) ? `budget 1.5 × ${fmt(keyedBudget.get(10000)!)}: ${within(keyedNow.keyed <= 1.5 * keyedBudget.get(10000)!)}` : "no 10,000-row run to compare";
-  console.log(`\n  node_state's dependency read (069), ${dep.sources.toLocaleString()} source rows and ${dep.links.toLocaleString()} links; 069 (median) vs the reads as 068 left them (once):\n`);
+  console.log(`\n  node_state's dependency read (071), ${dep.sources.toLocaleString()} source rows and ${dep.links.toLocaleString()} links; 071 (median) vs the reads as 068 left them (once):\n`);
   const rowsVerdict = keyedBefore.rows === "" ? "rows not compared (cut)" : `rows ${keyedNow.rows === keyedBefore.rows ? "identical" : "DIFFER"}`;
   console.log(`    node_state(<40 ids>), every column      ${fmt(keyedNow.keyed).padStart(9)} vs ${cut(keyedBefore.keyed)}   (${blockedRows} of 40 blocked; ${keyedVerdict}; ${rowsVerdict})`);
   console.log(`    node_state(), the dependency columns    ${fmt(keyedNow.whole).padStart(9)} vs ${cut(keyedBefore.whole)}`);
   console.log(`    node_dependencies()                     ${fmt(keyedNow.deps).padStart(9)} vs ${cut(keyedBefore.deps)}`);
 
-  // What 069's triggers cost a writer, pre-registered: a plain capture at most
+  // What 071's triggers cost a writer, pre-registered: a plain capture at most
   // +0.03 ms, a status move on a sourced row between known and unknown at most
   // +0.2 ms, a source row's write at most +0.2 ms; the bulk stamp, moving 40%
   // of the rows between known and unknown, is printed against +20%. Off is the
@@ -378,7 +378,7 @@ for (const n of SCALES) {
   // they are, so it is rebuilt after, and a last triggered stamp tests them.
   const gateDefs = (await sql`SELECT tgname, tgrelid::regclass::text AS rel, pg_get_triggerdef(oid) AS def FROM pg_trigger
                                WHERE tgname IN ('thought_sources_node_gate_insert', 'thought_sources_node_gate_update', 'thought_sources_node_gate_delete', 'thoughts_node_source_gate_update')`) as { tgname: string; rel: string; def: string }[];
-  if (gateDefs.length !== 4) throw new Error(`expected 069's four row-change triggers, found ${gateDefs.length}`);
+  if (gateDefs.length !== 4) throw new Error(`expected 071's four row-change triggers, found ${gateDefs.length}`);
   const gateTriggers = (on: boolean) => sql.unsafe(gateDefs.map((t) => `DROP TRIGGER IF EXISTS ${t.tgname} ON ${t.rel};${on ? ` ${t.def};` : ""}`).join(" "));
   const gateBlocks = async (call: () => Promise<unknown>) => {
     const on: number[] = [], off: number[] = [];
@@ -422,7 +422,7 @@ for (const n of SCALES) {
   await stampTickets("canceled", "unstarted");
   const [{ gateDrift }] = await sql`SELECT count(*)::int AS "gateDrift" FROM ob1_node_projection_drift()`;
   const flipOn = median(flipsOn), flipOff = median(flipsOff);
-  console.log(`\n  069's triggers on a writer, against them dropped (medians; the bulk stamp three times each way):\n`);
+  console.log(`\n  071's triggers on a writer, against them dropped (medians; the bulk stamp three times each way):\n`);
   console.log(`    a plain upsert_thought                  ${fmt(gateCapture.on).padStart(9)} vs ${fmt(gateCapture.off)}   (+${fmt(gateCapture.on - gateCapture.off)}; budget 0.03 ms: ${within(gateCapture.on - gateCapture.off <= 0.03)})`);
   console.log(`    a sourced row's status, known↔unknown   ${fmt(gateStatus.on).padStart(9)} vs ${fmt(gateStatus.off)}   (+${fmt(gateStatus.on - gateStatus.off)}; budget 0.20 ms: ${within(gateStatus.on - gateStatus.off <= 0.2)})`);
   console.log(`    record_thought_source, a new row        ${fmt(gateSource.on).padStart(9)} vs ${fmt(gateSource.off)}   (+${fmt(gateSource.on - gateSource.off)}; budget 0.20 ms: ${within(gateSource.on - gateSource.off <= 0.2)})`);

@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 069: node_state's dependency columns read the ids they are asked
+-- Migration 071: node_state's dependency columns read the ids they are asked
 --                for — the gate stored and kept current on write, the links
 --                probed by index (SMD-2267)
 -- =============================================================================
@@ -207,12 +207,12 @@
 -- =============================================================================
 
 -- Each prerequisite named on its own, as 068 names its two. Driven by
--- test-upgrade.ts [20u].
+-- test-upgrade.ts [20w].
 DO $g$
 BEGIN
   IF to_regclass('thought_sources') IS NULL OR to_regprocedure('source_thought(text, text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 069 needs 053 (thought_sources, source_thought); this schema lacks it',
+      MESSAGE = 'migration 071 needs 053 (thought_sources, source_thought); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character
       -- back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
@@ -220,7 +220,7 @@ BEGIN
   END IF;
   IF to_regclass('ob1_ticket_head') IS NULL OR to_regclass('ob1_superseded_by') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 069 needs 068 (ob1_ticket_head, ob1_superseded_by); this schema lacks it',
+      MESSAGE = 'migration 071 needs 068 (ob1_ticket_head, ob1_superseded_by); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -242,7 +242,7 @@ CREATE TABLE IF NOT EXISTS ob1_source_gate (
   gates      boolean NOT NULL     -- the thought's own status_type is a known one
 );
 COMMENT ON TABLE ob1_source_gate IS
-  'One row per thought_sources row: its system, and whether its thought''s own metadata.status_type is in node_lifecycle_types(). A system gates — can say a blocker is settled — while some row of it does (058''s gate, per row). Kept current by the thought_sources_node_gate_* and thoughts_node_source_gate_update triggers; ob1_node_projection_drift() checks it, ob1_rebuild_source_gate() repairs it. Migration 069 / SMD-2267.';
+  'One row per thought_sources row: its system, and whether its thought''s own metadata.status_type is in node_lifecycle_types(). A system gates — can say a blocker is settled — while some row of it does (058''s gate, per row). Kept current by the thought_sources_node_gate_* and thoughts_node_source_gate_update triggers; ob1_node_projection_drift() checks it, ob1_rebuild_source_gate() repairs it. Migration 071 / SMD-2267.';
 
 -- The gate: does any row of this system gate? One probe.
 CREATE INDEX IF NOT EXISTS ob1_source_gate_system_idx
@@ -288,7 +288,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_source_gate_reconcile(uuid[]) IS
-  'Brings ob1_source_gate to thought_sources and thoughts for the thoughts given (every row when NULL; an empty array touches nothing): deletes what vanished, upserts what changed, and returns the counts. Takes no lock itself — the triggers and ob1_rebuild_source_gate() do — so it is internal: a direct call races the triggers (call the rebuild instead). Migration 069 / SMD-2267.';
+  'Brings ob1_source_gate to thought_sources and thoughts for the thoughts given (every row when NULL; an empty array touches nothing): deletes what vanished, upserts what changed, and returns the counts. Takes no lock itself — the triggers and ob1_rebuild_source_gate() do — so it is internal: a direct call races the triggers (call the rebuild instead). Migration 071 / SMD-2267.';
 
 CREATE OR REPLACE FUNCTION ob1_rebuild_source_gate()
 RETURNS TABLE (written int, deleted int)
@@ -312,7 +312,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_rebuild_source_gate() IS
-  'Reconciles the whole of ob1_source_gate under SHARE locks on thoughts and thought_sources and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 069''s seed, the repair after a write made with either table''s user triggers disabled (beside ob1_rebuild_node_projection(), 068''s), and a step for any migration that changes node_lifecycle_types(), which every mirror row is computed from. Migration 069 / SMD-2267.';
+  'Reconciles the whole of ob1_source_gate under SHARE locks on thoughts and thought_sources and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 071''s seed, the repair after a write made with either table''s user triggers disabled (beside ob1_rebuild_node_projection(), 068''s), and a step for any migration that changes node_lifecycle_types(), which every mirror row is computed from. Migration 071 / SMD-2267.';
 
 -- 068's two arms verbatim, and the mirror's: every stored row against its
 -- tables computed fresh.
@@ -353,7 +353,7 @@ AS $$
    WHERE (g.thought_id, g.system, g.gates) IS DISTINCT FROM (f.thought_id, f.system, f.gates)
 $$;
 COMMENT ON FUNCTION ob1_node_projection_drift() IS
-  'Every row where the node_state projection differs from its formulas computed fresh — projection (head or superseded_by, 058''s formulas; source_gate, each source row''s system and whether its thought states a known status_type), key, the stored row and the fresh one as text, NULL where one side has none. Zero rows when exact. Computes the whole brain: a check, not a read path. Migration 068 / SMD-2256; the gate, 069 / SMD-2267.';
+  'Every row where the node_state projection differs from its formulas computed fresh — projection (head or superseded_by, 058''s formulas; source_gate, each source row''s system and whether its thought states a known status_type), key, the stored row and the fresh one as text, NULL where one side has none. Zero rows when exact. Computes the whole brain: a check, not a read path. Migration 068 / SMD-2256; the gate, 071 / SMD-2267.';
 
 -- ---------------------------------------------------------------------------
 -- The triggers
@@ -389,7 +389,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_source_gate_lock(uuid[]) IS
-  'Takes the gate''s advisory transaction locks for the thoughts given — class 22563, a bucket of 256 per thought id, exclusive, in bucket order — so a transaction holds at most 256 of them. The thought_sources triggers'' insert and update paths and the thoughts status trigger take them before they read a thought''s status or write a mirror row. Migration 069 / SMD-2267.';
+  'Takes the gate''s advisory transaction locks for the thoughts given — class 22563, a bucket of 256 per thought id, exclusive, in bucket order — so a transaction holds at most 256 of them. The thought_sources triggers'' insert and update paths and the thoughts status trigger take them before they read a thought''s status or write a mirror row. Migration 071 / SMD-2267.';
 
 CREATE OR REPLACE FUNCTION ob1_source_gate_sync()
 RETURNS trigger
@@ -432,7 +432,7 @@ BEGIN
     END IF;
     IF current_setting('transaction_isolation') = 'repeatable read' THEN
       RAISE EXCEPTION USING
-        MESSAGE = 'this write moves a source row, and node_state''s gate (migration 069) cannot be kept under REPEATABLE READ',
+        MESSAGE = 'this write moves a source row, and node_state''s gate (migration 071) cannot be kept under REPEATABLE READ',
         HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of source rows and statuses is serializable.',
         ERRCODE = 'feature_not_supported';
     END IF;
@@ -458,7 +458,7 @@ BEGIN
   END IF;
   IF current_setting('transaction_isolation') = 'repeatable read' THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'this write moves a source row, and node_state''s gate (migration 069) cannot be kept under REPEATABLE READ',
+      MESSAGE = 'this write moves a source row, and node_state''s gate (migration 071) cannot be kept under REPEATABLE READ',
       HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of source rows and statuses is serializable.',
       ERRCODE = 'feature_not_supported';
   END IF;
@@ -471,7 +471,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_source_gate_sync() IS
-  'The thought_sources_node_gate_* row-change triggers'' body. A DELETE returns when it deleted nothing, and otherwise drops the deleted rows'' mirror rows by key (thought_id is the source row''s key), reading nothing else and taking no lock. An INSERT takes the new rows'' buckets (ob1_source_gate_lock) and upserts their mirror rows in one statement. An UPDATE takes, from the transition tables, the thoughts whose source row vanished, appeared or changed system; returns at once when there are none; otherwise takes their buckets and reconciles their mirror rows. The INSERT and UPDATE paths refuse under REPEATABLE READ. Migration 069 / SMD-2267.';
+  'The thought_sources_node_gate_* row-change triggers'' body. A DELETE returns when it deleted nothing, and otherwise drops the deleted rows'' mirror rows by key (thought_id is the source row''s key), reading nothing else and taking no lock. An INSERT takes the new rows'' buckets (ob1_source_gate_lock) and upserts their mirror rows in one statement. An UPDATE takes, from the transition tables, the thoughts whose source row vanished, appeared or changed system; returns at once when there are none; otherwise takes their buckets and reconciles their mirror rows. The INSERT and UPDATE paths refuse under REPEATABLE READ. Migration 071 / SMD-2267.';
 
 CREATE OR REPLACE FUNCTION ob1_source_gate_status()
 RETURNS trigger
@@ -496,7 +496,7 @@ BEGIN
   -- it, and the move would be lost without a conflict.
   IF current_setting('transaction_isolation') = 'repeatable read' THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'this write moves a thought''s status_type between known and unknown, and node_state''s gate (migration 069) cannot be kept under REPEATABLE READ',
+      MESSAGE = 'this write moves a thought''s status_type between known and unknown, and node_state''s gate (migration 071) cannot be kept under REPEATABLE READ',
       HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of source rows and statuses is serializable.',
       ERRCODE = 'feature_not_supported';
   END IF;
@@ -518,7 +518,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_source_gate_status() IS
-  'thoughts_node_source_gate_update''s body: from an UPDATE''s transition tables, the thoughts whose status_type moved between one node_lifecycle_types() knows and any other; returns at once when there are none; refuses under REPEATABLE READ; otherwise takes their buckets (ob1_source_gate_lock) and sets their mirror rows'' gates from the rows as they stand. Migration 069 / SMD-2267.';
+  'thoughts_node_source_gate_update''s body: from an UPDATE''s transition tables, the thoughts whose status_type moved between one node_lifecycle_types() knows and any other; returns at once when there are none; refuses under REPEATABLE READ; otherwise takes their buckets (ob1_source_gate_lock) and sets their mirror rows'' gates from the rows as they stand. Migration 071 / SMD-2267.';
 
 CREATE OR REPLACE FUNCTION ob1_source_gate_truncate()
 RETURNS trigger
@@ -532,7 +532,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_source_gate_truncate() IS
-  'thought_sources_node_gate_truncate''s body: emptying thought_sources — directly or through a cascading truncation of thoughts — leaves no source row, so the mirror is emptied. Migration 069 / SMD-2267.';
+  'thought_sources_node_gate_truncate''s body: emptying thought_sources — directly or through a cascading truncation of thoughts — leaves no source row, so the mirror is emptied. Migration 071 / SMD-2267.';
 
 DROP TRIGGER IF EXISTS thought_sources_node_gate_insert ON thought_sources;
 CREATE TRIGGER thought_sources_node_gate_insert
@@ -588,7 +588,7 @@ AS $$
    WHERE f.kind = 'link' AND f.payload->>'relation' IN ('blocks', 'blocked_by')
 $$;
 COMMENT ON FUNCTION node_dependencies() IS
-  'One row per blocks / blocked_by link facet (053), open or closed: system, the blocked and blocker identities (a blocks facet names its holder the blocker, a blocked_by its target), active (valid_until unset), changed_at (the later of written and closed) and gates — whether some source row of the system states a known status_type on its own metadata (a status borrowed through a Linear ticket claim does not count). A system that does not gate cannot say a blocker is settled, so node_state reads only gating active links. The gate reads ob1_source_gate, kept current on write. Migration 058 / SMD-2074 (the gate SMD-2218); stored, 069 / SMD-2267.';
+  'One row per blocks / blocked_by link facet (053), open or closed: system, the blocked and blocker identities (a blocks facet names its holder the blocker, a blocked_by its target), active (valid_until unset), changed_at (the later of written and closed) and gates — whether some source row of the system states a known status_type on its own metadata (a status borrowed through a Linear ticket claim does not count). A system that does not gate cannot say a blocker is settled, so node_state reads only gating active links. The gate reads ob1_source_gate, kept current on write. Migration 058 / SMD-2074 (the gate SMD-2218); stored, 071 / SMD-2267.';
 
 -- ---------------------------------------------------------------------------
 -- source_thought — 053's resolver, its board-sync fallback by 068's index
@@ -628,7 +628,7 @@ AS $$
   )
 $$;
 COMMENT ON FUNCTION source_thought(text, text) IS
-  'The thought a source identity names, or NULL: thought_sources first; for `linear`, the head of the board sync''s twin chain claiming metadata.issue (SMD-1954), so a link facet''s target resolves on a brain the sync filled before 053. Readers resolve link targets through this; the link itself stores the identity. Migration 053 / SMD-1867; the claim found by 068''s issue index, 069 / SMD-2267.';
+  'The thought a source identity names, or NULL: thought_sources first; for `linear`, the head of the board sync''s twin chain claiming metadata.issue (SMD-1954), so a link facet''s target resolves on a brain the sync filled before 053. Readers resolve link targets through this; the link itself stores the identity. Migration 053 / SMD-1867; the claim found by 068''s issue index, 071 / SMD-2267.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_system_gates — one system's gate, by the partial index
@@ -649,7 +649,7 @@ STABLE
 SET enable_seqscan = off
 AS $$ SELECT EXISTS (SELECT 1 FROM ob1_source_gate g WHERE g.system = p_system AND g.gates) $$;
 COMMENT ON FUNCTION ob1_system_gates(text) IS
-  'Whether a system gates — some source row of it states a known status_type on its own thought (058''s gate, SMD-2218) — as one probe of ob1_source_gate''s partial index. The keyed dependency read''s gate. Migration 069 / SMD-2267.';
+  'Whether a system gates — some source row of it states a known status_type on its own thought (058''s gate, SMD-2218) — as one probe of ob1_source_gate''s partial index. The keyed dependency read''s gate. Migration 071 / SMD-2267.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_node_dependencies_of — the dependency columns, every thought or the ids
@@ -729,7 +729,7 @@ AS $$
    GROUP BY r.thought_id
 $$;
 COMMENT ON FUNCTION ob1_node_dependencies_of(uuid[]) IS
-  'For each thought named (every thought when NULL) that some gating active blocks / blocked_by link names by its ticket: its open blockers (sorted, a linear one bare and another system''s as system:key), those with no known status, and in_dependencies (always true — a thought no such link names is not listed). The ids read their links by index; NULL reads 058''s whole-brain formulation. What node_state''s dependency columns read. Migration 069 / SMD-2267.';
+  'For each thought named (every thought when NULL) that some gating active blocks / blocked_by link names by its ticket: its open blockers (sorted, a linear one bare and another system''s as system:key), those with no known status, and in_dependencies (always true — a thought no such link names is not listed). The ids read their links by index; NULL reads 058''s whole-brain formulation. What node_state''s dependency columns read. Migration 071 / SMD-2267.';
 
 -- ---------------------------------------------------------------------------
 -- node_state — 068's, its two dependency joins one keyed join
@@ -754,4 +754,4 @@ AS $$
    WHERE p_ids IS NULL OR l.thought_id = ANY(p_ids)
 $$;
 COMMENT ON FUNCTION node_state(uuid[]) IS
-  'Per thought (every thought when p_ids is NULL, else those named): node_lifecycle()''s columns; open (known and not settled, NULL when the status_type is missing or unknown); blocked (open blockers, and the thought itself not settled); blockers (its ticket''s open blockers from gating active links, a blocker settled only by its own known lifecycle, sorted, linear bare and another system''s as system:key, NULL when none — kept on a settled thought); unknown_blockers (those with no known status); in_dependencies (a gating active link names its ticket); superseded_by (the newest thought superseding it, NULL when current — ob1_superseded_by''s). Coverage is open IS NOT NULL; freshness is synced_at and created_at, never updated_at. No top-level WITH, so a caller''s planner pulls it up: a read of the lifecycle and superseded_by columns is primary-key lookups from the caller''s ids, and the dependency join runs only when its columns are read — by index from p_ids when given (inlined with its ids; a generic plan scans every thought, SMD-2380), every link when NULL (ob1_node_dependencies_of, the gate stored). The one read graph-centrality and search rank by. Migration 058 / SMD-2074; stored, 068 / SMD-2256; keyed, 069 / SMD-2267.';
+  'Per thought (every thought when p_ids is NULL, else those named): node_lifecycle()''s columns; open (known and not settled, NULL when the status_type is missing or unknown); blocked (open blockers, and the thought itself not settled); blockers (its ticket''s open blockers from gating active links, a blocker settled only by its own known lifecycle, sorted, linear bare and another system''s as system:key, NULL when none — kept on a settled thought); unknown_blockers (those with no known status); in_dependencies (a gating active link names its ticket); superseded_by (the newest thought superseding it, NULL when current — ob1_superseded_by''s). Coverage is open IS NOT NULL; freshness is synced_at and created_at, never updated_at. No top-level WITH, so a caller''s planner pulls it up: a read of the lifecycle and superseded_by columns is primary-key lookups from the caller''s ids, and the dependency join runs only when its columns are read — by index from p_ids when given (inlined with its ids; a generic plan scans every thought, SMD-2380), every link when NULL (ob1_node_dependencies_of, the gate stored). The one read graph-centrality and search rank by. Migration 058 / SMD-2074; stored, 068 / SMD-2256; keyed, 071 / SMD-2267.';

@@ -517,7 +517,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-1812; the entity name gate's allowlist, SMD-2300; a derivation never
   // paired with its inputs, SMD-2292; the pass settling stale proposals,
   // SMD-2297), 068 (the node_state projection kept current on write,
-  // SMD-2256) and 069 (node_state's dependency columns keyed, the gate
+  // SMD-2256) and 071 (node_state's dependency columns keyed, the gate
   // stored, SMD-2267) stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -587,15 +587,15 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // rebuild_derived on its own body, refusing by name without 036, 061 or
   // 063 ([20s]); 068 adds two tables, an index and four triggers on 001's
   // thoughts and redefines 058's node_lifecycle and node_state on their own
-  // signatures, refusing by name without 025 or 058 ([20t]); 069 adds a
+  // signatures, refusing by name without 025 or 058 ([20t]); 071 adds a
   // table, an index and four triggers on 053's thought_sources and one on
   // 001's thoughts, and redefines 053's source_thought, 058's
   // node_dependencies and node_state and 068's drift on their own signatures,
   // refusing by name without 053 or 068
-  // ([20u]) — all recorded by the baseline with their prerequisites present,
+  // ([20w]) — all recorded by the baseline with their prerequisites present,
   // so none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 40, `030 is among the last forty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 42, `030 is among the last forty-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2909,9 +2909,9 @@ console.log("\n[20t] Migration 068 on a schema without 058 — refused up front,
   await sql.close();
 }
 
-console.log("\n[20u] Migration 069 on a schema without 068 — refused up front, naming 068 and --reapply; applied over a brain with source rows and links, node_state() and node_dependencies() read what they did and the seed leaves no drift (SMD-2267)");
+console.log("\n[20w] Migration 071 on a schema without 068 — refused up front, naming 068 and --reapply; applied over a brain with source rows and links, node_state() and node_dependencies() read what they did and the seed leaves no drift (SMD-2267)");
 {
-  // 069 redefines 068's drift and reads its tables from node_state: without
+  // 071 redefines 068's drift and reads its tables from node_state: without
   // the guard a schema stopping before 068 would fail at a bare "relation
   // ob1_superseded_by does not exist" in the first call. 053 is older than
   // every schema that reaches 058, so 068 is the check reached here.
@@ -2921,24 +2921,24 @@ console.log("\n[20u] Migration 069 on a schema without 068 — refused up front,
   assert(baselined.code === 0, `--baseline records every migration over the pre-068 schema (exit ${baselined.code})`);
   const sql = new SQL({ url: URL_, max: 1 });
   const the068 = MIGRATIONS.find((f) => f.startsWith("068_"))!;
-  const the069 = MIGRATIONS.find((f) => f.endsWith("_node_dependencies_keyed.sql"))!;  // by name: renumbered when main takes its number
-  await sql`DELETE FROM schema_migrations WHERE name = ${the069}`;
+  const the071 = MIGRATIONS.find((f) => f.endsWith("_node_dependencies_keyed.sql"))!;  // by name: renumbered when main takes its number
+  await sql`DELETE FROM schema_migrations WHERE name = ${the071}`;
   // 068 stays recorded and never tried — the baseline is what an adopted
-  // brain's ledger says — so 069 is the first file the plain run applies.
+  // brain's ledger says — so 071 is the first file the plain run applies.
   const plain = await migrate();
   const ok = plain.code === 1 &&
-    /069_node_dependencies_keyed\.sql\s+FAILED: migration 069 needs 068 \(ob1_ticket_head, ob1_superseded_by\); this schema lacks it/.test(plain.out) &&
+    /071_node_dependencies_keyed\.sql\s+FAILED: migration 071 needs 068 \(ob1_ticket_head, ob1_superseded_by\); this schema lacks it/.test(plain.out) &&
     /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
-  assert(ok, `a plain run fails at 069 naming 068 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
-  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the069}`)[0].c) === 0, "…069 records nothing");
+  assert(ok, `a plain run fails at 071 naming 068 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the071}`)[0].c) === 0, "…071 records nothing");
   // The file locks thoughts, then thought_sources, before its first trigger:
   // CREATE TRIGGER would take thought_sources' lock first, the order opposite
   // to a delete's cascade, and a delete of a sourced thought during the
   // migration deadlocked with it — nine runs in ten under six writers, five of
   // them failing the migration (fourth and fifth review passes).
-  const src069 = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "migrations", the069), "utf8").split("\n").filter((l) => !/^\s*--/.test(l)).join("\n");
-  const lockAt = src069.search(/LOCK TABLE thoughts, thought_sources IN SHARE ROW EXCLUSIVE MODE;/);
-  const firstTrigger = src069.search(/CREATE TRIGGER/);
+  const src071 = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "migrations", the071), "utf8").split("\n").filter((l) => !/^\s*--/.test(l)).join("\n");
+  const lockAt = src071.search(/LOCK TABLE thoughts, thought_sources IN SHARE ROW EXCLUSIVE MODE;/);
+  const firstTrigger = src071.search(/CREATE TRIGGER/);
   assert(lockAt >= 0 && firstTrigger > lockAt,
     `…and it locks thoughts, then thought_sources, before its first CREATE TRIGGER (${lockAt}, ${firstTrigger})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the068 });
@@ -2948,11 +2948,11 @@ console.log("\n[20u] Migration 069 on a schema without 068 — refused up front,
   // and a comment on the blocked ticket.
   const row = async (content: string, meta: Record<string, unknown>) =>
     (await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, ${meta}::jsonb) RETURNING id`)[0].id as string;
-  const blocked = await row("[20u] the blocked ticket", { source: "linear", issue: "U-10", status: "Todo", status_type: "unstarted" });
-  const blocker = await row("[20u] its blocker", { source: "linear", issue: "U-11", status: "In Progress", status_type: "started" });
-  const issue = await row("[20u] a github issue", { status_type: "completed" });
-  const doc = await row("[20u] a markdown doc", {});
-  await row("[20u] a comment", { ticket: "U-10" });
+  const blocked = await row("[20w] the blocked ticket", { source: "linear", issue: "U-10", status: "Todo", status_type: "unstarted" });
+  const blocker = await row("[20w] its blocker", { source: "linear", issue: "U-11", status: "In Progress", status_type: "started" });
+  const issue = await row("[20w] a github issue", { status_type: "completed" });
+  const doc = await row("[20w] a markdown doc", {});
+  await row("[20w] a comment", { ticket: "U-10" });
   for (const [id, system, identity] of [[blocked, "linear", "U-10"], [blocker, "linear", "U-11"], [issue, "github", "G-10"], [doc, "markdown", "notes.md"]] as const)
     await sql`SELECT record_thought_source(${id}::uuid, ${system}, ${identity}, 'x', 'text/plain')`;
   await sql`SELECT record_source_links(${blocked}::uuid, 'linear', ${JSON.stringify([{ relation: "blocked_by", target: "U-11" }, { relation: "blocked_by", target: "U-12" }])}::text::jsonb)`;
@@ -2964,7 +2964,7 @@ console.log("\n[20u] Migration 069 on a schema without 068 — refused up front,
     deps: (await sql`SELECT * FROM node_dependencies() ORDER BY system, blocked, blocker, active`).map((r: Record<string, unknown>) => JSON.stringify(r)),
   });
   const before = await read();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the069 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the071 });
   const after = await read();
   const keyed = (await sql`SELECT * FROM node_state(${`{${blocked}}`}::uuid[])`)[0] as { blocked: boolean; blockers: string[] | null };
   const [state] = await sql`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_source_gate) AS rows,

@@ -1685,7 +1685,7 @@ if (configFailed) {
                 + "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes, and a delete of a ticket row or of any thought something supersedes, included"
                 + " (068's triggers keep the node_state projection as the caller)");
             }
-            // 069's triggers keep node_state's gate as the caller on a source
+            // 071's triggers keep node_state's gate as the caller on a source
             // row's write (a delete of a sourced thought included, through its
             // cascade) and on a status move between known and unknown; the
             // dependency reads read it. A plain capture and an edit that moves
@@ -1694,7 +1694,7 @@ if (configFailed) {
             if (gateMiss.length) {
               fails.push((gateMiss.includes("SELECT") ? "the reads of node_state's dependency columns that reach the gate (graph-centrality --startable and --decay-blocked, node_dependencies()' gates, a keyed read of sourced or linked thoughts, a generic plan) and " : "")
                 + "the writes that keep the gate — a source row's insert, move or delete (a structured pass, and a delete of a thought that has one) and a status_type moving between a known and an unknown one, each needing some of these"
-                + " (069's triggers keep node_state's gate as the caller)");
+                + " (071's triggers keep node_state's gate as the caller)");
             }
             const why = ` — so ${fails.join(", and ")} would fail`;
             if (missingByTable.size) {
@@ -2787,7 +2787,7 @@ if (configFailed) {
         // thought (the cascade nulling pointers to it), among them — so it
         // fails, and the image's entrypoint does not start the server;
         // SERIALIZABLE keeps the projection exact only if every ticket writer
-        // is serializable (SMD-2256, second review pass). Since 069 its gate
+        // is serializable (SMD-2256, second review pass). Since 071 its gate
         // refuses, under it, a write of a source row and a status move between
         // a known and an unknown status_type too (SMD-2267). The fix names where
         // the setting comes from (third review pass: a role-in-database or a
@@ -2808,11 +2808,11 @@ if (configFailed) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
           } else if (projection && /^repeatable read$/i.test(level)) {
             add("transaction isolation", "fail",
-                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included)${gate ? ", and 069's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type" : ""} — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included)${gate ? ", and 071's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type" : ""} — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
                 fixIsolation);
           } else {
             add("transaction isolation", "warn",
-                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? `; and 068's node_state projection stays exact only if every writer of ticket rows is serializable${gate ? ", and 069's gate only if every writer of source rows and statuses is" : ""}` : ""}`,
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? `; and 068's node_state projection stays exact only if every writer of ticket rows is serializable${gate ? ", and 071's gate only if every writer of source rows and statuses is" : ""}` : ""}`,
                 fixIsolation);
           }
         } catch (e) {
