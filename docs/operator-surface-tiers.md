@@ -105,14 +105,15 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **The REST core is the only resource server that authorizes.**
   - Access keys keep their read / write / capture scopes (`server-portable/auth.ts`).
   - The authorization server's tokens map to the same three scopes: `brain:read`, `brain:write`, `brain:capture`.
-  - The audit actor is the subject, plus `act` when a service delegated. Subjects are namespaced by kind, `key:<name>` or `oauth:<sub>`, so a key can never read as a signed-in identity.
+  - The audit actor is the subject, plus `act` when a service delegated. A key's subject is its bare name, and an OAuth subject is `oauth:<sub>`. So a key can never read as a signed-in identity, because `keygen.ts` allows no `:` in a key name. Existing rows, `actor:` egress terms and the search tools' `actor` filter keep matching, since each already reads a key's bare name.
   - No privilege exists only in OAuth.
 - **MCP server:**
   - While the authorization server is reachable, it serves protected-resource metadata and answers 401 with `WWW-Authenticate`. The challenge goes only on requests whose `Host` is the public origin, so a keyless loopback client gets today's plain 401 rather than an OAuth flow it can never finish. Keying this on `Host` fails safe; no security rule keys on `Host`.
   - While configured but unreachable, OAuth clients get a 503, not a 401 that would restart their sign-in.
   - It exchanges each incoming OAuth token (audience = the public `/mcp` resource) for a REST-core token under its own client credentials. It caches the result by the incoming token, never by subject alone. One operator can hold a read-scope connector and a write-scope connector.
   - The MCP authorization spec forbids passing the received token upstream; exchange is how the hop keeps both the subject and the delegating service.
-- **Access-key MCP clients** (the hook, `?key=` connectors) are **forwarded** (decision 7, SMD-2286 step 4). The MCP server passes the key to the REST core with its own service key. The REST core checks the key and records the key's name as the subject and the MCP service as the actor.
+- **Access-key MCP clients** (the hook, `?key=` connectors) are **forwarded** (decision 7, SMD-2286 step 4). The MCP server passes the key to the REST core with its own forwarder key. The REST core checks both, and records the key's name as the subject and the MCP service as the actor.
+  - The forwarder is a key with a `forward` scope that grants nothing by itself. The REST core refuses any other key in the forwarder's place, so a client holding two keys cannot stamp one as the other's actor (SMD-2284).
   - This is not the token passthrough the spec forbids. That rule covers OAuth tokens issued for the MCP server, and a brain key is the REST core's own credential, checked there.
   - Forwarding works in every state and needs no authorization server. Keys therefore survive its outage, the capture hook included.
 - **GUI:**
