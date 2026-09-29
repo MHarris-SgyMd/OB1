@@ -1501,7 +1501,10 @@ export async function setPathWithoutTemp(tx) {
  * `schema_migrations` of its shape, with `name` and `sha256` — and public
  * holds no brain: that ledger and `thoughts` beside it. An empty ledger
  * alone in public, which --dry-run or a first run failed at 001 leaves, is
- * no brain. Building on would start a second brain in public. Every schema
+ * no brain. `adopting` (--baseline, which records a schema built by hand
+ * and has just found public.thoughts) takes public's `thoughts` alone as
+ * the brain there. `viaUser` is true where the schema is the role's own and
+ * the path names it as `"$user"`, which the operator does not see spelled. Building on would start a second brain in public. Every schema
  * the path resolves to (current_schemas: those this role may use) is read,
  * not the first ledger a name resolves to, so another tool's
  * `schema_migrations` (Rails', Ecto's: a `version`, no `sha256`) neither
@@ -1519,11 +1522,12 @@ export async function setPathWithoutTemp(tx) {
  * which need no privilege on the schema. Bun.sql only (a tagged-template
  * client).
  */
-export async function pinPublicFirst(sql) {
+export async function pinPublicFirst(sql, adopting = false) {
   const [state] = await sql`
     SELECT current_setting('search_path') AS path,
            current_setting('server_version_num')::int AS version,
-           current_schemas(false)::text[] AS schemas`;
+           current_schemas(false)::text[] AS schemas,
+           current_user AS "user"`;
   /** This migrator's ledger in `schema`: `schema_migrations` with its two columns. */
   const holdsBrain = async (schema) =>
     (await sql`
@@ -1532,9 +1536,12 @@ export async function pinPublicFirst(sql) {
                  AND a.attnum > 0 AND NOT a.attisdropped) = 2 AS brain`)[0].brain;
   const publicThoughts = (await sql`SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                                                      WHERE n.nspname = 'public' AND c.relname = 'thoughts') AS present`)[0].present;
-  if (!(publicThoughts && (await holdsBrain("public")))) {
+  if (!(publicThoughts && (adopting || (await holdsBrain("public"))))) {
     for (const schema of state.schemas) {
-      if (schema !== "public" && (await holdsBrain(schema))) return { refused: "ledger", schema };
+      if (schema !== "public" && (await holdsBrain(schema))) {
+        const viaUser = schema === state.user && searchPathSchemas(state.path, state.version).includes("$user");
+        return { refused: "ledger", schema, viaUser };
+      }
     }
   }
   if (state.schemas[0] === "public") return { refused: null, was: null };

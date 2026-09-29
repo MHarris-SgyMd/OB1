@@ -28,7 +28,7 @@ import { SQL } from "bun";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, reembedKey } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, quoteIdent, reembedKey } from "./config.mjs";
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
@@ -3262,23 +3262,40 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
     // A brain in another schema, public empty — as the old migrator left one
     // under a path that put another schema first; here, the brain built in
     // public and the schema renamed. Building on would start a second brain.
+    // Built as a first run often goes: a --dry-run, whose empty ledger in
+    // public is no brain in another schema, then the plain run.
     await dropSchema(URL_);
+    const dryFirst = await migrate("--dry-run");
     const built = await migrate();
-    assert(built.code === 0, `(a brain built for the case, exit ${built.code})`);
+    assert(dryFirst.code === 0 && built.code === 0 && new RegExp(`applied ${MIGRATIONS.length}, skipped 0`).test(built.out),
+           `a --dry-run then a plain run on a fresh database builds the brain in public (exit ${dryFirst.code}, ${built.code})`);
     // With the brain in public, another schema's ledger of this shape on the
     // path is not a brain to refuse over: the run goes on in public.
     await admin.unsafe("DROP SCHEMA IF EXISTS tu_copy CASCADE; CREATE SCHEMA tu_copy; CREATE TABLE tu_copy.schema_migrations (name text PRIMARY KEY, sha256 text)");
     const alongside = await runMigrator(withPath("tu_copy,public"), MIGRATOR_ENV);
+    // --baseline adopts a brain built by hand: public's thoughts with no
+    // ledger yet is the brain there, as --baseline's own guard reads it.
+    await admin.unsafe("DROP TABLE public.schema_migrations");
+    const adopted = await runMigrator(withPath("tu_copy,public"), MIGRATOR_ENV, "--baseline");
     await admin.unsafe("DROP SCHEMA tu_copy CASCADE");
     assert(alongside.code === 0 && current.test(alongside.out),
            `…while with the brain in public, another schema's ledger of this shape on the path refuses nothing (exit ${alongside.code})`);
+    assert(adopted.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(adopted.out) && (await schemasOf("schema_migrations")) === "public",
+           `…nor stops --baseline adopting public's thoughts, with no ledger yet, as the brain there (exit ${adopted.code})`);
     await admin.unsafe("DROP SCHEMA IF EXISTS tu_brain CASCADE; DROP SCHEMA IF EXISTS tu_rails CASCADE; ALTER SCHEMA public RENAME TO tu_brain; CREATE SCHEMA public");
     try {
       const second = await runMigrator(withPath("tu_brain,public"), MIGRATOR_ENV);
-      assert(second.code === 2 && /Refused: this connection's search_path reaches a brain in schema "tu_brain" — this migrator's ledger — and public holds none/.test(second.out)
+      assert(second.code === 2 && /Refused: this connection's search_path reaches a brain in schema "tu_brain" — this migrator's ledger — and public holds no brain/.test(second.out)
                && /take "tu_brain" off this connection's search_path/.test(second.out) && /a move by hand, as the owner of both schemas, minding whatever else public holds\. Nothing was changed\./.test(second.out)
                && !/ALTER SCHEMA/.test(second.out) && (await schemasOf("schema_migrations")) === "tu_brain",
              `a brain in another schema on the path, none in public: refused in words — take it off the path, or move it by hand — no statement printed, and nothing created in public (exit ${second.code})`);
+      // A thoughts in public with no ledger of this migrator's is no brain
+      // there: refused alike.
+      await admin.unsafe("CREATE TABLE public.thoughts (id int)");
+      const halfPublic = await runMigrator(withPath("tu_brain,public"), MIGRATOR_ENV);
+      await admin.unsafe("DROP TABLE public.thoughts");
+      assert(halfPublic.code === 2 && /reaches a brain in schema "tu_brain"/.test(halfPublic.out),
+             `…and refused alike where public holds a thoughts but no ledger of this migrator's (exit ${halfPublic.code})`);
       // Behind another tool's ledger earlier on the path (Rails': a version
       // column, no sha256), and behind an empty public first: every schema
       // on the path is read, not the first ledger a name resolves to.
@@ -3305,6 +3322,18 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
       }
       assert(grantRefused.code === 2 && /--grant grants on the brain's objects in public, and there are none there/.test(grantRefused.out) && !/second brain/.test(grantRefused.out),
              `…and --grant is refused there, in its own words (exit ${grantRefused.code})`);
+      // The brain in the role's own schema, reached through the default
+      // path's "$user": the refusal says so, since the path does not spell it.
+      const [{ me }] = (await admin`SELECT current_user AS me`) as { me: string }[];
+      await admin.unsafe(`ALTER SCHEMA tu_brain RENAME TO ${quoteIdent(me)}`);
+      let viaUser: { code: number; out: string };
+      try {
+        viaUser = await migrate();
+      } finally {
+        await admin.unsafe(`ALTER SCHEMA ${quoteIdent(me)} RENAME TO tu_brain`);
+      }
+      assert(viaUser.code === 2 && viaUser.out.includes(`reaches a brain in schema ${quoteIdent(me)} (the path's "$user")`),
+             `…and a brain in the role's own schema, under the default path, is named as the path's "$user" (exit ${viaUser.code})`);
     } finally {
       // The brain back as public, the empty one gone.
       await admin.unsafe(`DO $r$ BEGIN
@@ -3324,16 +3353,21 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
 
     // No schema public: nothing can put it first.
     await dropSchema(URL_);
-    await admin.unsafe("DROP SCHEMA IF EXISTS tu_rails CASCADE; ALTER SCHEMA public RENAME TO tu_public_away");
+    await admin.unsafe("DROP SCHEMA IF EXISTS tu_rails CASCADE; DROP ROLE IF EXISTS tu_granted; CREATE ROLE tu_granted; ALTER SCHEMA public RENAME TO tu_public_away");
     let noPublic: { code: number; out: string };
+    let noPublicGrant: { code: number; out: string };
     try {
       noPublic = await migrate();
+      noPublicGrant = await migrate("--grant", "tu_granted");
     } finally {
-      await admin.unsafe("ALTER SCHEMA tu_public_away RENAME TO public");
+      await admin.unsafe("ALTER SCHEMA tu_public_away RENAME TO public; DROP OWNED BY tu_granted; DROP ROLE IF EXISTS tu_granted");
     }
     assert(noPublic.code === 2 && /Refused: this database has no schema named public/.test(noPublic.out) && /CREATE SCHEMA public;  as the database's owner, then run again\. Nothing was changed\./.test(noPublic.out)
              && (await schemasOf("schema_migrations")) === "",
            `no schema public: refused, naming CREATE SCHEMA public, and no ledger created anywhere (exit ${noPublic.code})`);
+    assert(noPublicGrant.code === 2 && /no schema named public, where --grant grants on the brain's objects, so there are none to grant on/.test(noPublicGrant.out)
+             && /CREATE SCHEMA public;  as the database's owner, apply the migrations, then run --grant\./.test(noPublicGrant.out),
+           `…and --grant there is refused in its own words: create public and apply the migrations first (exit ${noPublicGrant.code})`);
 
     // A role without USAGE on public, which Postgres leaves off its path. The
     // printed GRANT, run as printed, lets it build in public: its first files
@@ -3342,10 +3376,12 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
     const asNoUsage = URL_.replace(/\/\/[^@]*@/, "//tu_nousage:nousage@");
     let noUsage: { code: number; out: string };
     let granted2: { code: number; out: string } | undefined;
+    let noUsageGrant: { code: number; out: string } | undefined;
     let noUsageLedger = "", grantedLedger = "";
     try {
-      await admin.unsafe("DROP ROLE IF EXISTS tu_nousage; CREATE ROLE tu_nousage LOGIN PASSWORD 'nousage'; REVOKE USAGE ON SCHEMA public FROM PUBLIC");
+      await admin.unsafe("DROP ROLE IF EXISTS tu_nousage; CREATE ROLE tu_nousage LOGIN PASSWORD 'nousage'; DROP ROLE IF EXISTS tu_granted; CREATE ROLE tu_granted; REVOKE USAGE ON SCHEMA public FROM PUBLIC");
       noUsage = await runMigrator(asNoUsage, MIGRATOR_ENV);
+      noUsageGrant = await runMigrator(asNoUsage, MIGRATOR_ENV, "--grant", "tu_granted");
       noUsageLedger = await schemasOf("schema_migrations");
       const printed = /GRANT USAGE, CREATE ON SCHEMA public TO \S+;/.exec(noUsage.out)?.[0];
       if (printed) {
@@ -3354,11 +3390,14 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
         grantedLedger = await schemasOf("schema_migrations");
       }
     } finally {
-      await admin.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC; DROP OWNED BY tu_nousage; DROP ROLE IF EXISTS tu_nousage");
+      await admin.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC; DROP OWNED BY tu_nousage; DROP ROLE IF EXISTS tu_nousage; DROP OWNED BY tu_granted; DROP ROLE IF EXISTS tu_granted");
     }
     assert(noUsage.code === 2 && /Refused: role tu_nousage has no USAGE on schema public/.test(noUsage.out) && /Run the migrator as the database's owner, postgres, or a role that is a member of it\./.test(noUsage.out)
-             && /GRANT USAGE, CREATE ON SCHEMA public TO tu_nousage;/.test(noUsage.out) && noUsageLedger === "",
-           `a role without USAGE on public: refused, naming the database's owner and the GRANT, and no ledger created anywhere (exit ${noUsage.code})`);
+             && /GRANT USAGE, CREATE ON SCHEMA public TO tu_nousage;/.test(noUsage.out) && /001's vector needs a superuser unless it is installed, and 011's pg_trgm needs CREATE on the database, which its owner has/.test(noUsage.out)
+             && noUsageLedger === "",
+           `a role without USAGE on public: refused, naming the database's owner, the GRANT and what each extension needs, and no ledger created anywhere (exit ${noUsage.code})`);
+    assert(!!noUsageGrant && noUsageGrant.code === 2 && /Run --grant as the objects' owner — the role that ran the migrations — or a superuser\./.test(noUsageGrant.out) && !/GRANT USAGE, CREATE/.test(noUsageGrant.out),
+           `…and --grant as that role is refused in its own words: run it as the objects' owner (exit ${noUsageGrant?.code})`);
     assert(!!granted2 && !/Refused/.test(granted2.out) && /001_\S+\s+applied/.test(granted2.out) && grantedLedger === "public",
            `…and the GRANT, run as printed, puts public back on the role's path, and it builds there (${granted2 ? granted2.out.split("\n").find((l) => /FAILED|Refused/.test(l))?.trim() ?? "no failure line" : "no GRANT printed"})`);
   } finally {

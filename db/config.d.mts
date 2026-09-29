@@ -290,10 +290,10 @@ export function quoteIdent(name: unknown): string;
 export function searchPathSchemas(setting: string, serverVersionNum: number, keepEmpty?: boolean): string[];
 /** Set the transaction's search_path to itself without the temp schema (dropped by parsed name, each name quoted), LOCAL; returns the path it read. */
 export function setPathWithoutTemp(tx: import("bun").SQL): Promise<string>;
-/** Put public first on the session's search_path (session scope, this run alone), or say why not: this migrator's ledger in another schema on the path and none in public, or public missing or without USAGE. `was` is the replaced path, null where public was first. */
-export function pinPublicFirst(sql: import("bun").SQL): Promise<
+/** Put public first on the session's search_path (session scope, this run alone), or say why not: this migrator's ledger in another schema on the path and no brain (that ledger with thoughts; thoughts alone when `adopting`) in public, or public missing or without USAGE. `was` is the replaced path, null where public was first; `viaUser`, the other schema is the role's own, reached through "$user". */
+export function pinPublicFirst(sql: import("bun").SQL, adopting?: boolean): Promise<
   | { refused: null; was: string | null }
-  | { refused: "ledger"; schema: string }
+  | { refused: "ledger"; schema: string; viaUser: boolean }
   | { refused: "public"; missing: boolean; role: string; owner: string }
 >;
 /** `SELECT name, value` of each bound as this session sees it (value NULL when pgvector is not loaded). */
