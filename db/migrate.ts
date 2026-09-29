@@ -10,6 +10,7 @@
  *   DATABASE_URL=... bun db/migrate.ts
  *   bun db/migrate.ts --dry-run        # show what would run, touch nothing
  *   bun db/migrate.ts --reapply        # re-run every recorded migration, in one transaction
+ *   await run({ url, dryRun: true })   # the same, in-process: import { run } from "./migrate.ts" (SMD-2304)
  *
  * Applied migrations are recorded in schema_migrations, so re-running is a no-op.
  * Every migration is also individually idempotent, so a database created by hand
@@ -49,7 +50,7 @@
  * rather than freezing it and every reader behind it.
  */
 
-import { SQL } from "bun";
+import type { SQL } from "bun";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
