@@ -7273,10 +7273,23 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
     return { label, ok: aHolding && bWaited && errors === "" && (await check()) && (await drift()) === 0, detail: `${label}: waited ${bWaited}, ${errors || "clean"}` };
   };
   const multi: { label: string; ok: boolean; detail: string }[] = [];
+  // Two thoughts in different buckets, sorted by id — the order a trigger's
+  // DISTINCT aggregate keys them in: thought 1 is the first a trigger locks and
+  // thought 2 the last, and neither's lock covers the other (fifth review
+  // pass: unsorted, a status trigger that locked only its first id passed one
+  // run in four, and bucket-mates would pass it whatever the order).
+  const pairApart = async (label: string) => {
+    const a = await row(`${label} a`, { kind: "race2267", status_type: "started" });
+    for (let k = 0; ; k++) {
+      const b = await row(`${label} b ${k}`, { kind: "race2267", status_type: "started" });
+      const [{ same }] = await db`SELECT hashtext(${a}) & 255 = hashtext(${b}) & 255 AS same`;
+      if (!same) return [a, b].sort();
+    }
+  };
   for (const which of [0, 1]) {
     // A status move of one thought held open; a two-row source insert of both
     // then waits on that thought's bucket and reads its committed status.
-    const pair = [await row(`[34] MI ${which} a`, { kind: "race2267", status_type: "started" }), await row(`[34] MI ${which} b`, { kind: "race2267", status_type: "started" })];
+    const pair = await pairApart(`[34] MI ${which}`);
     multi.push(await holdThenWrite(`two-row insert, thought ${which + 1} moving`,
       `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = '${pair[which]}'`,
       `INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
@@ -7284,7 +7297,7 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
       async () => (await mirror(pair[which])) === false && (await mirror(pair[1 - which])) === true));
     // A two-row status move held open; a source write of one of its thoughts
     // then waits on that thought's bucket and reads the committed status.
-    const moved = [await row(`[34] MS ${which} a`, { kind: "race2267", status_type: "started" }), await row(`[34] MS ${which} b`, { kind: "race2267", status_type: "started" })];
+    const moved = await pairApart(`[34] MS ${which}`);
     multi.push(await holdThenWrite(`source write, thought ${which + 1} of a two-row move`,
       `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${moved[0]}', '${moved[1]}')`,
       `SELECT record_thought_source('${moved[which]}'::uuid, 'github', 'G-MS-${which}', 'x', 'text/plain')`,
@@ -7293,40 +7306,45 @@ console.log("\n[34] Migration 069's gate under two connections: a status move an
   assert(multi.every((m) => m.ok),
     `a two-row source insert waits on the bucket of whichever of its thoughts a status move holds, and a source write waits on the bucket of whichever thought a two-row status move holds — each then reads the committed status, and no drift (${multi.map((m) => m.detail).join("; ")})`);
 
-  // Two status moves of bucket-mates do not wait on each other: the status
-  // trigger takes its bucket shared (fourth review pass: exclusive, two
-  // transactions moving plain notes' statuses deadlocked across statements,
-  // and one held move held up every other in its bucket). Two plain notes —
-  // no source row, no ticket key — whose ids share a bucket; A moves one's
-  // status and holds; B's move of the other commits while A still holds.
+  // A status move, then the thought's source write, in one transaction — the
+  // write order the header recommends, and ingest-records' — in two
+  // transactions over bucket-mates (fifth review pass: with the status
+  // trigger's bucket shared, each held it shared and then asked for it
+  // exclusive, a deadlock ten times in ten). A moves X's status and holds; B
+  // moves Y's, a bucket-mate, and waits on the bucket; A records X's source
+  // row and commits; B then records Y's and commits.
   {
-    const a = await row("[34] SH a", { kind: "race2267", status_type: "started" });
-    const [{ b: bucket }] = await db`SELECT hashtext(${a}) & 255 AS b`;
-    let mate = "";
-    for (let k = 0; !mate; k++) {
-      const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[34] SH mate ${k}`}, ${{ kind: "race2267", status_type: "started" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
-      if (c.b === bucket) mate = c.id;
+    const x = await row("[34] UP x", { kind: "race2267", status_type: "weird" });
+    const [{ b: bucket }] = await db`SELECT hashtext(${x}) & 255 AS b`;
+    let y = "";
+    for (let k = 0; !y; k++) {
+      const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[34] UP mate ${k}`}, ${{ kind: "race2267", status_type: "weird" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
+      if (c.b === bucket) y = c.id;
     }
     const connA = racer(), connB = racer();
     const { p: doneP, open: done } = gate();
-    let aHolding = false, bDone = false, errors = "";
+    let aMoved = false, bPid = -1, errors = "";
     const aRun = connA.begin(async (tx: SQL) => {
-      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = ${a}::uuid`;
-      aHolding = true;
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = ${x}::uuid`;
+      aMoved = true;
       await doneP;
+      await tx`SELECT record_thought_source(${x}::uuid, 'github', 'G-UP-x', 'x', 'text/plain')`;
     }).catch((e: Error) => { errors += `A: ${e.message}; `; });
-    await waitFor(() => aHolding || errors !== "");
+    await waitFor(() => aMoved || errors !== "");
     const bRun = connB.begin(async (tx: SQL) => {
-      await tx`SET LOCAL statement_timeout = '8s'`;
-      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = ${mate}::uuid`;
-    }).then(() => { bDone = true; }, (e: Error) => { errors += `B: ${e.message}; `; });
-    await waitFor(() => bDone || errors !== "", 100);
-    const bFirst = bDone;
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = ${y}::uuid`;
+      await tx`SELECT record_thought_source(${y}::uuid, 'github', 'G-UP-y', 'x', 'text/plain')`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
     done();
     await aRun; await bRun;
     await connA.close(); await connB.close();
-    assert(aHolding && bFirst && errors === "" && (await drift()) === 0,
-      `a status move of a plain note commits while another transaction holds a status move of a note in the same bucket — the status trigger's bucket is shared — and no drift (${bFirst ? "committed first" : "waited"}; ${errors || "clean"})`);
+    assert(aMoved && bWaited && errors === "" && (await mirror(x)) === true && (await mirror(y)) === true && (await drift()) === 0,
+      `two transactions each moving a status and then writing that thought's source row, over bucket-mates: the second waits on the bucket, and both commit — no deadlock, both mirror rows gate, no drift (${errors || "clean"})`);
   }
 
   // A take against one status update of both thoughts (first and second

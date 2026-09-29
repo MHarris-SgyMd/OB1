@@ -182,7 +182,7 @@ const FUNCTIONS = [
   // 069 (SMD-2267): the triggers go with thought_sources and thoughts.
   "ob1_node_dependencies_of(uuid[])",
   "ob1_system_gates(text)",
-  "ob1_source_gate_lock(uuid[], boolean)",
+  "ob1_source_gate_lock(uuid[])",
   "ob1_source_gate_sync()",
   "ob1_source_gate_status()",
   "ob1_source_gate_truncate()",

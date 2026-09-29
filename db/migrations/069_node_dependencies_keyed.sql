@@ -100,12 +100,11 @@
 --
 --   Concurrency. A source write and a status move of the same thought take
 --   turns on an advisory transaction lock: a bucket of the thought's id, 256
---   buckets in class 22563 (ob1_source_gate_lock), taken in bucket order —
---   exclusive by the thought_sources triggers' insert and update paths, shared
---   by the thoughts status trigger, so two status moves never wait on each
---   other — each before it reads a status or writes a mirror row, and
---   each read a statement after the lock — so whichever goes second reads
---   what the first committed. A source row's delete takes none: it
+--   buckets in class 22563 (ob1_source_gate_lock), taken exclusive in bucket
+--   order by the thought_sources triggers' insert and update paths and by the
+--   thoughts status trigger, each before it reads a status or writes a mirror
+--   row, and each read a statement after the lock — so whichever goes second
+--   reads what the first committed. A source row's delete takes none: it
 --   drops the mirror row by key, and a status move meets it on that row. So a
 --   transaction holds at most 256 of these locks — 769 with 068's 513, so ten
 --   such wide transactions at once, not 068's fifteen, fill a default server's
@@ -114,8 +113,12 @@
 --   classes before 22563. A bucket is held until commit, so a transaction
 --   that has written a source row holds up a status move of any thought in
 --   that bucket, not only its own, until it commits; and one that has moved a
---   status holds up source writes in its buckets (a bulk status UPDATE, every
---   source write), but no other status move.
+--   status — a plain note's too — holds up source writes and status moves in
+--   its buckets (a bulk status UPDATE, all of them). Exclusive for status moves
+--   too, not shared (pass 4, reverted in pass 5): a status move then a source
+--   write of the same thought in one transaction — the write order below, and
+--   ingest-records' — took the bucket shared and then asked for it exclusive,
+--   and two such transactions over bucket-mates deadlocked ten times in ten.
 --   Not the thought's row (FOR SHARE, until the second review pass): a source
 --   writer's share lock crossed every lock taken in another order — a
 --   multi-row UPDATE of thoughts in scan order, a delete's cascade, a take's
@@ -139,9 +142,12 @@
 --   classes (then a ticket row's write), or two such transactions each writing
 --   source rows whose buckets the other already holds (two bulk writers of
 --   thirty source rows each deadlocked five times in ten, where 068's own
---   ticket writes do the same). Status moves alone never deadlock here: their
---   buckets are shared. Write a thought before its source row, one
---   thought per transaction, as the repo's writers do. Within one statement: a
+--   ticket writes do the same), or two transactions each moving the statuses
+--   of several thoughts in separate statements, plain notes included, whose
+--   buckets cross (a one-statement bulk move takes its buckets in order and
+--   does not). Write a thought before its source row, one thought per
+--   transaction, as the repo's writers do: the transaction then takes the
+--   bucket once, exclusive, for both. Within one statement: a
 --   take (record_thought_source's p_take, two statements in one call) against
 --   one status update of both its thoughts, when the update's trigger has taken
 --   the new thought's bucket and reaches the old one's mirror row as the take
@@ -370,7 +376,7 @@ COMMENT ON FUNCTION ob1_node_projection_drift() IS
 -- first did, put a bucket before a source row's lock where every trigger puts
 -- the row first, and a stress run of mixed writers gave 23 deadlocks against 4
 -- without it (six seeds of 3,600 statements; main, none or one).
-CREATE OR REPLACE FUNCTION ob1_source_gate_lock(p_ids uuid[], p_shared boolean DEFAULT false)
+CREATE OR REPLACE FUNCTION ob1_source_gate_lock(p_ids uuid[])
 RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -378,16 +384,12 @@ DECLARE
   b int;
 BEGIN
   FOR b IN SELECT DISTINCT hashtext(x::text) & 255 FROM unnest(p_ids) x WHERE x IS NOT NULL ORDER BY 1 LOOP
-    IF p_shared THEN
-      PERFORM pg_advisory_xact_lock_shared(22563, b);
-    ELSE
-      PERFORM pg_advisory_xact_lock(22563, b);
-    END IF;
+    PERFORM pg_advisory_xact_lock(22563, b);
   END LOOP;
 END
 $$;
-COMMENT ON FUNCTION ob1_source_gate_lock(uuid[], boolean) IS
-  'Takes the gate''s advisory transaction locks for the thoughts given — class 22563, a bucket of 256 per thought id, in bucket order, shared when p_shared — so a transaction holds at most 256 of them. The thought_sources triggers'' insert and update paths take them exclusive and the thoughts status trigger shared, before they read a thought''s status or write a mirror row: a source write and a status move exclude each other, two status moves do not (the thought''s row orders two moves of one thought). Migration 069 / SMD-2267.';
+COMMENT ON FUNCTION ob1_source_gate_lock(uuid[]) IS
+  'Takes the gate''s advisory transaction locks for the thoughts given — class 22563, a bucket of 256 per thought id, exclusive, in bucket order — so a transaction holds at most 256 of them. The thought_sources triggers'' insert and update paths and the thoughts status trigger take them before they read a thought''s status or write a mirror row. Migration 069 / SMD-2267.';
 
 CREATE OR REPLACE FUNCTION ob1_source_gate_sync()
 RETURNS trigger
@@ -498,17 +500,15 @@ BEGIN
       HINT = 'Run it under READ COMMITTED (the default), or SERIALIZABLE if every writer of source rows and statuses is serializable.',
       ERRCODE = 'feature_not_supported';
   END IF;
-  -- The buckets, shared, then the update — a fresh statement: a source
-  -- writer that held a bucket first has committed its mirror row, and this
-  -- finds it; one arriving later waits for this and reads the status it
-  -- commits. Shared, so two status moves never wait on each other's bucket —
-  -- two moves of one thought are ordered by the thought's row, and a move of
-  -- a plain note (no source row, no ticket key) waits for nothing it did not
-  -- wait for on main (fourth review pass: exclusive, two transactions moving
-  -- plain notes' statuses deadlocked across statements, and one move held up
-  -- every other in its bucket). This trigger sorts after 068's on thoughts, so
-  -- a statement takes 068's classes before this one.
-  PERFORM ob1_source_gate_lock(v_ids, true);
+  -- The buckets, then the update — a fresh statement: a source writer that
+  -- held a bucket first has committed its mirror row, and this finds it; one
+  -- arriving later waits for this and reads the status it commits. Exclusive,
+  -- as the source paths take them: shared (pass 4), a transaction that moved
+  -- a status and then wrote the thought's source row asked for the bucket it
+  -- held shared as exclusive, and two such over bucket-mates deadlocked (fifth
+  -- review pass). This trigger sorts after 068's on thoughts, so a statement
+  -- takes 068's classes before this one.
+  PERFORM ob1_source_gate_lock(v_ids);
   UPDATE ob1_source_gate g
      SET gates = coalesce(t.metadata->>'status_type' = ANY(node_lifecycle_types()), false)
     FROM thoughts t

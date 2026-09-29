@@ -845,16 +845,18 @@ key, reading nothing else — and on `thoughts` (AFTER UPDATE) for the rows whos
 `status_type` moved between known and unknown; any other write returns at once.
 A source write and a status move of one thought take turns on an advisory
 lock — a bucket of the thought's id, 256 buckets in class 22563, taken in
-bucket order after 068's classes, exclusive for source writes and shared for
-status moves, so two status moves never wait on each other — so whichever goes second reads what the
+bucket order after 068's classes, exclusive for both — so whichever goes second reads what the
 first committed; a source row's delete takes none (it drops the mirror row by
 key).
 Not the thought's row: a source writer's share lock there, until the second
 review pass, deadlocked with multi-row updates, cascades and takes where main
-waited. A bucket is held until commit, so a transaction that writes source rows
-holds up status moves of any thought in its buckets, and bulk writers can
-deadlock across statements, as 068's ticket writes can: write a thought before
-its source row, one thought per transaction. REPEATABLE READ is refused for a source row's insert or move and for
+waited. A bucket is held until commit, so a transaction that writes source rows or
+moves statuses holds up both in its buckets, and transactions that do either
+for several thoughts in separate statements can deadlock, as 068's ticket
+writes can: write a thought before its source row, one thought per transaction
+(the bucket is then taken once, for both). Shared buckets for status moves
+were tried and reverted: a status move then a source write, in one
+transaction, upgraded the lock and deadlocked bucket-mates ten times in ten. REPEATABLE READ is refused for a source row's insert or move and for
 every status move between known and unknown (a source row's delete and a
 re-record that changes nothing run; the delete raises 40001 if its thought's
 status moved since the snapshot). `ob1_rebuild_source_gate()` repairs the mirror after a write made with

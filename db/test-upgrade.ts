@@ -25,6 +25,7 @@
  */
 
 import { SQL } from "bun";
+import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
@@ -2930,6 +2931,16 @@ console.log("\n[20u] Migration 069 on a schema without 068 — refused up front,
     /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 069 naming 068 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the069}`)[0].c) === 0, "…069 records nothing");
+  // The file locks thoughts, then thought_sources, before its first trigger:
+  // CREATE TRIGGER would take thought_sources' lock first, the order opposite
+  // to a delete's cascade, and a delete of a sourced thought during the
+  // migration deadlocked with it — nine runs in ten under six writers, five of
+  // them failing the migration (fourth and fifth review passes).
+  const src069 = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "migrations", the069), "utf8").split("\n").filter((l) => !/^\s*--/.test(l)).join("\n");
+  const lockAt = src069.search(/LOCK TABLE thoughts, thought_sources IN SHARE ROW EXCLUSIVE MODE;/);
+  const firstTrigger = src069.search(/CREATE TRIGGER/);
+  assert(lockAt >= 0 && firstTrigger > lockAt,
+    `…and it locks thoughts, then thought_sources, before its first CREATE TRIGGER (${lockAt}, ${firstTrigger})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the068 });
   // A brain 068 already reads: two linear tickets and a github issue with
   // source rows, blocked_by and blocks links between them, one closed, a

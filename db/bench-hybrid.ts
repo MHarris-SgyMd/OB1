@@ -325,7 +325,10 @@ for (const n of SCALES) {
   // at a minute (printed ">60 s"): on this brain 053's resolver costs each
   // unheld blocker a GIN scan, seconds a read at 10,000 rows and ten minutes
   // at 100,000 (fourth review pass: three uncut runs of them added half an
-  // hour). The keyed read's timed call is the one whose rows are compared.
+  // hour). 069's keyed read is timed as SELECT * and its rows hashed apart,
+  // untimed; a before read is too slow to run twice, so its one timed call is
+  // the hash (fifth review pass: timing the hash for both changed what the
+  // budget measured).
   const CUT_MS = 60_000;
   const once = async (fn: () => Promise<unknown>) => {
     const t = performance.now();
@@ -337,7 +340,9 @@ for (const n of SCALES) {
   const keyedRows = async () => { lastRows = (await sql`SELECT md5(string_agg(x::text, '|' ORDER BY x::text)) AS h FROM node_state(${ids40}::uuid[]) x`)[0].h as string; };
   const depReads = async (timer: (fn: () => Promise<unknown>) => Promise<number>) => {
     lastRows = "";
-    const keyed = await timer(keyedRows);
+    let keyed: number;
+    if (timer === time) { keyed = await time(() => sql`SELECT * FROM node_state(${ids40}::uuid[])`); await keyedRows(); }
+    else keyed = await timer(keyedRows);
     return {
       keyed, rows: lastRows,
       whole: await timer(() => sql`SELECT count(blockers) + count(unknown_blockers) + count(nullif(in_dependencies, false)) FROM node_state()`),
