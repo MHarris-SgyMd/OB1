@@ -29,6 +29,11 @@ leaves open.
 - An act-tool workflow ships on its own MCP path.
 - Gmail and Linear moved to SMD-2257 and SMD-2258, each behind its gate.
 
+**Amended by SMD-2289** (emitter egress, built):
+- An emitter has no network. A live-API pipeline names its hosts, and its
+  emitter connects to those alone, through a proxy of the runner's ("Running a
+  pipeline from a workflow").
+
 ## The decision
 
 1. **n8n, over Activepieces and Windmill.** n8n and Activepieces passed every
@@ -429,17 +434,24 @@ runs outside n8n:
 
   An emitter's HOME is one it cannot write, and Python's user site is off,
   so no emitter can plant code another runs (review pass 3). Each pipeline
-  owns one source: two on the same `system` are refused. Two limits are
-  named rather than closed:
+  owns one source: two on the same `system` are refused. An emitter has no
+  network (SMD-2289): rules keyed on the emitter uids, set as the container
+  starts and then beyond the runner's reach, refuse every packet, DNS and
+  loopback included. A live-API emitter's pipeline names its hosts
+  (`network`), and the emitter reaches them only through a proxy the runner
+  keeps for it, which tunnels TLS naming those hosts (their ClientHello's
+  server name, with no encrypted inner hello) and nothing else. What travels
+  inside TLS is not read, so a CDN that honours an HTTP Host unlike the
+  server name (domain fronting, which the large CDNs refuse) could still
+  carry it to another of its sites. Before
+  that, an emitter an export had taken over could reach the host's Ollama,
+  admin API and all, Postgres, and on a VPS the cloud metadata endpoint.
+  Two limits are named rather than closed:
   - every emitter can read every pipeline's world-readable exports, unless
     the operator gives each directory to its pipeline's uid, on an engine
     that enforces host file modes (Docker Desktop and podman-machine do not);
-  - emitters have the runner's network, which the live-API emitters need.
-    That includes the host's Ollama, unauthenticated with its admin API,
-    Postgres (a password is still needed), and on a VPS the cloud metadata
-    endpoint. SMD-2289 takes it away from any pipeline that does not ask for
-    a host. The runner also connects as the Postgres superuser, as the
-    migrator and board-sync do; SMD-2289 gives it a role of its own.
+  - the runner connects as the Postgres superuser, as the migrator and
+    board-sync do; SMD-2289's second part gives it a role of its own.
   - An item's facets may not name another source's ticket (`issue`,
     `ticket`, `linear_updated_at`), which node_state and the board sync
     read whatever the source (review pass 7).
@@ -461,9 +473,11 @@ The runner is built with SMD-2212's generic import template. Its allowlist
 ships empty: each recipe's ticket adds its line, its emitter and the
 emitter's packages when it converts. The eval kit proves the path with a
 fixture emitter in Python. The runner publishes no port, where n8n
-publishes one on loopback. SMD-2211's checkpoint covers the two live-API
-emitters' own egress, and how their vendor credential reaches the runner is
-decided when the first of them converts (SMD-2149, SMD-2021).
+publishes one on loopback. A live-API emitter connects only to the hosts its
+line names, through its proxy (SMD-2289), and only by TLS. The hosts are the
+operator's to choose: nothing reviews them yet, since SMD-2211's checkpoint
+covers n8n's credentials, not these. How their vendor credential reaches the runner is decided when
+the first of them converts (SMD-2149, SMD-2021).
 
 ## What moves, what stays
 

@@ -4240,6 +4240,37 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const proposed = await consolidate();
     const atlas = (await proposals()).find((p) => p.older_id === atlasOld && p.newer_id === atlasNew);
     assert(proposed.code === 0 && atlas !== undefined && atlas.status === "pending" && (await proposals()).length === proposalsBefore + 1, `the atlas pair is proposed pending (exit ${proposed.code})`);
+    // 070 (SMD-2313): the PENDING row on a lineage pair — the ticket's own
+    // case, a page over its evidence judged before 066 — under --list
+    // lineage, with no stale standing on it; the array set raw and cleared
+    // (run-it, first review pass: the one --list lineage tooth was a stale
+    // row, so the pending call dropped passed every suite).
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${atlasOld}::text) WHERE id = ${atlasNew}::uuid`;
+    const pendingLineage = await consolidate("--list", "lineage");
+    assert(pendingLineage.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\), most confident first:$/m.test(pendingLineage.out) && /LINEAGE PAIR\s*$/m.test(pendingLineage.out) && !/\(stale/.test(pendingLineage.out) && pendingLineage.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`),
+           `--list lineage lists the pending row, tagged, with no stale standing and --force on the accept line (${pendingLineage.out.split("\n").find((l) => /LINEAGE PAIR/.test(l))?.trim().slice(0, 160)})`);
+    // …and the accept is refused without --force — a guard on the one accept
+    // door, not a verdict: the row stays pending, nothing is written
+    // (definitions probe, second review pass: the accept went through under
+    // the reject's own advice). A brain without 070's listing gets the file
+    // named on --list, not a driver stack: the form dropped and put back.
+    const acceptLineage = await consolidate("--accept", atlas!.id);
+    assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`)
+           && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
+           `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
+    // R3 tooth (mutant 2): the catch names 070 for the one error it is for — an unrelated failure inside the listing is shown as itself.
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
+    const listBoom = await consolidate("--list", "lineage");
+    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 070/.test(listBoom.out),
+           `an unrelated error inside --list is shown as itself, not as a missing 070 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
+    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 070 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 070 and says the listing needs the file before pointing at it");
+    const listPre070 = await consolidate("--list", "lineage");
+    assert(listPre070.code === 1 && /--list needs migration 070 \(db\/migrations\/070_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre070.out) && !/PostgresError/.test(listPre070.out),
+           `on a brain without 070 --list names the file, not a driver error (exit ${listPre070.code}: ${listPre070.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+    await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
     const rb1 = await rebuild(atlasNew);
@@ -4248,6 +4279,20 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it finds in conflict again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
     const staleList = await consolidate("--list", "stale");
     assert(staleList.code === 0 && /1 stale proposal\(s\)/.test(staleList.out) && /\(stale — in this pass's pool\)/.test(staleList.out) && staleList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`), `--list stale tags the row's standing and still offers the reviewer's decision (${staleList.out.split("\n").find((l) => /stale —/.test(l))?.trim().slice(0, 200)})`);
+    // 070 (SMD-2313): the same stale row standing on a lineage pair — the
+    // newer thought's derived_from set raw to name the older, the shape 066
+    // left behind — is tagged under --list stale, listed under --list lineage
+    // with the reject to run, and counted by --status; the array is cleared
+    // before the pass's run below, whose settle reason is the unrelated verdict.
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${atlasOld}::text) WHERE id = ${atlasNew}::uuid`;
+    const lineageList = await consolidate("--list", "lineage");
+    assert(lineageList.code === 0 && /1 unreviewed proposal\(s\) standing on a lineage pair \(pending, then stale\), most confident first/.test(lineageList.out) && /\(stale — in this pass's pool\)/.test(lineageList.out)
+           && lineageList.out.includes(`lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066; reject it: --reject ${atlas!.id} --note "lineage pair (066)"`) && lineageList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`),
+           `--list lineage lists the row with its standing, the lineage line and the reject to run (${lineageList.out.split("\n").find((l) => /lineage pair:/.test(l))?.trim().slice(0, 200)})`);
+    assert(/LINEAGE PAIR  \(stale — in this pass's pool\)/.test((await consolidate("--list", "stale")).out), "…--list stale tags it LINEAGE PAIR beside its standing");
+    assert(/, 1 unreviewed standing on a lineage pair \(--list lineage shows them; the reviewer rejects each — the pass never replaces a pending one\) — --list shows them/.test((await consolidate("--status")).out), "…and --status counts it");
+    await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
+    assert(/no unreviewed proposals standing on a lineage pair/.test((await consolidate("--list", "lineage")).out) && !/LINEAGE PAIR/.test((await consolidate("--list", "stale")).out), "…and cleared, nothing stands there and the tag is gone");
     // The standing is read under THIS pass's key (second review pass): the
     // row's-key claim gone and one requeued under another judge's key is
     // another pass's pool — named beside "waiting", since this run re-pools
@@ -4414,6 +4459,40 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const borrowed = await consolidate("--reject", cedar.id, "--note", `${PASS_SETTLED_PREFIX} by hand`);
     assert(borrowed.code === 2 && /that marker is the pass's own/.test(borrowed.out) && (await proposalRow(cedar.id)).review_note?.startsWith(PASS_SETTLED_PREFIX) === true && /judged again/.test((await proposalRow(cedar.id)).review_note ?? ""),
            `--note beginning with the marker is refused as usage, the row untouched (exit ${borrowed.code})`);
+    // R3 teeth (mutants 1a-1d): the accept guard's other cases on a throwaway
+    // pair — after the audit counts above, since a forced accept and its
+    // reject are audited under the reviewer's name.
+    {
+      const r3Old = await seed("smd-2313 live: the evidence", 9, 0);
+      const r3New = await seed("smd-2313 live: the page over it", 8, 0);
+      const [{ id: r3 }] = await sql`SELECT record_supersession_proposal(${r3Old}::uuid, ${r3New}::uuid, 'newer_supersedes_older', 0.8, 'the page restates the evidence', 0.9, ${KEY}, NULL) AS id`;
+      // A guard that let an accept through: undo it, so the steps below still run and report.
+      const undo = async () => { if ((await supersedesOf(r3New)) !== null) await consolidate("--reject", r3); await sql`UPDATE supersession_proposals SET status = 'pending', reviewed_at = NULL, review_note = NULL WHERE id = ${r3}::uuid`; };
+      await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${r3New}::text) WHERE id = ${r3Old}::uuid`;
+      const reverse = await consolidate("--accept", r3);
+      assert(reverse.code === 1 && /accept refused: one side's derived_from names the other/.test(reverse.out) && (await supersedesOf(r3New)) === null,
+             `the OLDER side naming the newer meets the same guard (exit ${reverse.code}: ${reverse.out.trim().slice(-160)})`);
+      await undo();
+      await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${r3Old}::uuid`;
+      await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${r3Old}::text) WHERE id = ${r3New}::uuid`;
+      await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${r3}::uuid`;
+      const staleAccept = await consolidate("--accept", r3);
+      assert(staleAccept.code === 1 && /accept refused: one side's derived_from names the other/.test(staleAccept.out),
+             `a stale lineage row's accept meets the guard before 063's stale rule (exit ${staleAccept.code}: ${staleAccept.out.trim().slice(-160)})`);
+      await undo();
+      const forcedLineage = await consolidate("--accept", r3, "--force");
+      assert(forcedLineage.code === 0 && /^\s*accepted /m.test(forcedLineage.out) && (await supersedesOf(r3New)) === r3Old,
+             `--accept --force on a lineage pair writes the pointer (exit ${forcedLineage.code}: ${forcedLineage.out.trim().slice(-160)})`);
+      const acceptedAgain = await consolidate("--accept", r3);
+      assert(acceptedAgain.code === 1 && /accept refused: already accepted/.test(acceptedAgain.out) && !/lineage/.test(acceptedAgain.out),
+             `an accept on the accepted lineage row is 029's ALREADY_ACCEPTED, not the guard's advice about a pointer not yet written (exit ${acceptedAgain.code}: ${acceptedAgain.out.trim().slice(-140)})`);
+      const acceptedList = await consolidate("--list", "accepted");
+      assert(/LINEAGE PAIR  \(accepted/.test(acceptedList.out) && acceptedList.out.includes(`accepted while the derivation names its input — --reject ${r3} clears the pointer (029)`),
+             `--list accepted tags the row and names the reject as the repair for a pointer already written (${acceptedList.out.split("\n").find((l) => /lineage pair:/.test(l))?.trim().slice(0, 160)})`);
+      const rejectedLineage = await consolidate("--reject", r3, "--note", "lineage pair (066)");
+      assert(rejectedLineage.code === 0 && /rejected [0-9a-f-]+: the supersedes pointer this proposal had set is cleared/.test(rejectedLineage.out) && (await supersedesOf(r3New)) === null && (await proposalRow(r3)).status === "rejected",
+             `--reject on a lineage pair is never refused, and clears the pointer a forced accept wrote — the repair for an accept already written (exit ${rejectedLineage.code}: ${rejectedLineage.out.trim().slice(-160)})`);
+    }
   }
 
   // SMD-1803: the CLI's day() over a proposal thought with no ISO-form date.

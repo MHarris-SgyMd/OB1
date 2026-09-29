@@ -339,6 +339,8 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
   // The worker-action tools mutate the queue, so they too are not read-only (SMD-2132).
   assert(byName["retry_failed"]?.annotations?.readOnlyHint === false, `"retry_failed" is readOnlyHint: false`);
   assert(byName["release_stale_leases"]?.annotations?.readOnlyHint === false, `"release_stale_leases" is readOnlyHint: false`);
+  // run_worker is write-scoped too (the drain; only its dry_run preview is built) — not read-only (SMD-2272).
+  assert(byName["run_worker"]?.annotations?.readOnlyHint === false, `"run_worker" is readOnlyHint: false`);
 }
 
 console.log("\n[10b] brain_info answers with no database, and says why that half is missing (SMD-2041)");

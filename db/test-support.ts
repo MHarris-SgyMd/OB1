@@ -155,6 +155,8 @@ const FUNCTIONS = [
   "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)",
   "review_supersession_proposal(uuid, text, text, text, jsonb, boolean)",
   "list_supersession_proposals(text, int)",
+  // 070 (SMD-2313): 029's listing under a third parameter; the two-argument form above stands on a schema stopped before 070.
+  "list_supersession_proposals(text, int, boolean)",
   "thought_changes(timestamptz, uuid, text, text, text[], int)",
   // 053 (SMD-1867); its table is listed above, its two indexes drop with thought_facets,
   // and record_thought_entities / thought_facets_validate are 016's and 042's names.
