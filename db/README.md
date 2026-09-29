@@ -2762,7 +2762,7 @@ guards the target three ways.
 - **Each side's URL names one database every client reaches** (SMD-2317).
   Bun runs the guards and the drop, and libpq runs `pg_dump` and `pg_restore`,
   so a URL they read differently (a query key such as `?host=`, a fragment, a
-  first-`@` host list) is refused on either side, as is one naming no
+  first-`@` host list) is refused on either side, as is one naming no host or no
   database. After connecting, each side's server must report the URL's
   database: an exported `PGDATABASE` beats the URL's in Bun. `--to` is asked
   again on the connection that marks and drops. No override lifts these.
@@ -3039,7 +3039,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 941 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 942 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -3067,17 +3067,19 @@ refused too, and never printed); one client constructor; and one answer to
 The resolver refuses a URL that Bun and libpq would take to different places
 (SMD-2317): a query key other than `sslmode`, `application_name` and `options` (Bun sends
 `database=` and `user=` to the server, which keeps them; libpq follows `host=`,
-`port=`, `dbname=` and `service=`), a fragment, an `@` other than the one
-ending the user, or a `,` in the host. Put the database in the URL's path. The
-reset rule then has three parts:
-- **The URL must name its database,** or the shell's `PGDATABASE` would choose
-  what is dropped.
+`port=`, `dbname=` and `service=`), a `+` in the query (a space to Bun), a
+fragment, an `@` other than the one ending the user, a `,` or `%2C` in the
+host, or a `.`/`..` path segment (Bun resolves it, libpq does not). Put the
+database in the URL's path. The reset rule then has three parts:
+- **The URL must name its host and its database.** With no host, Bun
+  connects to localhost over TCP and libpq to the unix socket; with no
+  database, the shell's `PGDATABASE` would choose what is dropped.
 - **Its host must be loopback by name** (`localhost`, `127.0.0.1`, `[::1]`,
-  `0.0.0.0`), not empty (it resolves through `PGHOST`), or
-  `OB1_ALLOW_REMOTE_DB=1` must be set.
+  `0.0.0.0`), or `OB1_ALLOW_REMOTE_DB=1` must be set.
 - **Once connected, the server must report the database the URL names**
-  (`current_database()`), over TCP. Bun lets an exported `PGDATABASE` beat
-  the URL's database, so this is asked on the connection that drops.
+  (`pg_catalog.current_database()`), over TCP. Bun lets an exported
+  `PGDATABASE` beat the URL's database, so this is asked on the connection
+  that drops.
 
 `OB1_ALLOW_REMOTE_DB` lifts the loopback host and the TCP requirement, and
 nothing else: the other refusals say which database would be dropped. The

@@ -5422,11 +5422,11 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   let refusedRemote: string, refusedEmptyHost: string;
   try {
     refusedRemote = await refreshRefusal("postgres://u@example.com:5432/b");
-    // tier.ts's own rule trusted an empty host, which resolves through PGHOST (SMD-2302).
+    // tier.ts's own rule trusted an empty host (SMD-2302); Bun and libpq take it to two servers, so no override lifts the refusal (SMD-2317).
     refusedEmptyHost = await refreshRefusal("postgres:///b");
   } finally { if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow; }
   assert(/^--to is not plainly this machine — example\.com is not a loopback host — and OB1_ALLOW_REMOTE_DB is not 1/.test(refusedRemote), `refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema) — got: ${refusedRemote}`);
-  assert(/^--to is not plainly this machine — the URL has no host/.test(refusedEmptyHost), `…and a target with no host, which resolves through PGHOST — got: ${refusedEmptyHost}`);
+  assert(/^--to: the URL has no host \(Bun would connect to localhost over TCP and libpq to the unix socket/.test(refusedEmptyHost), `…and a target with no host, which Bun and libpq read as two servers — got: ${refusedEmptyHost}`);
   // And a --to that is the --from database under another spelling (SMD-2036):
   // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
   // under. The second URL differs as a string (a parameter only), so string
@@ -7411,6 +7411,25 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
     const overridden = await drop(urlOf(A), { PGDATABASE: B, [REMOTE_DB_FLAG]: "1" });
     assert(overridden.code === 2 && overridden.out.includes(`reached database "${B}"`) && (await markers())[B],
       `…and ${REMOTE_DB_FLAG}=1 does not lift it: it says which database is dropped, not whether a remote one may be (exit ${overridden.code})`);
+    // The check asks pg_catalog's current_database(), not whatever the session's
+    // path finds first: options= may set search_path, and a function of that
+    // name in the reached database answered the URL's name and let the drop
+    // through (review pass 1, run). The control shows the stand-in does answer
+    // an unqualified call on that path.
+    {
+      const b = new SQL({ url: urlOf(B), max: 1 });
+      try { await b.unsafe(`CREATE SCHEMA IF NOT EXISTS evil; CREATE OR REPLACE FUNCTION evil.current_database() RETURNS name LANGUAGE sql AS $$ SELECT '${A}'::name $$`); } finally { await b.close(); }
+      const spoofQuery = "?options=-c%20search_path%3Devil%2Cpg_catalog%2Cpublic";
+      const probe = new SQL({ url: urlOf(B) + spoofQuery, max: 1 });
+      let answered = "";
+      try { answered = String((await probe.unsafe("SELECT current_database() AS db"))[0].db); } finally { await probe.close(); }
+      const spoofed = await drop(urlOf(A) + spoofQuery, { PGDATABASE: B });
+      const afterSpoof = await markers();
+      assert(answered === A && spoofed.code === 2 && spoofed.out.includes(`reached database "${B}"`) && afterSpoof[B],
+        `a current_database() planted on the path ahead of pg_catalog does not answer the check: refused, ${B} kept (the stand-in answers "${answered}" unqualified; exit ${spoofed.code})`);
+      const clean = new SQL({ url: urlOf(B), max: 1 });
+      try { await clean.unsafe("DROP SCHEMA evil CASCADE"); } finally { await clean.close(); }
+    }
     // The controls: the harness sees a drop, and a PGDATABASE that agrees is no refusal.
     const agreed = await drop(urlOf(A), { PGDATABASE: A });
     const afterAgreed = await markers();

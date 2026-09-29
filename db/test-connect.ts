@@ -75,8 +75,9 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   ];
   const none = {};
   // The override lifts the host rule, never a URL that fails to pin one
-  // database: one that does not parse is the only such row here (SMD-2317).
-  const pins = (what: string) => !what.includes("does not parse");
+  // database: here one that does not parse, and an empty host, which Bun and
+  // libpq take to two servers (SMD-2317, review pass 1).
+  const pins = (what: string) => !what.includes("does not parse") && !what.includes("an empty host");
   for (const [url, local, what] of HOSTS) {
     ok((notThrowaway(url) === null) === local, `notThrowaway: ${what} → ${local ? "no reason" : "a reason"}`);
     ok(mayReset(url, none) === local, `mayReset, no override: ${what} → ${local}`);
@@ -142,6 +143,16 @@ const SPLITS: [string, RegExp, string][] = [
   [`postgres://u:${MARK}@localhost:5432/canary?data%62ase=stable`, /the query key database,/, "a percent-encoded key, decoded as both readers decode it"],
   [`postgres://u:${MARK}@localhost:5432/canary?${MARK}`, /carries a query key, and only/, "a key that is not a plain word, which is not printed"],
   [`postgres://u:${MARK}@localhost:5432/canary?sslmode=disable&sslmode=require`, /gives the query key sslmode twice/, "sslmode twice"],
+  // Review pass 1: each measured with both readers, or a mutant survived without it.
+  [`postgres://u:${MARK}@localhost:5432/x/../canary`, /a path the parser rewrites/, "a .. segment (Bun reaches canary, libpq x/../canary)"],
+  [`postgres://u:${MARK}@localhost:5432/./canary`, /a path the parser rewrites/, "a . segment"],
+  [`postgres://u:${MARK}@localhost:5432/%2e%2e/canary`, /a path the parser rewrites/, "an encoded .. segment (libpq reaches ../canary)"],
+  [`postgres://u:${MARK}@localhost:5432/stable/%2e%2E/canary`, /a path the parser rewrites/, "a mixed-case encoded .. segment"],
+  [`postgres://u:${MARK}@localhost:5432/canary?options=-c+search_path%3Dx`, /has a \+ in its query/, "a + in a query value (a space to Bun, a + to libpq)"],
+  [`postgres://u@localhost%2Cdb.example.com/canary`, /names a host list/, "a %2C host list, which libpq decodes"],
+  [`postgres://localhost?application_name=a@db.example.com:5432/canary`, /an @ other than the one ending its user/, "an @ past a ? with no path (libpq's user ends there, its host is db.example.com)"],
+  [`postgres://localhost/@canary`, /an @ other than the one ending its user/, "an @ straight after the path's /"],
+  [`postgres://u:${MARK}@localhost:5432/canary?SSLMODE=disable`, /the query key SSLMODE,/, "a key in capitals (the allowlist is exact)"],
 ];
 {
   for (const [url, re, what] of SPLITS) {
@@ -159,6 +170,7 @@ const SPLITS: [string, RegExp, string][] = [
     ["postgres://u@localhost/can\nary", "a newline inside the path"],
     ["POSTGRES://u@localhost/canary", "a scheme in capitals (libpq wants postgres:// exactly)"],
     ["postgres:u@localhost/canary", "no // after the scheme"],
+    ["postgres://u@localhost/can\x7fary", "a DEL inside the path"],
   ] as const) {
     ok(databaseUrlProblem(url) === UNPARSEABLE_DATABASE_URL && identityRefusal(url) === "the URL does not parse", `${what}: refused as unparseable`);
   }
@@ -336,7 +348,7 @@ const SPLITS: [string, RegExp, string][] = [
   const FROM = `postgres://u:${MARK}@127.0.0.1:1/a`;
   const refresh = (to: string, env: Record<string, string> = {}) => spawn(["tier.ts", "--refresh", "--from", FROM, "--to", to], env);
   for (const [to, re, what] of [
-    ["postgres:///b", /--to is not plainly this machine — the URL has no host/, "an empty host"],
+    ["postgres:///b", /--to: the URL has no host \(Bun would connect to localhost over TCP and libpq to the unix socket/, "an empty host"],
     ["postgres://u@db.example.com:5432/b", /--to is not plainly this machine — db\.example\.com is not a loopback host — and OB1_ALLOW_REMOTE_DB is not 1/, "a remote host"],
     ["postgres://u@192.168.1.5:5432/b", /--to is not plainly this machine — 192\.168\.1\.5 is not a loopback host/, "an RFC1918 host"],
   ] as const) {
@@ -357,6 +369,8 @@ const SPLITS: [string, RegExp, string][] = [
     [`postgres://u:${MARK}@localhost:5432/canary#?host=stable-host`, /the URL has a fragment/, "#?host="],
     [`postgres://u@stable-host:5432,x@localhost/canary`, /the URL has an @ other than/, "a first-@ host list"],
     [`postgres://u:${MARK}@localhost:5432`, /the URL names no database/, "no database"],
+    [`postgres://u:${MARK}@localhost:5432/x/../canary`, /the URL has a path the parser rewrites/, "a .. segment (the guards judged canary, pg_restore wrote x/../canary)"],
+    ["postgres:///canary", /the URL has no host/, "an empty host (Bun over TCP, libpq over the socket)"],
   ] as const) {
     for (const side of ["--to", "--from"] as const) {
       const argv = side === "--to" ? ["tier.ts", "--refresh", "--from", FROM, "--to", url] : ["tier.ts", "--refresh", "--from", url, "--to", "postgres://u@127.0.0.1:1/b"];

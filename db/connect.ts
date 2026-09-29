@@ -105,7 +105,10 @@ export const URL_QUERY_KEYS: ReadonlySet<string> = new Set(["sslmode", "applicat
  *     `@` and Bun at the last, so `u@prod:5432,x@localhost/db` sends libpq to
  *     prod first. libpq also reads up to an `@` past a `?`, so one in a query
  *     value splits it too.
- *   • No `,` in the host: libpq reads a host list, and Bun one name.
+ *   • No `,` (or `%2C`) in the host: libpq reads a host list, and Bun one name.
+ *   • A path the parser leaves as written: it resolves `.` and `..`
+ *     segments, and libpq does not.
+ *   • No `+` in the query: Bun decodes it as a space, and libpq does not.
  *   • Only URL_QUERY_KEYS in the query, each once.
  * Checked before the URL reaches a client, so a refused URL opens no
  * connection (test-connect.ts counts them).
@@ -135,7 +138,20 @@ function readersSplit(url: string): string | null {
   if (ats > 1 || (ats === 1 && authorityEnd !== -1 && rest.indexOf("@") > authorityEnd)) {
     return "has an @ other than the one ending its user (percent-encode it as %40): libpq ends the user at the first @, and Bun at the last";
   }
-  if (u.hostname.includes(",")) return "names a host list (a , in its host): libpq tries each host, and Bun reads one name";
+  if (u.hostname.includes(",") || u.hostname.toLowerCase().includes("%2c")) return "names a host list (a , in its host, or %2C, which libpq decodes to one): libpq tries each host, and Bun reads one name";
+  // The parser resolves dot segments in the path and libpq reads the path as
+  // written: `/x/../canary` reaches canary in Bun and a database named
+  // `x/../canary` in libpq (review pass 1, measured with both).
+  if (authorityEnd !== -1 && rest[authorityEnd] === "/") {
+    const q = rest.indexOf("?", authorityEnd);
+    if (rest.slice(authorityEnd, q === -1 ? undefined : q) !== u.pathname) {
+      return "has a path the parser rewrites (a . or .. segment, or a character it encodes): Bun reads the rewritten path, and libpq the path as written";
+    }
+  }
+  // Bun decodes a + in a query value as a space, and libpq keeps it: an
+  // options value of `-c+search_path=x` is `-c search_path=x` to one and a
+  // setting named "+search_path" to the other (review pass 1).
+  if (u.search.includes("+")) return "has a + in its query: Bun reads it as a space and libpq as a +, so write %20 or %2B";
   const seen = new Set<string>();
   for (const key of u.searchParams.keys()) {
     const named = /^[A-Za-z_]{1,40}$/.test(key) ? `the query key ${key}` : "a query key";
@@ -249,7 +265,8 @@ export function remoteDbAllowed(env: Record<string, string | undefined> = proces
  * Why no override makes `url` resettable, or null. Two things decide which
  * database a command drops, and OB1_ALLOW_REMOTE_DB answers neither:
  *   • the URL must be one every reader takes to the same place
- *     (databaseUrlProblem);
+ *     (databaseUrlProblem), and name its host: with none, Bun and libpq go
+ *     to different servers;
  *   • it must name its database. With none, the client takes PGDATABASE's, or
  *     the user's name, so the shell would choose what is dropped.
  */
@@ -257,6 +274,11 @@ export function identityRefusal(url: string): string | null {
   if (!parses(url)) return "the URL does not parse";
   const split = readersSplit(url);
   if (split !== null) return `the URL ${split}`;
+  // An empty host is a split too: Bun connects to localhost over TCP (PGHOST
+  // unset, measured), libpq to the unix socket, and those can be two servers.
+  // A worker may still use one; a command that drops a schema may not, override
+  // or not (review pass 1).
+  if (new URL(url).hostname === "") return "the URL has no host (Bun would connect to localhost over TCP and libpq to the unix socket, or both to PGHOST's)";
   if (databaseOf(url) === "") return "the URL names no database (the client would take PGDATABASE's, or the user's name)";
   return null;
 }
@@ -290,7 +312,9 @@ export interface Queryable {
  * No override lifts this. Call it on a URL identityRefusal has passed.
  */
 export async function reachedDatabaseRefusal(sql: Queryable, url: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
-  const [row] = (await sql.unsafe("SELECT current_database() AS db")) as { db: string }[];
+  // Qualified: `options=-c search_path=evil,pg_catalog` would otherwise let a
+  // function of that name in the target database answer (review pass 1, run).
+  const [row] = (await sql.unsafe("SELECT pg_catalog.current_database() AS db")) as { db: string }[];
   const named = databaseOf(url);
   if (row.db === named) return null;
   return `the connection reached database ${JSON.stringify(row.db)}, not ${JSON.stringify(named)}, the one the URL names${
@@ -316,7 +340,7 @@ export async function connectedResetRefusal(sql: Queryable, url: string, env: Re
 
 /** Why `sql` is not over TCP, or null — the half of connectedResetRefusal OB1_ALLOW_REMOTE_DB lifts. */
 export async function socketRefusal(sql: Queryable, env: Record<string, string | undefined> = process.env): Promise<string | null> {
-  const [row] = (await sql.unsafe("SELECT inet_server_addr() IS NULL AS socket")) as { socket: boolean }[];
+  const [row] = (await sql.unsafe("SELECT pg_catalog.inet_server_addr() IS NULL AS socket")) as { socket: boolean }[];
   if (row.socket && !remoteDbAllowed(env)) return "the connection is over a unix socket, not the TCP port the URL's host names";
   return null;
 }

@@ -353,9 +353,10 @@ export { REMOTE_DB_FLAG };
  * a LAN-hosted stack at 192.168.x.x holding a real database is the documented
  * deployment topology, and a stale DATABASE_URL to it would have been dropped
  * without a prompt. The two questions have different answers. An EMPTY host is
- * refused rather than trusted: Bun's SQL client resolves `postgres:///db`
- * through PGHOST, exactly as libpq does, so an empty hostname is whatever the
- * shell says it is. IPv6 loopback is `[::1]` as WHATWG URL reports it. A
+ * refused rather than trusted, override or not: `postgres:///db` goes where
+ * PGHOST says, and with PGHOST unset Bun connects to localhost over TCP while
+ * libpq takes the unix socket, which can be another server (SMD-2317). IPv6
+ * loopback is `[::1]` as WHATWG URL reports it. A
  * libpq-style socket URL (`postgres://u@/db?host=/var/run/...`) does not parse
  * and is refused, override or not; the client does not honour that form
  * either.
