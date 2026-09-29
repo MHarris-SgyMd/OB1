@@ -5230,10 +5230,14 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
 
     // SMD-2290: the embed arms send the logged query text to the provider, so they
     // pass through the egress gate now, like every other provider call in the fork.
-    // A stub records requests. Under the default deny with the endpoint not declared
-    // local the hybrid arm is skipped and the stub is never called; declared local
-    // the replay embeds and the stub IS called — so a dropped gate (which would
-    // embed under deny too) is caught by the first assertion's zero.
+    // A stub records requests. The property that matters is the zero: no logged
+    // query text leaves under the default deny. It is held twice over — the up-front
+    // skip when the endpoint is not declared local, and, under that, getEmbedding's
+    // own per-call gate (a ProviderError before any request). The local case then
+    // embeds and the stub IS called, so the zero is a gate holding, not a broken
+    // embedder. (Dropping the up-front skip alone keeps the zero — the per-call gate
+    // still refuses — but turns the graceful skip into an exit-1 error, which the
+    // [20] skip assertions above catch.)
     {
       let stubReqs = 0;
       const stub = Bun.serve({ port: 0, fetch() { stubReqs++; const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return Response.json({ data: [{ embedding: v }] }); } });
@@ -5246,7 +5250,7 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
         stubReqs = 0;
         const allowed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both], { OB1_LLM_BASE_URL: stubUrl, OB1_EMBEDDING_MODEL: EMBEDDING_MODEL, OB1_LLM_LOCAL: "1" });
         assert(stubReqs >= 1 && /replayed 3 of 3 logged searches/.test(allowed.out),
-          `declared local, the replay embeds the hybrid query through the gate — the stub is called and all three rows replay (${stubReqs} request(s); ${allowed.out.trim().split("\n")[0]})`);
+          `declared local, the replay embeds the hybrid query through the gate — the stub is called and all three rows replay, so the deny zero is a gate holding, not a dead embedder (${stubReqs} request(s); ${allowed.out.trim().split("\n")[0]})`);
       } finally {
         stub.stop(true);
       }

@@ -898,9 +898,14 @@ async function main(): Promise<void> {
     // so it measures what the canary's search would return, and through the same
     // egress gate every other provider call in the fork passes (SMD-2290). The
     // wholesale check the claim workers run (as sync-linear.ts does): null when
-    // the endpoint is declared local, or the policy is off or allows it.
+    // the endpoint is declared local, or the policy is off or allows it. A logged
+    // query carries only its text — the `marker` unit, no actor and no row
+    // metadata — so the check reads that one unit: it stays what getEmbedding's
+    // own per-call gate will judge below, so the two agree rather than this one
+    // passing on an actor:/source: term the query never carries and the per-call
+    // one then refusing.
     const embedCfg = resolveEmbedConfig(process.env as EmbedEnv);
-    const embedRefused = egressRefusal(embedCfg.embeddings, embedCfg.egress);
+    const embedRefused = egressRefusal(embedCfg.embeddings, embedCfg.egress, ["marker"]);
     let embedFn: EmbedFn | undefined;
     if (embedRefused) {
       console.error(`note: the embeddings endpoint is not available to the replay (${embedRefused}) — hybrid- and current-arm searches will be skipped (the keyword arm replays without a model). Declare it local (OB1_LLM_LOCAL=1) or allow it in OB1_EGRESS_POLICY to embed the logged queries.`);
