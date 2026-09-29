@@ -6291,6 +6291,16 @@ stand-in key on its own image:
 - as compose starts it: up, the runner's own process at CapEff `e0` (KILL,
   SETGID, SETUID).
 
+**The runner's database role (SMD-2289, part 2).** Since the runner reaches
+Postgres as `ob1_orchestration_runner`, I also asks, from inside its
+container as `bun` over its own `DATABASE_URL`, who it is. It must not be a
+superuser. Its environment must hold nothing outside compose's list for the
+service and the image's own names, and none of the server's (`MCP_ACCESS_KEYS`,
+`POSTGRES_PASSWORD`, the Jev and query-log knobs among them). Only names are
+read, never values. The grant set was measured as that role in the kit's
+runner, one group at a time, until the fixture's items were inserted and
+embedded.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

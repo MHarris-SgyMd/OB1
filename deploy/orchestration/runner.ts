@@ -882,6 +882,12 @@ function canRead(dir: string): boolean {
 /** What a missing emitter needs, said the same way at build and at start (review pass 4: "rebuild" was the advice at both, and a rebuild can never add it). */
 const missingEmitterHelp = (missing: string[]) => `pipelines.json names an emitter the image does not hold (${missing.join("; ")}). Copy it into the image: a COPY line in deploy/orchestration/runner.Dockerfile, and a \`!<its path>\` line in the repo root's .dockerignore (which keeps recipes/ and evals/ out); then rebuild the runner: compose --profile orchestration up -d --build orchestration-runner`;
 
+/** A postgres URL's password, "" when it has none; null when there is no URL to read. */
+export function databasePassword(url: string | undefined): string | null {
+  if (!url) return null;
+  try { return decodeURIComponent(new URL(url).password); } catch { return null; }
+}
+
 /** The service's configuration from its environment; throws with the reason. */
 function configFrom(env: Record<string, string | undefined>, uid = process.getuid?.() ?? -1, file = PIPELINES_FILE): Config {
   const key = env.OB1_RUNNER_KEY?.trim() ?? "";
@@ -890,6 +896,8 @@ function configFrom(env: Record<string, string | undefined>, uid = process.getui
   if (!Number.isFinite(timeoutS) || timeoutS <= 0) throw new Error(`OB1_RUNNER_TIMEOUT_S must be a positive number of seconds, got "${env.OB1_RUNNER_TIMEOUT_S}"`);
   // As root (the image), nothing runs as root: without su-exec the runner refuses to start.
   if (uid === 0 && !SU_EXEC) throw new Error("running as root without su-exec: an emitter would run as root and could read every secret — use the runner's image (deploy/orchestration/runner.Dockerfile)");
+  // In the image the runner connects as its own role, whose password compose puts in the URL from OB1_RUNNER_DB_PASSWORD (SMD-2289); unset, every run would fail on its first query instead.
+  if (uid === 0 && databasePassword(env.DATABASE_URL) === "") throw new Error("DATABASE_URL carries no password: OB1_RUNNER_DB_PASSWORD, the runner's database role's, is not set — run `bun deploy/orchestration/provision.ts --init`, which writes it into deploy/.env, then start the profile again so its role step sets it");
   const pipelines = loadPipelines(file);
   const byUid = new Map<number, string>();
   for (const p of pipelines) {
@@ -1089,6 +1097,8 @@ async function selfCheck(): Promise<number> {
   const t = parseTally("  items: 3 record(s) (fixture 3)\n  tier=stable  inserted 3  updated 0  patched 0  unchanged 0  skipped 0  held 0  stale 0\n");
   expect("the count line is read", t?.inserted === 3 && t.unchanged === 0 && parseTally("nothing") === null);
   expect("configFrom refuses a missing or short key", throws(() => configFrom({}), /OB1_RUNNER_KEY/) && throws(() => configFrom({ OB1_RUNNER_KEY: "short" }), /OB1_RUNNER_KEY/));
+  expect("a database URL's password is read, and a URL with none is told from no URL", databasePassword("postgres://r:p%40ss@db:5432/x") === "p@ss" && databasePassword("postgres://r:@db/x") === "" && databasePassword("postgres://r@db/x") === "" && databasePassword(undefined) === null && databasePassword("not a url") === null);
+  if (SU_EXEC) expect("in the image, a DATABASE_URL with no password (OB1_RUNNER_DB_PASSWORD unset) is refused, naming --init", throws(() => configFrom({ OB1_RUNNER_KEY: "k".repeat(40), DATABASE_URL: "postgres://ob1_orchestration_runner:@postgres:5432/openbrain" }, 0), /OB1_RUNNER_DB_PASSWORD.*--init/));
   if (!SU_EXEC) expect("as root without su-exec it refuses to start", throws(() => configFrom({ OB1_RUNNER_KEY: "k".repeat(40) }, 0), /without su-exec/));
   const r = (x: Partial<Report>) => statusOf({ pipeline: "p", ok: false, emitted: 0, ...x });
   expect("status follows the stage and the exit code, not the text", r({ ok: true }) === 200 && r({ stage: "emitter", exit: 3 }) === 422 && r({ stage: "one-source" }) === 422

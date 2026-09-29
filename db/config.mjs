@@ -1861,6 +1861,12 @@ export const ROLE_GRANTS = Object.freeze({
     // granted before 063 fails preflight's write privileges over it; SMD-1723
     // decides the capture group when forget lands on the server.
     Object.freeze({ table: "ob1_embedding_snapshot", privileges: Object.freeze(["DELETE"]),                              since: "063" }),
+    // The migrator's own ledger, which reembed reads on every start to name
+    // the migration a brain is missing: without it every pass under a
+    // --grant role stopped at "permission denied for table
+    // schema_migrations" (SMD-2289, measured as the orchestration runner's
+    // role). The ledger is the migrator's, there before 001.
+    Object.freeze({ table: "schema_migrations",      privileges: Object.freeze(["SELECT"]),                              since: "001" }),
   ]),
   // The entity-extraction worker, additionally, writes the entity graph — and
   // so does a structured pass (`source:` mentions). UPDATE on the mention and

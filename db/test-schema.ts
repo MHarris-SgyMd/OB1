@@ -9050,7 +9050,10 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   // the trigger's snapshot write and the check's read of the event; short of
   // either of 060's two, the write fails inside the trigger.
   await db.exec(`CREATE ROLE ob1_test_capture NOLOGIN`);
-  for (const s of grantStatements("ob1_test_capture", { groups: ["capture", "server", "worker"] })) await db.exec(s);
+  // Granted as --grant grants, only what is there: the worker group names the migrator's ledger, which this schema, applied without the migrator, has not (SMD-2289).
+  const captureGroups = ["capture", "server", "worker"];
+  const capturePresent = new Set((await db.query<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects(captureGroups)))).rows.filter((r) => r.present).map((r) => r.name));
+  for (const s of grantStatements("ob1_test_capture", { groups: captureGroups, present: capturePresent })) await db.exec(s);
   const asCapture = async (): Promise<string> => {
     try {
       await db.transaction(async (tx) => {

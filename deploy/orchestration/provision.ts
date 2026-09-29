@@ -9,7 +9,8 @@
  *
  * `--init` writes the secrets the profile needs, where the env file has none:
  * N8N_ENCRYPTION_KEY, N8N_OWNER_PASSWORD, its bcrypt hash
- * N8N_OWNER_PASSWORD_HASH, N8N_MCP_KEY, N8N_WEBHOOK_KEY and OB1_RUNNER_KEY (the import runner's). It never replaces
+ * N8N_OWNER_PASSWORD_HASH, N8N_MCP_KEY, N8N_WEBHOOK_KEY, OB1_RUNNER_KEY (the import runner's) and
+ * OB1_RUNNER_DB_PASSWORD (its database role's, SMD-2289). It never replaces
  * a value, except a hash that no longer matches the password. n8n sets its
  * owner from the environment at every start (N8N_INSTANCE_OWNER_MANAGED_BY_ENV).
  * So the owner exists from the first boot, and nobody who reaches the port
@@ -230,6 +231,8 @@ export async function initSecrets(envFile: string): Promise<string[]> {
   if (!env.N8N_MCP_KEY) put("N8N_MCP_KEY", hex(32));
   if (!env.N8N_WEBHOOK_KEY) put("N8N_WEBHOOK_KEY", hex(32));
   if (!env.OB1_RUNNER_KEY) put("OB1_RUNNER_KEY", hex(32));
+  // The runner's database role (compose's orchestration-runner-role, SMD-2289): hex, which db/login-role.ts takes as it stands.
+  if (!env.OB1_RUNNER_DB_PASSWORD) put("OB1_RUNNER_DB_PASSWORD", hex(32));
   return written;
 }
 
@@ -376,7 +379,7 @@ export async function ensureApiKey(o: Options): Promise<KeyResult> {
 }
 
 /** The names --init writes. A stack provisioned before one was added (OB1_RUNNER_KEY, SMD-2212) is told to run it (review pass 2). */
-const INIT_WRITES = ["N8N_ENCRYPTION_KEY", "N8N_OWNER_PASSWORD", "N8N_OWNER_PASSWORD_HASH", "N8N_MCP_KEY", "N8N_WEBHOOK_KEY", "OB1_RUNNER_KEY"];
+const INIT_WRITES = ["N8N_ENCRYPTION_KEY", "N8N_OWNER_PASSWORD", "N8N_OWNER_PASSWORD_HASH", "N8N_MCP_KEY", "N8N_WEBHOOK_KEY", "OB1_RUNNER_KEY", "OB1_RUNNER_DB_PASSWORD"];
 
 /** A template's `${NAME}` placeholders filled from the env. The rendered text is never written to disk. */
 function render(template: string, env: Record<string, string>, file: string): string {
@@ -868,7 +871,7 @@ async function selfCheck(): Promise<number> {
     const first = await initSecrets(fresh);
     const second = await initSecrets(fresh);
     const got = parseEnv(readFileSync(fresh, "utf8"));
-    expect("--init writes what is missing and keeps what is set", first.join() === "N8N_ENCRYPTION_KEY,N8N_OWNER_PASSWORD,N8N_OWNER_PASSWORD_HASH,N8N_WEBHOOK_KEY,OB1_RUNNER_KEY" && got.N8N_MCP_KEY === "keep-me");
+    expect("--init writes what is missing and keeps what is set", first.join() === "N8N_ENCRYPTION_KEY,N8N_OWNER_PASSWORD,N8N_OWNER_PASSWORD_HASH,N8N_WEBHOOK_KEY,OB1_RUNNER_KEY,OB1_RUNNER_DB_PASSWORD" && got.N8N_MCP_KEY === "keep-me" && /^[0-9a-f]{64}$/.test(got.OB1_RUNNER_DB_PASSWORD ?? ""));
     expect("--init's hash is bcrypt and verifies the password", /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(got.N8N_OWNER_PASSWORD_HASH) && await Bun.password.verify(got.N8N_OWNER_PASSWORD, got.N8N_OWNER_PASSWORD_HASH));
     expect("--init a second time writes nothing", second.length === 0);
     setEnvValue(fresh, "N8N_OWNER_PASSWORD", "Ob1-changed-9");

@@ -1054,6 +1054,31 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml --profile orchestration build orchestration-runner
 
+      # SMD-2289: the runner's database role, as compose makes it. The
+      # one-shot runs twice against this job's Postgres: the role created,
+      # then updated, as a rotated password would be. Then, over TCP with its
+      # password, the role is not a superuser, reads thoughts (its groups'
+      # privileges), and cannot create a table (it owns nothing and holds no
+      # CREATE).
+      - name: The import runner's database role is made and granted
+        working-directory: deploy
+        env:
+          OB1_RUNNER_DB_PASSWORD: ci-stand-in-runner-db-password-0123456789
+        run: |
+          docker compose -f compose.yaml --profile orchestration run --rm --no-deps orchestration-runner-role
+          docker compose -f compose.yaml --profile orchestration run --rm --no-deps orchestration-runner-role | tee /tmp/role-again.log
+          grep -q "ob1_orchestration_runner updated" /tmp/role-again.log
+          url="postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD}@localhost:5432/openbrain"
+          [ "$(docker compose -f compose.yaml exec -T postgres psql "$url" -Atc "SELECT rolsuper FROM pg_roles WHERE rolname = current_user")" = "f" ]
+          docker compose -f compose.yaml exec -T postgres psql "$url" -Atc "SELECT count(*) FROM thoughts"
+          if docker compose -f compose.yaml exec -T postgres psql "$url" -Atc "CREATE TABLE ob1_runner_role_probe (x int)"; then
+            echo "the runner's role created a table"; exit 1
+          fi
+          # The step will not take the superuser for a runner's role.
+          if docker compose -f compose.yaml --profile orchestration run --rm --no-deps orchestration-runner-role bun login-role.ts --role postgres --password-env OB1_RUNNER_DB_PASSWORD; then
+            echo "login-role.ts took the superuser"; exit 1
+          fi
+
       # SMD-2289: the image's own start, as compose runs the service but
       # without its dependencies (starting opens no database connection).
       # `--egress` gives a real nft its rules, setpriv drops NET_ADMIN and
@@ -1067,6 +1092,8 @@ jobs:
         working-directory: deploy
         env:
           OB1_RUNNER_KEY: ci-stand-in-runner-key-not-a-secret-0123456789
+          # In the image the runner refuses a DATABASE_URL with no password (SMD-2289).
+          OB1_RUNNER_DB_PASSWORD: ci-stand-in-runner-db-password-0123456789
         run: |
           docker compose -f compose.yaml --profile orchestration run -d --no-deps --name ob1-runner-egress orchestration-runner
           for _ in $(seq 30); do docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening" && break; sleep 1; done

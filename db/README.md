@@ -914,7 +914,14 @@ this.)
 `db/config.mjs`'s `ROLE_GRANTS` is the machine-readable list; this table is the
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
-issues every group at once.
+issues every group at once, or with `--groups capture,worker,…` those alone
+(SMD-2289). `--groups` grants less; it revokes nothing, so a role granted
+more before keeps it. `db/login-role.ts --role <name> --password-env <VAR>`
+creates or updates the LOGIN role itself (not a superuser, owning nothing),
+its password sent as a SCRAM verifier, for a compose service that connects as
+a role of its own: the orchestration runner's `ob1_orchestration_runner`
+holds capture, server, worker, structure and extraction, what its ingester
+and reembed run (measured).
 
 | Group | Object (migration, or `schemas/` file) | Privileges |
 | --- | --- | --- |
@@ -936,6 +943,7 @@ issues every group at once.
 | | `ob1_config` (006) | `INSERT, UPDATE` |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
+| | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks; without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |

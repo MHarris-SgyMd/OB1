@@ -62,6 +62,7 @@ import {
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
   HNSW_SEEDS,
+  ROLE_GRANT_GROUPS,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
   grantPresenceSql,
@@ -90,9 +91,15 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations
 // a silent plain run that exits 0. The refusal names the flag or the
 // argument's position, never the argument: a URL carries a password.
 const cli = commandLine("migrate.ts", {
-  url: "one", grant: "one", "dry-run": "none", baseline: "none", reapply: "none", force: "none",
-}, { hints: { url: "<postgres://…>", grant: "<role>", force: "(with --baseline)" } });
+  url: "one", grant: "one", groups: "one", "dry-run": "none", baseline: "none", reapply: "none", force: "none",
+}, { hints: { url: "<postgres://…>", grant: "<role>", groups: "<group,group…> (with --grant)", force: "(with --baseline)" } });
 
+// Refused before the URL is read, so a stray --groups says so rather than "no database URL".
+const groupsArg = cli.value("groups");
+if (groupsArg !== undefined && cli.value("grant") === undefined) {
+  console.error("--groups narrows --grant to some of its groups; it does nothing on its own. Pass it with --grant <role>.");
+  process.exit(2);
+}
 const url = databaseUrl(cli.value("url"));
 const dryRun = cli.has("dry-run");
 const baseline = cli.has("baseline");
@@ -126,7 +133,19 @@ if (force && !baseline) {
 // role now holds each privilege and rolls back if not: a grantor that holds a
 // privilege without grant option "grants" it with a WARNING and no effect,
 // which the driver does not surface (SMD-1796, third review pass).
+// --groups a,b narrows it to those groups of ROLE_GRANTS (SMD-2289: the
+// orchestration runner's role gets what its ingester and reembed run, not the
+// whole list). It grants less; it revokes nothing, so a role granted more
+// before keeps what it has.
 const grantRole = cli.value("grant");
+const grantGroups = groupsArg === undefined ? ROLE_GRANT_GROUPS : groupsArg.split(",").map((g) => g.trim()).filter(Boolean);
+{
+  const unknown = grantGroups.filter((g) => !(ROLE_GRANT_GROUPS as readonly string[]).includes(g));
+  if (groupsArg !== undefined && (unknown.length || !grantGroups.length)) {
+    console.error(`--groups takes a comma-separated list of ${ROLE_GRANT_GROUPS.join(", ")}${unknown.length ? `; not a group: ${unknown.map((g) => JSON.stringify(g)).join(", ")}` : "; none was given"}.`);
+    process.exit(2);
+  }
+}
 if (grantRole !== undefined) {
   if (baseline || reapply) {
     console.error("--grant issues privileges; it does not apply or record migrations. Run it on its own.");
@@ -144,22 +163,22 @@ if (grantRole !== undefined) {
       await gsql.close();
       process.exit(2);
     }
-    const wanted = grantedObjects();
+    const wanted = grantedObjects(grantGroups);
     const present = new Set<string>(
       ((await gsql.unsafe(grantPresenceSql(wanted))) as { kind: string; name: string; present: boolean }[]).filter((r) => r.present).map((r) => r.name)
     );
     const missing = wanted.filter((o) => !present.has(o.name)).map((o) => o.name);
     // "; " between names: a function's name carries ", " inside its argument list.
     const skippedHint = `not yet present, skipped (run --grant again after applying the migration, community schema or extension/recipe schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach): ${missing.join("; ")}`;
-    const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { present })];
+    const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { groups: grantGroups, present })];
     if (dryRun) {
-      console.log(`\n--grant ${grantRole}  (--dry-run: nothing run)\n`);
+      console.log(`\n--grant ${grantRole}${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`}  (--dry-run: nothing run)\n`);
       for (const s of statements) console.log(`  ${s}`);
       if (missing.length) console.log(`\n  ${skippedHint}`);
       await gsql.close();
       process.exit(0);
     }
-    const merged = mergedGrants(undefined, present);
+    const merged = mergedGrants(grantGroups, present);
     await gsql.begin(async (tx) => {
       for (const s of statements) await tx.unsafe(s);
       const notHeld = ((await tx.unsafe(grantVerifySql(grantRole, merged))) as { kind: string; name: string; privilege: string; held: boolean }[]).filter((r) => !r.held);
@@ -171,7 +190,7 @@ if (grantRole !== undefined) {
         );
       }
     });
-    console.log(`\nGranted ${grantRole} the capturing-role privileges over ${present.size} object(s):\n`);
+    console.log(`\nGranted ${grantRole} ${groupsArg === undefined ? "the capturing-role privileges" : `the privileges of ${grantGroups.join(", ")}`} over ${present.size} object(s):\n`);
     for (const s of statements) console.log(`  ${s}`);
     if (missing.length) console.log(`\n  ${skippedHint}`);
     await gsql.close();

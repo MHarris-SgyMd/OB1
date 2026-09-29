@@ -236,7 +236,10 @@ async function inRunData(env: Record<string, string>, names: string[], value: st
  * - the instance's schedule is n8n days for 24 hours (review pass 2: an
  *   hourly 24 fires once, then never);
  * - neither the run key nor the runner's key is anywhere in n8n's saved runs
- *   of the import workflows (review pass 1: the webhook saved its headers).
+ *   of the import workflows (review pass 1: the webhook saved its headers);
+ * - the runner reaches Postgres as `ob1_orchestration_runner`, not a
+ *   superuser, and its environment holds only what compose lists for it and
+ *   the image sets, none of the server's keys or knobs (SMD-2289).
  */
 async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Check> {
   const rows = () => brainSql("n8n", `SELECT count(*), count(*) FILTER (WHERE metadata->>'actor_name' = '${IMPORT.actor}'), count(*) FILTER (WHERE embedding IS NOT NULL) FROM thoughts WHERE metadata->>'source' = '${IMPORT.system}'`).split("|").map(Number);
@@ -270,6 +273,7 @@ async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Chec
   const schedule = fixtureFlow?.nodes?.find((n: any) => n.name === "Schedule")?.parameters?.rule?.interval?.[0];
   const daily = schedule?.field === "days" && schedule?.daysInterval === 1;
   const leaked = Number(brainSql("n8n", `SELECT count(*) FROM thoughts WHERE metadata->>'source' = 'gmail' AND metadata->>'actor_name' = '${IMPORT.actor}'`));
+  const who = runnerIdentity();
   // Read after the runner-down run, so its saved error is among them.
   const flows = [IMPORT.pipeline, IMPORT.stray, IMPORT.snoop, IMPORT.vendor].flatMap((p) => [`OB1 import — ${p}`, `OB1 import — ${p} (on demand)`]);
   const [runKey, runnerKey] = [await inRunData(env, flows, env.N8N_WEBHOOK_KEY), await inRunData(env, flows, env.OB1_RUNNER_KEY)];
@@ -281,7 +285,8 @@ async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Chec
     && vendor.status === 200 && vendor.report?.emitted === 0 && vendor.report?.egress?.length === 2
     && /^CONNECT server:8000: the TLS ClientHello names other\.example, not server$/.test(vendor.report.egress[0]) && /^CONNECT postgres:5432: not a host vendor names \(network: server:8000\)$/.test(vendor.report.egress[1])
     && (down === null || (down.status === 502 && /did not answer/.test(down.report?.why ?? "")))
-    && runKey.runs > 0 && runKey.holding === 0 && runnerKey.holding === 0;
+    && runKey.runs > 0 && runKey.holding === 0 && runnerKey.holding === 0
+    && who.role === RUNNER_ROLE && who.superuser === false && who.beyond.length === 0 && who.serverOnly.length === 0;
   const fmt = (r: { status: number; report: any }) => `${r.status}${r.report?.counts ? ` inserted ${r.report.counts.inserted} unchanged ${r.report.counts.unchanged}` : ""}${r.report?.ok === false ? ` ${r.report.why}` : ""}`;
   return {
     id: "I",
@@ -291,8 +296,33 @@ async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Chec
       + `snoop → ${snoop.status}, ${snoop.status === 200 && snoop.report?.emitted === 0 ? "no environment readable, no network reached" : `FOUND: ${JSON.stringify(snoop.report).slice(0, 300)}`}, ${leftovers} of its leftover children still running; `
       + `vendor → ${vendor.status}, ${vendor.status === 200 ? `its proxy refused ${JSON.stringify(vendor.report?.egress ?? [])}` : JSON.stringify(vendor.report).slice(0, 300)}; `
       + `the fixture's schedule ${JSON.stringify(schedule)}; runner down → ${down ? `${down.status} ${String(down.report?.why ?? "").slice(0, 80)}` : "not run (sealed)"}; `
-      + `the run key in ${runKey.holding} of ${runKey.runs} saved import runs, the runner's key in ${runnerKey.holding}`,
+      + `the run key in ${runKey.holding} of ${runKey.runs} saved import runs, the runner's key in ${runnerKey.holding}; `
+      + `the runner connects as ${who.role ?? `(unread: ${who.problem})`}${who.superuser === false ? ", not a superuser" : who.superuser ? ", A SUPERUSER" : ""}, its environment ${who.names} name(s)${who.beyond.length ? `, BEYOND compose's list: ${who.beyond.join(" ")}` : ""}${who.serverOnly.length ? `, THE SERVER'S: ${who.serverOnly.join(" ")}` : ""}`,
   };
+}
+
+/** The runner's own database role (SMD-2289), which compose's orchestration-runner-role makes. */
+const RUNNER_ROLE = "ob1_orchestration_runner";
+/** What the runner's image sets or an exec adds, beside compose's list. */
+const IMAGE_ENV = ["PATH", "HOME", "HOSTNAME", "TERM", "container", "BUN_INSTALL_BIN", "BUN_RUNTIME_TRANSPILER_CACHE_PATH"];
+/** The server's, which the runner must not hold: its keys, the database's owner, and knobs its ingester and reembed do not read. */
+const SERVER_ONLY = ["MCP_ACCESS_KEYS", "POSTGRES_PASSWORD", "PORT", "OB1_JEV_BASE_URL", "OB1_QUERY_LOG", "OB1_PG_POOL", "OB1_TRGM_INDEX", "OB1_JUDGE_MODEL", "OB1_EXTRACT_CHUNK_TOKENS", "LINEAR_API_KEY"];
+
+/**
+ * Who the runner is to the database, and what its environment holds
+ * (SMD-2289): asked from inside its container as `bun`, the user its
+ * ingester and reembed run as, over its own DATABASE_URL. The names outside
+ * compose's list for the service, or among the server's own, are returned;
+ * values are never read out.
+ */
+function runnerIdentity(): { role: string | null; superuser: boolean | null; names: number; beyond: string[]; serverOnly: string[]; problem?: string } {
+  const listed = Object.keys((Bun.YAML.parse(readFileSync(join(HERE, "..", "..", "deploy", "compose.yaml"), "utf8")) as any).services["orchestration-runner"].environment ?? {});
+  const script = "const s = new Bun.SQL(process.env.DATABASE_URL, { max: 1 }); const [r] = await s`SELECT current_user::text AS role, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser`; await s.close(); console.log(JSON.stringify({ ...r, names: Object.keys(process.env) }))";
+  const run = compose("n8n", ["exec", "-T", "orchestration-runner", "su-exec", "bun", "bun", "-e", script]);
+  let got: { role: string; superuser: boolean; names: string[] };
+  try { got = JSON.parse(run.out.trim().split("\n").at(-1) ?? ""); } catch { return { role: null, superuser: null, names: 0, beyond: [], serverOnly: [], problem: `exit ${run.code}: ${(run.err || run.out).trim().slice(0, 160)}` }; }
+  const allowed = new Set([...listed, ...IMAGE_ENV]);
+  return { role: got.role, superuser: got.superuser, names: got.names.length, beyond: got.names.filter((n) => !allowed.has(n)).sort(), serverOnly: got.names.filter((n) => SERVER_ONLY.includes(n)).sort() };
 }
 
 /** The compose services whose names are n8n's own network's, bare or with one of its search domains. */

@@ -149,7 +149,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
-| `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
+| `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -703,8 +703,10 @@ cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
 
 `--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
 hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
-`$`s as variables), `N8N_MCP_KEY`, `N8N_WEBHOOK_KEY` and the import runner's
-`OB1_RUNNER_KEY`, where the file has none. n8n sets its owner from the email and the hash at every start
+`$`s as variables), `N8N_MCP_KEY`, `N8N_WEBHOOK_KEY`, the import runner's
+`OB1_RUNNER_KEY`, and `OB1_RUNNER_DB_PASSWORD`, its database role's (SMD-2289),
+where the file has none. A stack provisioned before SMD-2289 runs `--init`
+once more to gain the password, or the runner refuses to start and says so. n8n sets its owner from the email and the hash at every start
 (`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
 boot, and nobody who reaches the port before provisioning can claim the
 instance. To change the password, edit it, run `--init` again, and recreate
@@ -934,6 +936,23 @@ The runner's key is a write capability bounded by the allowlist (the ADR's
 decision 4, amended), and not a brain key. To change it, edit
 `OB1_RUNNER_KEY`, recreate the runner (`compose up -d orchestration-runner`),
 and provision, which patches n8n's copy.
+
+**The runner's database role** (SMD-2289). The runner reaches Postgres as
+`ob1_orchestration_runner`, not the superuser. It is a LOGIN role that is not
+a superuser and owns nothing. It holds the grant groups its ingester and
+reembed run, and no more: capture, server, worker, structure and extraction
+(db/README.md, "Grants for a capturing role").
+- The `orchestration-runner-role` step makes it, on the migrator's image and
+  as the migrator connects, before the runner starts, on every `up`:
+  `db/login-role.ts` creates the role or resets its password to
+  `OB1_RUNNER_DB_PASSWORD`, then `migrate.ts --grant --groups` grants.
+- So a new migration's grants reach it on the next start. To rotate the
+  password, edit `OB1_RUNNER_DB_PASSWORD` and start the profile again
+  (`compose --profile orchestration up -d`).
+- The runner's environment holds what its ingester and reembed read: the
+  tier, the embedding, chunk and chat-blurb knobs, the provider's endpoints
+  and credentials, the timeout and the egress gate. It does not hold the
+  server's key material or its other knobs.
 
 **Adding a pipeline.** A pipeline is a line in `pipelines.json` plus its
 emitter, and the emitter has to be in the runner's image. For a converted
