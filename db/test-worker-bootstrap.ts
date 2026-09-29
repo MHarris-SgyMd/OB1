@@ -94,5 +94,5 @@ const deny = resolveEgressPolicy({});
   ok(/is declared local \(OB1_LLM_LOCAL\)/.test(egressDescription(local, deny, "OB1_LLM_LOCAL")), "a local endpoint's banner says the gate does not apply");
 }
 
-console.log(`\n  worker-bootstrap: ${pass} passed, ${fail} failed`);
+console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
