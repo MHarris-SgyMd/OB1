@@ -131,18 +131,22 @@ if (force && !baseline) {
  * Put public first on `conn`'s path for this run (pinPublicFirst, config.mjs),
  * or print the refusal, close `conn` and exit 2. --grant's statements are
  * unqualified too, so it runs this before them, as the run does before its
- * ledger.
+ * ledger; `grant` words the refusal for it. A brain in another schema is
+ * refused in words, not with statements to run: moving one into public is
+ * the operator's, who knows what else public holds (SMD-2247, second review
+ * pass: a printed schema rename moved another app out of public).
  */
-async function publicFirstOrExit(conn: SQL): Promise<void> {
+async function publicFirstOrExit(conn: SQL, grant = false): Promise<void> {
   const pinned = await pinPublicFirst(conn);
   if (pinned.refused === "ledger") {
     const other = quoteIdent(pinned.schema);
     console.error(
-      `Refused: this connection's search_path reaches a brain — this migrator's ledger — in schema ${other}, and public has none.\n` +
-        "  This migrator builds in public, where preflight and --baseline look; run on, it would start a second brain there.\n" +
-        `  If ${other} is this brain, built there by a path that put it first, make it public — as the database's owner, with nothing of the brain's in public:\n` +
-        `    ALTER SCHEMA public RENAME TO public_empty; ALTER SCHEMA ${other} RENAME TO public;\n` +
-        `  then run again (an extension the old public held moves with it: ALTER EXTENSION <name> SET SCHEMA public). If it is another brain, take ${other} off this connection's search_path. Nothing was changed.`
+      `Refused: this connection's search_path reaches a brain in schema ${other} — this migrator's ledger — and public holds none.\n` +
+        (grant
+          ? "  --grant grants on the brain's objects in public, and there are none there.\n"
+          : "  This migrator builds in public, where preflight and --baseline look; run on, it would start a second brain there.\n") +
+        `  If ${other} is another brain, take ${other} off this connection's search_path. If it is this brain, built in ${other} by a path that put it first,\n` +
+        "  it has to move into public before the migrator can go on: a move by hand, as the owner of both schemas, minding whatever else public holds. Nothing was changed."
     );
     await conn.close();
     process.exit(2);
@@ -150,12 +154,15 @@ async function publicFirstOrExit(conn: SQL): Promise<void> {
   if (pinned.refused === "public") {
     console.error(
       pinned.missing
-        ? "Refused: this database has no schema named public, and this migrator builds the brain there.\n" +
+        ? `Refused: this database has no schema named public, and ${grant ? "--grant grants on the brain's objects" : "this migrator builds the brain"} there.\n` +
             "  CREATE SCHEMA public;  as the database's owner, then run again. Nothing was changed."
+        : grant
+        ? `Refused: role ${pinned.role} has no USAGE on schema public, so Postgres leaves public off its search_path, and --grant grants on the brain's objects there.\n` +
+            "  Run --grant as the objects' owner — the role that ran the migrations — or a superuser. Nothing was changed."
         : `Refused: role ${pinned.role} has no USAGE on schema public, so Postgres leaves public off its search_path, and this migrator builds the brain there.\n` +
-            `  Run the migrator as the database's owner, ${pinned.owner}. To build as ${pinned.role} instead, as the schema's owner:\n` +
+            `  Run the migrator as the database's owner, ${pinned.owner}, or a role that is a member of it. To build as ${pinned.role} instead, as the schema's owner:\n` +
             `    GRANT USAGE, CREATE ON SCHEMA public TO ${pinned.role};\n` +
-            "  though the migrations that create extensions (011, pg_trgm) still need the database's owner or a superuser. Nothing was changed."
+            "  though the migrations that create extensions (001's vector, unless it is installed; 011's pg_trgm) still need the database's owner or a superuser. Nothing was changed."
     );
     await conn.close();
     process.exit(2);
@@ -186,7 +193,7 @@ if (grantRole !== undefined) {
       await gsql.close();
       process.exit(2);
     }
-    await publicFirstOrExit(gsql);
+    await publicFirstOrExit(gsql, true);
     const wanted = grantedObjects();
     const present = new Set<string>(
       ((await gsql.unsafe(grantPresenceSql(wanted))) as { kind: string; name: string; present: boolean }[]).filter((r) => r.present).map((r) => r.name)

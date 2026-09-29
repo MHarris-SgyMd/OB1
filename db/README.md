@@ -20,7 +20,8 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   first on its own session's path, the rest after it, so the brain is built in
   `public` whatever the role's or the connection string's path puts first. It
   refuses, changing nothing, where the path reaches a brain's ledger in another
-  schema or `public` cannot come first (test-upgrade [23]).
+  schema and `public` holds no brain, or `public` cannot come first
+  (test-upgrade [23]).
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container

@@ -1499,17 +1499,21 @@ export async function setPathWithoutTemp(tx) {
  * Judged first, before the path is touched: `{ refused: "ledger", schema }`
  * where a schema on the path other than public holds this migrator's ledger —
  * `schema_migrations` of its shape, with `name` and `sha256` — and public
- * holds none. Building on would start a second brain in public. Every schema
- * on the path is read, not the first ledger a name resolves to, so another
- * tool's `schema_migrations` (Rails', Ecto's: a `version`, no `name` or
- * `sha256`) neither hides a brain behind it nor counts as one. This holds
- * where public is first too: a brain behind an empty public refuses.
+ * holds no brain: that ledger and `thoughts` beside it. An empty ledger
+ * alone in public, which --dry-run or a first run failed at 001 leaves, is
+ * no brain. Building on would start a second brain in public. Every schema
+ * the path resolves to (current_schemas: those this role may use) is read,
+ * not the first ledger a name resolves to, so another tool's
+ * `schema_migrations` (Rails', Ecto's: a `version`, no `sha256`) neither
+ * hides a brain behind it nor counts as one. This holds where public is
+ * first too: a brain behind an empty public refuses.
  *
  * Then, where public is not already the first schema Postgres searches, the
  * path is set, and re-read: `{ refused: "public", missing, role, owner }`
  * where public is still not first — there is no schema public, or this role
- * has no USAGE on it, which Postgres takes as off the path. The session keeps
- * the path it was given; the migrator exits on the refusal. Otherwise
+ * has no USAGE on it, which Postgres takes as off the path. The path has
+ * been set by then, and resolves as before; the migrator exits on the
+ * refusal. Otherwise
  * `{ refused: null, was }`: `was` is the path it replaced, or null where
  * public was already first. Catalog reads by pg_class and pg_attribute,
  * which need no privilege on the schema. Bun.sql only (a tagged-template
@@ -1526,7 +1530,9 @@ export async function pinPublicFirst(sql) {
       SELECT (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
                WHERE n.nspname = ${schema} AND c.relname = 'schema_migrations' AND a.attname IN ('name', 'sha256')
                  AND a.attnum > 0 AND NOT a.attisdropped) = 2 AS brain`)[0].brain;
-  if (!(await holdsBrain("public"))) {
+  const publicThoughts = (await sql`SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                                                     WHERE n.nspname = 'public' AND c.relname = 'thoughts') AS present`)[0].present;
+  if (!(publicThoughts && (await holdsBrain("public")))) {
     for (const schema of state.schemas) {
       if (schema !== "public" && (await holdsBrain(schema))) return { refused: "ledger", schema };
     }
