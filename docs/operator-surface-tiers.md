@@ -173,7 +173,7 @@ Read against the tree on 2026-09-27.
 | Session-capture hook | New URL; stays an MCP client; refusal codes carried over exactly | SMD-2287 |
 | board-sync and the `db/` scripts | 35 files import `server-portable` modules (`entities`, `embed`, `chunk`, `egress`, `store`, …) and none import `index.ts`. SMD-2283 keeps those paths. The worker containers join the mesh and the egress network (they call providers) | SMD-2283, SMD-2134, SMD-1869 |
 | n8n | Brain calls move from MCP to the REST core. SMD-2212 (merged, #222) needs no re-aim for its import: n8n calls the `orchestration-runner`, not the brain. Its act tool is n8n's own endpoint | SMD-2295 |
-| `orchestration-runner` (#222) | A worker-class DB writer on the mesh and the egress network; its per-uid hardening is redesigned against the two networks | SMD-2289 |
+| `orchestration-runner` (#222) | A worker-class DB writer on the mesh and the egress network. Its per-uid egress rules (SMD-2289) are the container's own network namespace's, so they hold whichever networks it joins | SMD-2289 |
 | `integrations/kubernetes-deployment` | Retires under compose-only | SMD-1931, SMD-2288 |
 | Jev, the LLM env forwarding, the preflight entrypoint | Move from the `server` service to the REST core | SMD-2284 |
 | Release images and CI | `ob1-server` becomes one image per server; the full-stack job goes through the proxy; the Workers build retires | SMD-2296, SMD-2288 |
