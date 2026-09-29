@@ -16,7 +16,12 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   provider pre-installs pgvector into a schema off the connection's `search_path`
   (Supabase uses `extensions`), the runner adds it to its own session so the
   migrations apply, and preflight names the persistent fix for the server — see
-  the `test-search-path.ts` note under Testing.
+  the `test-search-path.ts` note under Testing. The runner also puts `public`
+  first on its own session's path, the rest after it, so the brain is built in
+  `public` whatever the role's or the connection string's path puts first. It
+  refuses, changing nothing, where the path reaches a brain's ledger in another
+  schema and `public` holds no brain, or `public` cannot come first
+  (test-upgrade [23]).
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
@@ -3039,10 +3044,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 948 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 954 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
+bun test-engines.ts                         # the engines (migrate.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -3095,6 +3101,22 @@ themselves, SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks
 that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.
+
+`migrate.ts` is also an engine (SMD-2304): `import { run } from "./migrate.ts"`
+defines it and does nothing else, and `run({ url, dryRun, baseline, reapply,
+force, grant, sql, writer })` is the CLI's run, returning the exit code — its
+lines go to the `Writer` it is given (`cli.ts`; the CLI passes the console),
+the migration files are read per call, and a client passed in is used in
+place of the URL and never closed. It must be one connection (the `max: 1`
+option), and it keeps the session state the run sets — lock_timeout, pgvector's
+schema on search_path when it is off the path, the `ob1.acl_*` settings — so
+pass one dedicated to the run, not a pooled connection another caller gets
+next. The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
+holds each engine to that: an import opens no connection, prints nothing and
+installs no process listener; the engine's code holds no exit, handler, argv
+scan or console call; and `run()` refuses in the CLI's words before
+connecting. Extraction, consolidation and re-embedding become engines next,
+one PR each, over the bootstrap below.
 
 The claim workers bootstrap their egress and identity through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket
