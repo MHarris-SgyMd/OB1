@@ -57,6 +57,7 @@ import {
   ACCEPTED_CLAIM_SQL,
   LOCK_TIMEOUT_S,
   alignVectorSearchPath,
+  pinPublicFirst,
   migrationNameProblem,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
@@ -126,6 +127,59 @@ if (force && !baseline) {
 // role now holds each privilege and rolls back if not: a grantor that holds a
 // privilege without grant option "grants" it with a WARNING and no effect,
 // which the driver does not surface (SMD-1796, third review pass).
+/**
+ * Put public first on `conn`'s path for this run (pinPublicFirst, config.mjs),
+ * or print the refusal, close `conn` and exit 2. --grant's statements are
+ * unqualified too, so it runs this before them, as the run does before its
+ * ledger; `grant` words the refusal for it, and `adopting` (--baseline) takes
+ * public's thoughts alone as the brain there. A brain in another schema is
+ * refused in words, not with statements to run: moving one into public is
+ * the operator's, who knows what else public holds (SMD-2247, second review
+ * pass: a printed schema rename moved another app out of public).
+ */
+async function publicFirstOrExit(conn: SQL, grant = false, adopting = false): Promise<void> {
+  const pinned = await pinPublicFirst(conn, adopting);
+  if (pinned.refused === "ledger") {
+    const other = quoteIdent(pinned.schema);
+    const named = pinned.viaUser ? ` (the path's "$user")` : "";
+    console.error(
+      `Refused: this connection's search_path reaches a brain in schema ${other}${named} — this migrator's ledger — and public holds no brain.\n` +
+        (grant
+          ? "  --grant grants on the brain's objects in public, and there are none there.\n"
+          : "  This migrator builds in public, where preflight and --baseline look; run on, it would start a second brain there.\n") +
+        `  If ${other} is another brain, take ${other} off this connection's search_path. If it is this brain, built in ${other} by a path that put it first,\n` +
+        "  it has to move into public before the migrator can go on: a move by hand, as the owner of both schemas, minding whatever else public holds. Nothing was changed."
+    );
+    await conn.close();
+    process.exit(2);
+  }
+  if (pinned.refused === "public") {
+    console.error(
+      pinned.missing
+        ? grant
+          ? "Refused: this database has no schema named public, where --grant grants on the brain's objects, so there are none to grant on.\n" +
+            "  CREATE SCHEMA public;  as the database's owner, apply the migrations, then run --grant. Nothing was changed."
+          : "Refused: this database has no schema named public, and this migrator builds the brain there.\n" +
+            "  CREATE SCHEMA public;  as the database's owner, then run again. Nothing was changed."
+        : grant
+        ? `Refused: role ${pinned.role} has no USAGE on schema public, so Postgres leaves public off its search_path, and --grant grants on the brain's objects there.\n` +
+            "  Run --grant as the objects' owner — the role that ran the migrations — or a superuser. Nothing was changed."
+        : `Refused: role ${pinned.role} has no USAGE on schema public, so Postgres leaves public off its search_path, and this migrator builds the brain there.\n` +
+            `  Run the migrator as the database's owner, ${pinned.owner}, or a role that is a member of it. To build as ${pinned.role} instead, as the schema's owner:\n` +
+            `    GRANT USAGE, CREATE ON SCHEMA public TO ${pinned.role};\n` +
+            "  Either way, 001's vector needs a superuser unless it is installed, and 011's pg_trgm needs CREATE on the database, which its owner has. Nothing was changed."
+    );
+    await conn.close();
+    process.exit(2);
+  }
+  if (pinned.was !== null) {
+    console.log(
+      `  search_path: public put first for this run only (it was ${pinned.was === "" || pinned.was === '""' ? "empty" : pinned.was}); ` +
+        "the server's connection keeps its own path, and preflight's schema row names the fix where that does not reach public.thoughts"
+    );
+  }
+}
+
 const grantRole = cli.value("grant");
 if (grantRole !== undefined) {
   if (baseline || reapply) {
@@ -144,6 +198,7 @@ if (grantRole !== undefined) {
       await gsql.close();
       process.exit(2);
     }
+    await publicFirstOrExit(gsql, true);
     const wanted = grantedObjects();
     const present = new Set<string>(
       ((await gsql.unsafe(grantPresenceSql(wanted))) as { kind: string; name: string; present: boolean }[]).filter((r) => r.present).map((r) => r.name)
@@ -332,6 +387,13 @@ if (baseline && !force) {
     process.exit(2);
   }
 }
+
+// The brain is built in public, where preflight and --baseline look, whatever
+// the session's search_path puts first (SMD-2247): every migration and the
+// ledger below are unqualified, and land in the path's first schema. Before
+// the ledger, so its CREATE neither fails with 3F000 on a path that names no
+// schema nor lands in another. See pinPublicFirst (config.mjs).
+await publicFirstOrExit(sql, false, baseline);
 
 await sql`
   CREATE TABLE IF NOT EXISTS schema_migrations (
