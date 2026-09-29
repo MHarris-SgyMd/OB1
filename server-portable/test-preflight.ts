@@ -322,6 +322,11 @@ console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242
     const got = searchPathSchemas(setting, version);
     assert(JSON.stringify(got) === JSON.stringify(want), `search_path ${shown(setting)} on ${version / 10000} reads as ${shown(want)} (got ${shown(got)})`);
   }
+  // temp_tablespaces' reading (SMD-2247): an empty entry is the default
+  // tablespace, kept; in a path it names no schema, dropped.
+  assert(JSON.stringify(searchPathSchemas('"", PG_DEFAULT', PG16, true)) === JSON.stringify(["", "pg_default"])
+           && JSON.stringify(searchPathSchemas('"", PG_DEFAULT', PG16)) === JSON.stringify(["pg_default"]),
+         "…and keepEmpty keeps a list's empty entry, which a path's reading drops");
   assert(withPublic([]) === "public" && withPublic(["$user", "public"]) === '"$user", public' && withPublic(['a"b', "x;y"]) === '"a""b", "x;y", public'
            && withPublic(["public", "a"]) === 'public, "a"',
          "…and the path with public put on it keeps the rest in order, each quoted, public once — where it stands, or last");

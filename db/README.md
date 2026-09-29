@@ -1502,6 +1502,7 @@ bun extract-entities.ts --url … --retry-left-out        # …only those with w
 OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
+#   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -1620,8 +1621,47 @@ flag reads a row again under the bound and the model in force: whole, or, over
 the bound, to it; a reading that fails outright — a window timing out, none
 parsing — records the row failed, and the earlier reading's entities stay in
 the graph until a later reading succeeds, since a failure writes nothing. A run that leaves partial rows and
-no failure exits 0, the partial rows listed on stdout: a job watching the exit
-code or stderr sees them only as `--status` counts them.
+no failure exits 0, the partial rows listed on stdout, unless the model looks
+at fault (below).
+
+**A run whose model looks at fault says so and exits 3 (SMD-2266).** Since a
+windowed thought with any window parsed is succeeded, a model answering many
+windows malformed writes partial rows, not failed ones. So the run counts its
+answers, one per window sent of each thought that returned (a timeout's
+earlier windows are not counted), and when more than a fifth of at least 48
+were not JSON of the expected shape (`db/config.mjs`'s `malformedAlarm`) it
+says so on stderr in two lines:
+- the first says the model, not the documents, is likely at fault, and names
+  `OB1_METADATA_MODEL`, and `OB1_EXTRACT_ESCALATE_MODEL` when it answered
+  runaways; a run of `--retry-failed`, `--retry-partial` or `--retry-left-out`
+  chose its rows for failing, so its first judgement says how many rows were
+  returned and that their documents may be at fault instead;
+- the second says the rows written stand, and names the retries for the kinds
+  of row the run left, with `--job` if `OB1_METADATA_MODEL` changes.
+
+The run exits 3, ahead of the 1 of rows failed, leased or pending, whose lines
+still print; a signal or the provider's refusal still exits 130 or 2, and the
+line says so. An all-malformed run exits 3 where it exited 1; its rows are
+failed, as before. A `--follow` process judges its answers in blocks of 48 or
+more after each pass drains the pool, so a breakage that starts late is not
+diluted by the good polls before it; one started on a backlog says nothing
+until the backlog is done, as a plain run does, so try a new model with
+`--limit 48` first. Stopped by a signal, a follower still exits 0; ending at
+its `--limit` with a block tripped, it exits 3, the last pass's block judged
+with the exit it takes.
+
+Measured on the stable brain's pool, read-only: qwen2.5:7b left out 11 of
+1,658 answers, all in six papers' reference lists, and read those six again at
+12 of 136 (9%). The wrong model, qwen3.5:0.8b, left out 17 of 61 over 24
+windowed thoughts (28%), 14 of them partial and none failed — the quiet case;
+over 24 one-window thoughts it failed 4, so a run with short thoughts in it
+already exits 1. There is no floor on one thought's share, since a thought's
+share reflects its text and a run's reflects the model; a floor of half would
+have failed only 3 of the wrong model's 14 partial thoughts. The three papers
+SMD-2260 was written for, read at 20 of 72 before it (28%), would pass a
+fifth: no share tells that reading apart from the wrong model's, and the floor
+of 48 keeps one such paper alone below the threshold at the default bound of
+24 windows.
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
@@ -2992,9 +3032,10 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 920 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 934 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
+bun test-connect.ts                         # every script's connection through connect.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -3009,6 +3050,23 @@ and `extract-entities.ts` ignored a flag they did not know, so `--K 10` ran the
 default `--k` and exited 0 (SMD-2015). `test-cli.ts` holds the scanner's rules,
 that every entry point imports `cli.ts` and nothing else reads `process.argv`,
 and runs each entry point with a flag it does not have and with `--help`.
+
+Every script reaches its database through `connect.ts` (SMD-2302): `--url`, else
+`DATABASE_URL`, else exit 2 with one refusal (a URL that does not parse is
+refused too, and never printed); one client constructor; and one answer to
+"may this database be reset?" — a loopback host by name (`localhost`,
+`127.0.0.1`, `[::1]`, `0.0.0.0`), not an empty host (it resolves through
+`PGHOST`), or `OB1_ALLOW_REMOTE_DB=1`. `tier.ts --refresh` and the suites'
+`dropSchema` both ask it, and print why not. The rule reads the URL's
+hostname; where a client actually connects can differ (Bun's `?path=` socket,
+libpq's `?host=`), which is SMD-2317. `hnsw-graph.ts`,
+`graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
+after connecting and return it from `closeThenExit`, which closes the pool and
+flushes their output first (the claim workers still close before each exit
+themselves, SMD-2304).
+`test-connect.ts` holds the rule as a truth table, runs the door, and checks
+that no script outside the suites reads `DATABASE_URL`, builds a client or
+exits inside the door.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
@@ -3031,7 +3089,9 @@ how SMD-1806's ingester met the step when it imported two `scripts/*.mjs`
 not resolve — and asserts the runner heals its own session while preflight names
 the persistent fix. The test container installs pgvector into `public`, on the
 path, so nothing else in the matrix sees this; the suite restores it afterward,
-which `ci-parity.sh` needs since it shares one Postgres.
+which `ci-parity.sh` needs since it shares one Postgres. Its [7] holds the path
+the migrator gives migration 021's transaction, `pg_temp` taken out, to the
+schemas Postgres reads in the raw path (SMD-2247).
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
 the command and removes the container on exit. It prefers podman (including the
@@ -3341,7 +3401,19 @@ first assumed. See FORK.md's SMD-1632 section.
   bound too; `--retry-left-out`, run as `--status` advises — another model,
   `--job` this pool's key — the stub answering now, takes those two and not the prefix, saying one is a
   prefix too, and clears their caveats and adds the windows' entities, and
-  `--retry-partial` then takes the prefix (SMD-2260).
+  `--retry-partial` then takes the prefix (SMD-2260). Three 24-window papers
+  with 4, 3 and 1 windows in prose — the stable brain's reference-list papers
+  as the 7B reads them, 8 of 72 answers — are written and the run exits 0 with
+  no alarm; four 12-window papers with 5 windows each in prose, 20 of 48
+  answers and no row failed, exit 3 where they exited 0, naming
+  `--retry-left-out` alone; three 12-window papers with 5 each in prose and 12
+  one-window notes in
+  prose, 27 of 48 answers, exit 3, before the notes' failures' 1, the stderr
+  line naming the share and the model, the papers' rows standing; a `--follow`
+  process given 48 notes in prose prints the line as it polls, not at its
+  stop, and exits 0 on SIGINT; and `--retry-failed` over the 60 notes, still in
+  prose, exits 3 saying their documents may be at fault; a `--follow --limit`
+  that trips on its last pass says it exits 3, and does (SMD-2266).
 
 ### What test-schema.ts asserts
 

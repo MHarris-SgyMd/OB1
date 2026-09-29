@@ -55,7 +55,7 @@ import {
 const t0 = Date.now();
 // Before anything reads the environment: every OB1_* knob but this arm's own
 // goes, and the few FORWARDED_ENV names (write-path.ts) — the throwaway
-// guard's overrides, whose own refusal names them. The import below is hoisted
+// guard's override, whose own refusal names it. The import below is hoisted
 // and the list is a literal, so it is in hand here.
 for (const k of Object.keys(process.env)) if (k.startsWith("OB1_") && !k.startsWith("OB1_WP_") && !(FORWARDED_ENV as readonly string[]).includes(k)) delete process.env[k];
 const URL_ = process.env.DATABASE_URL;

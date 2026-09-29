@@ -104,6 +104,12 @@ export function resolveExtractWindow(
 export const EXTRACT_MIN_WINDOW_TOKENS: number;
 /** The most windows one thought is extracted in by default, 24; over it the thought is extracted over its first windows, succeeded with a caveat (SMD-2240). */
 export const EXTRACT_MAX_WINDOWS: number;
+/** The share of a run's extraction answers, one a window, past which malformed ones read as the model at fault, a fifth (SMD-2266). */
+export const EXTRACT_MALFORMED_ALARM_SHARE: number;
+/** The fewest answers a run judges that share over, 48. */
+export const EXTRACT_MALFORMED_ALARM_MIN: number;
+/** Whether `malformed` of a run's `answers` are more than EXTRACT_MALFORMED_ALARM_SHARE of at least EXTRACT_MALFORMED_ALARM_MIN. */
+export function malformedAlarm(answers: number, malformed: number): boolean;
 /** OB1_EXTRACT_MAX_WINDOWS when a positive safe integer once floored, else EXTRACT_MAX_WINDOWS; `from` says which. */
 export function resolveExtractMaxWindows(raw: string | undefined): { windows: number; from: "OB1_EXTRACT_MAX_WINDOWS" | "default" };
 
@@ -278,8 +284,12 @@ export const HNSW_SEED_MAX_SCAN_TUPLES: number;
 export const HNSW_SEED_SCAN_MEM_MULTIPLIER: number;
 /** The bound names, in remedy order. Bind into Bun.sql with sql.array(HNSW_BOUNDS, "TEXT"). */
 export const HNSW_BOUNDS: string[];
-/** A database name as an SQL identifier. */
+/** A name (a database's, a schema's, a tablespace's) as an SQL identifier, always quoted. */
 export function quoteIdent(name: unknown): string;
+/** A search_path setting's schemas, in order, as Postgres resolves them; `serverVersionNum` is `server_version_num` (17 counts a vertical tab as whitespace); `keepEmpty` keeps a `""` entry (temp_tablespaces' default tablespace). */
+export function searchPathSchemas(setting: string, serverVersionNum: number, keepEmpty?: boolean): string[];
+/** Set the transaction's search_path to itself without the temp schema (dropped by parsed name, each name quoted), LOCAL; returns the path it read. */
+export function setPathWithoutTemp(tx: import("bun").SQL): Promise<string>;
 /** `SELECT name, value` of each bound as this session sees it (value NULL when pgvector is not loaded). */
 export const BOUNDS_IN_FORCE_SQL: string;
 /** match_thoughts clamps match_count to this inside the function (014). */

@@ -4,6 +4,8 @@ import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
 import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
 import { captureLineage } from "./lineage.ts";
+import { classifyGenre } from "./genre.ts";
+import { resolveJevConfig } from "./jev.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
@@ -332,6 +334,14 @@ function embedConfig(): EmbedConfig {
 // The tag extraction is metadata.ts (shared with db/sync-linear.ts); this is
 // the server's reader over it, lazy like embedConfig for the same reason.
 const extractMetadata = (text: string, subject: EgressSubject) => extractMetadataWith(text, subject, embedConfig());
+
+// The genre classifier (SMD-2323): a deterministic pre-signal over the metadata
+// first, then the typed-decision tier when OB1_JEV_BASE_URL names one — opt-in
+// and null-by-default, so a capture pays nothing for it unless the tier is
+// configured (the classifier is pre-signal-only and falls back to `other`).
+const jevConfig = () => resolveJevConfig(env());
+const classifyThoughtGenre = (content: string, metadata: Record<string, unknown>, subject: EgressSubject) =>
+  classifyGenre(content, metadata, jevConfig(), subject);
 
 function citationBase(): string {
   return env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
@@ -1993,10 +2003,16 @@ function buildServer(principal: Principal): McpServer {
         // still RECORDS the label below, for the passes and the per-source weight.
         const subject: EgressSubject = { kind: "capture", actor: principal.name, content };
         const gate = decideCalls(subject, cfg, cfg.egress);
-        // Independent of each other, so they overlap.
-        const [embedded, metadata] = await Promise.all([
+        // Independent of each other, so they overlap. The genre classifier reads
+        // the caller's metadata (a `source:linear`/arXiv pre-signal) and, only
+        // when the tier is configured, the content — never the extractor's tags,
+        // so it need not wait for extractMetadata (SMD-2323). Its own egress is
+        // the tier's, so it runs regardless of the capture's chat gate; a tier
+        // outage falls back to `other` inside the classifier, never here.
+        const [embedded, metadata, genre] = await Promise.all([
           gate.embeddings.allowed ? embedCapture(content, subject) : Promise.resolve(undefined),
           gate.chat.allowed ? extractMetadata(content, subject) : Promise.resolve(metadataRefused()),
+          classifyThoughtGenre(content, { ...clientMetadata, source: origin }, subject),
         ]);
         const chunks = embedded?.chunks ?? [];
         const contextFailures = embedded?.contextFailures ?? 0;
@@ -2006,7 +2022,11 @@ function buildServer(principal: Principal): McpServer {
         // shape check above has already refused a reserved key outright, so this
         // only orders the rest), and `summary_model` and its like survive
         // (SMD-2014).
-        const payload = { metadata: { ...clientMetadata, ...metadata, source: origin } };
+        // `genre` last, over both spreads: the classifier already honours a valid
+        // caller-supplied genre (its pre-signal returns it), so placing the
+        // classified value here lets that one round-trip while a bogus one is
+        // overwritten by the classification (SMD-2323).
+        const payload = { metadata: { ...clientMetadata, ...metadata, source: origin, genre: genre.genre } };
 
         // Atomicity is the store's problem now: the SQL path writes content,
         // metadata and vector in one statement, while the PostgREST path keeps the

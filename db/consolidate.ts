@@ -112,7 +112,6 @@
  * itself, stops every worker at once with nothing marked failed.
  */
 
-import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
@@ -128,6 +127,7 @@ import { isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
+import { databaseUrl, openSql } from "./connect.ts";
 
 /**
  * Every argument accounted for (db/cli.ts): a flag this worker does not have
@@ -144,11 +144,7 @@ const cli = commandLine("consolidate.ts", {
 }, { hints: { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" } });
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const url = cli.value("url") ?? process.env.DATABASE_URL;
-if (!url) {
-  console.error("No database URL. Pass --url or set DATABASE_URL.");
-  process.exit(2);
-}
+const url = databaseUrl(cli.value("url"));
 
 const WORKERS = cli.int("workers", { absent: 2, min: 1 });
 // One thought per claim: up to --k model calls per thought against a claim of
@@ -261,7 +257,7 @@ if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, 
 // through the pool, and a worker parked on a lock or a long statement holds
 // its own connection, so the spare is what keeps every worker's leases alive
 // then. Tightening this to WORKERS would recreate the lapse 031 removed.
-const sql = new SQL({ url, max: WORKERS + 1 });
+const sql = openSql(url, { max: WORKERS + 1 });
 
 // ── The database's side ─────────────────────────────────────────────────────
 
