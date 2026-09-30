@@ -710,6 +710,7 @@ async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promi
   if (stray.length) return { pipeline: p.name, ok: false, stage: "one-source", why: `${stray.length} line(s) are not ${p.name}'s source — the batch is refused whole; nothing written`, emitted, notes: stray.slice(0, 20) };
   if (emitted === 0) return { pipeline: p.name, ok: true, emitted, counts: null, report: [`${p.name}: the emitter printed nothing — no export under ${input}?`] };
   const ing = await step([...c.asPipeline, ...c.commands.ingest(p)], { cwd: c.cwd, env: c.env, stdin: e.bytes, deadline });
+  if (ing.code !== 0 && passwordRefused(ing.err)) return { pipeline: p.name, ok: false, stage: "ingest", exit: ing.code, emitted, why: RUNNER_PASSWORD_WHY };
   // The ingester's own "next: bun db/reembed.ts" is the runner's next step, not the reader's.
   const base = { pipeline: p.name, emitted, counts: parseTally(ing.out), report: redactAll(lines(ing.out).filter((l) => !/^\s*next: /.test(l))), notes: shownTail(ing.err, 8000) };
   if (ing.timedOut || ing.code !== 0) return { ...base, ok: false, stage: "ingest", exit: ing.timedOut ? null : ing.code, why: ing.timedOut ? `the ingester ${past}` : `the ingester exited ${ing.code}${ing.code === 2 ? " (it refused the batch or its configuration; nothing written — the notes say which)" : ""}` };
@@ -882,6 +883,17 @@ function canRead(dir: string): boolean {
 /** What a missing emitter needs, said the same way at build and at start (review pass 4: "rebuild" was the advice at both, and a rebuild can never add it). */
 const missingEmitterHelp = (missing: string[]) => `pipelines.json names an emitter the image does not hold (${missing.join("; ")}). Copy it into the image: a COPY line in deploy/orchestration/runner.Dockerfile, and a \`!<its path>\` line in the repo root's .dockerignore (which keeps recipes/ and evals/ out); then rebuild the runner: compose --profile orchestration up -d --build orchestration-runner`;
 
+/** Whether a step's stderr is Postgres refusing the runner's password: its role's was changed and the runner not recreated (review pass 1: a bare stack trace). */
+const passwordRefused = (stderr: string) => /password authentication failed for user/.test(stderr);
+/** What the runner says then. */
+const RUNNER_PASSWORD_WHY = "Postgres refused the runner's database password: OB1_RUNNER_DB_PASSWORD was changed and the runner not recreated with it. Start the profile again (compose --profile orchestration up -d), which resets the role's password and recreates the runner; nothing was written";
+
+/** A postgres URL's password, "" when it has none; null when there is no URL to read. */
+export function databasePassword(url: string | undefined): string | null {
+  if (!url) return null;
+  try { return decodeURIComponent(new URL(url).password); } catch { return null; }
+}
+
 /** The service's configuration from its environment; throws with the reason. */
 function configFrom(env: Record<string, string | undefined>, uid = process.getuid?.() ?? -1, file = PIPELINES_FILE): Config {
   const key = env.OB1_RUNNER_KEY?.trim() ?? "";
@@ -890,6 +902,8 @@ function configFrom(env: Record<string, string | undefined>, uid = process.getui
   if (!Number.isFinite(timeoutS) || timeoutS <= 0) throw new Error(`OB1_RUNNER_TIMEOUT_S must be a positive number of seconds, got "${env.OB1_RUNNER_TIMEOUT_S}"`);
   // As root (the image), nothing runs as root: without su-exec the runner refuses to start.
   if (uid === 0 && !SU_EXEC) throw new Error("running as root without su-exec: an emitter would run as root and could read every secret — use the runner's image (deploy/orchestration/runner.Dockerfile)");
+  // In the image the runner connects as its own role, whose password compose puts in the URL from OB1_RUNNER_DB_PASSWORD (SMD-2289); unset, every run would fail on its first query instead.
+  if (uid === 0 && databasePassword(env.DATABASE_URL) === "") throw new Error("DATABASE_URL carries no password: OB1_RUNNER_DB_PASSWORD, the runner's database role's, is not set — run `bun deploy/orchestration/provision.ts --init`, which writes it into deploy/.env, then start the profile again so its role step sets it");
   const pipelines = loadPipelines(file);
   const byUid = new Map<number, string>();
   for (const p of pipelines) {
@@ -1089,6 +1103,8 @@ async function selfCheck(): Promise<number> {
   const t = parseTally("  items: 3 record(s) (fixture 3)\n  tier=stable  inserted 3  updated 0  patched 0  unchanged 0  skipped 0  held 0  stale 0\n");
   expect("the count line is read", t?.inserted === 3 && t.unchanged === 0 && parseTally("nothing") === null);
   expect("configFrom refuses a missing or short key", throws(() => configFrom({}), /OB1_RUNNER_KEY/) && throws(() => configFrom({ OB1_RUNNER_KEY: "short" }), /OB1_RUNNER_KEY/));
+  expect("a database URL's password is read, and a URL with none is told from no URL", databasePassword("postgres://r:p%40ss@db:5432/x") === "p@ss" && databasePassword("postgres://r:@db/x") === "" && databasePassword("postgres://r@db/x") === "" && databasePassword(undefined) === null && databasePassword("not a url") === null);
+  if (SU_EXEC) expect("in the image, a DATABASE_URL with no password (OB1_RUNNER_DB_PASSWORD unset) is refused, naming --init", throws(() => configFrom({ OB1_RUNNER_KEY: "k".repeat(40), DATABASE_URL: "postgres://ob1_orchestration_runner:@postgres:5432/openbrain" }, 0), /OB1_RUNNER_DB_PASSWORD.*--init/));
   if (!SU_EXEC) expect("as root without su-exec it refuses to start", throws(() => configFrom({ OB1_RUNNER_KEY: "k".repeat(40) }, 0), /without su-exec/));
   const r = (x: Partial<Report>) => statusOf({ pipeline: "p", ok: false, emitted: 0, ...x });
   expect("status follows the stage and the exit code, not the text", r({ ok: true }) === 200 && r({ stage: "emitter", exit: 3 }) === 422 && r({ stage: "one-source" }) === 422
@@ -1289,6 +1305,18 @@ async function selfCheck(): Promise<number> {
   expect("with no networked pipeline, the rules open nothing", !/ accept$/m.test(egressRules(parsePipelines(one({})))));
   expect("every emitter uid is inside the range the rules close", [uOn, uOff, emitterUid("x"), emitterUid("fixture")].every((u) => u >= EMITTER_UIDS[0] && u <= EMITTER_UIDS[1]));
   expect("the capabilities the image's command drops are read from CapEff", heldEgressCaps("CapEff:\t00000000000000e0\n").length === 0 && JSON.stringify(heldEgressCaps("CapPrm:\t0\nCapEff:\t00000000000011e0\n")) === JSON.stringify(["NET_ADMIN", "SETPCAP"]) && heldEgressCaps("") .length === 0);
+
+  // SMD-2289 part 2: an ingester Postgres refused on the password is said as that, with the fix, not as a bare exit.
+  const pwFail = await serve(config({
+    pipelines: [parsePipelines(one({ name: "pwfail", emitter: emit(`console.log(${JSON.stringify(item("fixture"))})`) }))[0]], env: process.env,
+    commands: { ...commands, ingest: () => ["bun", "-e", `console.error('PostgresError: password authentication failed for user "ob1_orchestration_runner"'); process.exit(1)`] },
+  }), 0);
+  try {
+    const pr = await (await fetch(`http://127.0.0.1:${pwFail.port}/run/pwfail`, { method: "POST", headers: { "x-runner-key": key } })).json() as Report;
+    expect(`an ingester refused on the database password says so and how to fix it (${pr.why})`, pr.stage === "ingest" && /refused the runner's database password/.test(pr.why ?? "") && /up -d/.test(pr.why ?? ""));
+  } finally {
+    pwFail.stop(true);
+  }
 
   // The proxy. Its upstream stand-in echoes what it gets, and says BYE when
   // the client has shut its write side, so a tunnel that drops a half-closed

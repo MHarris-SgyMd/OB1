@@ -7863,6 +7863,387 @@ console.log("\n[24b] workerIdentity: a valid worker key resolves to an agent id 
     "a revoked key is refused with its revocation time and reason, and never runs");
 }
 
+console.log("\n[35] Migration 071's gate under two connections: a status move and a source write of one thought take turns on its bucket, either way round, and the mirror reads the later commit; a take and a status move of both its thoughts, and a thought's delete and its source row's, commit without a deadlock; node_state(<ids>) reads its links by index on a brain of twenty thousand; the suite leaves no drift (SMD-2267)");
+{
+  // test-schema [63] holds the rules on one connection; what it cannot hold is
+  // a second writer's uncommitted row. drift()'s source_gate arm is the check.
+  const db = new SQL({ url: URL_!, max: 1 });
+  const drift = async () => Number((await db`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`)[0].n);
+  const suiteDrift = await drift();
+  const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+  const blocked = async (pid: number) => Number((await db`SELECT count(*)::int AS n FROM pg_locks WHERE pid = ${pid} AND NOT granted`)[0].n) > 0;
+  const gate = () => { let open: () => void = () => {}; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+  const row = async (content: string, meta: Record<string, unknown>) =>
+    String((await db`INSERT INTO thoughts (content, metadata) VALUES (${content}, ${meta}::jsonb) RETURNING id`)[0].id);
+  const mirror = async (id: string) => (await db`SELECT gates FROM ob1_source_gate WHERE thought_id = ${id}::uuid`)[0]?.gates as boolean | undefined;
+
+  // The status move first. A moves X's status from known to unknown and holds
+  // its transaction open, and X's bucket (class 22563) with it; B records X's
+  // source row, and its trigger waits on the bucket. Once A commits, B's
+  // upsert — a fresh statement — reads X's new status: the mirror row does not
+  // gate. Without the lock B read the status A had not committed yet
+  // (started) and its row gated.
+  const x = await row("[35] X, a github issue", { kind: "race2267", status_type: "started" });
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = ${x}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`SELECT record_thought_source(${x}::uuid, 'github', 'G-race-1', 'x', 'text/plain')`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const g = await mirror(x);
+    assert(aHolding && bWaited && errors === "" && g === false && (await drift()) === 0,
+      `a source write of a thought whose status is moving waits on the thought's bucket until the move commits, then reads its new status: the mirror row does not gate, and no drift (${g}; ${errors || "clean"})`);
+  }
+
+  // The status move first again, against a source row that moves system (the
+  // UPDATE path, which locks and then reconciles): A moves X's status back to
+  // known and holds; B moves X's source row to jira and waits on X's bucket;
+  // once A commits, B reads started and the mirror row gates. Without the
+  // lock B read weird, and its upsert, queued behind A's update of the row,
+  // wrote it back not gating.
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = ${x}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`SELECT record_thought_source(${x}::uuid, 'jira', 'J-race-1', 'x', 'text/plain')`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [g] = await db`SELECT system, gates FROM ob1_source_gate WHERE thought_id = ${x}::uuid`;
+    assert(aHolding && bWaited && errors === "" && g?.system === "jira" && g?.gates === true && (await drift()) === 0,
+      `a source row moving system while its thought's status moves waits on the thought's bucket, then reads the committed status: the mirror row is jira's and gates, and no drift (${JSON.stringify(g)}; ${errors || "clean"})`);
+  }
+
+  // Multi-row statements lock every thought they touch (third review pass: a
+  // two-row statement that locked one of its thoughts survived every test and
+  // left the other's mirror row stale). Each holder below is held open while
+  // a single-row writer of ONE of its thoughts — the first, then the second —
+  // must wait on that thought's bucket, and after the holder commits reads what
+  // it committed.
+  const holdThenWrite = async (label: string, hold: string, write: string, check: () => Promise<boolean>) => {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx.unsafe(hold);
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx.unsafe(write);
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    return { label, ok: aHolding && bWaited && errors === "" && (await check()) && (await drift()) === 0, detail: `${label}: waited ${bWaited}, ${errors || "clean"}` };
+  };
+  const multi: { label: string; ok: boolean; detail: string }[] = [];
+  // Two thoughts in different buckets, sorted by id — the order a trigger's
+  // DISTINCT aggregate keys them in: thought 1 is the first a trigger locks and
+  // thought 2 the last, and neither's lock covers the other (fifth review
+  // pass: unsorted, a status trigger that locked only its first id passed one
+  // run in four, and bucket-mates would pass it whatever the order).
+  const pairApart = async (label: string) => {
+    const a = await row(`${label} a`, { kind: "race2267", status_type: "started" });
+    for (let k = 0; ; k++) {
+      const b = await row(`${label} b ${k}`, { kind: "race2267", status_type: "started" });
+      const [{ same }] = await db`SELECT hashtext(${a}) & 255 = hashtext(${b}) & 255 AS same`;
+      if (!same) return [a, b].sort();
+    }
+  };
+  for (const which of [0, 1]) {
+    // A status move of one thought held open; a two-row source insert of both
+    // then waits on that thought's bucket and reads its committed status.
+    const pair = await pairApart(`[35] MI ${which}`);
+    multi.push(await holdThenWrite(`two-row insert, thought ${which + 1} moving`,
+      `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = '${pair[which]}'`,
+      `INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+       VALUES ('${pair[0]}', 'github', 'G-MI-${which}-a', 'x', 'text/plain', repeat('0', 64)), ('${pair[1]}', 'github', 'G-MI-${which}-b', 'x', 'text/plain', repeat('0', 64))`,
+      async () => (await mirror(pair[which])) === false && (await mirror(pair[1 - which])) === true));
+    // A two-row status move held open; a source write of one of its thoughts
+    // then waits on that thought's bucket and reads the committed status.
+    const moved = await pairApart(`[35] MS ${which}`);
+    multi.push(await holdThenWrite(`source write, thought ${which + 1} of a two-row move`,
+      `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${moved[0]}', '${moved[1]}')`,
+      `SELECT record_thought_source('${moved[which]}'::uuid, 'github', 'G-MS-${which}', 'x', 'text/plain')`,
+      async () => (await mirror(moved[which])) === false));
+  }
+  assert(multi.every((m) => m.ok),
+    `a two-row source insert waits on the bucket of whichever of its thoughts a status move holds, and a source write waits on the bucket of whichever thought a two-row status move holds — each then reads the committed status, and no drift (${multi.map((m) => m.detail).join("; ")})`);
+
+  // A status move, then the thought's source write, in one transaction — the
+  // write order the header recommends, and ingest-records' — in two
+  // transactions over bucket-mates (fifth review pass: with the status
+  // trigger's bucket shared, each held it shared and then asked for it
+  // exclusive, a deadlock ten times in ten). A moves X's status and holds; B
+  // moves Y's, a bucket-mate, and waits on the bucket; A records X's source
+  // row and commits; B then records Y's and commits.
+  {
+    const x = await row("[35] UP x", { kind: "race2267", status_type: "weird" });
+    const [{ b: bucket }] = await db`SELECT hashtext(${x}) & 255 AS b`;
+    let y = "";
+    for (let k = 0; !y; k++) {
+      const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[35] UP mate ${k}`}, ${{ kind: "race2267", status_type: "weird" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
+      if (c.b === bucket) y = c.id;
+    }
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aMoved = false, bPid = -1, errors = "";
+    const aRun = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = ${x}::uuid`;
+      aMoved = true;
+      await doneP;
+      await tx`SELECT record_thought_source(${x}::uuid, 'github', 'G-UP-x', 'x', 'text/plain')`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aMoved || errors !== "");
+    const bRun = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = ${y}::uuid`;
+      await tx`SELECT record_thought_source(${y}::uuid, 'github', 'G-UP-y', 'x', 'text/plain')`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aRun; await bRun;
+    await connA.close(); await connB.close();
+    assert(aMoved && bWaited && errors === "" && (await mirror(x)) === true && (await mirror(y)) === true && (await drift()) === 0,
+      `two transactions each moving a status and then writing that thought's source row, over bucket-mates: the second waits on the bucket, and both commit — no deadlock, both mirror rows gate, no drift (${errors || "clean"})`);
+  }
+
+  // A take against one status update of both thoughts (first and second
+  // review passes), two ways round. First: B holds linear L-TK; one statement
+  // moves A's and B's statuses and sleeps before its trigger runs, holding
+  // both rows; meanwhile T1 takes L-TK for A — B's source row out, A's in,
+  // taking A's bucket — and commits; the statement's trigger then takes the
+  // buckets and sets A's mirror row. With pass 1's FOR SHARE on the delete,
+  // the take waited on B's row while holding A's: fine here, but a deadlock
+  // with a thought's delete (below). The window left — the update's trigger
+  // holding A's bucket as it reaches B's mirror row mid-take — is the
+  // header's named case, not raced here.
+  {
+    const a = await row("[35] TK A", { kind: "race2267", status_type: "started" });
+    const b = await row("[35] TK B", { kind: "race2267", status_type: "started" });
+    await db`SELECT record_thought_source(${b}::uuid, 'linear', 'L-TK', 'x', 'text/plain')`;
+    const connA = racer(), connB = racer();
+    let errors = "", bPid = -1;
+    const bDone = (async () => {
+      bPid = Number((await connB`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await connB.unsafe(`SET statement_timeout = '15s'`);
+      await connB.unsafe(`WITH u AS (UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${a}', '${b}') RETURNING 1)
+                          SELECT pg_sleep(1.5) FROM (SELECT count(*) FROM u) x`);
+    })().catch((e: Error) => { errors += `B: ${e.message}; `; });
+    const sleeping = async () => bPid > 0 && Number((await db`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${bPid} AND wait_event = 'PgSleep'`)[0].n) === 1;
+    await waitFor(sleeping);
+    const bSlept = await sleeping();
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`SELECT record_thought_source(${a}::uuid, 'linear', 'L-TK', 'x2', 'text/plain', NULL, true)`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [held] = await db`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = 'L-TK'`;
+    assert(bSlept && errors === "" && held?.id === a && (await mirror(a)) === false && (await mirror(b)) === undefined && (await drift()) === 0,
+      `a take of a source row against one status update of both thoughts, whose trigger has not run: both commit, no deadlock — A holds L-TK, its mirror row reads the status committed last, B's is gone, and no drift (${errors || "clean"})`);
+  }
+  // Second: the status update has run its trigger — it holds both buckets and
+  // B's mirror row — and holds its transaction; the take waits on B's mirror
+  // row, then on nothing, and reads the committed statuses.
+  {
+    const a = await row("[35] TK2 A", { kind: "race2267", status_type: "started" });
+    const b = await row("[35] TK2 B", { kind: "race2267", status_type: "started" });
+    await db`SELECT record_thought_source(${b}::uuid, 'linear', 'L-TK2', 'x', 'text/plain')`;
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let bHolding = false, aPid = -1, errors = "";
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx.unsafe(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${a}', '${b}')`);
+      bHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(() => bHolding || errors !== "");
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`SELECT record_thought_source(${a}::uuid, 'linear', 'L-TK2', 'x2', 'text/plain', NULL, true)`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(async () => aPid > 0 && (await blocked(aPid)));
+    const aWaited = aPid > 0 && (await blocked(aPid));
+    done();
+    await bDone; await aDone;
+    await connA.close(); await connB.close();
+    assert(bHolding && aWaited && errors === "" && (await mirror(a)) === false && (await mirror(b)) === undefined && (await drift()) === 0,
+      `a take against a status update of both thoughts that holds their buckets waits for it, then commits: A's mirror row reads the committed status, B's is gone, no deadlock and no drift (${errors || "clean"})`);
+  }
+
+  // A thought's delete against a delete of its source row (second review
+  // pass). One statement deletes T and sleeps before its cascade, holding T's
+  // row; meanwhile another deletes T's source row, whose trigger drops the
+  // mirror row by key and takes no lock — so it commits, and the cascade then
+  // finds the source row gone. With pass 1's FOR SHARE on T there, the source
+  // delete waited for T's row while the cascade waited for the source row: a
+  // deadlock.
+  {
+    const t = await row("[35] DL T", { kind: "race2267", status_type: "started" });
+    await db`SELECT record_thought_source(${t}::uuid, 'github', 'G-DL', 'x', 'text/plain')`;
+    const connA = racer(), connB = racer();
+    let errors = "", bPid = -1;
+    const bDone = (async () => {
+      bPid = Number((await connB`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await connB.unsafe(`SET statement_timeout = '15s'`);
+      await connB.unsafe(`WITH d AS (DELETE FROM thoughts WHERE id = '${t}' RETURNING 1) SELECT pg_sleep(1.5) FROM (SELECT count(*) FROM d) x`);
+    })().catch((e: Error) => { errors += `B: ${e.message}; `; });
+    const sleeping = async () => bPid > 0 && Number((await db`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${bPid} AND wait_event = 'PgSleep'`)[0].n) === 1;
+    await waitFor(sleeping);
+    const bSlept = await sleeping();
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`DELETE FROM thought_sources WHERE thought_id = ${t}::uuid`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [{ left }] = await db`SELECT count(*)::int AS left FROM thoughts WHERE id = ${t}::uuid`;
+    assert(bSlept && errors === "" && left === 0 && (await mirror(t)) === undefined && (await drift()) === 0,
+      `a delete of a thought's source row while the thought's own delete holds its row commits, and the delete after it — no deadlock, no mirror row left, no drift (${errors || "clean"})`);
+  }
+
+  // The source write first. A records Y's source row and holds its
+  // transaction open (its mirror row gates: Y states started); B moves Y's
+  // status to unknown and its trigger waits on Y's bucket. Once A commits, B's update
+  // finds the mirror row and sets it not to gate.
+  const y = await row("[35] Y, a github issue", { kind: "race2267", status_type: "started" });
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SELECT record_thought_source(${y}::uuid, 'github', 'G-race-2', 'x', 'text/plain')`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = ${y}::uuid`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const g = await mirror(y);
+    assert(aHolding && bWaited && errors === "" && g === false && (await drift()) === 0,
+      `a status move of a thought whose source row is being written waits until the write commits, then finds its mirror row: it does not gate, and no drift (${g}; ${errors || "clean"})`);
+  }
+
+  // node_state(<ids>) on twenty thousand thoughts, every one with a source
+  // row — four thousand linear tickets, half with a blocked_by link, and
+  // sixteen thousand markdown notes, a system that states no status: every
+  // table the dependency read touches is reached by index under real
+  // statistics, one read touches a few rows of each, not the brain's (a table
+  // of a few thousand rows is one the planner rightly scans whole for forty
+  // ids, so every thought is sourced here), and its rows are the whole-brain
+  // read's for those ids.
+  await db`INSERT INTO thoughts (content, metadata) SELECT '[35] note ' || g, jsonb_build_object('kind', 'race2267') FROM generate_series(1, 16000) g`;
+  await db`INSERT INTO thoughts (content, metadata) SELECT '[35] ticket ' || g,
+             jsonb_build_object('kind', 'race2267', 'source', 'linear', 'issue', 'K-' || g, 'status_type', (ARRAY['started', 'completed', 'weird'])[1 + g % 3])
+             FROM generate_series(1, 4000) g`;
+  await db`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+           SELECT t.id, CASE WHEN t.metadata ? 'issue' THEN 'linear' ELSE 'markdown' END, coalesce(t.metadata->>'issue', t.content), 'x', 'text/plain', encode(sha256('x'), 'hex')
+             FROM thoughts t WHERE t.metadata->>'kind' = 'race2267' AND t.content LIKE '[35] %'
+               AND NOT EXISTS (SELECT 1 FROM thought_sources o WHERE o.thought_id = t.id)`;
+  await db`INSERT INTO thought_facets (thought_id, kind, payload)
+           SELECT s.thought_id, 'link', jsonb_build_object('relation', 'blocked_by', 'system', 'linear', 'target', 'K-' || (1 + (substr(s.identity, 3)::int * 7) % 4000))
+             FROM thought_sources s WHERE s.identity LIKE 'K-%' AND substr(s.identity, 3)::int % 2 = 0 AND (1 + (substr(s.identity, 3)::int * 7) % 4000) <> substr(s.identity, 3)::int`;
+  // And a blocks link on every tenth note: markdown states no status, so its
+  // links hold nothing — and its gate is the one a scan finds last (inline,
+  // the probe read the whole mirror per such link: SMD-2267's probe).
+  await db`INSERT INTO thought_facets (thought_id, kind, payload)
+           SELECT s.thought_id, 'link', jsonb_build_object('relation', 'blocks', 'system', 'markdown', 'target', '[35] note ' || (substr(s.identity, 11)::int + 1))
+             FROM thought_sources s WHERE s.system = 'markdown' AND s.identity LIKE '[35] note %' AND substr(s.identity, 11)::int % 10 = 0`;
+  await db`ANALYZE thoughts, thought_sources, thought_facets, ob1_source_gate, ob1_ticket_head`;
+  // Ten tickets that carry a blocked_by link (two in three of their blockers
+  // are open, so some are blocked whatever the draw), ten markdown notes with
+  // a link, twenty of anything.
+  const [{ ids }] = await db`SELECT array_agg(id)::text AS ids FROM (
+      (SELECT id FROM thoughts WHERE metadata->>'kind' = 'race2267' ORDER BY md5(id::text) LIMIT 20)
+      UNION ALL (SELECT f.thought_id FROM thought_facets f WHERE f.kind = 'link' AND f.payload->>'system' = 'linear' ORDER BY md5(f.thought_id::text) LIMIT 10)
+      UNION ALL (SELECT f.thought_id FROM thought_facets f WHERE f.kind = 'link' AND f.payload->>'system' = 'markdown' ORDER BY md5(f.thought_id::text) LIMIT 10)) x`;
+  const planLines = (await db.unsafe(`EXPLAIN (COSTS OFF) SELECT * FROM node_state('${ids}'::uuid[])`)).map((r: Record<string, string>) => r["QUERY PLAN"]);
+  const seqs = planLines.flatMap((l: string) => [...l.matchAll(/Seq Scan on (\w+)/g)].map((m) => m[1]));
+  const TABLES = ["thoughts", "thought_facets", "thought_sources", "ob1_source_gate"];
+  const reads = async () => {
+    await db`SELECT pg_stat_force_next_flush()`;
+    await db`SELECT pg_stat_clear_snapshot()`;
+    const rs = await db`SELECT relname, (coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0))::int AS rows FROM pg_stat_user_tables WHERE relname = ANY(${`{${TABLES.join(",")}}`}::text[])` as { relname: string; rows: number }[];
+    return Object.fromEntries(rs.map((r) => [r.relname, r.rows]));
+  };
+  const before = await reads();
+  await db.unsafe(`SELECT * FROM node_state('${ids}'::uuid[])`);
+  const after = await reads();
+  const touched = TABLES.map((t) => `${t} ${after[t] - before[t]}`);
+  const [same] = await db.unsafe(`SELECT (SELECT count(*)::int FROM (((SELECT * FROM node_state('${ids}'::uuid[])) EXCEPT ALL (SELECT * FROM node_state() WHERE thought_id = ANY('${ids}'::uuid[])))
+                                          UNION ALL ((SELECT * FROM node_state() WHERE thought_id = ANY('${ids}'::uuid[])) EXCEPT ALL (SELECT * FROM node_state('${ids}'::uuid[])))) x) AS n,
+                                         (SELECT count(*) FILTER (WHERE blockers IS NOT NULL)::int FROM node_state('${ids}'::uuid[])) AS blocked`);
+  // A blocker the brain holds no source row for resolves through the board
+  // sync's claim: by 068's issue index, one probe, not 001's GIN index, which
+  // read every issue row's posting (SMD-2267's bench: 6 ms a blocker at
+  // 10,000 thoughts, the keyed read 47 ms).
+  const scans = async () => {
+    await db`SELECT pg_stat_force_next_flush()`;
+    await db`SELECT pg_stat_clear_snapshot()`;
+    const rs = await db`SELECT indexrelname AS i, idx_scan::int AS n FROM pg_stat_user_indexes WHERE indexrelname IN ('thoughts_issue_key_idx', 'thoughts_metadata_idx')` as { i: string; n: number }[];
+    return Object.fromEntries(rs.map((r) => [r.i, r.n]));
+  };
+  const s0 = await scans();
+  const [{ resolved }] = await db`SELECT source_thought('linear', 'K-unheld') AS resolved`;
+  const s1 = await scans();
+  const byIssue = s1.thoughts_issue_key_idx - s0.thoughts_issue_key_idx, byGin = s1.thoughts_metadata_idx - s0.thoughts_metadata_idx;
+  assert(resolved === null && byIssue >= 1 && byGin === 0,
+    `an identity the brain does not hold resolves to nothing through 068's issue index (${byIssue} scan${byIssue === 1 ? "" : "s"}), not 001's GIN index (${byGin})`);
+  assert(seqs.every((t: string) => !TABLES.includes(t)) && TABLES.every((t) => after[t] - before[t] < 400) && same.n === 0 && same.blocked > 0 && (await drift()) === 0,
+    `node_state(<forty ids>) — ten of them markdown notes whose links name a system that never gates — on twenty thousand sourced thoughts, four thousand of them tickets with two thousand links, scans none of thoughts, the links, the source rows or the mirror (${seqs.join(", ") || "no sequential scan"}) and reads a few hundred rows of each at most (${touched.join(", ")}), and its rows are the whole-brain read's for those ids (${same.blocked} with blockers)`);
+
+  await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2267'`;
+  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_source_gate g WHERE NOT EXISTS (SELECT 1 FROM thought_sources s WHERE s.thought_id = g.thought_id)) AS orphans`;
+  assert(suiteDrift === 0 && left.drift === 0 && left.orphans === 0,
+    `every section before this one left the projection and the gate exact (${suiteDrift}), and deleting this section's rows takes their mirror rows with them (${left.orphans} left, drift ${left.drift})`);
+  await db.close();
+}
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
