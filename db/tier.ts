@@ -910,9 +910,9 @@ async function main(): Promise<void> {
     if (embedRefused) {
       console.error(`note: the embeddings endpoint is not available to the replay (${embedRefused}) — hybrid- and current-arm searches will be skipped (the keyword arm replays without a model). Declare it local (OB1_LLM_LOCAL=1) or allow it in OB1_EGRESS_POLICY to embed the logged queries.`);
     } else {
-      // The query's egress subject is the text alone — a replay is not a worker
-      // key's send, so no actor unit; getEmbedding gates each call and applies the
-      // model's query template (db/config.mjs), as the server's search does.
+      // getEmbedding applies the model's query template (db/config.mjs) and gates
+      // each call as the server's search does; the subject is the query text alone
+      // (no actor — a replay is not a worker key's send).
       const embedder = createEmbedder(() => embedCfg, { rememberRefusal: false });
       embedFn = (q) => embedder.getEmbedding(q, { kind: "query", content: q }, "query");
     }
