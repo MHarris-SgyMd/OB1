@@ -164,11 +164,11 @@ const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "a
  * same time takes the spare. A reserved connection or a transaction's handle
  * is refused. The worker key resolves on a connection of its own
  * (db/worker-bootstrap.ts), so a run or a decision with OB1_WORKER_KEY set
- * needs `url` beside `sql` — the URL of the database `sql` is connected to:
- * nothing checks that the two name one database: a URL for another registers the agent there, and
- * the rows here carry its id (review pass 3). `env` is what the run reads for the judge model,
- * the endpoints, the egress policy and the worker key: process.env when
- * absent.
+ * needs `url` beside `sql`, the URL of the database `sql` is connected to.
+ * Nothing checks that the two name one database; a URL for another registers
+ * the agent there, and the rows here carry its id. `env` is what the run
+ * reads for the judge model, the endpoints, the egress policy and the worker
+ * key: process.env when absent.
  *
  * `signal` stops the pass as the CLI's first signal does: every worker after
  * the thought in hand, its unfinished claims back to the pool, and wakes a
@@ -866,7 +866,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * row (a reviewer decided it, another pass replaced it, its thought is gone
    * between the read and this write), counted and not failed.
    */
-
   async function settleStale(s: StaleRow, why: string, olderFp: string, newerFp: string, settled: string, reason?: string): Promise<boolean> {
     const recipe = { ...proposalRecipe(cfg, { similarity: s.similarity ?? NaN, candidates: K, minSimilarity: MIN_SIM }), settled, ...(reason ? { reason } : {}) };
     if (s.similarity === null) delete (recipe as { similarity?: number }).similarity;
@@ -1374,8 +1373,7 @@ if (import.meta.main) {
   const url = databaseUrl(cli.value("url"));
   // The numbers by the scanner's rules, in run()'s order — the lease pair
   // between them, as run() checks it — so a command breaking two rules is
-  // refused for the same one it always was. The review flags' rules are
-  // run()'s (reviewProblem), after every number, where they always were.
+  // refused for the same one it always was.
   const workers = cli.int("workers", { absent: 2, min: 1 });
   const batch = cli.int("batch", { absent: 1, min: 1 });
   const ttl = cli.int("ttl", { absent: DEFAULT_TTL_S, min: 1 });

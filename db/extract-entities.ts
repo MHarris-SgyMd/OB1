@@ -167,9 +167,11 @@ const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.js
  * the same time takes the spare. A reserved connection or a transaction's
  * handle is refused. The worker key resolves on a connection of its own
  * (db/worker-bootstrap.ts), so a run with OB1_WORKER_KEY set needs `url`
- * beside `sql` — the URL of the database `sql` is connected to: nothing checks that the two name one database: a URL for another registers the agent there, and
- * the rows here carry its id (review pass 3). `env` is what the run reads for the model, the endpoints, the
- * egress policy and the worker key: process.env when absent.
+ * beside `sql`, the URL of the database `sql` is connected to. Nothing checks
+ * that the two name one database; a URL for another registers the agent
+ * there, and the rows here carry its id. `env` is what the run reads for the
+ * model, the endpoints, the egress policy and the worker key: process.env
+ * when absent.
  *
  * `signal` stops the pass as the CLI's first signal does: every worker after
  * the thought in hand, its unfinished claims back to the pool, and wakes a
