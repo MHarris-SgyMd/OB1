@@ -286,9 +286,13 @@ export function remoteDbAllowed(env: Record<string, string | undefined> = proces
  *     (databaseUrlProblem), and name its host: with none, Bun and libpq go
  *     to different servers;
  *   • it must name its database. With none, the client takes PGDATABASE's, or
- *     the user's name, so the shell would choose what is dropped.
+ *     the user's name, so the shell would choose what is dropped;
+ *   • it must name its port while PGPORT is exported. Bun takes PGPORT for a
+ *     URL that names none (measured: dropSchema dropped a second server's
+ *     database of the same name), and the tools' connection names 5432
+ *     (toolTarget).
  */
-export function identityRefusal(url: string): string | null {
+export function identityRefusal(url: string, env: Record<string, string | undefined> = process.env): string | null {
   if (!parses(url)) return "the URL does not parse";
   const split = readersSplit(url);
   if (split !== null) return `the URL ${split}`;
@@ -298,6 +302,7 @@ export function identityRefusal(url: string): string | null {
   // or not (review pass 1).
   if (new URL(url).hostname === "") return "the URL has no host (Bun would connect to localhost over TCP and libpq to the unix socket, or both to PGHOST's)";
   if (databaseOf(url) === "") return "the URL names no database (the client would take PGDATABASE's, or the user's name)";
+  if (new URL(url).port === "" && (env.PGPORT ?? "") !== "") return "the URL names no port and PGPORT is exported, which Bun would use: name the port in the URL";
   return null;
 }
 
@@ -309,7 +314,7 @@ export function identityRefusal(url: string): string | null {
  * the server the rest.
  */
 export function resetRefusal(url: string, env: Record<string, string | undefined> = process.env): string | null {
-  return identityRefusal(url) ?? (remoteDbAllowed(env) ? null : notThrowaway(url));
+  return identityRefusal(url, env) ?? (remoteDbAllowed(env) ? null : notThrowaway(url));
 }
 
 /** The one rule, before connecting: a command that drops a schema may run against `url`. */
@@ -361,6 +366,71 @@ export async function socketRefusal(sql: Queryable, env: Record<string, string |
   const [row] = (await sql.unsafe("SELECT pg_catalog.inet_server_addr() IS NULL AS socket")) as { socket: boolean }[];
   if (row.socket && !remoteDbAllowed(env)) return "the connection is over a unix socket, not the TCP port the URL's host names";
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// The libpq tools' connection: built from the URL's parts, never the URL.
+// ---------------------------------------------------------------------------
+
+/**
+ * What a libpq tool (pg_dump, pg_restore) connects with: a keyword/value
+ * connection string, and the environment to run it in. SMD-2317's second
+ * half. Handed the typed URL, libpq parsed it by rules of its own that each
+ * review round found another of (a fragment, the first `@`, dot segments, `+`,
+ * `%2C`, a second `=`), and followed PGHOSTADDR, PGSERVICE and the rest of its
+ * environment wherever the URL's host pointed. Here it parses no URL:
+ *   • host and port are the URL's as the parser read them (the host's
+ *     brackets off, 5432 for none: identityRefusal refuses a portless URL
+ *     while PGPORT is exported), so libpq dials what Bun dialled;
+ *   • dbname and user are what the server told the guarded connection
+ *     (`reached`), not what the URL says;
+ *   • sslmode, application_name and options, decoded, are the only others;
+ *   • the password is in PGPASSWORD, off the argv (`ps` shows argv to every
+ *     user of a Linux host; SMD-2119 asks the same of tier.ts's other spawns);
+ *   • the environment keeps only the PG* variables that authenticate
+ *     (TOOL_PG_KEEP): PGHOST, PGHOSTADDR, PGPORT, PGDATABASE, PGUSER,
+ *     PGSERVICE, PGSERVICEFILE, PGSYSCONFDIR, PGOPTIONS and the rest go, and
+ *     a password from the environment stays only when the URL names none.
+ * Where libpq and Bun could still resolve one name to two servers (a
+ * `localhost` with one listener on ::1 and another on 127.0.0.1), tier.ts's
+ * probe of --to asks pg_dump itself before anything is dropped.
+ */
+export interface ToolTarget {
+  conninfo: string;
+  env: Record<string, string>;
+}
+
+/** The PG* variables a libpq tool keeps: they authenticate or bound a connection, and choose no server, database or user. */
+export const TOOL_PG_KEEP = /^PG(PASSFILE|CHANNELBINDING|REQUIREAUTH|SSL[A-Z]*|GSSENCMODE|KRBSRVNAME|CONNECT_TIMEOUT)$/;
+
+/** A keyword/value value, quoted as libpq reads one: single quotes, with `\` and `'` escaped. */
+export function conninfoValue(v: string): string {
+  return `'${v.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}'`;
+}
+
+/**
+ * The tools' connection to `url`'s database (ToolTarget). `reached` is what
+ * the server reported on the connection the guards asked: its database and
+ * user. Call it on a URL identityRefusal has passed. `env` is the environment
+ * to derive the tool's from (process.env by default); nothing of the password
+ * is in `conninfo`.
+ */
+export function toolTarget(url: string, reached: { database: string; user: string }, env: Record<string, string | undefined> = process.env): ToolTarget {
+  const u = new URL(url);
+  const host = u.hostname.replace(/^\[(.*)\]$/, "$1");
+  const parts: [string, string][] = [["host", host], ["port", u.port || "5432"], ["dbname", reached.database], ["user", reached.user]];
+  for (const key of ["sslmode", "application_name", "options"]) {
+    const value = u.searchParams.get(key);
+    if (value !== null) parts.push([key, value]);
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) continue;
+    if (k.startsWith("PG") && !TOOL_PG_KEEP.test(k) && !(k === "PGPASSWORD" && u.password === "")) continue;
+    out[k] = v;
+  }
+  if (u.password !== "") out.PGPASSWORD = decodeURIComponent(u.password);
+  return { conninfo: parts.map(([k, v]) => `${k}=${conninfoValue(v)}`).join(" "), env: out };
 }
 
 // ---------------------------------------------------------------------------

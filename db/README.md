@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2315 assertions: 2315 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy-one (71) migrations applied, and
+`bun test-schema.ts` prints `2317 assertions: 2317 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-two (72) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -222,7 +222,8 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.0.0+upstream.9543c29`, the first release (`001..048`), and 051 writes
 `1.1.0+upstream.9543c29`, the second (`049..051`), and 057 writes
 `1.2.0+upstream.9543c29`, the third (`052..057`), and 062 writes
-`1.3.0+upstream.9543c29`, the fourth (`058..062`). `preflight` prints the
+`1.3.0+upstream.9543c29`, the fourth (`058..062`), and 072 writes
+`1.4.0+upstream.9543c29`, the fifth (`063..072`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -2819,7 +2820,7 @@ migration might touch, so a migration meets *all* the real data), resets the tar
 and restores into it, copies the source's database-level settings the dump leaves
 out (`ALTER DATABASE … SET` — migration 014's HNSW bounds, SMD-2037), then runs
 `migrate.ts` forward with the merged tree. It is destructive to `--to`, so it
-guards the target three ways.
+guards the target five ways.
 
 - **It is not the `--from` database.** The source session is looked up in the
   target's `pg_stat_activity`. Two names for one server are still one server,
@@ -2854,9 +2855,19 @@ guards the target three ways.
   database. After connecting, each side's server must report the URL's
   database: an exported `PGDATABASE` beats the URL's in Bun. `--to` is asked
   again on the connection that marks and drops. No override lifts these.
+- **The tools parse no URL.** `pg_dump` and `pg_restore` get a keyword
+  connection string (`connect.ts` `toolTarget`): the URL's host and port, the
+  database and login (`session_user`) the server reported, and only
+  `sslmode`, `application_name` and `options`. The password is in
+  `PGPASSWORD`, off their argv. Their environment keeps only the `PG*`
+  variables that authenticate, so `PGHOSTADDR`, `PGSERVICE`, `PGOPTIONS` and
+  the rest cannot send them elsewhere. Before the mark, `pg_dump` on that same
+  string must find a table just created, in a schema of its own, through the
+  connection that drops, or `--to` is left untouched.
 
 It needs Bun
-and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
+and a `pg_dump`/`pg_restore`, `pg_dump` at a major version of at least both
+servers' (the source's for the dump, `--to`'s for the probe), and
 no image the stack runs has both — the pgvector image has the client and no Bun,
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
 builds `db/tier.Dockerfile` (`oven/bun:1.4.0-alpine` + `postgresql16-client`, the
@@ -3126,8 +3137,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2315 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1003 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2317 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1015 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -3161,11 +3172,12 @@ The resolver refuses a URL that Bun and libpq would take to different places
 query part libpq refuses (empty, no `=`, a second raw `=`, an `sslmode` in
 capitals), a fragment, an `@` other than the one ending the user, a `,` or
 `%2C` in the host, or a `.`/`..` path segment (Bun resolves it, libpq does
-not). Put the
-database in the URL's path. The reset rule then has three parts:
-- **The URL must name its host and its database.** With no host, Bun
-  connects to localhost over TCP and libpq to the unix socket; with no
-  database, the shell's `PGDATABASE` would choose what is dropped.
+not). Put the database in the URL's path. The reset rule then has three
+parts:
+- **The URL must name its host and its database,** and its port while
+  `PGPORT` is exported. With no host, Bun connects to localhost over TCP and
+  libpq to the unix socket; with no database, the shell's `PGDATABASE` would
+  choose what is dropped; with no port, Bun takes `PGPORT`.
 - **Its host must be loopback by name** (`localhost`, `127.0.0.1`, `[::1]`,
   `0.0.0.0`), or `OB1_ALLOW_REMOTE_DB=1` must be set.
 - **Once connected, the server must report the database the URL names**

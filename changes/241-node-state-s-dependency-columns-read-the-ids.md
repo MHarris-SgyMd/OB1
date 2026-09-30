@@ -1,0 +1,135 @@
+# 241. node_state's dependency columns read the ids asked for: the gate stored, the links probed (SMD-2267)
+
+**What changed.** `db/migrations/071_node_dependencies_keyed.sql`:
+`ob1_source_gate` — one row per `thought_sources` row, its system and whether
+its thought's own `status_type` is known (058's gate, per row; a mirror, not a
+count per system, since a cascade delete cannot decrement a count), a partial
+index on the system where it gates. Statement triggers keep it: on
+`thought_sources`, an INSERT upserts in one statement, an UPDATE of the system
+or the thought reconciles (a canonical-only re-record returns at once), a
+DELETE drops by key and reads nothing (a cascade's trigger runs as the caller;
+one that deleted nothing returns), TRUNCATE empties it; on `thoughts`, an
+UPDATE moving a status between known and unknown sets the row, any other
+write returns at once. A source write and a status move of one thought take
+turns on an advisory bucket of its id (class 22563, 256 buckets, sorted, after
+068's classes, exclusive), each
+reading a statement after the lock; a delete takes none. REPEATABLE READ is
+refused for a source row's insert or move and a status move, SERIALIZABLE left
+to SSI. `ob1_rebuild_source_gate()` (READ COMMITTED only) and drift()'s
+`source_gate` arm. `node_dependencies()` tests each link's system against the
+gating systems, read once per call. `ob1_system_gates(text)` probes the partial
+index (`SET enable_seqscan = off`, not inlined: inline, the planner hashed the
+whole mirror, or scanned it per link for a system that never gates).
+`source_thought()` keeps its results and finds the board sync's claim by 068's
+issue index — jsonb equality of the two keys, which is what containment of a
+top-level scalar is, a NULL identity keeping 053's form — not 001's GIN index.
+`ob1_node_dependencies_of(ids)`: for ids, each ticket identity's links from
+both ends by 053's indexes, the gate, each blocker by primary key behind
+OFFSET 0; for NULL, 068's whole-brain read — two branches behind one-time
+filters under one `GROUP BY thought_id`, dropped by a caller that reads none
+of the columns. `node_state()` joins it once. The migration locks thoughts,
+then thought_sources, first. Preflight's write-privileges and isolation rows
+name 071; the README, the ADR, graph-centrality's comment and the bench's arm
+follow.
+
+**Why.** After 068 the lifecycle and `superseded_by` were lookups and the
+dependency columns — `blocked`, `blockers`, `unknown_blockers`,
+`in_dependencies` and `node_dependencies()`' gate — were still whole-brain reads
+on every call: `node_state(<40 ids>)` resolved every link and blocker of the
+brain and kept forty rows. Of three shapes (every ticket's blockers stored; the
+gate alone stored and the rest probed; SMD-1997's fold) the maintainer chose the
+second (2026-09-28): the gate is the one answer not local to a few rows near the
+ids, a blocker's status is already a lookup since 068, and a ticket's links are
+two index probes. The resolver and the gate's helper were found by the bench:
+on a brain where two links in three name a ticket it does not hold, main's
+keyed read took 6.5 s at 10,000 thoughts and 656 s at 100,000 (053's resolver),
+this file's 47 ms until the resolver moved to the issue index; a system that
+never gates then cost 70 ms for forty of its ids until the gate became a probe.
+
+**Held.** test-schema 2276 — new [65]: the catalog; 058's `node_lifecycle`,
+`node_dependencies` and `node_state` and 053's `source_thought`, cut from their
+files and loaded as temporary functions, the oracle; two seeded sequences of
+240 writes (twenty kinds, each counted only when it wrote — source rows
+recorded, taken, moved, re-recorded, deleted; links added, closed, re-opened,
+deleted; statuses moved on sourced rows and blockers' heads; pointers on the
+board sync's fallback rows, a numeric issue and an array-valued source among
+them; cascading deletes; rollbacks), an identity text every system shares, with
+drift() empty and `node_dependencies()`, `node_state()`, `node_state(<1–6
+ids>)` and `source_thought()` equal to the oracle both ways after each; fixtures
+of a link in a system not its holder's, of one naming another system's
+identity text, and of a blocker whose status no lifecycle knows; the keyed plan; the lock bound; the grant (without the table a
+plain capture, an edit, an unsourced delete and a lifecycle read by id run; a
+status move, a source write and a linked ticket's dependency read are refused);
+the replays; the rebuild; REPEATABLE READ; TRUNCATE. [44], [48], [52], [54] and
+[56] follow. test-upgrade 485 — [20w], the file's lock before its first
+trigger, the window guard forty-two. test-live 916 — [35]: a status move holding
+the bucket against a source insert and a move to another system, then the
+reverse; a two-row insert and a two-row status move, their thoughts sorted and
+in two buckets, against a single writer of each; a status move then a source
+write in each of two transactions over bucket-mates, both committing; a take against a status update of both its thoughts, in the two orders
+that do not deadlock; a thought's delete against its source row's; an unheld
+identity by the issue index; `node_state(<40 ids>)` on 20,000 sourced thoughts
+scans none of the four tables and reads under 400 rows of each. test-preflight
+580.
+
+**Measured.** `db/bench-hybrid.ts`'s new arm (source rows on the ticket heads,
+a blocked_by link from each even ticket to the next, two in three naming a
+ticket the brain does not hold), against the reads 068 left (053's resolver,
+058's gate, 068's node_state, timed once, cut at 60 s): `node_state(<40 ids>)`
+3.29 ms at 10,000 thoughts and 2.33 at 100,000 against 6.0 s and over 60 s
+(6.5 s and 656 s in an earlier, uncut run). The pre-registered budgets: 1.5
+times the 10,000-row figure at 100,000, met; 2 ms at 10,000, missed in every
+bench run (2.88, 6.96 at load 3–5, 3.29; met only in a direct probe, 15 calls with a constant list: 1.92 and 1.89 —
+0.5 ms planning, 1.0 execution of which 0.6–0.8 the lifecycle columns, 068's
+joins, and the round trip). Forty ids whose links name a system that never
+gates, 1.7 ms. Every thought's dependency columns 28 and 281 ms against 5.5 s
+and over 60 s (732 s uncut); `node_dependencies()` read for its gates 1.2 and
+11.3 against 3.9 and 45.0; against the triggers dropped, the bench's 40% bulk
+status flip +1% and +3% (budget +20%), its writers +0.00 and +0.03 ms a plain
+capture, +0.12 and −0.04 a status move, +0.04 and +0.04 a new source row.
+Writers, in a paired probe outside the bench (forty alternating blocks of ten each way, the median of the blocks'
+differences, 10,000 and 100,000 thoughts, load 5–6): a plain capture +0.00 and
++0.01 ms (budget 0.03), a sourced row's status between known and unknown −0.05
+and +0.08 (budget 0.2), a new source row +0.09 and +0.04 (budget 0.2).
+Concurrency, a stress harness outside the repo (three connections of random
+single-statement writes, six seeds of 3,600 statements): 0 deadlocks under READ
+COMMITTED (4 in an earlier run) and 2 under SERIALIZABLE, against one run of
+main's with 1 and 1; drift 0 after every run. Search's `prefer_current`, 071's
+`node_state` against 068's on one brain over 201 interleaved rounds: −0.02 ms
+at 10,000 and +0.02 at 100,000, rows identical. The dogfood brain (a read-only
+dump in a throwaway Postgres, 1,060 thoughts, 613 source rows, 180 links, at
+main's 068, then this file, re-run after pass 3): graph-centrality in 300
+modes, `node_state()`, `node_dependencies()` and `node_state(<every id>)` byte
+for byte the same; 444 of 613 mirror rows gating, drift 0. Mutants, re-run on
+the tree after pass 5, each harness first run clean: forty-two, forty killed
+— [65] every trigger, key, early-return, isolation, gate, keyed-read and
+resolver mutant (an unknown blocker by a fixture since pass 4: the sequences'
+random ids caught it by chance); [54] the gate's join put back; test-live [35]
+each missing bucket lock (insert, update, status, each locking one thought of a
+two-row statement — the status one by luck, one run in four, until pass 5 drew
+the pair sorted and apart), the status bucket taken shared, pass 1's FOR SHARE
+on the delete, the gate's helper inlinable; [20w] the lock dropped or reversed.
+Two survive: the gate as an
+inline EXISTS (the same rows; a plan the bench's brain gets and [35]'s does
+not), and the buckets unsorted (a deadlock no test can force).
+
+**Review passes.** Five.
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | every thought's delete needed the new table: the cascade fires the source rows' delete trigger with nothing deleted, and its DELETE was checked all the same | run-it | the delete path returns when nothing was deleted; [65] |
+| 1 | `node_dependencies()` read for its gates went quadratic (3.5 s at 30,000 thoughts, 21 ms on main); the bench timed `count(*)`, which drops the join | run-it | the gating systems as one array per call; the bench reads `gates` |
+| 1 | a take deadlocked with one status update of both thoughts; a keyed read without the link's system survived ([65]'s identity pools were disjoint by system); three sections left 053's resolver installed; what REPEATABLE READ refuses and which reads need the grant | run-it, cold read | FOR SHARE first on the delete (reverted in pass 2); a shared identity, fixtures, the restores; the docs |
+| 2 | pass 1's FOR SHARE on the delete deadlocked a thought's delete with its source row's (five of five) and a take with a delete of the old holder; row locks gave fifteen 40P01 in a stress run against main's one, blocked every edit of a sourced thought and needed UPDATE on thoughts | run-it, cold read | advisory buckets of the thought's id (the maintainer's call); the delete takes none; a take locking both buckets up front tried and dropped (23 deadlocks against 4) |
+| 3 | a two-row insert or status move that locked one of its thoughts left the other's mirror row stale, untested; buckets held to commit deadlock across statements (two bulk source writers, five in ten at thirty rows), which the header denied | run-it, cold read | [35] races both multi-row shapes; the header names the class as 068's, with the write order to avoid it |
+| 4 | status moves of plain notes (no source row, no ticket key) deadlocked across statements and stalled each other, which main never does (buckets made shared for status moves, reverted in pass 5); the headline claimed a keyed cost under a generic plan; the bench's before arm ran its slowest read thrice uncut (half an hour at 100,000), half its status samples moved nothing, and it found this file by number; the migration locked thought_sources before thoughts; the writer and stress figures were credited to the bench | cold read, run-it | the caveat and SMD-2380; the bench cut, toggled and finding the file by name; the lock first; the figures cited to their runs |
+| 5 | pass 4's shared status buckets deadlocked a status move followed by its thought's source write — the header's order and ingest-records' — over bucket-mates, ten in ten; nothing read the migration's lock; the plain-note claim was false; the bench timed the keyed read through a hash; the two-row status race missed a trigger locking one thought one run in four | run-it, cold read, mutant | exclusive again (the maintainer's call), [35] races that order; [20w] reads the lock; the bench times `SELECT *`; the race's pair sorted and in two buckets |
+
+**Not taken.** Every ticket's blockers stored (a blocker's head moving fans
+out to every ticket it blocks — the maintainer's choice, above). A count per
+system (a cascade delete cannot decrement it). Row locks on thoughts (pass 2).
+Shared buckets for source writes too (pass 3: a mixed bulk run still
+deadlocked eight in ten), or for status moves alone (pass 4, reverted in 5). An `ORDER BY` on the gate's probe (the planner drops
+a sort key the WHERE fixes). **Follow-ups.** SMD-2380: 068's `p_ids IS NULL OR
+id = ANY(p_ids)` under a forced generic plan scans every thought (15–18 ms for
+forty ids at 100,000 against 2.0–2.6 custom).

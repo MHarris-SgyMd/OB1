@@ -36,6 +36,10 @@ integrations/openclaw-agent-memory/dist/
 evals/corpus-*.json
 evals/*.local.json
 
+# The authorization-server POC's throwaway TLS certificate and key (SMD-2285),
+# written by `bun evals/eval-auth.ts --up`.
+evals/auth/.poc/
+
 # Recipe run output — full email and memory text, never to be committed.
 # gmail-smart-pull writes its packs and its Gmail state under
 # recipes/gmail-smart-pull/data/ (the OAuth token lives beside the script, in

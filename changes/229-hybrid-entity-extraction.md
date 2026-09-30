@@ -1,0 +1,8 @@
+# 229. Hybrid entity extraction — `--decide`: the generative model proposes names, the Jev decider decides validity and type, its p_true the confidence (SMD-2321)
+
+**What it adds (opt-in; no schema, contract or default change).**
+
+- **`server-portable/hybrid-extract.ts`** — `decideEntities(text, entities, cfg, subject)`: re-decides a generative extraction's entities. Identifier shapes are carved by rule (SMD-2300); the rest get a validity binary + a type choice through `jevDecideMany` (egress-gated, batched), with the decider's `p_true` stored as the confidence. Returns the kept entities and a stats record (`carved / decided / droppedRefused / droppedByDecider / noContext / deciderError`). The decide call is injectable so a unit test stubs it without a network.
+- **`db/extract-entities.ts --decide`** — resolves the Jev tier (`resolveJevConfig`), refuses to start with `--decide` and no `OB1_JEV_BASE_URL`, and re-decides each thought's entities after the raw generative answer is dumped (so the dump keeps the model's answer for replay) and before `record_thought_entities`.
+
+**Design.** A candidate whose name is not found verbatim in the text keeps the model's type — the extraction carries no offsets, so the decider would otherwise judge it on the doc opening. The binary gate drops a candidate the decider calls `false` or abstains on; SMD-2305 will defer the abstain band instead. A decider outage keeps the model's entities, flagged in the stats. Not the default until an end-to-end comparison through the write path says so (SMD-1038 posture); production needs the decider tier deployed for the worker to reach (SMD-2265).

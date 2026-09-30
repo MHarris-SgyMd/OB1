@@ -170,7 +170,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**215 numbered changes** on top of the pin: 1–17 are the table above; 18–215 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**242 numbered changes** on top of the pin: 1–17 are the table above; 18–242 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -372,6 +372,33 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 213 | [The full-stack job builds the three dashboards in the background while the stack comes up, not in series after it](changes/213-the-full-stack-job-builds-the-three-dashboards.md) | SMD-2251 |
 | 214 | [The thought-enrichment backfills move onto the SQL shim](changes/214-the-thought-enrichment-backfills-move-onto.md) | SMD-2139 |
 | 215 | [Lineage for every derived artifact, with its recipe: the `derivations` table every producer writes in its artifact's transaction](changes/215-lineage-for-every-derived-artifact.md) | SMD-1731 |
+| 216 | [Preflight's remedies for a refusal or a hidden column: the `schema` row reads the SQLSTATE, three column checks read `pg_attribute`, the `vector extension` row prints the `schema` row's statement](changes/216-preflight-s-remedies-for-a-refusal-or-a-hidden.md) | SMD-2238 |
+| 217 | [`rebuild_derived`](changes/217-rebuild-derived.md) | SMD-1732 |
+| 218 | [The first n8n templates](changes/218-the-first-n8n-templates.md) | SMD-2212 |
+| 219 | [One flag scanner for every db/ script](changes/219-one-flag-scanner-for-every-db-script.md) | SMD-2134, SMD-2015 |
+| 220 | [The page store](changes/220-the-page-store.md) | SMD-1812 |
+| 221 | [server-portable moves to the MCP TypeScript SDK v2](changes/221-server-portable-moves-to-the-mcp-typescript-sdk.md) | SMD-2278 |
+| 222 | [The entity name gate as a good-shape allowlist: a high-precision identifier shape (migration 065) overrides the model's type for any type, not just a person or place](changes/222-the-entity-name-gate-as-a-good-shape-allowlist.md) | SMD-2300 |
+| 223 | [A derivation and its inputs are never paired for judgement](changes/223-a-derivation-and-its-inputs-are-never-paired.md) | SMD-2292 |
+| 224 | [The consolidation pass settles a stale proposal it no longer finds in conflict, and a pass-settled row is the pass's to reopen](changes/224-the-consolidation-pass-settles-a-stale-proposal.md) | SMD-2297 |
+| 225 | [node_state reads two tables kept current on write, so prefer_current costs its window, not the corpus](changes/225-node-state-reads-two-tables-kept-current.md) | SMD-2256 |
+| 226 | [server-portable can return a job handle instead of blocking](changes/226-server-portable-can-return-a-job-handle-instead.md) | SMD-2273 |
+| 227 | [The propose→decide spike: a deterministic entity proposer and the three-shape comparison](changes/227-the-propose-to-decide-spike-a-deterministic.md) | SMD-2017 |
+| 228 | [the async job registry survives a restart](changes/228-the-async-job-registry-survives-a-restart.md) | SMD-2318 |
+| 229 | [Hybrid entity extraction](changes/229-hybrid-entity-extraction.md) | SMD-2321 |
+| 230 | [The grading report's proposal dates go through one day renderer, `isoDay`: `2026-09-09`, not `Wed Sep 09`](changes/230-the-grading-report-s-proposal-dates-go-through.md) | SMD-1842 |
+| 231 | [One connection module for every db/ script](changes/231-one-connection-module-for-every-db-script.md) | SMD-2302, SMD-2134 |
+| 232 | [The migrator and the tier refresh read a search_path with preflight's parser](changes/232-the-migrator-and-the-tier-refresh-read-a-search.md) | SMD-2247 |
+| 233 | [A run whose model looks at fault says so and exits 3](changes/233-a-run-whose-model-looks-at-fault-says.md) | SMD-2266 |
+| 234 | [Thought genre at capture](changes/234-thought-genre-at-capture.md) | SMD-2323 |
+| 235 | [A proposal standing on a lineage pair is visible as such](changes/235-a-proposal-standing-on-a-lineage-pair-is-visible.md) | SMD-2313 |
+| 236 | [`run_worker` dry_run](changes/236-run-worker-dry-run.md) | SMD-2272 |
+| 237 | [The import runner's hardening](changes/237-the-import-runner-s-hardening.md) | SMD-2289 |
+| 238 | [The reset guards ask the connection, not the URL, and the libpq tools never parse it](changes/238-the-reset-guards-ask-the-connection-not-the-url.md) | SMD-2317 |
+| 239 | [Reference-list windows: measure the failure shape and the two candidate fixes](changes/239-reference-list-windows-measure-the-failure-shape.md) | SMD-2269 |
+| 240 | [migrate.ts and extract-entities.ts are engines: import one and call run()](changes/240-migrate-ts-and-extract-entities-ts-are-engines.md) | SMD-2304, SMD-2134 |
+| 241 | [node_state's dependency columns read the ids asked for: the gate stored, the links probed](changes/241-node-state-s-dependency-columns-read-the-ids.md) | SMD-2267 |
+| 242 | [The authorization server's proof of concept: oidc-provider on Bun proves criteria 1–5. Its outbound fetches go through a guard of our own, because the library's SSRF protection does not load under Bun, and the library's open defaults are closed](changes/242-the-authorization-server-s-proof-of-concept-oidc.md) | SMD-2285 |
 
 Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->
@@ -722,7 +749,7 @@ its measurements are in the change file named.
 ### Landing a rebase on `main`, which is protected
 
 `main` is the working default and carries a ruleset: every one of
-`fork-checks.yml`'s ten jobs required, on a head up to date with `main` and
+`fork-checks.yml`'s eleven jobs required, on a head up to date with `main` and
 satisfied only by a run of the Actions app; changes only through a pull request;
 no deletion, **no force-push**, and no bypass actors — it applies to admins too.
 The ruleset is a file, `.github/rulesets/main.json`, applied with
@@ -744,7 +771,7 @@ reaching `main` goes through a PR, which is two commands:
 
 ```bash
 gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the ten checks pass
+gh pr merge --merge --auto        # lands itself once the eleven checks pass
 ```
 
 History keeps both lines, which is what happened when the fork's work first landed
