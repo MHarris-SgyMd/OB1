@@ -12,8 +12,9 @@
  *
  * These functions RETURN their outcome — a refusal string, or null when at
  * least one call would go through — and never call process.exit or touch the
- * sql client. The CLI worker exits on the result today; SMD-2304's importable
- * run() will turn the same result into a return code. Banners are returned as
+ * sql client. extract-entities.ts's importable run() turns the result into a
+ * return code (SMD-2304); consolidate.ts and reembed.ts still exit on it until
+ * they are engines. Banners are returned as
  * strings for the caller to print with its own label and spacing.
  */
 
@@ -129,23 +130,26 @@ export async function workerIdentity(
     return { ok: false, message: "\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this." };
   }
   const store = new SqlStore(url, { max: 1 });
+  let res: Awaited<ReturnType<SqlStore["resolveAgent"]>>;
   try {
-    const res = await store.resolveAgent({ keyHash: hash, label: record.name, scope: record.scope });
-    if (!res.ok && res.error === "REVOKED") {
-      return { ok: false, message: `\n  The worker's key was revoked at ${res.revokedAt}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.` };
-    }
-    if (res.ok) {
-      write(`  agent:  ${record.name} (${record.scope}, ${res.agentId})`);
-      return { ok: true, identity: { agentId: res.agentId, keyName: record.name } };
-    }
-    warn(`  ⚠  resolve_agent answered ${res.detail}; rows will carry no agent id`);
-    return { ok: true, identity: none };
+    res = await store.resolveAgent({ keyHash: hash, label: record.name, scope: record.scope });
   } catch (e) {
     warn(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
     return { ok: true, identity: none };
   } finally {
     await store.close();
   }
+  // Outside the resolve's try: a writer that throws on the agent line is the
+  // writer's error, not an identity that did not resolve (SMD-2304 review pass 2).
+  if (!res.ok && res.error === "REVOKED") {
+    return { ok: false, message: `\n  The worker's key was revoked at ${res.revokedAt}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.` };
+  }
+  if (res.ok) {
+    write(`  agent:  ${record.name} (${record.scope}, ${res.agentId})`);
+    return { ok: true, identity: { agentId: res.agentId, keyName: record.name } };
+  }
+  warn(`  ⚠  resolve_agent answered ${res.detail}; rows will carry no agent id`);
+  return { ok: true, identity: none };
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────

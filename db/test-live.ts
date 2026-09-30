@@ -40,6 +40,8 @@ import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { workerIdentity } from "./worker-bootstrap.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
+import { run as runExtract, type ExtractOptions } from "./extract-entities.ts";
+import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
@@ -3158,6 +3160,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // While set, every answer takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
   let slowMs = 0;
+  /** While above zero, the next calls are refused, 300 ms in, as a bad key would be — the provider's refusal, fatal to the pass; `refused` counts those sent. */
+  let refuseCalls = 0;
+  let refused = 0;
+  /** While above zero, the next calls answer 503 at once — the provider unavailable, a transient error the worker pauses on. */
+  let unavailableCalls = 0;
   const model = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -3166,6 +3173,17 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       modelsAsked.push(body.model ?? "");
       // The thought is the user message; the rules are the system message.
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      if (refuseCalls > 0) {
+        refuseCalls--;
+        // A beat late, so another worker's call is in hand by then.
+        await Bun.sleep(300);
+        refused++;
+        return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
+      }
+      if (unavailableCalls > 0) {
+        unavailableCalls--;
+        return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      }
       await Bun.sleep(5 + slowMs);
       if ((hemlockIsProse && /hemlock/.test(prompt)) || [...proseKeys].some((k) => prompt.includes(k))) {
         return Response.json({ choices: [{ message: { content: "I'm sorry, I can't help with that." } }] });
@@ -3206,8 +3224,21 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     MCP_ACCESS_KEYS: `entity-worker:write:${hashKey(rawKey)}`,
   };
   const dumpPath = join(tmpdir(), `ob1-test-live-extract-${process.pid}.jsonl`);
-  const extract = (...extra: string[]): Promise<{ code: number; out: string }> =>
+  const extract = (...extra: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> =>
     runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, ...extra], { env: env as Record<string, string>, cwd: HERE });
+  /**
+   * extract-entities.ts's run() in this process — the engine the CLI wraps
+   * (SMD-2304) — under the spawned worker's environment, its lines per stream
+   * as a child's are, for `same` against a spawned run.
+   */
+  const extractInProcess = async (opts: Omit<ExtractOptions, "writer"> = {}): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const outs: string[] = [], errs: string[] = [];
+    const code = await runExtract({ url: URL_!, env, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, stdout: lines(outs), stderr: lines(errs) };
+  };
+  /** A run with its wall-clock seconds masked ("in 0.4s", "0.0s in 0 model call(s)"): two runs that did the same compare byte for byte. */
+  const untimed = (r: { code: number; stdout: string; stderr: string }) => ({ code: r.code, stdout: r.stdout.replace(/\d+\.\d+s\b/g, "<s>"), stderr: r.stderr.replace(/\d+\.\d+s\b/g, "<s>") });
   const graph = async () => (await sql`
     SELECT (SELECT count(*)::int FROM ob1_entities) AS entities,
            (SELECT count(*)::int FROM thought_entities) AS mentions,
@@ -3223,6 +3254,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(/window: thoughts over 300 estimated tokens are extracted in 300-token windows \(overlap 37\), from OB1_EXTRACT_CHUNK_TOKENS \(stub-meta's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list\)/.test(dry.out),
          "the banner states the window rule and where it came from — the sentence preflight prints (SMD-1879)");
   assert((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].c === 0, "…including the key");
+  // The same dry run through run() in this process (SMD-2304).
+  const dryIn = await extractInProcess({ dryRun: true });
+  assert(same(dryIn, dry), `extract run() in-process prints the spawned --dry-run's stdout and stderr byte for byte, with its exit code (${dryIn.code}: ${dryIn.stdout.split("\n").filter(Boolean).slice(-1)[0]?.slice(0, 120)})`);
   assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'entity-worker'`)[0].c === 0, "…and it did not register the worker's agent either");
   const bareLimit = await extract("--limit");
   assert(bareLimit.code === 2 && /--limit needs a value/.test(bareLimit.out), "a bare --limit is refused rather than read as no limit");
@@ -3299,6 +3333,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   });
   const otherOut = (await new Response(otherModel.stdout).text()) + (await new Response(otherModel.stderr).text());
   assert((await otherModel.exited) === 2 && /--switch-key/.test(otherOut), "a run under a different model's key is refused without --switch-key");
+  const otherIn = await extractInProcess({ limit: 1, env: { ...env, OB1_METADATA_MODEL: "other-model" } });
+  assert(otherIn.code === 2 && otherIn.stdout + otherIn.stderr === otherOut, `…and run() in-process refuses it in the same words (exit ${otherIn.code})`);
   const [{ key: stillKey }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
   assert(stillKey === KEY, "…and the recorded key is untouched");
 
@@ -3307,6 +3343,10 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const second = await extract();
   assert(second.code === 1 && /0 extracted, 0 failed/.test(second.out), "a second run has nothing to extract (and still exits 1 for the failed row)");
   assert(calls === callsAfterFirst, "…and made no model call");
+  // The same no-op run through run() in this process: the identity resolved,
+  // the pool read, the summary and the failed row's lines on their streams.
+  const secondIn = await extractInProcess();
+  assert(same(untimed(secondIn), untimed(second)) && calls === callsAfterFirst, `…and run() in-process prints what the spawned run printed, stream by stream, its seconds aside (exit ${secondIn.code}: ${secondIn.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 100)})`);
   const ids2 = (await sql`SELECT id FROM ob1_entities ORDER BY id`).map((r: { id: string }) => r.id);
   assert(JSON.stringify(ids1) === JSON.stringify(ids2) && JSON.stringify(await graph()) === JSON.stringify(g1), "…the graph is unchanged, entity ids included");
 
@@ -3332,6 +3372,15 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // --status, then --retry-failed with a --limit.
   const status = await extract("--status");
   assert(status.code === 0 && /9 extracted, 1 failed/.test(status.out) && /graph: \d+ entities/.test(status.out), "--status reports the pass and the graph");
+  // …and on a caller's client, in-process: the same lines, and the client
+  // still open after. Two workers and a spare: three connections, and this
+  // section's own one-connection client refused as too narrow.
+  const caller = new SQL({ url: URL_, max: 3 });
+  const statusIn = await extractInProcess({ status: true, sql: caller });
+  const narrowIn = await extractInProcess({ status: true, sql });
+  assert(same(statusIn, status) && (await caller`SELECT 1 AS one`)[0].one === 1, `run() --status on a caller's client prints the spawned --status byte for byte, and leaves the client open (exit ${statusIn.code}${statusIn.stderr ? `: ${statusIn.stderr.slice(0, 100)}` : ""})`);
+  assert(narrowIn.code === 2 && narrowIn.stdout === "" && /needs a client of at least 3 connections for 2 worker\(s\)/.test(narrowIn.stderr), `…and a one-connection client is refused before anything is read (exit ${narrowIn.code})`);
+  await caller.close();
   hemlockIsProse = false;
   answers.hemlock = { entities: [{ name: "Socrates", type: "person", confidence: 0.9 }], relationships: [] };
   const retried = await extract("--retry-failed", "--limit", "1");
@@ -3354,6 +3403,214 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(extracted, "a thought captured while --follow polls is extracted by the trigger and the poll, with no new run");
   assert(followCode === 0, `the follower exits 0 on SIGINT (exit ${followCode}; ${followOut.split("\n").filter(Boolean).slice(-2).join(" | ")})`);
   assert((await entityByName("Grafana")) !== undefined, "…and Grafana is in the graph");
+
+  // Stopping a pass (SMD-2304). Four notes the stub answers with nothing, one
+  // worker, slow answers: a stop lands while a thought is in hand.
+  const notes: string[] = [];
+  for (let i = 0; i < 4; i++) notes.push(await seed(`A signalled note, number ${i}.`));
+  const noteClaims = async () =>
+    Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(notes, "TEXT")}::uuid[]) GROUP BY status`)
+      .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
+  // In hand: the claim made and its model call at the stub — a stop between
+  // the two ends the worker before it takes the thought up (a race the script
+  // always had), so waiting on the claim alone flaked under load.
+  const inHand = async (from: number) => { for (let i = 0; i < 100 && !((await noteClaims()).claimed === 1 && calls > from); i++) await Bun.sleep(50); };
+  slowMs = 600;
+  // A caller's AbortSignal stops every worker after the thought in hand, in
+  // words that promise no second stop, and run() returns 130; onPass handed
+  // the stop once, as the pass began.
+  const ac = new AbortController();
+  const handed: PassStop[] = [];
+  const softFrom = calls;
+  const softRun = extractInProcess({ workers: 1, signal: ac.signal, onPass: (s) => handed.push(s) });
+  await inHand(softFrom);
+  ac.abort();
+  const soft = await softRun;
+  const afterSoft = await noteClaims();
+  assert(soft.code === 130 && handed.length === 1 && soft.stderr.includes("\n  stopping after the current thought; unfinished claims go back to the pool\n") && !soft.stderr.includes("again to exit now")
+         && afterSoft.succeeded === 1 && afterSoft.pending === 3 && !afterSoft.claimed,
+         `a caller's AbortSignal stops the pass after the thought in hand, the rest back in the pool, and run() returns 130 (exit ${soft.code}, ${handed.length} stop(s) handed, claims ${JSON.stringify(afterSoft)})`);
+  // The stop onPass hands: the first call is that stop; a second is the hard
+  // stop — every worker's leases returned while the thought is still in hand,
+  // which the worker then abandons: no write, no release of a row no longer
+  // its own (review pass 1: it recorded the thought, then failed to release).
+  let hardStop: PassStop | undefined;
+  const hardFrom = calls;
+  const hardRun = extractInProcess({ workers: 1, onPass: (s) => { hardStop = s; } });
+  await inHand(hardFrom);
+  const firstStop = hardStop?.();
+  const release = hardStop?.();
+  await release;
+  const heldAfterRelease = (await noteClaims()).claimed ?? 0;
+  const hard = await hardRun;
+  assert(firstStop === null && release instanceof Promise && heldAfterRelease === 0 && hard.code === 130 && hard.stderr.includes(`second signal — exiting now; leases not returned in time expire within 900 s`),
+         `a second call of the stop onPass hands returns the release of the workers' leases, made before the thought in hand finished (${heldAfterRelease} held after it, exit ${hard.code})`);
+  assert(!hard.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(hard.stdout) && (await noteClaims()).succeeded === 1 && hardStop?.() === null,
+         `…the thought in hand abandoned — nothing written or released for it, nothing counted — and the stop inert once run() has returned (${hard.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 80)})`);
+  // The CLI's signals, installed from onPass (db/lease.ts's stopOnSignals):
+  // one SIGINT stops after the thought in hand and exits 130; a second exits
+  // 130 at once, with the thought still in hand and its lease returned.
+  const cliRun = () => Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--workers", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
+  const onceFrom = calls;
+  const once = cliRun();
+  await inHand(onceFrom);
+  once.kill("SIGINT");
+  const [, onceErr] = await Promise.all([new Response(once.stdout).text(), new Response(once.stderr).text()]);
+  const onceCode = await once.exited;
+  const afterOnce = await noteClaims();
+  assert(onceCode === 130 && onceErr.includes("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)\n") && afterOnce.succeeded === 2 && !afterOnce.claimed,
+         `one SIGINT stops the CLI after the thought in hand and exits 130 (exit ${onceCode}, claims ${JSON.stringify(afterOnce)})`);
+  slowMs = 5000;
+  const twiceFrom = calls;
+  const twice = cliRun();
+  await inHand(twiceFrom);
+  twice.kill("SIGINT");
+  await Bun.sleep(100);
+  const signalledAt = Date.now();
+  twice.kill("SIGINT");
+  const [, twiceErr] = await Promise.all([new Response(twice.stdout).text(), new Response(twice.stderr).text()]);
+  const twiceCode = await twice.exited;
+  const twiceMs = Date.now() - signalledAt;
+  const afterTwice = await noteClaims();
+  assert(twiceCode === 130 && twiceErr.includes("second signal — exiting now") && twiceMs < 2500 && !afterTwice.claimed && afterTwice.succeeded === 2,
+         `a second SIGINT exits 130 at once, the thought in hand not finished and its lease returned (exit ${twiceCode} after ${twiceMs} ms, claims ${JSON.stringify(afterTwice)})`);
+  // After the provider's refusal stopped the workers, the first stop is
+  // already the hard one — the script's rule, kept: its handler read the
+  // same `stopping` the refusal set. Two workers: one's call is refused 300 ms
+  // in, the other's is two seconds in hand when the stop comes.
+  refuseCalls = 1;
+  slowMs = 2000;
+  let fatalStop: PassStop | undefined;
+  const fatalFrom = calls, refusedFrom = refused;
+  const fatalRun = extractInProcess({ workers: 2, onPass: (s) => { fatalStop = s; } });
+  // Both calls at the stub and the refusal sent — not a fixed sleep (review pass 2).
+  for (let i = 0; i < 100 && !(calls >= fatalFrom + 2 && refused > refusedFrom); i++) await Bun.sleep(50);
+  await Bun.sleep(100);
+  const afterFatal = fatalStop?.();
+  await afterFatal;
+  const fatal = await fatalRun;
+  slowMs = 0;
+  refuseCalls = 0;
+  assert(fatal.code === 2 && fatal.stderr.includes("The provider refused the request itself") && afterFatal instanceof Promise && fatal.stderr.includes("second signal — exiting now")
+         && !fatal.stderr.includes("stopping after the current thought") && !fatal.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(fatal.stdout)
+         && (await noteClaims()).succeeded === 2 && !(await noteClaims()).claimed,
+         `after the provider's refusal, the pass's first stop is the hard one: the other worker's thought in hand is released, not finished (exit ${fatal.code}, ${afterFatal instanceof Promise ? "a release" : String(afterFatal)}, claims ${JSON.stringify(await noteClaims())})`);
+
+  // A caller's signal aborted during start-up stops the run before its next
+  // write, and the failed row stays failed rather than returned to a pool
+  // nothing drains (review pass 1): aborted as the identity resolves, the key
+  // is not written; aborted as the key is, --retry-failed's statement never
+  // runs. The key cleared first, so the run writes it.
+  const [failedNote] = notes;
+  await sql`UPDATE thought_work_claims SET status = 'failed', last_error = 'planted', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${KEY} AND thought_id = ${failedNote}::uuid`;
+  const startUp = async (at: string) => {
+    await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+    const ac2 = new AbortController();
+    const errs: string[] = [];
+    const code = await runExtract({ url: URL_!, env, retryFailed: true, signal: ac2.signal, writer: { out: (l) => { if (l.startsWith(at)) ac2.abort(); }, err: (l) => errs.push(l) } });
+    const [{ status }] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${failedNote}::uuid`;
+    const keyed = (await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].c === 1;
+    return { code, status, keyed, said: errs.some((l) => l.includes("stopped before the pass began: the caller's signal was aborted; nothing was claimed")) };
+  };
+  const atIdentity = await startUp("  agent:");
+  const atKey = await startUp("  ob1_config.entity_extraction_key = ");
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${KEY}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+  assert(atIdentity.code === 130 && atIdentity.said && atIdentity.status === "failed" && !atIdentity.keyed,
+         `a caller's signal aborted as the identity resolves stops the run before it writes the key: 130, the failed row still failed (${JSON.stringify(atIdentity)})`);
+  assert(atKey.code === 130 && atKey.said && atKey.status === "failed" && atKey.keyed,
+         `…and aborted as the key is written, before --retry-failed's statement (${JSON.stringify(atKey)})`);
+  await sql`UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL WHERE work_type = ${KEY} AND thought_id = ${failedNote}::uuid`;
+
+  // A worker that throws — a Writer that throws — stops the other after the
+  // thought in hand, and run() rejects once it has: nothing left claimed, and
+  // no pass going on behind the rejection (review pass 1).
+  for (let i = 0; i < 6; i++) notes.push(await seed(`A thrown note, number ${i}.`));
+  slowMs = 300;
+  const thrownAt = await runExtract({ url: URL_!, env, workers: 2, writer: { out: (l) => { if (/^  \d+\/\d+  /.test(l)) throw new Error("writer boom"); }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+  const rightAfter = await noteClaims();
+  await Bun.sleep(1200);
+  const later2 = await noteClaims();
+  slowMs = 0;
+  assert(thrownAt === "writer boom" && !rightAfter.claimed && (rightAfter.pending ?? 0) > 0 && JSON.stringify(rightAfter) === JSON.stringify(later2),
+         `a Writer that throws in one worker stops the other and rejects run() with its error, nothing left claimed or going on after (${thrownAt}; ${JSON.stringify(rightAfter)} → ${JSON.stringify(later2)})`);
+
+  // A reserved connection and a transaction's handle report the pool's max
+  // but are one connection: refused (review pass 1).
+  const pool = new SQL({ url: URL_, max: 4 });
+  const reserved = await pool.reserve();
+  const onReserved = await extractInProcess({ sql: reserved, dryRun: true });
+  reserved.release();
+  const onTx = await pool.begin(async (tx) => extractInProcess({ sql: tx, dryRun: true }));
+  await pool.close();
+  assert([onReserved, onTx].every((r) => r.code === 2 && r.stdout === "" && /needs a pool, not a reserved connection or a transaction's handle/.test(r.stderr)),
+         `a reserved connection and a transaction's handle are refused as a run's client (exits ${onReserved.code}, ${onTx.code})`);
+  // The hard stop wakes a worker pausing on a provider error: run() returns at
+  // once, and the thought is not sent again after the leases are gone (review
+  // pass 2: the 5-45 s pause ran out, then the call was made).
+  unavailableCalls = 100;
+  let pauseStop: PassStop | undefined;
+  const pauseFrom = calls;
+  const pauseErrs: string[] = [];
+  const pauseRun = runExtract({ url: URL_!, env, workers: 1, onPass: (s) => { pauseStop = s; }, writer: { out: () => {}, err: (l) => pauseErrs.push(l) } });
+  for (let i = 0; i < 100 && !(calls > pauseFrom && pauseErrs.some((l) => l.includes("provider unavailable"))); i++) await Bun.sleep(50);
+  pauseStop?.();
+  const pauseRelease = pauseStop?.();
+  const pauseAt = Date.now(), callsAtStop = calls;
+  const pauseCode = await pauseRun;
+  const pauseMs = Date.now() - pauseAt;
+  await pauseRelease;
+  unavailableCalls = 0;
+  assert(pauseCode === 130 && pauseMs < 1500 && calls === callsAtStop && !(await noteClaims()).claimed,
+         `a hard stop during a provider-error pause returns 130 at once, sending nothing more (exit ${pauseCode} after ${pauseMs} ms, ${calls - callsAtStop} call(s) after the stop)`);
+
+  // A Writer that throws on the line naming the rows a worker returned is the
+  // Writer's error, not a lease left unreturned (review pass 2): run() rejects
+  // with it, and the rows are back in the pool.
+  slowMs = 600;
+  const freedAc = new AbortController();
+  const freedErrs: string[] = [];
+  const freedFrom = calls;
+  const freedRun = runExtract({ url: URL_!, env, workers: 1, batch: 2, signal: freedAc.signal, writer: { out: () => {}, err: (l) => { if (/returned \d+ unfinished row\(s\)/.test(l)) throw new Error("writer boom"); freedErrs.push(l); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+  for (let i = 0; i < 100 && !((await noteClaims()).claimed === 2 && calls > freedFrom); i++) await Bun.sleep(50);
+  freedAc.abort();
+  const freedOutcome = await freedRun;
+  slowMs = 0;
+  assert(freedOutcome === "writer boom" && !freedErrs.some((l) => l.includes("could not return its leases")) && !(await noteClaims()).claimed,
+         `a Writer that throws on a worker's "returned N unfinished" line rejects run() with its error, not "could not return its leases" (${freedOutcome})`);
+
+  // The identity's agent line through a Writer that throws: the Writer's
+  // error, not an identity that did not resolve (review pass 2).
+  const idOutcome = await workerIdentity(URL_!, env, { noKeyWarning: "", write: () => { throw new Error("writer boom"); } }).then((r) => (r.ok ? `resolved, agent ${r.identity.agentId ?? "none"}` : r.message), (e: Error) => e.message);
+  assert(idOutcome === "writer boom", `workerIdentity's agent line through a throwing writer rejects with the writer's error (${idOutcome})`);
+
+  // A follower's sleep wakes on a stop: a first stop returns 0, the hard stop
+  // 130 — at once, not when the sleep ends (review pass 2: 19 s, and 0).
+  const followRun = async (stopIt: (stop: PassStop | undefined, ac: AbortController) => void) => {
+    const ac2 = new AbortController();
+    let st: PassStop | undefined;
+    const r = runExtract({ url: URL_!, env, workers: 1, follow: 30, signal: ac2.signal, onPass: (x) => { st = x; }, writer: { out: () => {}, err: () => {} } });
+    await Bun.sleep(1500);
+    const at = Date.now();
+    stopIt(st, ac2);
+    const code = await r;
+    return { code, ms: Date.now() - at };
+  };
+  const followSoft = await followRun((_, ac2) => ac2.abort());
+  const followHard = await followRun((st) => { st?.(); void st?.(); });
+  assert(followSoft.code === 0 && followSoft.ms < 1500 && followHard.code === 130 && followHard.ms < 1500,
+         `a follower asleep wakes on a caller's abort (exit ${followSoft.code} after ${followSoft.ms} ms) and on the hard stop, which is 130 (exit ${followHard.code} after ${followHard.ms} ms)`);
+  // --status reads on under a signal already aborted: it has no pass to stop.
+  const statusAborted = await extractInProcess({ status: true, signal: AbortSignal.abort() });
+  assert(statusAborted.code === 0 && /\n  status: \d+ thoughts/.test(`\n${statusAborted.stdout}`), `--status in-process under an aborted signal reports, exit 0 (exit ${statusAborted.code})`);
+  for (const id of notes) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  // run() takes its listener off a caller's signal when it returns: an abort
+  // after a (no-op) pass writes nothing more.
+  const afterRun = new AbortController();
+  const laterErrs: string[] = [];
+  const laterCode = await runExtract({ url: URL_!, env, workers: 1, signal: afterRun.signal, writer: { out: () => {}, err: (l) => laterErrs.push(l) } });
+  const laterBefore = laterErrs.length;
+  afterRun.abort();
+  assert(laterCode === 0 && laterErrs.length === laterBefore, `…and an abort after run() has returned writes nothing: its listener went with it (exit ${laterCode}, ${laterErrs.length - laterBefore} line(s) after)`);
 
   // Nothing in this section wrote thought_audit through the worker: it writes
   // entities, not thoughts. The edit and delete above are audited as the tools
