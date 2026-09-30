@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-2302, SMD-2134]
-migrations: []
----
-
-## Changelog
-
-Every `db/` script reaches its database through one module, `db/connect.ts`: one `--url`/`DATABASE_URL` resolver, one client, one close-then-exit door, and one "may this database be reset?" rule — `tier.ts --refresh` now refuses a `--to` with an empty host, and `OB1_EVAL_ALLOW_REMOTE_DB` is no longer read (use `OB1_ALLOW_REMOTE_DB=1`) (SMD-2302, SMD-2134).
-
-## FORK
-
-One connection module for every db/ script — one loopback rule, and no exit that skips the close (SMD-2302 / 2134)
+# 231. One connection module for every db/ script — one loopback rule, and no exit that skips the close (SMD-2302 / 2134)
 
 **What changed.** `db/connect.ts` is how a `db/` script reaches its database,
 SMD-2134's second cut after the flag scanner.

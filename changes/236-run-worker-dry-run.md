@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2272]
-migrations: []
----
-
-## Changelog
-
-`run_worker` — the third worker-queue action — arrives as a write-scoped MCP tool and keyed `POST /worker-run`, for now as its **preview half only**: `run_worker(work_type, { dry_run: true, limit? })` reports, without claiming anything, what a drain of that pool would process — the same census `worker_status` shows (pending / claimed / stale / unpooled) plus a `backlog` and a `limit`-bounded `wouldClaim`. The executing drain is deliberately refused as a value (`RUN_WORKER_DRAIN_NOT_AVAILABLE`): the server does not run the bulk LLM passes, so the drain will land on a callable worker core later. SQL-backend only, like the rest of the worker surface (SMD-2272).
-
-## FORK
-
-`run_worker` dry_run — an operator can preview a pool drain over MCP/REST without shelling in (SMD-2272)
+# 236. `run_worker` dry_run — an operator can preview a pool drain over MCP/REST without shelling in (SMD-2272)
 
 **What changed.** SMD-2131 shipped `worker_status` (the read), SMD-2132 shipped `retry_failed` and `release_stale_leases` (the two pure-SQL write actions) and **deferred the third, `run_worker` (the drain)** on three recorded constraints: the server deliberately never runs the bulk LLM passes; the claim→provider→release loop has no importable core (it is inline in each `db/*.ts` `main()`); and a real drain runs for minutes against a POST/SSE transport whose keepalive caps at 10 min. The third constraint is now met — SMD-2273's job registry and SMD-2318's durable `jobs` table give a handle/poll/stream that survives even a restart — but the first two stand (the callable core is SMD-2304, still open). So this lands the one slice that is independent of them, which the ticket itself flags as "buildable now": the `dry_run` preview.
 

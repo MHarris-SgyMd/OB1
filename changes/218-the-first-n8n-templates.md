@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2212]
-migrations: []
----
-
-## Changelog
-
-The `orchestration` profile ships its first n8n templates. An import runner (Bun and python3, no published port, its own key) runs an allowlisted pipeline's emitter as a user of its own over a read-only imports directory, refuses a batch with a line of another source, runs the ingestion pipeline under its own actor, and succeeds when the pipeline's rows all have a vector. A generic import template is loaded per pipeline, on a schedule and through an on-demand door that saves no runs. An act tool, `linear_file_issue`, is a multi-step Linear flow on its own MCP endpoint, loaded only when its Linear key is set. `db/ingest-records.ts` gains `--actor`. Provisioning skips an optional credential's workflows, unloads what a run no longer produces, refuses one of OB1's keys in any other credential, and resolves one template's reference to another (SMD-2212).
-
-## FORK
-
-The first n8n templates — the import runner and a generic import template, and an act tool on its own MCP endpoint (SMD-2212)
+# 218. The first n8n templates — the import runner and a generic import template, and an act tool on its own MCP endpoint (SMD-2212)
 
 **What changed.** The ticket's Gmail and Linear templates moved to
 SMD-2257 and SMD-2258, each behind its gate. This builds what nothing blocks.

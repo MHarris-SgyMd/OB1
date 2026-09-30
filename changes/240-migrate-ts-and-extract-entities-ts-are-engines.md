@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-2304, SMD-2134]
-migrations: []
----
-
-## Changelog
-
-`db/migrate.ts` and `db/extract-entities.ts` are importable engines: importing one does nothing until its `run(opts)` is called, which is the CLI's run, returning its exit code, with its output going to the writer it is given; an extraction pass is stopped by a caller's AbortSignal, or by the stop its `onPass` hook hands over (SMD-2304, SMD-2134).
-
-## FORK
-
-migrate.ts and extract-entities.ts are engines: import one and call run() — nothing runs at import any more, PRs 1–2 of 5 (SMD-2304 / 2134)
+# 240. migrate.ts and extract-entities.ts are engines: import one and call run() — nothing runs at import any more, PRs 1–2 of 5 (SMD-2304 / 2134)
 
 **What changed.** SMD-2134's fourth cut, in five PRs. This one lays the
 pieces the other engines use and turns the migrator into the first:

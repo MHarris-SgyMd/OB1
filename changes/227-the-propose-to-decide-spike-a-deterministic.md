@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-2017]
-migrations: []
----
-
-## Changelog
-
-Measured entity extraction as propose→decide against the generative extractor (spike, eval-only, no default change). A deterministic proposer (`server-portable/propose.ts`) offers candidate names — identifier and quoted-literal tokens, capitalised proper-noun runs, citation author-refs, organisation-suffix runs, and a gazetteer of names the graph already knows — and three evals score the shapes on the labelled long-document gold and on fork content. The proposer's span recall is 66.8% (research) / 77.7% (fork) exact and ~89% by containment; the hybrid (the generative model proposes, the decider decides validity and type) beats pure generation on every axis (81.6 / 76.1 / 65.9 vs 75.3 / 72.6 / 54.7 valid/type/exact), and pure propose→decide is recall-capped. The verdict is the hybrid (SMD-2017).
-
-## FORK
-
-The propose→decide spike: a deterministic entity proposer and the three-shape comparison — the hybrid (generative proposes, decider decides) wins (SMD-2017)
+# 227. The propose→decide spike: a deterministic entity proposer and the three-shape comparison — the hybrid (generative proposes, decider decides) wins (SMD-2017)
 
 **What it adds (eval-only; no schema, contract or default change).**
 
