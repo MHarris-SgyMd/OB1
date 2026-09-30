@@ -897,10 +897,10 @@ async function main(): Promise<void> {
     // The replay embeds each logged query with the brain's own configured model,
     // so it measures what the canary's search would return, and through the same
     // egress gate every other provider call in the fork passes (SMD-2290). The
-    // wholesale check the claim workers run (as sync-linear.ts does): null when
-    // the endpoint is declared local, or the policy is off or allows it. A logged
-    // query carries only its text — the `marker` unit, no actor and no row
-    // metadata — so the check reads that one unit: it stays what getEmbedding's
+    // wholesale refusal the claim workers apply (as sync-linear.ts does): null
+    // when the endpoint is declared local, or the policy is off or allows it. A
+    // logged query carries only its text — the `marker` unit, no actor and no row
+    // metadata — so the gate reads that one unit: it stays what getEmbedding's
     // own per-call gate will judge below, so the two agree rather than this one
     // passing on an actor:/source: term the query never carries and the per-call
     // one then refusing.
