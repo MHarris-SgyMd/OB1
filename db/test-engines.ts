@@ -382,7 +382,10 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   ok(reviewAborted === "stub queried", `…and a listing under an aborted signal reads on — it only reads (${reviewAborted.slice(0, 30)})`);
   // A decision writes: an aborted signal stops it before anything opens, as it stops a run (review pass 1).
   const decisionAborted = await inProcess({ url: AT, accept: ID, signal: AbortSignal.abort() });
-  ok(decisionAborted.code === 130 && /stopped before the pass began/.test(decisionAborted.err) && decisionAborted.seen === 0, `…while a decision under an aborted signal returns 130 before connecting (exit ${decisionAborted.code}, ${decisionAborted.seen} connection(s))`);
+  ok(decisionAborted.code === 130 && decisionAborted.err === "\n  stopped before the decision was written: the caller's signal was aborted\n" && decisionAborted.seen === 0, `…while a decision under an aborted signal returns 130 before connecting, in words that name no pass (exit ${decisionAborted.code}, ${decisionAborted.seen} connection(s))`);
+  // …beside --dry-run too: the decision writes whatever else is asked (review pass 2: it read the tables first).
+  const dryDecision = await inProcess({ url: AT, reject: ID, dryRun: true, signal: AbortSignal.abort() });
+  ok(dryDecision.code === 130 && dryDecision.seen === 0, `…and a decision beside --dry-run stops before connecting too (exit ${dryDecision.code}, ${dryDecision.seen} connection(s))`);
   ok(!closed, "…and never closes the caller's client");
 }
 

@@ -163,7 +163,7 @@ const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "a
  * option), free for the run: a pool another run or caller is using at the
  * same time takes the spare. A reserved connection or a transaction's handle
  * is refused. The worker key resolves on a connection of its own
- * (db/worker-bootstrap.ts), so a run or a review with OB1_WORKER_KEY set
+ * (db/worker-bootstrap.ts), so a run or a decision with OB1_WORKER_KEY set
  * needs `url` beside `sql`. `env` is what the run reads for the judge model,
  * the endpoints, the egress policy and the worker key: process.env when
  * absent.
@@ -174,14 +174,14 @@ const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "a
  * its next write — the agent's registration, a --retry-failed statement, the
  * pool — and run() returns 130 (a statement already committed stays so); a
  * decision (--accept, --reject) stops the same way, before the key resolves
- * and before the decision is written.
- * `onPass` is called once, as the pass begins — where the CLI installs its
+ * and before the decision is written, saying so. --status, --dry-run, --list
+ * and --stale only read, and do not read it.
+ * `onPass` is called once, as a run's pass begins — a decision has none — where the CLI installs its
  * signal handlers (stopOnSignals) — with the pass's stop (db/lease.ts's
  * PassStop). Its hard stop returns the leases at once, aborts the judge's
  * call in hand and wakes a worker pausing on a provider error, and run()
  * returns 130 (2 after the provider's refusal), writing and releasing nothing
  * more for the thought in hand; a call after run() has returned does nothing.
- * Neither is used by --status, --dry-run, --list or --stale, which only read.
  */
 export interface ConsolidateOptions {
   url?: string;
@@ -213,6 +213,9 @@ export interface ConsolidateOptions {
   signal?: AbortSignal;
   onPass?: (stop: PassStop) => void;
 }
+
+/** What run() says when a caller's signal stopped a decision before it was written — a decision has no pass (review pass 2). */
+const DECISION_STOPPED = "\n  stopped before the decision was written: the caller's signal was aborted";
 
 /** The run's numbers, each the option given or the CLI's default. */
 type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number; timeout: number; k: number; minSim: number; minConfidence: number; limit: number; follow: number; stale: number };
@@ -324,6 +327,10 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
   }
   const reviewing = opts.list != null || opts.accept != null || opts.reject != null || settled.stale > 0;
   const deciding = opts.accept != null || opts.reject != null;
+  // A run and a decision write — resolve the key, and stop under an aborted
+  // signal; --status, --dry-run, --list and --stale only read (review pass 2:
+  // the two rules had drifted apart for a decision beside --dry-run).
+  const writes = deciding || !(opts.status || opts.dryRun || reviewing);
   if (opts.sql != null) {
     // A reserved connection or a transaction's handle reports its pool's max
     // but is one connection, and a transaction keeps the run's claims from the
@@ -343,9 +350,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
       err(`consolidate.ts needs a client of at least ${settled.workers + 1} connections for ${settled.workers} worker(s): one each and a spare the heartbeat beats through (db/lease.ts). Pass a client opened with a larger max option, or a URL.`);
       return 2;
     }
-    // A run and a decision resolve the key; --status, --dry-run, --list and --stale only read.
-    const resolves = deciding || !(opts.status || opts.dryRun || reviewing);
-    if (noUrl && (opts.env ?? process.env).OB1_WORKER_KEY && resolves) {
+    if (noUrl && (opts.env ?? process.env).OB1_WORKER_KEY && writes) {
       err("consolidate.ts resolves OB1_WORKER_KEY on a connection of its own (db/worker-bootstrap.ts): pass url beside sql, or run without the key.");
       return 2;
     }
@@ -353,8 +358,8 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
   // A signal aborted before the call: nothing opened, nothing written. --status,
   // --dry-run, --list and --stale only read, and read on; a decision writes, and
   // stops as a run does (review pass 1).
-  if (opts.signal?.aborted && !opts.status && !opts.dryRun && (!reviewing || deciding)) {
-    err(STOPPED_EARLY);
+  if (opts.signal?.aborted && writes) {
+    err(deciding ? DECISION_STOPPED : STOPPED_EARLY);
     return 130;
   }
   const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1 });
@@ -392,7 +397,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    */
   const stoppedEarly = (): boolean => {
     if (opts.signal?.aborted !== true) return false;
-    err(STOPPED_EARLY);
+    err(ACCEPT !== undefined || REJECT !== undefined ? DECISION_STOPPED : STOPPED_EARLY);
     return true;
   };
   const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
