@@ -149,10 +149,11 @@
  * which reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture
  * group's), so a role without the `structure` group's `thought_sources` runs
  * every other mode; the flags read `node_state()`,
- * which needs it. `metadata.status_type` is a transitional, lossy scalar — the
- * transitions are `thought_audit`'s (046) — and when SMD-1997 folds them, the
- * two reads of it change (`node_lifecycle()`'s body and `node_dependencies()`'
- * gate, which reads a source row's own status) and no caller does.
+ * which needs it (and, since 071, `ob1_source_gate`, the capture group's).
+ * `metadata.status_type` is a transitional, lossy scalar — the transitions are
+ * `thought_audit`'s (046) — and when SMD-1997 folds them, the two reads of it
+ * change (`node_lifecycle()`'s body and `node_dependencies()`' gate, which
+ * reads a source row's own status, stored since 071) and no caller does.
  *
  * The subject resolves by 016's own rule, one rung at a time: an exact
  * `normalized_name` match (`normalize_entity_name`, so "Open-Brain" finds

@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2300 assertions: 2300 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy (70) migrations applied, and
+`bun test-schema.ts` prints `2315 assertions: 2315 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-one (71) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -808,8 +808,8 @@ included, and the log carries no `created_at` move; SMD-1997's fold can later
 feed the heads' status. `node_lifecycle()` and `node_state()` keep their
 signatures and rows and read the tables; `node_state` lost its top-level WITH,
 so a caller's planner pulls it up, drops the dependency joins it does not read
-(still whole-brain reads — `blockers`, `unknown_blockers`, `in_dependencies`,
-and `node_dependencies()`' gate on the status scalar — SMD-2267) and looks the
+(whole-brain reads until 071 keyed them — `blockers`, `unknown_blockers`,
+`in_dependencies`, and `node_dependencies()`' gate — SMD-2267) and looks the
 rest up by primary key. `search_thoughts_hybrid` is estimated at 100 rows, its
 window's bound, so a ten-thousand-thought brain does not hash-join the whole
 table to it. Measured on `bench-hybrid.ts`'s arm: `prefer_current` adds, in the
@@ -874,6 +874,61 @@ test-schema [64], test-upgrade [20v], test-live [16];
 `server-portable/test-preflight.ts` drives the census, the leftover-form and
 the older-body arms; the store and e2e suites read the column.
 
+Migration 071 makes `node_state`'s dependency columns read the ids they are
+asked for (SMD-2267). The gate — whether some source row of a system states a
+known status on its own metadata (058's, SMD-2218) — is the one answer not local
+to a few rows, so it is the one stored: `ob1_source_gate` mirrors every
+`thought_sources` row with its system and whether its thought's `status_type` is
+one `node_lifecycle_types()` knows, and a system gates while some row of it does
+(one probe of a partial index). Statement triggers keep it current: on
+`thought_sources` (AFTER INSERT, UPDATE and DELETE with transition tables, and
+TRUNCATE) for the rows that appeared, vanished or changed system — a
+canonical-only re-record returns at once, and a delete drops its mirror rows by
+key, reading nothing else — and on `thoughts` (AFTER UPDATE) for the rows whose
+`status_type` moved between known and unknown; any other write returns at once.
+A source write and a status move of one thought take turns on an advisory
+lock — a bucket of the thought's id, 256 buckets in class 22563, taken in
+bucket order after 068's classes, exclusive for both — so whichever goes second reads what the
+first committed; a source row's delete takes none (it drops the mirror row by
+key).
+Not the thought's row: a source writer's share lock there, until the second
+review pass, deadlocked with multi-row updates, cascades and takes where main
+waited. A bucket is held until commit, so a transaction that writes source rows or
+moves statuses holds up both in its buckets, and transactions that do either
+for several thoughts in separate statements can deadlock, as 068's ticket
+writes can: write a thought before its source row, one thought per transaction
+(the bucket is then taken once, for both). Shared buckets for status moves
+were tried and reverted: a status move then a source write, in one
+transaction, upgraded the lock and deadlocked bucket-mates ten times in ten. REPEATABLE READ is refused for a source row's insert or move and for
+every status move between known and unknown (a source row's delete and a
+re-record that changes nothing run; the delete raises 40001 if its thought's
+status moved since the snapshot). `ob1_rebuild_source_gate()` repairs the mirror after a write made with
+triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm.
+`node_dependencies()` keeps its rows and tests each link's system against the
+gating systems, read once per call, instead of grouping every source row with
+its thought. `source_thought()` keeps its
+results and finds the board sync's claim for a linear identity no source row
+holds by 068's issue index: 001's GIN index read every issue row's posting per
+such blocker, which on a brain where most links name a ticket it does not hold
+cost the keyed read 47 ms and a whole-brain read 5 s. `ob1_node_dependencies_of(ids)` is
+the dependency read: for ids, each thought's ticket identities (its source row,
+its `ticket` or `issue` claim), each identity's links from both ends through
+053's indexes, the gate by index (`ob1_system_gates()`, planned on the partial
+index: inline, a system that never gates cost a scan of the whole mirror per
+link) and each blocker's lifecycle by primary key;
+for NULL, 058's whole-brain read as 068 ran it — two branches behind one-time
+filters under one `GROUP BY thought_id`, which a caller that reads none of the
+columns still drops. `node_state()` joins it once. On `bench-hybrid.ts`'s arm
+(two links in three naming a ticket the brain does not hold), `SELECT * FROM
+node_state(<40 ids>)` costs 2.9 ms at 10,000 thoughts and 2.9 at 100,000 (6.5 s
+and 656 s on the reads 068 left), every thought's dependency columns 31 and 308
+ms (6.1 s and 732 s), and `node_dependencies()` read for its gates 2.1 and 15.7 (3.5 and 45.8); a
+writer pays +0.09 ms at most (a new source row), measured paired. A caller that passes NULL and
+joins its own ids still computes every thought: pass the ids. The triggers run as
+the writer, so the **capture** group gains the four privileges on
+`ob1_source_gate`: a role granted before 071 fails preflight until `migrate.ts
+--grant` runs again. test-schema [65], test-live [35], test-upgrade [20w].
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -919,7 +974,31 @@ this.)
 `db/config.mjs`'s `ROLE_GRANTS` is the machine-readable list; this table is the
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
-issues every group at once.
+issues every group at once, or with `--groups capture,worker,…` those alone
+(SMD-2289). `--groups` grants less and revokes nothing; `--exact` adds the
+revoke, in the grant's own transaction: a member of another role or an owner
+of anything is refused, then what an ACL grants the role on a
+table or column, a sequence or a routine, and CREATE on a schema or the
+database, go (schema USAGE, CONNECT and TEMP stay); it is refused if it still
+holds anything else (named by catalog and database); then the groups are
+granted, so what it holds here is theirs. Every `--grant`, and `login-role.ts`,
+holds one advisory lock, so two at once in one database queue. `db/login-role.ts --role <name> --password-env <VAR>`
+creates or updates the LOGIN role itself (not a superuser, owning nothing,
+a member of no role, its settings in every database cleared; refused if one
+survives, as a setting only a superuser may reset does a migrator that is not),
+its password sent as a SCRAM verifier, for a compose service that connects as
+a role of its own: the orchestration runner's `ob1_orchestration_runner`
+holds capture, worker, structure and extraction, what its ingester
+and reembed run (measured), and not the server group, whose writes to
+`ob1_agent_keys` could clear a key's revocation. `login-role.ts` refuses a
+role that is a superuser, a member of another role or the owner of anything,
+or whose name a schema here bears (first on its search_path), and `--exact` one still holding a privilege it cannot revoke (a default
+privilege naming it, a grant in another database). Under that role the `ANALYZE
+thought_work_claims` that reembed and 015's `enqueue_thoughts` run (the
+owner's to run) is skipped: Postgres warns, the client does not print it, and
+autovacuum keeps the claim table's statistics. The worker group's `UPDATE` on
+`ob1_config` covers the whole table, the event log's ordering key among its
+rows, as it does for every worker; narrowing it would take row-level policy.
 
 | Group | Object (migration, or `schemas/` file) | Privileges |
 | --- | --- | --- |
@@ -932,15 +1011,17 @@ issues every group at once.
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
 | | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
 | | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
+| | `ob1_source_gate` (071) | `SELECT, INSERT, UPDATE, DELETE` — 071's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()`' gates and the dependency columns read it (SMD-2267); a plain capture, an edit that moves no status and a delete of an unsourced thought never touch it. |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `ob1_config` (006) | `INSERT, UPDATE` |
+| | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
+| | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks; without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
@@ -1001,7 +1082,7 @@ granted. Functions are executable by `PUBLIC` by default, so only the community
 functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones — are
 listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,
 readwise and CRM RPCs) need nothing. `ob1_config` appears twice — `SELECT` for
-the server's own read, `INSERT, UPDATE` for a worker's job key — as does
+the server's own read, `SELECT, INSERT, UPDATE` for a worker's job key — as does
 `thought_audit` (`INSERT` for the capture path, upstream's `SELECT` beside it),
 and `--grant` merges each into one `GRANT`. A view is granted as a table is,
 and needs it: a role's `SELECT` on `thoughts` does not reach a view over it.
@@ -1020,7 +1101,9 @@ a privilege without grant option "grants" it with only a warning and no effect;
 if anything is not held it rolls back, names the privileges, and says to connect
 as the objects' owner or a superuser; it never creates the role or sets a password, so
 create the role first. `--grant --dry-run` prints the statements without running
-them, so a locked-down deployment can grant a subset by hand. A role that only
+them, so a locked-down deployment can grant a subset by hand; with `--exact` it
+runs the revokes, the check and the grants in a transaction it rolls back, so it
+needs the privileges a real run does and shows what that run would refuse. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, and **pages**
@@ -2736,7 +2819,7 @@ migration might touch, so a migration meets *all* the real data), resets the tar
 and restores into it, copies the source's database-level settings the dump leaves
 out (`ALTER DATABASE … SET` — migration 014's HNSW bounds, SMD-2037), then runs
 `migrate.ts` forward with the merged tree. It is destructive to `--to`, so it
-guards the target three ways.
+guards the target five ways.
 
 - **It is not the `--from` database.** The source session is looked up in the
   target's `pg_stat_activity`. Two names for one server are still one server,
@@ -2771,9 +2854,19 @@ guards the target three ways.
   database. After connecting, each side's server must report the URL's
   database: an exported `PGDATABASE` beats the URL's in Bun. `--to` is asked
   again on the connection that marks and drops. No override lifts these.
+- **The tools parse no URL.** `pg_dump` and `pg_restore` get a keyword
+  connection string (`connect.ts` `toolTarget`): the URL's host and port, the
+  database and login (`session_user`) the server reported, and only
+  `sslmode`, `application_name` and `options`. The password is in
+  `PGPASSWORD`, off their argv. Their environment keeps only the `PG*`
+  variables that authenticate, so `PGHOSTADDR`, `PGSERVICE`, `PGOPTIONS` and
+  the rest cannot send them elsewhere. Before the mark, `pg_dump` on that same
+  string must find a table just created, in a schema of its own, through the
+  connection that drops, or `--to` is left untouched.
 
 It needs Bun
-and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
+and a `pg_dump`/`pg_restore`, `pg_dump` at a major version of at least both
+servers' (the source's for the dump, `--to`'s for the probe), and
 no image the stack runs has both — the pgvector image has the client and no Bun,
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
 builds `db/tier.Dockerfile` (`oven/bun:1.4.0-alpine` + `postgresql16-client`, the
@@ -3043,12 +3136,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 956 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2315 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 998 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
-bun test-engines.ts                         # the engines (migrate.ts) import with no side effect, refuse through run() — no database
+bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -3078,11 +3171,12 @@ The resolver refuses a URL that Bun and libpq would take to different places
 query part libpq refuses (empty, no `=`, a second raw `=`, an `sslmode` in
 capitals), a fragment, an `@` other than the one ending the user, a `,` or
 `%2C` in the host, or a `.`/`..` path segment (Bun resolves it, libpq does
-not). Put the
-database in the URL's path. The reset rule then has three parts:
-- **The URL must name its host and its database.** With no host, Bun
-  connects to localhost over TCP and libpq to the unix socket; with no
-  database, the shell's `PGDATABASE` would choose what is dropped.
+not). Put the database in the URL's path. The reset rule then has three
+parts:
+- **The URL must name its host and its database,** and its port while
+  `PGPORT` is exported. With no host, Bun connects to localhost over TCP and
+  libpq to the unix socket; with no database, the shell's `PGDATABASE` would
+  choose what is dropped; with no port, Bun takes `PGPORT`.
 - **Its host must be loopback by name** (`localhost`, `127.0.0.1`, `[::1]`,
   `0.0.0.0`), or `OB1_ALLOW_REMOTE_DB=1` must be set.
 - **Once connected, the server must report the database the URL names**
@@ -3096,8 +3190,9 @@ server's address is not compared with loopback, because through a container's
 published port it is the container's. `hnsw-graph.ts`,
 `graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
 after connecting and return it from `closeThenExit`, which closes the pool and
-flushes their output first (the claim workers still close before each exit
-themselves, SMD-2304).
+flushes their output first, as `migrate.ts` and `extract-entities.ts` do with
+their `run()`'s code (consolidate.ts and reembed.ts still close before each
+exit themselves until they are engines, SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks
 that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.
@@ -3115,8 +3210,31 @@ next. The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
 holds each engine to that: an import opens no connection, prints nothing and
 installs no process listener; the engine's code holds no exit, handler, argv
 scan or console call; and `run()` refuses in the CLI's words before
-connecting. Extraction, consolidation and re-embedding become engines next,
-one PR each, over the bootstrap below.
+connecting.
+
+`extract-entities.ts` is the second (SMD-2304 PR 2): `run({ url, sql, env,
+workers, batch, ttl, heartbeat, timeout, limit, follow, dump, job, status,
+dryRun, switchKey, retryFailed, retryPartial, retryLeftOut, decide, writer,
+signal, onPass })`. A number left out takes the CLI's default and one given is
+held to its flag's rule, refused in the CLI's words; `env` is what the run
+reads for the model, endpoints, egress policy and worker key (process.env when
+absent). A caller's client needs a connection per worker and a spare the
+heartbeat beats through (`max` at least workers + 1), and the worker key
+resolves on a connection of its own, so a keyed run needs `url` beside `sql`;
+a reserved connection or a transaction's handle is refused (one connection
+whatever `max` it reports). `signal` stops the pass as a first signal does —
+every worker after the thought in hand, waking a follower's sleep — and,
+aborted before the pass, stops the run before its next write with 130
+(`--status` and `--dry-run` read on). `onPass` is called once as the pass
+begins, where the script installed its handlers, with the pass's stop
+(`lease.ts`'s `PassStop`): the first call stops after the thought in hand;
+one while it is already stopping (a second, or the first after the provider's
+refusal stopped the workers) returns the release of every worker's leases,
+and the thought in hand is abandoned — nothing written or released for it.
+The CLI installs `lease.ts`'s `stopOnSignals` there, which exits 130 when that
+release settles or after 3 s, and takes it off when run() settles — a signal
+after that ends the process as one before the pass does.
+Consolidation and re-embedding become engines next, one PR each.
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket
@@ -3134,7 +3252,8 @@ classifies a provider error into thought / transient / fatal for both workers
 (extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
 `actorPayload` rather than by hand. The module returns its outcome rather than
-exiting, so SMD-2304's importable `run()` will turn it into a return code.
+exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s
+now, `consolidate.ts`'s and `reembed.ts`'s once they are engines (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
 the `classifyError` rules and the identity cases that refuse before connecting;
 `test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that

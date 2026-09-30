@@ -18,8 +18,10 @@ FROM oven/bun:1.4.0-alpine
 WORKDIR /app
 # The runner, the two contracts it shares with the server, its flag scanner, its
 # connection module and the migrations — at the paths migrate.ts reads them
-# (./config.mjs, ./version.mjs, ./cli.ts, ./connect.ts, ./migrations).
-COPY db/migrate.ts db/config.mjs db/version.mjs db/cli.ts db/connect.ts ./
+# (./config.mjs, ./version.mjs, ./cli.ts, ./connect.ts, ./migrations) — and
+# login-role.ts, which the orchestration profile's role step runs beside
+# `migrate.ts --grant` (SMD-2289).
+COPY db/migrate.ts db/login-role.ts db/config.mjs db/version.mjs db/cli.ts db/connect.ts ./
 COPY db/migrations ./migrations
 # version.mjs resolves releases.json at its parent's parent — / here, as in the
 # server image — so `bun migrate.ts --dry-run` names the release each pending

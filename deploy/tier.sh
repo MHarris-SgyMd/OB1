@@ -63,8 +63,9 @@
 # a URL gets no such opt-in: export OB1_ALLOW_REMOTE_DB=1 to reset one, as with
 # tier.ts.
 #
-# The client major, 16, must be at least the source server's: refreshToolsReady
-# refuses the refresh otherwise, and bumping the stack's Postgres means bumping
+# The client major, 16, must be at least both servers' (pg_dump reads the
+# source, and --to for the probe before the reset): refreshToolsReady refuses
+# the refresh otherwise, and bumping the stack's Postgres means bumping
 # the package in db/tier.Dockerfile with it. On a host with SELinux enforcing
 # (Fedora, RHEL — podman's default there), the read-only mount of the checkout
 # needs a label the container may read; relabel the checkout once (`chcon -Rt

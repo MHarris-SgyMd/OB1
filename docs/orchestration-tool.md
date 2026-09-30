@@ -29,10 +29,11 @@ leaves open.
 - An act-tool workflow ships on its own MCP path.
 - Gmail and Linear moved to SMD-2257 and SMD-2258, each behind its gate.
 
-**Amended by SMD-2289** (emitter egress, built):
+**Amended by SMD-2289** (the runner's hardening, built):
 - An emitter has no network. A live-API pipeline names its hosts, and its
   emitter connects to those alone, through a proxy of the runner's ("Running a
   pipeline from a workflow").
+- The runner writes as a database role of its own, not the superuser.
 
 ## The decision
 
@@ -446,12 +447,13 @@ runs outside n8n:
   carry it to another of its sites. Before
   that, an emitter an export had taken over could reach the host's Ollama,
   admin API and all, Postgres, and on a VPS the cloud metadata endpoint.
-  Two limits are named rather than closed:
+  The runner connects as a role of its own, `ob1_orchestration_runner`,
+  which is not a superuser and holds what its ingester and reembed run, and
+  its environment holds only the knobs they read (SMD-2289). One limit is
+  named rather than closed:
   - every emitter can read every pipeline's world-readable exports, unless
     the operator gives each directory to its pipeline's uid, on an engine
-    that enforces host file modes (Docker Desktop and podman-machine do not);
-  - the runner connects as the Postgres superuser, as the migrator and
-    board-sync do; SMD-2289's second part gives it a role of its own.
+    that enforces host file modes (Docker Desktop and podman-machine do not).
   - An item's facets may not name another source's ticket (`issue`,
     `ticket`, `linear_updated_at`), which node_state and the board sync
     read whatever the source (review pass 7).

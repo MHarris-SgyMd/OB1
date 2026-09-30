@@ -35,10 +35,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { workerIdentity } from "./worker-bootstrap.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
+import { run as runExtract, type ExtractOptions } from "./extract-entities.ts";
+import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
@@ -3157,6 +3160,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // While set, every answer takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
   let slowMs = 0;
+  /** While above zero, the next calls are refused, 300 ms in, as a bad key would be — the provider's refusal, fatal to the pass; `refused` counts those sent. */
+  let refuseCalls = 0;
+  let refused = 0;
+  /** While above zero, the next calls answer 503 at once — the provider unavailable, a transient error the worker pauses on. */
+  let unavailableCalls = 0;
   const model = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -3165,6 +3173,17 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       modelsAsked.push(body.model ?? "");
       // The thought is the user message; the rules are the system message.
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      if (refuseCalls > 0) {
+        refuseCalls--;
+        // A beat late, so another worker's call is in hand by then.
+        await Bun.sleep(300);
+        refused++;
+        return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
+      }
+      if (unavailableCalls > 0) {
+        unavailableCalls--;
+        return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      }
       await Bun.sleep(5 + slowMs);
       if ((hemlockIsProse && /hemlock/.test(prompt)) || [...proseKeys].some((k) => prompt.includes(k))) {
         return Response.json({ choices: [{ message: { content: "I'm sorry, I can't help with that." } }] });
@@ -3205,8 +3224,21 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     MCP_ACCESS_KEYS: `entity-worker:write:${hashKey(rawKey)}`,
   };
   const dumpPath = join(tmpdir(), `ob1-test-live-extract-${process.pid}.jsonl`);
-  const extract = (...extra: string[]): Promise<{ code: number; out: string }> =>
+  const extract = (...extra: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> =>
     runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, ...extra], { env: env as Record<string, string>, cwd: HERE });
+  /**
+   * extract-entities.ts's run() in this process — the engine the CLI wraps
+   * (SMD-2304) — under the spawned worker's environment, its lines per stream
+   * as a child's are, for `same` against a spawned run.
+   */
+  const extractInProcess = async (opts: Omit<ExtractOptions, "writer"> = {}): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const outs: string[] = [], errs: string[] = [];
+    const code = await runExtract({ url: URL_!, env, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, stdout: lines(outs), stderr: lines(errs) };
+  };
+  /** A run with its wall-clock seconds masked ("in 0.4s", "0.0s in 0 model call(s)"): two runs that did the same compare byte for byte. */
+  const untimed = (r: { code: number; stdout: string; stderr: string }) => ({ code: r.code, stdout: r.stdout.replace(/\d+\.\d+s\b/g, "<s>"), stderr: r.stderr.replace(/\d+\.\d+s\b/g, "<s>") });
   const graph = async () => (await sql`
     SELECT (SELECT count(*)::int FROM ob1_entities) AS entities,
            (SELECT count(*)::int FROM thought_entities) AS mentions,
@@ -3222,6 +3254,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(/window: thoughts over 300 estimated tokens are extracted in 300-token windows \(overlap 37\), from OB1_EXTRACT_CHUNK_TOKENS \(stub-meta's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list\)/.test(dry.out),
          "the banner states the window rule and where it came from — the sentence preflight prints (SMD-1879)");
   assert((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].c === 0, "…including the key");
+  // The same dry run through run() in this process (SMD-2304).
+  const dryIn = await extractInProcess({ dryRun: true });
+  assert(same(dryIn, dry), `extract run() in-process prints the spawned --dry-run's stdout and stderr byte for byte, with its exit code (${dryIn.code}: ${dryIn.stdout.split("\n").filter(Boolean).slice(-1)[0]?.slice(0, 120)})`);
   assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'entity-worker'`)[0].c === 0, "…and it did not register the worker's agent either");
   const bareLimit = await extract("--limit");
   assert(bareLimit.code === 2 && /--limit needs a value/.test(bareLimit.out), "a bare --limit is refused rather than read as no limit");
@@ -3298,6 +3333,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   });
   const otherOut = (await new Response(otherModel.stdout).text()) + (await new Response(otherModel.stderr).text());
   assert((await otherModel.exited) === 2 && /--switch-key/.test(otherOut), "a run under a different model's key is refused without --switch-key");
+  const otherIn = await extractInProcess({ limit: 1, env: { ...env, OB1_METADATA_MODEL: "other-model" } });
+  assert(otherIn.code === 2 && otherIn.stdout + otherIn.stderr === otherOut, `…and run() in-process refuses it in the same words (exit ${otherIn.code})`);
   const [{ key: stillKey }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
   assert(stillKey === KEY, "…and the recorded key is untouched");
 
@@ -3306,6 +3343,10 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const second = await extract();
   assert(second.code === 1 && /0 extracted, 0 failed/.test(second.out), "a second run has nothing to extract (and still exits 1 for the failed row)");
   assert(calls === callsAfterFirst, "…and made no model call");
+  // The same no-op run through run() in this process: the identity resolved,
+  // the pool read, the summary and the failed row's lines on their streams.
+  const secondIn = await extractInProcess();
+  assert(same(untimed(secondIn), untimed(second)) && calls === callsAfterFirst, `…and run() in-process prints what the spawned run printed, stream by stream, its seconds aside (exit ${secondIn.code}: ${secondIn.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 100)})`);
   const ids2 = (await sql`SELECT id FROM ob1_entities ORDER BY id`).map((r: { id: string }) => r.id);
   assert(JSON.stringify(ids1) === JSON.stringify(ids2) && JSON.stringify(await graph()) === JSON.stringify(g1), "…the graph is unchanged, entity ids included");
 
@@ -3331,6 +3372,15 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // --status, then --retry-failed with a --limit.
   const status = await extract("--status");
   assert(status.code === 0 && /9 extracted, 1 failed/.test(status.out) && /graph: \d+ entities/.test(status.out), "--status reports the pass and the graph");
+  // …and on a caller's client, in-process: the same lines, and the client
+  // still open after. Two workers and a spare: three connections, and this
+  // section's own one-connection client refused as too narrow.
+  const caller = new SQL({ url: URL_, max: 3 });
+  const statusIn = await extractInProcess({ status: true, sql: caller });
+  const narrowIn = await extractInProcess({ status: true, sql });
+  assert(same(statusIn, status) && (await caller`SELECT 1 AS one`)[0].one === 1, `run() --status on a caller's client prints the spawned --status byte for byte, and leaves the client open (exit ${statusIn.code}${statusIn.stderr ? `: ${statusIn.stderr.slice(0, 100)}` : ""})`);
+  assert(narrowIn.code === 2 && narrowIn.stdout === "" && /needs a client of at least 3 connections for 2 worker\(s\)/.test(narrowIn.stderr), `…and a one-connection client is refused before anything is read (exit ${narrowIn.code})`);
+  await caller.close();
   hemlockIsProse = false;
   answers.hemlock = { entities: [{ name: "Socrates", type: "person", confidence: 0.9 }], relationships: [] };
   const retried = await extract("--retry-failed", "--limit", "1");
@@ -3353,6 +3403,214 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(extracted, "a thought captured while --follow polls is extracted by the trigger and the poll, with no new run");
   assert(followCode === 0, `the follower exits 0 on SIGINT (exit ${followCode}; ${followOut.split("\n").filter(Boolean).slice(-2).join(" | ")})`);
   assert((await entityByName("Grafana")) !== undefined, "…and Grafana is in the graph");
+
+  // Stopping a pass (SMD-2304). Four notes the stub answers with nothing, one
+  // worker, slow answers: a stop lands while a thought is in hand.
+  const notes: string[] = [];
+  for (let i = 0; i < 4; i++) notes.push(await seed(`A signalled note, number ${i}.`));
+  const noteClaims = async () =>
+    Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(notes, "TEXT")}::uuid[]) GROUP BY status`)
+      .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
+  // In hand: the claim made and its model call at the stub — a stop between
+  // the two ends the worker before it takes the thought up (a race the script
+  // always had), so waiting on the claim alone flaked under load.
+  const inHand = async (from: number) => { for (let i = 0; i < 100 && !((await noteClaims()).claimed === 1 && calls > from); i++) await Bun.sleep(50); };
+  slowMs = 600;
+  // A caller's AbortSignal stops every worker after the thought in hand, in
+  // words that promise no second stop, and run() returns 130; onPass handed
+  // the stop once, as the pass began.
+  const ac = new AbortController();
+  const handed: PassStop[] = [];
+  const softFrom = calls;
+  const softRun = extractInProcess({ workers: 1, signal: ac.signal, onPass: (s) => handed.push(s) });
+  await inHand(softFrom);
+  ac.abort();
+  const soft = await softRun;
+  const afterSoft = await noteClaims();
+  assert(soft.code === 130 && handed.length === 1 && soft.stderr.includes("\n  stopping after the current thought; unfinished claims go back to the pool\n") && !soft.stderr.includes("again to exit now")
+         && afterSoft.succeeded === 1 && afterSoft.pending === 3 && !afterSoft.claimed,
+         `a caller's AbortSignal stops the pass after the thought in hand, the rest back in the pool, and run() returns 130 (exit ${soft.code}, ${handed.length} stop(s) handed, claims ${JSON.stringify(afterSoft)})`);
+  // The stop onPass hands: the first call is that stop; a second is the hard
+  // stop — every worker's leases returned while the thought is still in hand,
+  // which the worker then abandons: no write, no release of a row no longer
+  // its own (review pass 1: it recorded the thought, then failed to release).
+  let hardStop: PassStop | undefined;
+  const hardFrom = calls;
+  const hardRun = extractInProcess({ workers: 1, onPass: (s) => { hardStop = s; } });
+  await inHand(hardFrom);
+  const firstStop = hardStop?.();
+  const release = hardStop?.();
+  await release;
+  const heldAfterRelease = (await noteClaims()).claimed ?? 0;
+  const hard = await hardRun;
+  assert(firstStop === null && release instanceof Promise && heldAfterRelease === 0 && hard.code === 130 && hard.stderr.includes(`second signal — exiting now; leases not returned in time expire within 900 s`),
+         `a second call of the stop onPass hands returns the release of the workers' leases, made before the thought in hand finished (${heldAfterRelease} held after it, exit ${hard.code})`);
+  assert(!hard.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(hard.stdout) && (await noteClaims()).succeeded === 1 && hardStop?.() === null,
+         `…the thought in hand abandoned — nothing written or released for it, nothing counted — and the stop inert once run() has returned (${hard.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 80)})`);
+  // The CLI's signals, installed from onPass (db/lease.ts's stopOnSignals):
+  // one SIGINT stops after the thought in hand and exits 130; a second exits
+  // 130 at once, with the thought still in hand and its lease returned.
+  const cliRun = () => Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--workers", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
+  const onceFrom = calls;
+  const once = cliRun();
+  await inHand(onceFrom);
+  once.kill("SIGINT");
+  const [, onceErr] = await Promise.all([new Response(once.stdout).text(), new Response(once.stderr).text()]);
+  const onceCode = await once.exited;
+  const afterOnce = await noteClaims();
+  assert(onceCode === 130 && onceErr.includes("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)\n") && afterOnce.succeeded === 2 && !afterOnce.claimed,
+         `one SIGINT stops the CLI after the thought in hand and exits 130 (exit ${onceCode}, claims ${JSON.stringify(afterOnce)})`);
+  slowMs = 5000;
+  const twiceFrom = calls;
+  const twice = cliRun();
+  await inHand(twiceFrom);
+  twice.kill("SIGINT");
+  await Bun.sleep(100);
+  const signalledAt = Date.now();
+  twice.kill("SIGINT");
+  const [, twiceErr] = await Promise.all([new Response(twice.stdout).text(), new Response(twice.stderr).text()]);
+  const twiceCode = await twice.exited;
+  const twiceMs = Date.now() - signalledAt;
+  const afterTwice = await noteClaims();
+  assert(twiceCode === 130 && twiceErr.includes("second signal — exiting now") && twiceMs < 2500 && !afterTwice.claimed && afterTwice.succeeded === 2,
+         `a second SIGINT exits 130 at once, the thought in hand not finished and its lease returned (exit ${twiceCode} after ${twiceMs} ms, claims ${JSON.stringify(afterTwice)})`);
+  // After the provider's refusal stopped the workers, the first stop is
+  // already the hard one — the script's rule, kept: its handler read the
+  // same `stopping` the refusal set. Two workers: one's call is refused 300 ms
+  // in, the other's is two seconds in hand when the stop comes.
+  refuseCalls = 1;
+  slowMs = 2000;
+  let fatalStop: PassStop | undefined;
+  const fatalFrom = calls, refusedFrom = refused;
+  const fatalRun = extractInProcess({ workers: 2, onPass: (s) => { fatalStop = s; } });
+  // Both calls at the stub and the refusal sent — not a fixed sleep (review pass 2).
+  for (let i = 0; i < 100 && !(calls >= fatalFrom + 2 && refused > refusedFrom); i++) await Bun.sleep(50);
+  await Bun.sleep(100);
+  const afterFatal = fatalStop?.();
+  await afterFatal;
+  const fatal = await fatalRun;
+  slowMs = 0;
+  refuseCalls = 0;
+  assert(fatal.code === 2 && fatal.stderr.includes("The provider refused the request itself") && afterFatal instanceof Promise && fatal.stderr.includes("second signal — exiting now")
+         && !fatal.stderr.includes("stopping after the current thought") && !fatal.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(fatal.stdout)
+         && (await noteClaims()).succeeded === 2 && !(await noteClaims()).claimed,
+         `after the provider's refusal, the pass's first stop is the hard one: the other worker's thought in hand is released, not finished (exit ${fatal.code}, ${afterFatal instanceof Promise ? "a release" : String(afterFatal)}, claims ${JSON.stringify(await noteClaims())})`);
+
+  // A caller's signal aborted during start-up stops the run before its next
+  // write, and the failed row stays failed rather than returned to a pool
+  // nothing drains (review pass 1): aborted as the identity resolves, the key
+  // is not written; aborted as the key is, --retry-failed's statement never
+  // runs. The key cleared first, so the run writes it.
+  const [failedNote] = notes;
+  await sql`UPDATE thought_work_claims SET status = 'failed', last_error = 'planted', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${KEY} AND thought_id = ${failedNote}::uuid`;
+  const startUp = async (at: string) => {
+    await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+    const ac2 = new AbortController();
+    const errs: string[] = [];
+    const code = await runExtract({ url: URL_!, env, retryFailed: true, signal: ac2.signal, writer: { out: (l) => { if (l.startsWith(at)) ac2.abort(); }, err: (l) => errs.push(l) } });
+    const [{ status }] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${failedNote}::uuid`;
+    const keyed = (await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].c === 1;
+    return { code, status, keyed, said: errs.some((l) => l.includes("stopped before the pass began: the caller's signal was aborted; nothing was claimed")) };
+  };
+  const atIdentity = await startUp("  agent:");
+  const atKey = await startUp("  ob1_config.entity_extraction_key = ");
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${KEY}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+  assert(atIdentity.code === 130 && atIdentity.said && atIdentity.status === "failed" && !atIdentity.keyed,
+         `a caller's signal aborted as the identity resolves stops the run before it writes the key: 130, the failed row still failed (${JSON.stringify(atIdentity)})`);
+  assert(atKey.code === 130 && atKey.said && atKey.status === "failed" && atKey.keyed,
+         `…and aborted as the key is written, before --retry-failed's statement (${JSON.stringify(atKey)})`);
+  await sql`UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL WHERE work_type = ${KEY} AND thought_id = ${failedNote}::uuid`;
+
+  // A worker that throws — a Writer that throws — stops the other after the
+  // thought in hand, and run() rejects once it has: nothing left claimed, and
+  // no pass going on behind the rejection (review pass 1).
+  for (let i = 0; i < 6; i++) notes.push(await seed(`A thrown note, number ${i}.`));
+  slowMs = 300;
+  const thrownAt = await runExtract({ url: URL_!, env, workers: 2, writer: { out: (l) => { if (/^  \d+\/\d+  /.test(l)) throw new Error("writer boom"); }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+  const rightAfter = await noteClaims();
+  await Bun.sleep(1200);
+  const later2 = await noteClaims();
+  slowMs = 0;
+  assert(thrownAt === "writer boom" && !rightAfter.claimed && (rightAfter.pending ?? 0) > 0 && JSON.stringify(rightAfter) === JSON.stringify(later2),
+         `a Writer that throws in one worker stops the other and rejects run() with its error, nothing left claimed or going on after (${thrownAt}; ${JSON.stringify(rightAfter)} → ${JSON.stringify(later2)})`);
+
+  // A reserved connection and a transaction's handle report the pool's max
+  // but are one connection: refused (review pass 1).
+  const pool = new SQL({ url: URL_, max: 4 });
+  const reserved = await pool.reserve();
+  const onReserved = await extractInProcess({ sql: reserved, dryRun: true });
+  reserved.release();
+  const onTx = await pool.begin(async (tx) => extractInProcess({ sql: tx, dryRun: true }));
+  await pool.close();
+  assert([onReserved, onTx].every((r) => r.code === 2 && r.stdout === "" && /needs a pool, not a reserved connection or a transaction's handle/.test(r.stderr)),
+         `a reserved connection and a transaction's handle are refused as a run's client (exits ${onReserved.code}, ${onTx.code})`);
+  // The hard stop wakes a worker pausing on a provider error: run() returns at
+  // once, and the thought is not sent again after the leases are gone (review
+  // pass 2: the 5-45 s pause ran out, then the call was made).
+  unavailableCalls = 100;
+  let pauseStop: PassStop | undefined;
+  const pauseFrom = calls;
+  const pauseErrs: string[] = [];
+  const pauseRun = runExtract({ url: URL_!, env, workers: 1, onPass: (s) => { pauseStop = s; }, writer: { out: () => {}, err: (l) => pauseErrs.push(l) } });
+  for (let i = 0; i < 100 && !(calls > pauseFrom && pauseErrs.some((l) => l.includes("provider unavailable"))); i++) await Bun.sleep(50);
+  pauseStop?.();
+  const pauseRelease = pauseStop?.();
+  const pauseAt = Date.now(), callsAtStop = calls;
+  const pauseCode = await pauseRun;
+  const pauseMs = Date.now() - pauseAt;
+  await pauseRelease;
+  unavailableCalls = 0;
+  assert(pauseCode === 130 && pauseMs < 1500 && calls === callsAtStop && !(await noteClaims()).claimed,
+         `a hard stop during a provider-error pause returns 130 at once, sending nothing more (exit ${pauseCode} after ${pauseMs} ms, ${calls - callsAtStop} call(s) after the stop)`);
+
+  // A Writer that throws on the line naming the rows a worker returned is the
+  // Writer's error, not a lease left unreturned (review pass 2): run() rejects
+  // with it, and the rows are back in the pool.
+  slowMs = 600;
+  const freedAc = new AbortController();
+  const freedErrs: string[] = [];
+  const freedFrom = calls;
+  const freedRun = runExtract({ url: URL_!, env, workers: 1, batch: 2, signal: freedAc.signal, writer: { out: () => {}, err: (l) => { if (/returned \d+ unfinished row\(s\)/.test(l)) throw new Error("writer boom"); freedErrs.push(l); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+  for (let i = 0; i < 100 && !((await noteClaims()).claimed === 2 && calls > freedFrom); i++) await Bun.sleep(50);
+  freedAc.abort();
+  const freedOutcome = await freedRun;
+  slowMs = 0;
+  assert(freedOutcome === "writer boom" && !freedErrs.some((l) => l.includes("could not return its leases")) && !(await noteClaims()).claimed,
+         `a Writer that throws on a worker's "returned N unfinished" line rejects run() with its error, not "could not return its leases" (${freedOutcome})`);
+
+  // The identity's agent line through a Writer that throws: the Writer's
+  // error, not an identity that did not resolve (review pass 2).
+  const idOutcome = await workerIdentity(URL_!, env, { noKeyWarning: "", write: () => { throw new Error("writer boom"); } }).then((r) => (r.ok ? `resolved, agent ${r.identity.agentId ?? "none"}` : r.message), (e: Error) => e.message);
+  assert(idOutcome === "writer boom", `workerIdentity's agent line through a throwing writer rejects with the writer's error (${idOutcome})`);
+
+  // A follower's sleep wakes on a stop: a first stop returns 0, the hard stop
+  // 130 — at once, not when the sleep ends (review pass 2: 19 s, and 0).
+  const followRun = async (stopIt: (stop: PassStop | undefined, ac: AbortController) => void) => {
+    const ac2 = new AbortController();
+    let st: PassStop | undefined;
+    const r = runExtract({ url: URL_!, env, workers: 1, follow: 30, signal: ac2.signal, onPass: (x) => { st = x; }, writer: { out: () => {}, err: () => {} } });
+    await Bun.sleep(1500);
+    const at = Date.now();
+    stopIt(st, ac2);
+    const code = await r;
+    return { code, ms: Date.now() - at };
+  };
+  const followSoft = await followRun((_, ac2) => ac2.abort());
+  const followHard = await followRun((st) => { st?.(); void st?.(); });
+  assert(followSoft.code === 0 && followSoft.ms < 1500 && followHard.code === 130 && followHard.ms < 1500,
+         `a follower asleep wakes on a caller's abort (exit ${followSoft.code} after ${followSoft.ms} ms) and on the hard stop, which is 130 (exit ${followHard.code} after ${followHard.ms} ms)`);
+  // --status reads on under a signal already aborted: it has no pass to stop.
+  const statusAborted = await extractInProcess({ status: true, signal: AbortSignal.abort() });
+  assert(statusAborted.code === 0 && /\n  status: \d+ thoughts/.test(`\n${statusAborted.stdout}`), `--status in-process under an aborted signal reports, exit 0 (exit ${statusAborted.code})`);
+  for (const id of notes) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  // run() takes its listener off a caller's signal when it returns: an abort
+  // after a (no-op) pass writes nothing more.
+  const afterRun = new AbortController();
+  const laterErrs: string[] = [];
+  const laterCode = await runExtract({ url: URL_!, env, workers: 1, signal: afterRun.signal, writer: { out: () => {}, err: (l) => laterErrs.push(l) } });
+  const laterBefore = laterErrs.length;
+  afterRun.abort();
+  assert(laterCode === 0 && laterErrs.length === laterBefore, `…and an abort after run() has returned writes nothing: its listener went with it (exit ${laterCode}, ${laterErrs.length - laterBefore} line(s) after)`);
 
   // Nothing in this section wrote thought_audit through the worker: it writes
   // entities, not thoughts. The edit and delete above are audited as the tools
@@ -5386,7 +5644,7 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
         writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
         chmodSync(join(shimDir, name), 0o755);
       };
-      shim("pg_dump", `while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
       shim("pg_restore", "exit 1");
       process.env.PATH = `${shimDir}:${savedPath}`;
       let failed: string | null = null;
@@ -7569,7 +7827,7 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
       chmodSync(join(shimDir, name), 0o755);
     };
-    shim("pg_dump", `: > "${started}"; i=0; while [ ! -e "${go}" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+    shim("pg_dump", `: > "${started}"; i=0; while [ ! -e "${go}" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
     shim("pg_restore", "exit 1");
     process.env.PATH = `${shimDir}:${savedPath}`;
     let midRefused: string | null = null;
@@ -7598,12 +7856,151 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
       const after = await markers();
       assert(/did not produce the thoughts table/.test(markRun ?? "") && bAfter === null && after[B] && !after[A],
         `a current_database() planted in --to ahead of pg_catalog does not move the mark: the refresh reached its restore on ${A}, and ${B} is neither marked nor dropped (${(markRun ?? "no error").slice(0, 80)}; ${B}'s settings ${JSON.stringify(bAfter)}; markers ${JSON.stringify(after)})`);
+      const clean = new SQL({ url: urlOf(A), max: 1 });
+      try { await clean.unsafe("DROP SCHEMA evil CASCADE"); } finally { await clean.close(); }
+    }
+
+    // The tools get toolTarget's connection, never the URL (SMD-2317's second
+    // PR): stand-in tools record their argv and environment while every
+    // variable that redirects libpq is exported. Bun ignores these when the
+    // URL names a host (measured), so the guards pass and the refresh runs to
+    // the stand-in restore.
+    {
+      await plant();
+      const rec = (name: string) => join(shimDir, `${name}.rec`);
+      const recorder = (name: string, rest: string) => shim(name, `{ echo "--- argv"; printf '%s\\n' "$@"; echo "--- env"; env; } >> "${rec(name)}"\n${rest}`);
+      recorder("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
+      recorder("pg_restore", "exit 1");
+      const redirects = { PGHOSTADDR: "10.9.9.9", PGSERVICE: "ob1-nosuch", PGOPTIONS: "-csearch_path=elsewhere", PGHOST: "prod.invalid", PGUSER: "nobody", PGSERVICEFILE: "/nonexistent/pg_service.conf" };
+      // A role of its own, so the password is a string no database name holds
+      // (the throwaway server's is its database's name).
+      const password = "rec-SECRET-2317";
+      await admin.unsafe(`DROP ROLE IF EXISTS ob1_rec; CREATE ROLE ob1_rec LOGIN SUPERUSER PASSWORD '${password}'`);
+      // --to's session also takes a role after login, through options=: the
+      // tools must log in as the session's user, not that role (review pass 1:
+      // current_user sent the tools in as a NOLOGIN role, refused).
+      await admin.unsafe("DROP ROLE IF EXISTS ob1_nologin; CREATE ROLE ob1_nologin NOLOGIN SUPERUSER");
+      const asRec = (db: string) => { const x = new URL(urlOf(db)); x.username = "ob1_rec"; x.password = password; return x.toString(); };
+      const saved: Record<string, string | undefined> = {};
+      for (const [k, v] of Object.entries(redirects)) { saved[k] = process.env[k]; process.env[k] = v; }
+      let recRun: string | null = null;
+      const sourceDb = new URL(URL_!).pathname.slice(1);
+      // --from through another loopback name than --to, so the dump's host is
+      // asserted too, not only its database (review pass 2: a dump built on
+      // --to's host survived).
+      // connect.ts's loopback set, not a spelling of its own (test-connect's census).
+      const otherLoopback = [...LOOPBACK_HOSTS].find((h) => h !== new URL(URL_!).hostname && /^[\d.]+$/.test(h))!;
+      const fromUrl = (() => { const x = new URL(asRec(sourceDb)); x.hostname = otherLoopback; return x.toString(); })();
+      try { await refresh(fromUrl, asRec(A) + "?options=-c%20role%3Dob1_nologin", "working"); } catch (e) { recRun = (e as Error).message; }
+      finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
+      const u = new URL(asRec(A));
+      const dumpRec = existsSync(rec("pg_dump")) ? readFileSync(rec("pg_dump"), "utf8") : "";
+      const restoreRec = existsSync(rec("pg_restore")) ? readFileSync(rec("pg_restore"), "utf8") : "";
+      const calls = (r: string) => r.split("--- argv").slice(1).map((s) => s.split("--- env")[0]);
+      const argvOf = (r: string) => calls(r).join("");
+      const envOf = (r: string) => r.split("--- env").slice(1).join("");
+      const conninfoTo = `host='${u.hostname}' port='${u.port}' dbname='${A}' user='ob1_rec'`;
+      const conninfoFrom = `host='${otherLoopback}' port='${u.port}' dbname='${sourceDb}' user='ob1_rec'`;
+      const dumpCalls = calls(dumpRec);
+      assert(/did not produce the thoughts table/.test(recRun ?? "") && argvOf(restoreRec).includes(conninfoTo) && dumpCalls.some((c) => c.includes(conninfoFrom) && c.includes("-Fc")) && dumpCalls.some((c) => c.includes(conninfoTo) && c.includes("--schema-only")),
+        `the dump is handed --from's connection string, the probe and pg_restore --to's: the URL's host and port and the server's database and user, not the URL (${(recRun ?? "no error").slice(0, 60)}; restore argv ${JSON.stringify(argvOf(restoreRec).split("\n").filter((l) => l.startsWith("host=")))})`);
+      assert(!argvOf(dumpRec + restoreRec).includes("user='ob1_nologin'") && argvOf(restoreRec).includes("options='-c role=ob1_nologin'"),
+        "…logged in as the session's user, with the role the URL sets left to its options (session_user, not current_user)");
+      assert(!argvOf(dumpRec + restoreRec).includes(password) && !argvOf(dumpRec + restoreRec).includes("postgres://") && envOf(restoreRec).includes(`PGPASSWORD=${password}`),
+        "…with the password in PGPASSWORD and no URL or password on any argv");
+      assert(dumpCalls.length === 2 && [...dumpCalls, ...calls(restoreRec)].every((c) => c.includes("--no-password")),
+        `…and every call (the dump, the probe, the restore) with --no-password, so a missing password fails rather than waits (${dumpCalls.length} pg_dump calls)`);
+      const leaked = Object.keys(redirects).filter((k) => new RegExp(`^${k}=`, "m").test(envOf(dumpRec + restoreRec)));
+      assert(leaked.length === 0, `…and none of PGHOSTADDR, PGSERVICE, PGSERVICEFILE, PGOPTIONS, PGHOST, PGUSER in either tool's environment (${leaked.join(", ") || "none"})`);
+      rmSync(rec("pg_dump"), { force: true });
+      rmSync(rec("pg_restore"), { force: true });
+    }
+
+    // The probe: pg_dump is asked, on the connection string pg_restore will
+    // get, for a table made through the connection that drops. A pg_dump that
+    // reaches another database finds no such table and says so, as the real
+    // one does ("no matching tables were found", exit 1), and --to is left as it was.
+    {
+      await plant();
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
+      let probeRun: string | null = null;
+      try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { probeRun = (e as Error).message; }
+      const a = new SQL({ url: urlOf(A), max: 1 });
+      let leftovers = -1;
+      try { leftovers = Number((await a`SELECT (SELECT count(*) FROM pg_class WHERE relname LIKE 'ob1_refresh_probe_%') + (SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'ob1_refresh_probe_%') AS n`)[0].n); } finally { await a.close(); }
+      assert(/^--to: pg_dump, given the connection the guards judged, did not find a table just created there/.test(probeRun ?? "") && /--to is untouched/.test(probeRun ?? "") && (await markers())[A] && leftovers === 0,
+        `a pg_dump that does not find the probe's table stops the refresh before the mark and the drop: ${A} keeps its thoughts and no probe schema or table (${(probeRun ?? "no refusal").slice(0, 120)}; ${leftovers} left)`);
+    }
+
+    // A probe that cannot create its schema refuses before the mark: main
+    // dropped public and then failed to create it. An event trigger in A
+    // refuses the probe's CREATE SCHEMA, as a role without CREATE on the
+    // database would be (review pass 2: a catch returning null survived).
+    {
+      await plant();
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
+      const a = new SQL({ url: urlOf(A), max: 1 });
+      try {
+        await a.unsafe(`CREATE OR REPLACE FUNCTION ob1_block_schemas() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'schemas are closed here'; END $$; CREATE EVENT TRIGGER ob1_block_schemas ON ddl_command_start WHEN TAG IN ('CREATE SCHEMA') EXECUTE FUNCTION ob1_block_schemas()`);
+      } finally { await a.close(); }
+      let blocked: string | null = null;
+      try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { blocked = (e as Error).message; }
+      const b = new SQL({ url: urlOf(A), max: 1 });
+      let probes = -1;
+      try {
+        probes = Number((await b`SELECT count(*)::int AS n FROM pg_namespace WHERE nspname LIKE 'ob1_refresh_probe_%'`)[0].n);
+        await b.unsafe("DROP EVENT TRIGGER ob1_block_schemas; DROP FUNCTION ob1_block_schemas()");
+      } finally { await b.close(); }
+      assert(/^--to: the probe could not create a schema through the connection that drops \(.*schemas are closed here/.test(blocked ?? "") && /--to is untouched/.test(blocked ?? "") && (await markers())[A] && probes === 0,
+        `a probe that cannot create its schema refuses before the mark: ${A} keeps its thoughts, no probe schema (${(blocked ?? "no refusal").slice(0, 110)}; ${probes} left)`);
+      // A probe schema a killed run left behind is swept once the target is
+      // marked: the reset drops public only.
+      const c = new SQL({ url: urlOf(A), max: 1 });
+      try { await c.unsafe("CREATE SCHEMA ob1_refresh_probe_leftover; CREATE TABLE ob1_refresh_probe_leftover.t ()"); } finally { await c.close(); }
+      let swept: string | null = null;
+      try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { swept = (e as Error).message; }
+      const d = new SQL({ url: urlOf(A), max: 1 });
+      let left = -1;
+      try { left = Number((await d`SELECT count(*)::int AS n FROM pg_namespace WHERE nspname LIKE 'ob1_refresh_probe_%'`)[0].n); } finally { await d.close(); }
+      assert(/did not produce the thoughts table/.test(swept ?? "") && left === 0,
+        `a probe schema a killed run left on --to is swept after the mark, beside the reset of public (${(swept ?? "no error").slice(0, 80)}; ${left} left)`);
+    }
+
+    // A refresh killed between its DROP SCHEMA public and CREATE SCHEMA
+    // leaves a marked target with no public schema, which the next run must
+    // still reset: the mark exists for that re-run. The probe lives in a schema
+    // of its own, so it does not need public (review pass 1: in public, the
+    // re-run stopped on "schema public does not exist").
+    {
+      shim("pg_dump", `t=; while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; [ "$1" = -t ] && t="$2"; shift; done; if [ -n "$t" ]; then a=\${t%%.*}; b=\${t#*.}; case "$t" in ob1_refresh_probe_*.ob1_refresh_probe_*) [ "$a" = "$b" ] && { echo "CREATE TABLE $t ();"; exit 0; };; esac; echo "pg_dump: error: no matching tables were found" >&2; exit 1; fi; exit 0`);
+      const a = new SQL({ url: urlOf(A), max: 1 });
+      try { await a.unsafe("DROP SCHEMA public CASCADE"); } finally { await a.close(); }
+      let rerun: string | null = null;
+      try { await refresh(URL_!, urlOf(A), "working"); } catch (e) { rerun = (e as Error).message; }
+      const again = new SQL({ url: urlOf(A), max: 1 });
+      let publicBack = false;
+      try { publicBack = (await again`SELECT to_regnamespace('public') IS NOT NULL AS p`)[0].p; } finally { await again.close(); }
+      assert(/did not produce the thoughts table/.test(rerun ?? "") && publicBack,
+        `a marked target with no public schema (a refresh killed mid-reset) is reset again: the re-run reaches its restore and public is back (${(rerun ?? "no error").slice(0, 100)})`);
+    }
+
+    // The probe asks pg_dump to read --to, so pg_dump must be as new as --to's
+    // server as well as the source's; refreshToolsReady says so before anything
+    // runs, rather than the probe misreading a version mismatch as another
+    // server (review pass 1, run).
+    {
+      const newer = await refreshToolsReady(major, major + 1);
+      const same = await refreshToolsReady(major, major);
+      assert(!newer.ready && /--to's server is major \d+/.test(newer.why ?? "") && same.ready,
+        `a --to on a newer major than pg_dump is refused up front, in words; the same major is ready (${newer.why ?? "ready"})`);
     }
   } finally {
     process.env.PATH = savedPath;
     if (savedPgDatabase === undefined) delete process.env.PGDATABASE; else process.env.PGDATABASE = savedPgDatabase;
     rmSync(shimDir, { recursive: true, force: true });
     for (const db of [A, B]) await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+    await admin.unsafe("DROP ROLE IF EXISTS ob1_rec");
+    await admin.unsafe("DROP ROLE IF EXISTS ob1_nologin");
     await admin.close();
   }
 }
@@ -7636,6 +8033,387 @@ console.log("\n[24b] workerIdentity: a valid worker key resolves to an agent id 
   const revoked = await workerIdentity(URL_, { OB1_WORKER_KEY: raw, MCP_ACCESS_KEYS: spec }, { noKeyWarning: "unused" });
   assert(!revoked.ok && /The worker's key was revoked at .+ \(SMD-2303 live\)\. Refusing to run\./.test(revoked.message),
     "a revoked key is refused with its revocation time and reason, and never runs");
+}
+
+console.log("\n[35] Migration 071's gate under two connections: a status move and a source write of one thought take turns on its bucket, either way round, and the mirror reads the later commit; a take and a status move of both its thoughts, and a thought's delete and its source row's, commit without a deadlock; node_state(<ids>) reads its links by index on a brain of twenty thousand; the suite leaves no drift (SMD-2267)");
+{
+  // test-schema [63] holds the rules on one connection; what it cannot hold is
+  // a second writer's uncommitted row. drift()'s source_gate arm is the check.
+  const db = new SQL({ url: URL_!, max: 1 });
+  const drift = async () => Number((await db`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`)[0].n);
+  const suiteDrift = await drift();
+  const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+  const blocked = async (pid: number) => Number((await db`SELECT count(*)::int AS n FROM pg_locks WHERE pid = ${pid} AND NOT granted`)[0].n) > 0;
+  const gate = () => { let open: () => void = () => {}; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+  const row = async (content: string, meta: Record<string, unknown>) =>
+    String((await db`INSERT INTO thoughts (content, metadata) VALUES (${content}, ${meta}::jsonb) RETURNING id`)[0].id);
+  const mirror = async (id: string) => (await db`SELECT gates FROM ob1_source_gate WHERE thought_id = ${id}::uuid`)[0]?.gates as boolean | undefined;
+
+  // The status move first. A moves X's status from known to unknown and holds
+  // its transaction open, and X's bucket (class 22563) with it; B records X's
+  // source row, and its trigger waits on the bucket. Once A commits, B's
+  // upsert — a fresh statement — reads X's new status: the mirror row does not
+  // gate. Without the lock B read the status A had not committed yet
+  // (started) and its row gated.
+  const x = await row("[35] X, a github issue", { kind: "race2267", status_type: "started" });
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = ${x}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`SELECT record_thought_source(${x}::uuid, 'github', 'G-race-1', 'x', 'text/plain')`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const g = await mirror(x);
+    assert(aHolding && bWaited && errors === "" && g === false && (await drift()) === 0,
+      `a source write of a thought whose status is moving waits on the thought's bucket until the move commits, then reads its new status: the mirror row does not gate, and no drift (${g}; ${errors || "clean"})`);
+  }
+
+  // The status move first again, against a source row that moves system (the
+  // UPDATE path, which locks and then reconciles): A moves X's status back to
+  // known and holds; B moves X's source row to jira and waits on X's bucket;
+  // once A commits, B reads started and the mirror row gates. Without the
+  // lock B read weird, and its upsert, queued behind A's update of the row,
+  // wrote it back not gating.
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = ${x}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`SELECT record_thought_source(${x}::uuid, 'jira', 'J-race-1', 'x', 'text/plain')`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [g] = await db`SELECT system, gates FROM ob1_source_gate WHERE thought_id = ${x}::uuid`;
+    assert(aHolding && bWaited && errors === "" && g?.system === "jira" && g?.gates === true && (await drift()) === 0,
+      `a source row moving system while its thought's status moves waits on the thought's bucket, then reads the committed status: the mirror row is jira's and gates, and no drift (${JSON.stringify(g)}; ${errors || "clean"})`);
+  }
+
+  // Multi-row statements lock every thought they touch (third review pass: a
+  // two-row statement that locked one of its thoughts survived every test and
+  // left the other's mirror row stale). Each holder below is held open while
+  // a single-row writer of ONE of its thoughts — the first, then the second —
+  // must wait on that thought's bucket, and after the holder commits reads what
+  // it committed.
+  const holdThenWrite = async (label: string, hold: string, write: string, check: () => Promise<boolean>) => {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx.unsafe(hold);
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx.unsafe(write);
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    return { label, ok: aHolding && bWaited && errors === "" && (await check()) && (await drift()) === 0, detail: `${label}: waited ${bWaited}, ${errors || "clean"}` };
+  };
+  const multi: { label: string; ok: boolean; detail: string }[] = [];
+  // Two thoughts in different buckets, sorted by id — the order a trigger's
+  // DISTINCT aggregate keys them in: thought 1 is the first a trigger locks and
+  // thought 2 the last, and neither's lock covers the other (fifth review
+  // pass: unsorted, a status trigger that locked only its first id passed one
+  // run in four, and bucket-mates would pass it whatever the order).
+  const pairApart = async (label: string) => {
+    const a = await row(`${label} a`, { kind: "race2267", status_type: "started" });
+    for (let k = 0; ; k++) {
+      const b = await row(`${label} b ${k}`, { kind: "race2267", status_type: "started" });
+      const [{ same }] = await db`SELECT hashtext(${a}) & 255 = hashtext(${b}) & 255 AS same`;
+      if (!same) return [a, b].sort();
+    }
+  };
+  for (const which of [0, 1]) {
+    // A status move of one thought held open; a two-row source insert of both
+    // then waits on that thought's bucket and reads its committed status.
+    const pair = await pairApart(`[35] MI ${which}`);
+    multi.push(await holdThenWrite(`two-row insert, thought ${which + 1} moving`,
+      `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = '${pair[which]}'`,
+      `INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+       VALUES ('${pair[0]}', 'github', 'G-MI-${which}-a', 'x', 'text/plain', repeat('0', 64)), ('${pair[1]}', 'github', 'G-MI-${which}-b', 'x', 'text/plain', repeat('0', 64))`,
+      async () => (await mirror(pair[which])) === false && (await mirror(pair[1 - which])) === true));
+    // A two-row status move held open; a source write of one of its thoughts
+    // then waits on that thought's bucket and reads the committed status.
+    const moved = await pairApart(`[35] MS ${which}`);
+    multi.push(await holdThenWrite(`source write, thought ${which + 1} of a two-row move`,
+      `UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${moved[0]}', '${moved[1]}')`,
+      `SELECT record_thought_source('${moved[which]}'::uuid, 'github', 'G-MS-${which}', 'x', 'text/plain')`,
+      async () => (await mirror(moved[which])) === false));
+  }
+  assert(multi.every((m) => m.ok),
+    `a two-row source insert waits on the bucket of whichever of its thoughts a status move holds, and a source write waits on the bucket of whichever thought a two-row status move holds — each then reads the committed status, and no drift (${multi.map((m) => m.detail).join("; ")})`);
+
+  // A status move, then the thought's source write, in one transaction — the
+  // write order the header recommends, and ingest-records' — in two
+  // transactions over bucket-mates (fifth review pass: with the status
+  // trigger's bucket shared, each held it shared and then asked for it
+  // exclusive, a deadlock ten times in ten). A moves X's status and holds; B
+  // moves Y's, a bucket-mate, and waits on the bucket; A records X's source
+  // row and commits; B then records Y's and commits.
+  {
+    const x = await row("[35] UP x", { kind: "race2267", status_type: "weird" });
+    const [{ b: bucket }] = await db`SELECT hashtext(${x}) & 255 AS b`;
+    let y = "";
+    for (let k = 0; !y; k++) {
+      const [c] = await db`INSERT INTO thoughts (content, metadata) VALUES (${`[35] UP mate ${k}`}, ${{ kind: "race2267", status_type: "weird" }}::jsonb) RETURNING id::text AS id, hashtext(id::text) & 255 AS b`;
+      if (c.b === bucket) y = c.id;
+    }
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aMoved = false, bPid = -1, errors = "";
+    const aRun = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = ${x}::uuid`;
+      aMoved = true;
+      await doneP;
+      await tx`SELECT record_thought_source(${x}::uuid, 'github', 'G-UP-x', 'x', 'text/plain')`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aMoved || errors !== "");
+    const bRun = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = ${y}::uuid`;
+      await tx`SELECT record_thought_source(${y}::uuid, 'github', 'G-UP-y', 'x', 'text/plain')`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aRun; await bRun;
+    await connA.close(); await connB.close();
+    assert(aMoved && bWaited && errors === "" && (await mirror(x)) === true && (await mirror(y)) === true && (await drift()) === 0,
+      `two transactions each moving a status and then writing that thought's source row, over bucket-mates: the second waits on the bucket, and both commit — no deadlock, both mirror rows gate, no drift (${errors || "clean"})`);
+  }
+
+  // A take against one status update of both thoughts (first and second
+  // review passes), two ways round. First: B holds linear L-TK; one statement
+  // moves A's and B's statuses and sleeps before its trigger runs, holding
+  // both rows; meanwhile T1 takes L-TK for A — B's source row out, A's in,
+  // taking A's bucket — and commits; the statement's trigger then takes the
+  // buckets and sets A's mirror row. With pass 1's FOR SHARE on the delete,
+  // the take waited on B's row while holding A's: fine here, but a deadlock
+  // with a thought's delete (below). The window left — the update's trigger
+  // holding A's bucket as it reaches B's mirror row mid-take — is the
+  // header's named case, not raced here.
+  {
+    const a = await row("[35] TK A", { kind: "race2267", status_type: "started" });
+    const b = await row("[35] TK B", { kind: "race2267", status_type: "started" });
+    await db`SELECT record_thought_source(${b}::uuid, 'linear', 'L-TK', 'x', 'text/plain')`;
+    const connA = racer(), connB = racer();
+    let errors = "", bPid = -1;
+    const bDone = (async () => {
+      bPid = Number((await connB`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await connB.unsafe(`SET statement_timeout = '15s'`);
+      await connB.unsafe(`WITH u AS (UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${a}', '${b}') RETURNING 1)
+                          SELECT pg_sleep(1.5) FROM (SELECT count(*) FROM u) x`);
+    })().catch((e: Error) => { errors += `B: ${e.message}; `; });
+    const sleeping = async () => bPid > 0 && Number((await db`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${bPid} AND wait_event = 'PgSleep'`)[0].n) === 1;
+    await waitFor(sleeping);
+    const bSlept = await sleeping();
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`SELECT record_thought_source(${a}::uuid, 'linear', 'L-TK', 'x2', 'text/plain', NULL, true)`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [held] = await db`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = 'L-TK'`;
+    assert(bSlept && errors === "" && held?.id === a && (await mirror(a)) === false && (await mirror(b)) === undefined && (await drift()) === 0,
+      `a take of a source row against one status update of both thoughts, whose trigger has not run: both commit, no deadlock — A holds L-TK, its mirror row reads the status committed last, B's is gone, and no drift (${errors || "clean"})`);
+  }
+  // Second: the status update has run its trigger — it holds both buckets and
+  // B's mirror row — and holds its transaction; the take waits on B's mirror
+  // row, then on nothing, and reads the committed statuses.
+  {
+    const a = await row("[35] TK2 A", { kind: "race2267", status_type: "started" });
+    const b = await row("[35] TK2 B", { kind: "race2267", status_type: "started" });
+    await db`SELECT record_thought_source(${b}::uuid, 'linear', 'L-TK2', 'x', 'text/plain')`;
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let bHolding = false, aPid = -1, errors = "";
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx.unsafe(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id IN ('${a}', '${b}')`);
+      bHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(() => bHolding || errors !== "");
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`SELECT record_thought_source(${a}::uuid, 'linear', 'L-TK2', 'x2', 'text/plain', NULL, true)`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(async () => aPid > 0 && (await blocked(aPid)));
+    const aWaited = aPid > 0 && (await blocked(aPid));
+    done();
+    await bDone; await aDone;
+    await connA.close(); await connB.close();
+    assert(bHolding && aWaited && errors === "" && (await mirror(a)) === false && (await mirror(b)) === undefined && (await drift()) === 0,
+      `a take against a status update of both thoughts that holds their buckets waits for it, then commits: A's mirror row reads the committed status, B's is gone, no deadlock and no drift (${errors || "clean"})`);
+  }
+
+  // A thought's delete against a delete of its source row (second review
+  // pass). One statement deletes T and sleeps before its cascade, holding T's
+  // row; meanwhile another deletes T's source row, whose trigger drops the
+  // mirror row by key and takes no lock — so it commits, and the cascade then
+  // finds the source row gone. With pass 1's FOR SHARE on T there, the source
+  // delete waited for T's row while the cascade waited for the source row: a
+  // deadlock.
+  {
+    const t = await row("[35] DL T", { kind: "race2267", status_type: "started" });
+    await db`SELECT record_thought_source(${t}::uuid, 'github', 'G-DL', 'x', 'text/plain')`;
+    const connA = racer(), connB = racer();
+    let errors = "", bPid = -1;
+    const bDone = (async () => {
+      bPid = Number((await connB`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await connB.unsafe(`SET statement_timeout = '15s'`);
+      await connB.unsafe(`WITH d AS (DELETE FROM thoughts WHERE id = '${t}' RETURNING 1) SELECT pg_sleep(1.5) FROM (SELECT count(*) FROM d) x`);
+    })().catch((e: Error) => { errors += `B: ${e.message}; `; });
+    const sleeping = async () => bPid > 0 && Number((await db`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${bPid} AND wait_event = 'PgSleep'`)[0].n) === 1;
+    await waitFor(sleeping);
+    const bSlept = await sleeping();
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '15s'`;
+      await tx`DELETE FROM thought_sources WHERE thought_id = ${t}::uuid`;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const [{ left }] = await db`SELECT count(*)::int AS left FROM thoughts WHERE id = ${t}::uuid`;
+    assert(bSlept && errors === "" && left === 0 && (await mirror(t)) === undefined && (await drift()) === 0,
+      `a delete of a thought's source row while the thought's own delete holds its row commits, and the delete after it — no deadlock, no mirror row left, no drift (${errors || "clean"})`);
+  }
+
+  // The source write first. A records Y's source row and holds its
+  // transaction open (its mirror row gates: Y states started); B moves Y's
+  // status to unknown and its trigger waits on Y's bucket. Once A commits, B's update
+  // finds the mirror row and sets it not to gate.
+  const y = await row("[35] Y, a github issue", { kind: "race2267", status_type: "started" });
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`SELECT record_thought_source(${y}::uuid, 'github', 'G-race-2', 'x', 'text/plain')`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += `A: ${e.message}; `; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = ${y}::uuid`;
+    }).catch((e: Error) => { errors += `B: ${e.message}; `; });
+    await waitFor(async () => bPid > 0 && (await blocked(bPid)));
+    const bWaited = bPid > 0 && (await blocked(bPid));
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const g = await mirror(y);
+    assert(aHolding && bWaited && errors === "" && g === false && (await drift()) === 0,
+      `a status move of a thought whose source row is being written waits until the write commits, then finds its mirror row: it does not gate, and no drift (${g}; ${errors || "clean"})`);
+  }
+
+  // node_state(<ids>) on twenty thousand thoughts, every one with a source
+  // row — four thousand linear tickets, half with a blocked_by link, and
+  // sixteen thousand markdown notes, a system that states no status: every
+  // table the dependency read touches is reached by index under real
+  // statistics, one read touches a few rows of each, not the brain's (a table
+  // of a few thousand rows is one the planner rightly scans whole for forty
+  // ids, so every thought is sourced here), and its rows are the whole-brain
+  // read's for those ids.
+  await db`INSERT INTO thoughts (content, metadata) SELECT '[35] note ' || g, jsonb_build_object('kind', 'race2267') FROM generate_series(1, 16000) g`;
+  await db`INSERT INTO thoughts (content, metadata) SELECT '[35] ticket ' || g,
+             jsonb_build_object('kind', 'race2267', 'source', 'linear', 'issue', 'K-' || g, 'status_type', (ARRAY['started', 'completed', 'weird'])[1 + g % 3])
+             FROM generate_series(1, 4000) g`;
+  await db`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+           SELECT t.id, CASE WHEN t.metadata ? 'issue' THEN 'linear' ELSE 'markdown' END, coalesce(t.metadata->>'issue', t.content), 'x', 'text/plain', encode(sha256('x'), 'hex')
+             FROM thoughts t WHERE t.metadata->>'kind' = 'race2267' AND t.content LIKE '[35] %'
+               AND NOT EXISTS (SELECT 1 FROM thought_sources o WHERE o.thought_id = t.id)`;
+  await db`INSERT INTO thought_facets (thought_id, kind, payload)
+           SELECT s.thought_id, 'link', jsonb_build_object('relation', 'blocked_by', 'system', 'linear', 'target', 'K-' || (1 + (substr(s.identity, 3)::int * 7) % 4000))
+             FROM thought_sources s WHERE s.identity LIKE 'K-%' AND substr(s.identity, 3)::int % 2 = 0 AND (1 + (substr(s.identity, 3)::int * 7) % 4000) <> substr(s.identity, 3)::int`;
+  // And a blocks link on every tenth note: markdown states no status, so its
+  // links hold nothing — and its gate is the one a scan finds last (inline,
+  // the probe read the whole mirror per such link: SMD-2267's probe).
+  await db`INSERT INTO thought_facets (thought_id, kind, payload)
+           SELECT s.thought_id, 'link', jsonb_build_object('relation', 'blocks', 'system', 'markdown', 'target', '[35] note ' || (substr(s.identity, 11)::int + 1))
+             FROM thought_sources s WHERE s.system = 'markdown' AND s.identity LIKE '[35] note %' AND substr(s.identity, 11)::int % 10 = 0`;
+  await db`ANALYZE thoughts, thought_sources, thought_facets, ob1_source_gate, ob1_ticket_head`;
+  // Ten tickets that carry a blocked_by link (two in three of their blockers
+  // are open, so some are blocked whatever the draw), ten markdown notes with
+  // a link, twenty of anything.
+  const [{ ids }] = await db`SELECT array_agg(id)::text AS ids FROM (
+      (SELECT id FROM thoughts WHERE metadata->>'kind' = 'race2267' ORDER BY md5(id::text) LIMIT 20)
+      UNION ALL (SELECT f.thought_id FROM thought_facets f WHERE f.kind = 'link' AND f.payload->>'system' = 'linear' ORDER BY md5(f.thought_id::text) LIMIT 10)
+      UNION ALL (SELECT f.thought_id FROM thought_facets f WHERE f.kind = 'link' AND f.payload->>'system' = 'markdown' ORDER BY md5(f.thought_id::text) LIMIT 10)) x`;
+  const planLines = (await db.unsafe(`EXPLAIN (COSTS OFF) SELECT * FROM node_state('${ids}'::uuid[])`)).map((r: Record<string, string>) => r["QUERY PLAN"]);
+  const seqs = planLines.flatMap((l: string) => [...l.matchAll(/Seq Scan on (\w+)/g)].map((m) => m[1]));
+  const TABLES = ["thoughts", "thought_facets", "thought_sources", "ob1_source_gate"];
+  const reads = async () => {
+    await db`SELECT pg_stat_force_next_flush()`;
+    await db`SELECT pg_stat_clear_snapshot()`;
+    const rs = await db`SELECT relname, (coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0))::int AS rows FROM pg_stat_user_tables WHERE relname = ANY(${`{${TABLES.join(",")}}`}::text[])` as { relname: string; rows: number }[];
+    return Object.fromEntries(rs.map((r) => [r.relname, r.rows]));
+  };
+  const before = await reads();
+  await db.unsafe(`SELECT * FROM node_state('${ids}'::uuid[])`);
+  const after = await reads();
+  const touched = TABLES.map((t) => `${t} ${after[t] - before[t]}`);
+  const [same] = await db.unsafe(`SELECT (SELECT count(*)::int FROM (((SELECT * FROM node_state('${ids}'::uuid[])) EXCEPT ALL (SELECT * FROM node_state() WHERE thought_id = ANY('${ids}'::uuid[])))
+                                          UNION ALL ((SELECT * FROM node_state() WHERE thought_id = ANY('${ids}'::uuid[])) EXCEPT ALL (SELECT * FROM node_state('${ids}'::uuid[])))) x) AS n,
+                                         (SELECT count(*) FILTER (WHERE blockers IS NOT NULL)::int FROM node_state('${ids}'::uuid[])) AS blocked`);
+  // A blocker the brain holds no source row for resolves through the board
+  // sync's claim: by 068's issue index, one probe, not 001's GIN index, which
+  // read every issue row's posting (SMD-2267's bench: 6 ms a blocker at
+  // 10,000 thoughts, the keyed read 47 ms).
+  const scans = async () => {
+    await db`SELECT pg_stat_force_next_flush()`;
+    await db`SELECT pg_stat_clear_snapshot()`;
+    const rs = await db`SELECT indexrelname AS i, idx_scan::int AS n FROM pg_stat_user_indexes WHERE indexrelname IN ('thoughts_issue_key_idx', 'thoughts_metadata_idx')` as { i: string; n: number }[];
+    return Object.fromEntries(rs.map((r) => [r.i, r.n]));
+  };
+  const s0 = await scans();
+  const [{ resolved }] = await db`SELECT source_thought('linear', 'K-unheld') AS resolved`;
+  const s1 = await scans();
+  const byIssue = s1.thoughts_issue_key_idx - s0.thoughts_issue_key_idx, byGin = s1.thoughts_metadata_idx - s0.thoughts_metadata_idx;
+  assert(resolved === null && byIssue >= 1 && byGin === 0,
+    `an identity the brain does not hold resolves to nothing through 068's issue index (${byIssue} scan${byIssue === 1 ? "" : "s"}), not 001's GIN index (${byGin})`);
+  assert(seqs.every((t: string) => !TABLES.includes(t)) && TABLES.every((t) => after[t] - before[t] < 400) && same.n === 0 && same.blocked > 0 && (await drift()) === 0,
+    `node_state(<forty ids>) — ten of them markdown notes whose links name a system that never gates — on twenty thousand sourced thoughts, four thousand of them tickets with two thousand links, scans none of thoughts, the links, the source rows or the mirror (${seqs.join(", ") || "no sequential scan"}) and reads a few hundred rows of each at most (${touched.join(", ")}), and its rows are the whole-brain read's for those ids (${same.blocked} with blockers)`);
+
+  await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2267'`;
+  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_source_gate g WHERE NOT EXISTS (SELECT 1 FROM thought_sources s WHERE s.thought_id = g.thought_id)) AS orphans`;
+  assert(suiteDrift === 0 && left.drift === 0 && left.orphans === 0,
+    `every section before this one left the projection and the gate exact (${suiteDrift}), and deleting this section's rows takes their mirror rows with them (${left.orphans} left, drift ${left.drift})`);
+  await db.close();
 }
 
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");

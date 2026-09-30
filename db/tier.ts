@@ -39,18 +39,22 @@
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
  * migration might touch), copies the source's database-level settings the dump
  * leaves out (SMD-2037), then runs migrate.ts against the target. It needs a
- * pg_dump / pg_restore whose major version is at least the source server's, AND
- * Bun: no image the stack runs has both, so deploy/tier.sh runs this file in one
+ * pg_restore, a pg_dump whose major version is at least both servers' (the
+ * source's for the dump, --to's for the probe that reads it), AND Bun: no
+ * image the stack runs has all three, so deploy/tier.sh runs this file in one
  * that does (db/tier.Dockerfile, SMD-2036); a host that runs it directly needs
- * postgresql-client >= the server. It is destructive to --to, so it refuses a
+ * postgresql-client >= both servers. It is destructive to --to, so it refuses a
  * --to that is the --from database (sameDatabase, whatever else is true); a
  * --to stamped tier=stable, holding thoughts under no canary/working stamp, or
  * holding some other application's schema, unless an earlier refresh marked it
  * (targetRefusal); and a non-loopback --to unless OB1_ALLOW_REMOTE_DB=1, the
  * same guard test-support's dropSchema uses. No override lifts the refusal of
- * a URL that Bun and libpq read as different targets, or that names no
- * database, or whose connection reached a database other than the one it
- * names (an exported PGDATABASE beats the URL's in Bun; SMD-2317).
+ * a URL that Bun and libpq read as different targets, or that names no host,
+ * no database, or no port while PGPORT is exported, or whose connection
+ * reached a database other than the one it names (an exported PGDATABASE
+ * beats the URL's in Bun; SMD-2317). pg_dump and pg_restore get a connection
+ * built from the URL's parts (connect.ts toolTarget), never the URL, and
+ * pg_dump must find a table made through the dropping connection first.
  *
  * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
  * is the offline, model-free, fixture-vector half in CI). For each search row
@@ -85,7 +89,7 @@ import { createEmbedder, resolveEmbedConfig, type EmbedEnv } from "../server-por
 import { egressRefusal } from "./worker-bootstrap.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
-import { closeThenExit, connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal } from "./connect.ts";
+import { closeThenExit, connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal, toolTarget, type ToolTarget } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -498,25 +502,85 @@ export async function targetRefusal(target: SQL): Promise<string | null> {
   return `${why} (database ${db}, no refresh mark)`;
 }
 
-/** Whether pg_dump AND pg_restore exist and are new enough to read `serverMaj` — refresh needs both. */
-export async function refreshToolsReady(serverMaj: number): Promise<{ ready: boolean; why?: string }> {
+/**
+ * Whether pg_dump AND pg_restore exist and pg_dump is new enough to read both
+ * servers: the source's major `serverMaj` (the dump), and --to's `targetMaj`
+ * (the probe asks pg_dump to read --to before it is reset; SMD-2317 review
+ * pass 1 — before the probe a newer --to was restored into by an older
+ * pg_restore, and now it is refused here, in words).
+ */
+export async function refreshToolsReady(serverMaj: number, targetMaj: number = serverMaj): Promise<{ ready: boolean; why?: string }> {
   const dump = await toolMajor("pg_dump");
   if (dump === null) return { ready: false, why: "pg_dump is not on PATH" };
   const restore = await toolMajor("pg_restore");
   if (restore === null) return { ready: false, why: "pg_restore is not on PATH" };
   if (dump < serverMaj) return { ready: false, why: `pg_dump is major ${dump} but the source server is major ${serverMaj} (pg_dump cannot read a newer server)` };
+  if (dump < targetMaj) return { ready: false, why: `pg_dump is major ${dump} but --to's server is major ${targetMaj} (pg_dump reads --to before the reset, to show it reaches it, and cannot read a newer server)` };
   return { ready: true };
 }
 
-async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Promise<{ code: number; out: string; err: string }> {
+async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe"; env?: Record<string, string> } = {}): Promise<{ code: number; out: string; err: string }> {
   const proc = Bun.spawn(cmd, {
     stdout: opts.stdio === "inherit" ? "inherit" : "pipe",
     stderr: opts.stdio === "inherit" ? "inherit" : "pipe",
-    env: process.env,
+    env: opts.env ?? process.env,
   });
   const out = opts.stdio === "inherit" ? "" : await new Response(proc.stdout).text();
   const err = opts.stdio === "inherit" ? "" : await new Response(proc.stderr).text();
   return { code: await proc.exited, out, err };
+}
+
+/**
+ * The database and login the server says `sql` is connected as: what a tool's
+ * connection names (toolTarget). session_user, not current_user: a role set
+ * after login (`ALTER ROLE … SET role`, or `options=-c role=…`) is
+ * current_user, and a tool logging in as it was refused, or with a matching
+ * PGPASSFILE line got in as someone the URL does not name (review pass 1,
+ * run). The URL's options still set that role inside the tool's session.
+ */
+async function reachedAs(sql: SQL): Promise<{ database: string; user: string }> {
+  const [row] = await sql<{ db: string; u: string }[]>`SELECT pg_catalog.current_database() AS db, session_user AS u`;
+  return { database: row.db, user: row.u };
+}
+
+/**
+ * Why pg_dump, handed `tool`, does not reach the database `dst` is connected
+ * to, or null when it does. The server cannot say where a client dialled from
+ * (behind a published port its address is the container's), so the tool is
+ * asked directly: a table only this run knows is created through `dst`, and
+ * pg_dump's schema of that one table must name it. A tool that went anywhere
+ * else finds nothing (SMD-2317). The table sits in a schema of its own, not
+ * public: a refresh killed between its DROP SCHEMA public and CREATE SCHEMA
+ * leaves a marked target with no public, which the next run must still reset
+ * (review pass 1, run). The schema is dropped either way.
+ */
+export async function toolReachRefusal(dst: SQL, tool: ToolTarget): Promise<string | null> {
+  const probe = `ob1_refresh_probe_${crypto.randomUUID().replaceAll("-", "")}`;
+  try {
+    await dst.unsafe(`CREATE SCHEMA ${probe}; CREATE TABLE ${probe}.${probe} ()`);
+  } catch (e) {
+    // One implicit transaction: a refused CREATE TABLE leaves no schema.
+    return `the probe could not create a schema through the connection that drops (${(e as Error).message}), and the reset would need to create one`;
+  }
+  let refusal: string | null;
+  try {
+    const r = await run(["pg_dump", "--schema-only", "--no-owner", "--no-privileges", "--no-password", "-t", `${probe}.${probe}`, "-d", tool.conninfo], { env: tool.env });
+    const why = r.err.trim() ? `: ${r.err.trim().split("\n")[0]}` : "";
+    // A pg_dump that reached a database without the table says so and exits 1
+    // (measured, pg_dump 16: "no matching tables were found").
+    if (r.code === 0 && r.out.includes(probe)) refusal = null;
+    else if (r.code === 0 || /no matching tables were found/.test(r.err)) refusal = "pg_dump, given the connection the guards judged, did not find a table just created there: it reaches another database or server, where pg_restore would write";
+    else refusal = `pg_dump, given the connection the guards judged, failed (exit ${r.code}${why}), so it cannot be shown to reach --to`;
+  } finally {
+    // A failed drop must not replace the answer; the sweep after the mark
+    // takes a probe schema this run (or a killed one) left behind.
+    try {
+      await dst.unsafe(`DROP SCHEMA IF EXISTS ${probe} CASCADE`);
+    } catch {
+      /* swept after the mark */
+    }
+  }
+  return refusal;
 }
 
 /**
@@ -525,7 +589,9 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
  *   2. mark the target as a refresh target (refreshMark), then reset its public
  *      schema (the destructive step, guarded by targetRefusal, the loopback
- *      check, and the connected check asked on the connection that drops).
+ *      check, the connected check asked on the connection that drops, and a
+ *      probe showing pg_dump reaches that same database, toolReachRefusal).
+ * pg_dump and pg_restore get toolTarget's connection, never the URL.
  *   3. pg_restore the dump.
  *   4. copy the source's database-level settings (databaseSettings), which the
  *      dump does not carry — 014's HNSW bounds among them (SMD-2037).
@@ -550,7 +616,9 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   const src = openSql(fromUrl);
   const target = openSql(toUrl);
   let serverMaj: number;
+  let targetMaj: number;
   let settings: Record<string, string>;
+  let fromAs: { database: string; user: string };
   try {
     await reach(src, fromUrl, "--from");
     await reach(target, toUrl, "--to");
@@ -561,7 +629,9 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     if (fromReached !== null) throw new Error(`--from: ${fromReached}. Refusing: pg_dump would read the URL's database, not the one checked.`);
     const toReached = await connectedResetRefusal(target, toUrl);
     if (toReached !== null) throw new Error(`--to: ${toReached}. Refusing: --refresh drops the target's schema.`);
+    fromAs = await reachedAs(src);
     serverMaj = await serverMajor(src);
+    targetMaj = await serverMajor(target);
     settings = await databaseSettings(src);
     // The reset below drops --to's schema, so --to must be neither the source
     // nor the record. The loopback guard covers neither — deploy/tier.sh sets
@@ -575,13 +645,18 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     await src.close();
     await target.close();
   }
-  const ready = await refreshToolsReady(serverMaj);
-  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. deploy/tier.sh runs this in an image with both (db/tier.Dockerfile, postgresql16-client); on a host install postgresql-client >= ${serverMaj}.`);
+  const ready = await refreshToolsReady(serverMaj, targetMaj);
+  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. deploy/tier.sh runs this in an image with both (db/tier.Dockerfile, postgresql16-client); on a host install postgresql-client >= ${Math.max(serverMaj, targetMaj)}.`);
 
   const dir = await mkdtemp(join(tmpdir(), "ob1-tier-"));
   const dumpFile = join(dir, "stable.dump");
   try {
-    const dumped = await run(["pg_dump", "-Fc", "--no-owner", "--no-privileges", "-f", dumpFile, fromUrl]);
+    // The tools get a connection built from the URL's parts and the server's
+    // answer, never the URL: libpq read URLs by rules of its own and followed
+    // PGHOSTADDR/PGSERVICE past the guards (connect.ts toolTarget, SMD-2317).
+    // --no-password: a missing password fails rather than waits on a prompt.
+    const fromTool = toolTarget(fromUrl, fromAs);
+    const dumped = await run(["pg_dump", "-Fc", "--no-owner", "--no-privileges", "--no-password", "-f", dumpFile, "-d", fromTool.conninfo], { env: fromTool.env });
     if (dumped.code !== 0) throw new Error(`pg_dump failed (exit ${dumped.code}): ${dumped.err.trim()}`);
 
     // Reset the target so the restore lands on a clean schema. DROP … CASCADE is
@@ -591,12 +666,18 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     // recognises as its own (refreshMark). `tier` is one of TIERS, checked by
     // the caller; ALTER DATABASE takes no bind parameters.
     const dst = openSql(toUrl);
+    let toTool: ToolTarget;
     try {
       if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
       // Asked again on this connection, the one that marks and drops: the
       // guard's own connection is closed, and this one is a new resolution.
       const again = await connectedResetRefusal(dst, toUrl);
       if (again !== null) throw new Error(`--to: ${again}. Refusing: --refresh drops the target's schema. --to is untouched.`);
+      // pg_restore will write where its connection goes, so pg_dump is asked,
+      // on that same connection string, to find a table made on this one.
+      toTool = toolTarget(toUrl, await reachedAs(dst));
+      const unreached = await toolReachRefusal(dst, toTool);
+      if (unreached !== null) throw new Error(`--to: ${unreached}. Refusing before the reset: --to is untouched.`);
       try {
         // pg_catalog's, not the path's: a URL's options= may set search_path,
         // and a planted current_database() would put the mark on another
@@ -609,13 +690,18 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
         // the default install too, so a role that cannot mark could rarely finish.
         throw new Error(`--refresh marks --to before resetting it (ALTER DATABASE … SET ob1.refresh_target) and could not: ${(e as Error).message}. That needs a superuser on --to, or GRANT SET ON PARAMETER ob1.refresh_target (PG15+); restoring pgvector needs a superuser in the default install anyway. --to is untouched.`);
       }
+      // A probe schema a killed run left (Ctrl-C during the probe's pg_dump, or
+      // a drop that failed) sits outside public, so the reset below would
+      // never take it: sweep them here, on the target that is being reset.
+      const leftovers = await dst<{ n: string }[]>`SELECT nspname AS n FROM pg_catalog.pg_namespace WHERE pg_catalog.starts_with(nspname, 'ob1_refresh_probe_')`;
+      for (const { n } of leftovers) await dst.unsafe(`DROP SCHEMA IF EXISTS "${n.replaceAll('"', '""')}" CASCADE`);
       await dst`DROP SCHEMA IF EXISTS public CASCADE`;
       await dst`CREATE SCHEMA public`;
     } finally {
       await dst.close();
     }
 
-    const restored = await run(["pg_restore", "--no-owner", "--no-privileges", "-d", toUrl, dumpFile]);
+    const restored = await run(["pg_restore", "--no-owner", "--no-privileges", "--no-password", "-d", toTool.conninfo, dumpFile], { env: toTool.env });
     // pg_restore exits non-zero on benign warnings (e.g. a comment on an extension
     // it did not create); treat a restore that produced the core table as success,
     // otherwise surface it.
