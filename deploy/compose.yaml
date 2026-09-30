@@ -103,6 +103,13 @@ services:
   # bytes. Root context, as server's: migrate.ts imports db/config.mjs, and the
   # root .dockerignore keeps the context to what the two images need.
   migrate:
+    # Named, so orchestration-runner-role finds it by one name under every
+    # compose (the Python podman-compose and --compatibility name a build
+    # <project>_migrate); never pulled, so `pull` and `up --pull …` build it
+    # rather than ask a registry for a name no registry holds (SMD-2289 review
+    # pass 8). The release overlay pulls its pinned migrator instead.
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-migrate
+    pull_policy: never
     build:
       context: ..
       dockerfile: db/Dockerfile
@@ -600,8 +607,47 @@ services:
   # No port. n8n reaches it as `orchestration-runner:8090` on the compose
   # network, behind OB1_RUNNER_KEY, which `provision.ts --init` writes. The
   # key is a write capability bounded by the allowlist, not a brain key. It
-  # reaches Postgres as the migrator and board-sync do. It embeds through the
-  # server's knobs, inherited by anchor, as board-sync does.
+  # reaches Postgres as a role of its own, `ob1_orchestration_runner` (the
+  # service below makes it), not the superuser, and its environment holds the
+  # knobs its ingester and reembed read, not the server's whole block
+  # (SMD-2289).
+  #
+  # The runner's database role (SMD-2289): a LOGIN role that is not a
+  # superuser and owns nothing, granted what the runner's ingester and reembed
+  # run (capture, worker, structure and extraction, measured) and no
+  # more: not the server group, whose writes to ob1_agent_keys could clear a
+  # key's revocation. It is a member of no role. A one-shot on the migrator's
+  # image, which connects as the migrator does: db/login-role.ts creates the
+  # role or resets its password to OB1_RUNNER_DB_PASSWORD (`provision.ts
+  # --init` writes it) and its settings, then `migrate.ts --grant --groups …
+  # --exact` replaces its privileges with the groups' in one transaction, so a
+  # runner in flight never meets a moment without them. Every `up` runs it,
+  # the runner left running when its config is unchanged, so a rotated
+  # password and the grants a new migration adds land before the runner
+  # starts.
+  orchestration-runner-role:
+    # migrate's image, by migrate's name, never pulled or built here: an image
+    # of its own kept an old config.mjs's grants after `up --build server`
+    # rebuilt migrate (review pass 5), and building it on every `up` made an
+    # offline `up` wait ~16 min on the registry (pass 6). The release overlay
+    # pins it to the release's migrator.
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-migrate
+    pull_policy: never
+    profiles: ["orchestration"]
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
+      # No `:?`, for the reason n8n's block gives: login-role.ts refuses without
+      # it and says to run --init. `up` then fails naming this service, and the
+      # runner, which waits on it, is not started.
+      OB1_RUNNER_DB_PASSWORD: ${OB1_RUNNER_DB_PASSWORD:-}
+    command: ["sh", "-c", "bun login-role.ts --role ob1_orchestration_runner --password-env OB1_RUNNER_DB_PASSWORD && bun migrate.ts --grant ob1_orchestration_runner --groups capture,worker,structure,extraction --exact"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
   orchestration-runner:
     build:
       context: ..
@@ -642,11 +688,36 @@ services:
     cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]
     security_opt: ["no-new-privileges:true"]
     environment:
-      <<: *server-env
-      # The server's key material stays with the server (board-sync's rule).
-      # The runner reads the database, the embedding knobs and its own key.
-      MCP_ACCESS_KEYS: ""
-      PORT: ""
+      # Its own role, and only what its ingester and reembed read (SMD-2289):
+      # the tier; the embedding model and width; the chunk window and context;
+      # the provider and chat endpoints, their credentials and whether each is
+      # local (reembed's blurbs are chat calls when OB1_CHUNK_CONTEXT is on);
+      # the metadata model and sampling the blurbs use; the timeout; and the
+      # egress gate. Not the server's anchor: a knob the server gains does not
+      # reach the runner unless it is added here. The fallbacks are the
+      # server's, which check-fork-consistency holds equal to db/config.mjs.
+      DATABASE_URL: postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD:-}@postgres:5432/openbrain
+      OB1_TIER: ${OB1_TIER:-}
+      OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
+      OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}
+      OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
+      OB1_CHUNK_TOKENS: ${OB1_CHUNK_TOKENS:-}
+      OB1_CHUNK_OVERLAP: ${OB1_CHUNK_OVERLAP:-}
+      OB1_CHUNK_CONTEXT: ${OB1_CHUNK_CONTEXT:-}
+      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}
+      OB1_LLM_API_KEY: ${OB1_LLM_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OB1_LLM_LOCAL: ${OB1_LLM_LOCAL:-}
+      OB1_CHAT_BASE_URL: ${OB1_CHAT_BASE_URL:-}
+      OB1_CHAT_API_KEY: ${OB1_CHAT_API_KEY:-}
+      OB1_CHAT_LOCAL: ${OB1_CHAT_LOCAL:-}
+      OB1_METADATA_MODEL: ${OB1_METADATA_MODEL:-}
+      OB1_METADATA_TEMPERATURE: ${OB1_METADATA_TEMPERATURE:-}
+      OB1_METADATA_REASONING: ${OB1_METADATA_REASONING:-}
+      OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
+      OB1_EGRESS_POLICY: ${OB1_EGRESS_POLICY:-}
+      OB1_EGRESS_ALLOW: ${OB1_EGRESS_ALLOW:-}
+      OB1_EGRESS_DENY: ${OB1_EGRESS_DENY:-}
       # No `:?`, for the reason n8n's block gives: the runner refuses to
       # start without it, and says why.
       OB1_RUNNER_KEY: ${OB1_RUNNER_KEY:-}
@@ -662,6 +733,8 @@ services:
       postgres:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      orchestration-runner-role:
         condition: service_completed_successfully
     # As n8n's: a configuration refusal (a missing key) exits 2 and the policy
     # restarts it. The runner waits 30 s before that exit, so `ps` shows it up

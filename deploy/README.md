@@ -149,7 +149,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
-| `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
+| `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -704,8 +704,14 @@ cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
 
 `--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
 hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
-`$`s as variables), `N8N_MCP_KEY`, `N8N_WEBHOOK_KEY` and the import runner's
-`OB1_RUNNER_KEY`, where the file has none. n8n sets its owner from the email and the hash at every start
+`$`s as variables), `N8N_MCP_KEY`, `N8N_WEBHOOK_KEY`, the import runner's
+`OB1_RUNNER_KEY`, and `OB1_RUNNER_DB_PASSWORD`, its database role's (SMD-2289),
+where the file has none. A stack provisioned before SMD-2289 runs `--init`
+once more to gain the password, then `compose --profile orchestration up -d
+--build`, so the migrator's image carries `login-role.ts`. Without the
+password, `compose --profile orchestration up -d` fails naming `orchestration-runner-role`, whose log (`compose logs
+orchestration-runner-role`) says to run `--init`, and the runner is not
+started, the one already running included. n8n sets its owner from the email and the hash at every start
 (`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
 boot, and nobody who reaches the port before provisioning can claim the
 instance. To change the password, edit it, run `--init` again, and recreate
@@ -935,6 +941,37 @@ The runner's key is a write capability bounded by the allowlist (the ADR's
 decision 4, amended), and not a brain key. To change it, edit
 `OB1_RUNNER_KEY`, recreate the runner (`compose up -d orchestration-runner`),
 and provision, which patches n8n's copy.
+
+**The runner's database role** (SMD-2289). The runner reaches Postgres as
+`ob1_orchestration_runner`, not the superuser. It is a LOGIN role that is not
+a superuser and owns nothing. It holds the grant groups its ingester and
+reembed run, and no more: capture, worker, structure and extraction
+(db/README.md, "Grants for a capturing role"). Not the server group, whose
+writes to `ob1_agent_keys` could clear a key's revocation. It is a member of
+no other role.
+- The `orchestration-runner-role` step makes it, on the migrator's image and
+  as the migrator connects, before the runner starts, on every `up`:
+  `db/login-role.ts` creates the role or resets its password to
+  `OB1_RUNNER_DB_PASSWORD` and clears an existing one's settings in every
+  database, then `migrate.ts --grant --groups … --exact` replaces what its
+  grants hold here with the groups' privileges (schema USAGE, CONNECT and
+  TEMP stay) in one transaction, so a runner already running never meets a
+  moment without them. A role neither will take is refused by name: a
+  superuser, a member of another role, an owner, one with a schema of its
+  name, or one holding a privilege a revoke there does not reach (a default
+  privilege naming it, a grant in another database). `login-role.ts` commits
+  first, so when `--exact` refuses, the new password is already set and the
+  runner, if its config changed, is left created and not started.
+- The step runs `migrate`'s image, by the name `migrate` gives it
+  (`<project>-migrate`, never pulled), and never pulls or builds its own, so the build that brings a new migration (`up
+  --build server` included) brings its grants to the step's next run; a
+  release overlay pins it to the release's migrator. To rotate the password,
+  edit `OB1_RUNNER_DB_PASSWORD` and start the profile again
+  (`compose --profile orchestration up -d`).
+- The runner's environment holds what its ingester and reembed read: the
+  tier, the embedding, chunk and chat-blurb knobs, the provider's endpoints
+  and credentials, the timeout and the egress gate. It does not hold the
+  server's key material or its other knobs.
 
 **Adding a pipeline.** A pipeline is a line in `pipelines.json` plus its
 emitter, and the emitter has to be in the runner's image. For a converted

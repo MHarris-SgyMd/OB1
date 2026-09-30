@@ -8054,16 +8054,15 @@ console.log("\n[53] A role migrate.ts --grant set up runs the entity writer (an 
   // thought_sources was the one (053). A migrations' group is one whose rows
   // are all dated by a migration number — not the community, extension and
   // recipe groups (dated by their files), whose table names a migration table
-  // could share (`entities`). OWNER_ONLY is what no role is granted on
-  // purpose: migrate.ts's ledger, which this suite's brain lacks (it applies
-  // the files itself) and a migrated one has.
-  const OWNER_ONLY = new Set(["schema_migrations"]);
+  // could share (`entities`). migrate.ts's ledger, which this suite's brain
+  // lacks (it applies the files itself), is named too since SMD-2289: the
+  // worker group reads it.
   const migrationGroups = ROLE_GRANT_GROUPS.filter((g) => ROLE_GRANTS[g].every((r) => /^\d{3}$/.test(r.since)));
   const namedTables = new Set(grantedTables(migrationGroups));
   assert(migrationGroups.includes("structure") && migrationGroups.includes("capture") && !migrationGroups.includes("community") && !namedTables.has("entities"),
     `the migrations' groups are the ones dated by migration number (${migrationGroups.join(", ")}), so a community-only table (entities) is not counted as named`);
-  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t) && !OWNER_ONLY.has(t));
-  assert(ungranted.length === 0, `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, migrate.ts's ledger aside (unnamed: ${ungranted.join(", ") || "none"})`);
+  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t));
+  assert(ungranted.length === 0 && namedTables.has("schema_migrations"), `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, and so is migrate.ts's ledger (unnamed: ${ungranted.join(", ") || "none"})`);
   // The community row for 016's mention table is issued on every migrated
   // brain, so it is held to the extraction row's privileges, no wider and now
   // no narrower (config.mjs, the schemas/entity-extraction comment).
@@ -9056,7 +9055,10 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   // the trigger's snapshot write and the check's read of the event; short of
   // either of 060's two, the write fails inside the trigger.
   await db.exec(`CREATE ROLE ob1_test_capture NOLOGIN`);
-  for (const s of grantStatements("ob1_test_capture", { groups: ["capture", "server", "worker"] })) await db.exec(s);
+  // Granted as --grant grants, only what is there: the worker group names the migrator's ledger, which this schema, applied without the migrator, has not (SMD-2289).
+  const captureGroups = ["capture", "server", "worker"];
+  const capturePresent = new Set((await db.query<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects(captureGroups)))).rows.filter((r) => r.present).map((r) => r.name));
+  for (const s of grantStatements("ob1_test_capture", { groups: captureGroups, present: capturePresent })) await db.exec(s);
   const asCapture = async (): Promise<string> => {
     try {
       await db.transaction(async (tx) => {
