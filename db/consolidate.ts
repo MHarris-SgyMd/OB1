@@ -368,7 +368,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
   // Aborted when the run returns, taking its listener off the caller's signal.
   const detach = new AbortController();
   try {
-    return await consolidateWith(sql, opts, settled, out, err, detach.signal);
+    return await consolidateWith(sql, opts, settled, writes, out, err, detach.signal);
   } finally {
     detach.abort();
     // A failing close must not mask the run's own error.
@@ -377,7 +377,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
 }
 
 /** The run once its options are settled: the script's body as it was, printing through the Writer and returning where it exited. */
-async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numbers, out: Writer["out"], err: Writer["err"], detach: AbortSignal): Promise<number> {
+async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numbers, writes: boolean, out: Writer["out"], err: Writer["err"], detach: AbortSignal): Promise<number> {
   const { workers: WORKERS, batch: BATCH, ttl: TTL, heartbeat: HEARTBEAT, timeout: TIMEOUT_S, k: K, minSim: MIN_SIM, minConfidence: MIN_CONFIDENCE, limit: LIMIT, follow: FOLLOW, stale: STALE_DAYS } = settled;
   const env = opts.env ?? process.env;
   /** Append every verdict here as JSONL — {newer, older, similarity, shared, verdict, supersedes, confidence, reason, key, proposal} — for evals/eval-consolidate.ts. */
@@ -454,9 +454,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let actorName = "consolidate";
   /** The worker key's name when it RESOLVED — the egress gate's `actor:` unit; the audit label above is not an actor (third review pass). */
   let keyName: string | undefined;
-  // A run, or a review: both write and are attributed. --status, --dry-run, --list and --stale only read.
-  const WRITES = ACCEPT !== undefined || REJECT !== undefined || !(STATUS_ONLY || DRY_RUN || REVIEW_ONLY);
-  if (WRITES) {
+  // A run, or a decision: both write and are attributed (run()'s `writes`, the one rule). --status, --dry-run, --list and --stale only read.
+  if (writes) {
     if (stoppedEarly()) return 130;
     // Without a key the URL is not read; with one, run() refused a missing URL.
     const id = await workerIdentity(opts.url ?? "", env, {

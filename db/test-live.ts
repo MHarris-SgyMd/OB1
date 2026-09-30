@@ -97,6 +97,11 @@ function same(a: { code: number; stdout: string; stderr: string }, b: { code: nu
   return a.code === b.code && a.stdout === b.stdout && a.stderr === b.stderr;
 }
 
+/** A run with its wall-clock seconds masked ("in 0.4s", "0.0s in 0 model call(s)"): two runs that did the same compare byte for byte. */
+function untimed(r: { code: number; stdout: string; stderr: string }): { code: number; stdout: string; stderr: string } {
+  return { code: r.code, stdout: r.stdout.replace(/\d+\.\d+s\b/g, "<s>"), stderr: r.stderr.replace(/\d+\.\d+s\b/g, "<s>") };
+}
+
 const unit = (i: number) => {
   const v = new Array(EMBEDDING_DIM).fill(0);
   v[i] = 1;
@@ -3237,8 +3242,6 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
     return { code, stdout: lines(outs), stderr: lines(errs) };
   };
-  /** A run with its wall-clock seconds masked ("in 0.4s", "0.0s in 0 model call(s)"): two runs that did the same compare byte for byte. */
-  const untimed = (r: { code: number; stdout: string; stderr: string }) => ({ code: r.code, stdout: r.stdout.replace(/\d+\.\d+s\b/g, "<s>"), stderr: r.stderr.replace(/\d+\.\d+s\b/g, "<s>") });
   const graph = async () => (await sql`
     SELECT (SELECT count(*)::int FROM ob1_entities) AS entities,
            (SELECT count(*)::int FROM thought_entities) AS mentions,
@@ -4355,7 +4358,6 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
     return { code, stdout: lines(outs), stderr: lines(errs) };
   };
-  const untimedC = (r: { code: number; stdout: string; stderr: string }) => ({ code: r.code, stdout: r.stdout.replace(/\d+\.\d+s\b/g, "<s>"), stderr: r.stderr.replace(/\d+\.\d+s\b/g, "<s>") });
   const claimCounts = async () =>
     Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} GROUP BY status`)
       .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
@@ -4478,7 +4480,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const second = await consolidate();
   assert(second.code === 1 && /0 thought\(s\) judged, 0 failed/.test(second.out) && calls === callsAfterFirst, "a second run has nothing to judge, makes no call, and still exits 1 for the failed row");
   const secondC = await consolidateInProcess();
-  assert(same(untimedC(secondC), untimedC(second)) && calls === callsAfterFirst, `…and run() in-process prints what the spawned run printed, stream by stream, its seconds aside (exit ${secondC.code})`);
+  assert(same(untimed(secondC), untimed(second)) && calls === callsAfterFirst, `…and run() in-process prints what the spawned run printed, stream by stream, its seconds aside (exit ${secondC.code})`);
 
   // --list prints both thoughts, the IDs, and the decision each row takes.
   const list = await consolidate("--list");
@@ -5016,7 +5018,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const racedOutcome = await runConsolidate({ url: URL_!, env, workers: 1, writer: { out: () => {}, err: (l) => { if (/not settled/.test(l)) throw new Error("writer boom"); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
     onJudge = null;
     const [racedClaim] = await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${pairs[0].newer}::uuid`;
-    assert(racedOutcome === "writer boom" && racedClaim?.last_error !== "writer boom" && racedClaim?.status !== "claimed",
+    assert(racedOutcome === "writer boom" && racedClaim !== undefined && racedClaim.last_error !== "writer boom" && racedClaim.status !== "claimed",
            `a Writer that throws inside processRow (the "not settled" line of a raced stale row) rejects run() with its error, not recorded as the thought's failure (${racedOutcome}; claim ${JSON.stringify(racedClaim)})`);
     // A decision is a write: a signal aborted as it starts stops it before the
     // key resolves (at the job line: no agent line), and one aborted as the key
