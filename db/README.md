@@ -3127,7 +3127,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2315 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 999 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1001 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -3231,9 +3231,10 @@ the CLI's rules and order (`cli.ts`'s `numberProblem` judges an in-process
 number by value, in the scanner's words), and the review flags' own rules
 — which combine, a --list word, a proposal id, the pass's note marker — in
 `reviewProblem`, an exported pure function the CLI and run() both refuse
-through. A review (`list`, `accept`, `reject`, `stale`) has no pass and reads
-on under an aborted signal, as `--status` does; a decision, like a run,
-resolves the worker key, so it needs `url` beside a caller's `sql`. The judge
+through. `list` and `stale` only read, and read on under an aborted signal,
+as `--status` does; a decision (`accept`, `reject`) writes, and stops under
+one as a run does. A decision, like a run, resolves the worker key, so with
+OB1_WORKER_KEY set it needs `url` beside a caller's `sql`. The judge
 takes an AbortSignal, so the hard stop also aborts the call in hand: run()
 returns at once in-process, where extract's waits for its call. Re-embedding
 becomes an engine next.

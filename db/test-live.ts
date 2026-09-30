@@ -4277,6 +4277,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   // While set, every verdict takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
   let slowMs = 0;
+  /** Awaited inside each judge call, when set (SMD-2304: a reviewer racing the pass's settle). */
+  let onJudge: (() => Promise<void>) | null = null;
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -4287,6 +4289,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
       const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
       seen.push({ a, b });
+      // Run during the call, before the verdict: a reviewer's decision racing the pass.
+      if (onJudge) await onJudge();
       await Bun.sleep(5 + slowMs);
       if (hemlockIsProse && /hemlock/.test(a + b)) return Response.json({ choices: [{ message: { content: "I'd rather not say." } }] });
       let answer: Record<string, unknown>;
@@ -4994,6 +4998,36 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     slowMs = 0;
     assert(thrown === "writer boom" && !rightAfter.claimed && (rightAfter.pending ?? 0) > 0 && JSON.stringify(rightAfter) === JSON.stringify(later),
            `a Writer that throws in one of consolidate's workers stops the other and rejects run(), nothing claimed or going on after (${thrown}; ${JSON.stringify(rightAfter)} → ${JSON.stringify(later)})`);
+    // A Writer that throws inside processRow — on the pass's "not settled"
+    // line, a reviewer having rejected the stale row during the judge's call —
+    // is the Writer's error: run() rejects with it, and the claim does not
+    // record it as the thought's failure (review pass 1: last_error = "writer boom").
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+    await consolidate();
+    const [{ id: racedId }] = await sql`SELECT record_supersession_proposal(${pairs[0].older}::uuid, ${pairs[0].newer}::uuid, 'newer_supersedes_older', 0.8, 'raced', 0.9, ${KEY}, NULL) AS id`;
+    await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${racedId}::uuid`;
+    onJudge = async () => { await sql`UPDATE supersession_proposals SET status = 'rejected', review_note = 'by a reviewer, mid-pass', reviewed_at = now() WHERE id = ${racedId}::uuid`; };
+    const racedOutcome = await runConsolidate({ url: URL_!, env, workers: 1, writer: { out: () => {}, err: (l) => { if (/not settled/.test(l)) throw new Error("writer boom"); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+    onJudge = null;
+    const [racedClaim] = await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${pairs[0].newer}::uuid`;
+    assert(racedOutcome === "writer boom" && racedClaim?.last_error !== "writer boom" && racedClaim?.status !== "claimed",
+           `a Writer that throws inside processRow (the "not settled" line of a raced stale row) rejects run() with its error, not recorded as the thought's failure (${racedOutcome}; claim ${JSON.stringify(racedClaim)})`);
+    // A decision is a write: a signal aborted as it starts stops it before the
+    // key resolves (at the job line: no agent line), and one aborted as the key
+    // resolves stops it before the decision (the proposal still pending, no
+    // pointer written) — review pass 1.
+    const [{ id: pendingId }] = await sql`SELECT record_supersession_proposal(${pairs[1].older}::uuid, ${pairs[1].newer}::uuid, 'newer_supersedes_older', 0.8, 'to decide', 0.9, ${KEY}, NULL) AS id`;
+    const decideAborted = async (at: string) => {
+      const ac2 = new AbortController();
+      const outs: string[] = [];
+      const code = await runConsolidate({ url: URL_!, env, accept: pendingId, signal: ac2.signal, writer: { out: (l) => { outs.push(l); if (l.startsWith(at)) ac2.abort(); }, err: () => {} } });
+      const [{ status: st }] = await sql`SELECT status FROM supersession_proposals WHERE id = ${pendingId}::uuid`;
+      return { code, st, agent: outs.some((l) => l.startsWith("  agent:")), pointer: await supersedesOf(pairs[1].newer) };
+    };
+    const atJob = await decideAborted("  job:");
+    const atKey = await decideAborted("  agent:");
+    assert(atJob.code === 130 && !atJob.agent && atJob.st === "pending" && atKey.code === 130 && atKey.agent && atKey.st === "pending" && atKey.pointer === null,
+           `a decision aborted as it starts resolves no key (${JSON.stringify(atJob)}), and one aborted as the key resolves writes no decision (${JSON.stringify(atKey)})`);
     for (const id of ids) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 

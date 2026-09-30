@@ -379,7 +379,10 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   const early = await inProcess({ url: AT, signal: AbortSignal.abort() });
   ok(early.code === 130 && /stopped before the pass began/.test(early.err) && early.seen === 0, `consolidate run() with a signal already aborted returns 130 before connecting (exit ${early.code})`);
   const reviewAborted = await run({ sql: stub(), list: "pending", signal: AbortSignal.abort(), writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
-  ok(reviewAborted === "stub queried", `…and a review under an aborted signal reads on — it has no pass to stop (${reviewAborted.slice(0, 30)})`);
+  ok(reviewAborted === "stub queried", `…and a listing under an aborted signal reads on — it only reads (${reviewAborted.slice(0, 30)})`);
+  // A decision writes: an aborted signal stops it before anything opens, as it stops a run (review pass 1).
+  const decisionAborted = await inProcess({ url: AT, accept: ID, signal: AbortSignal.abort() });
+  ok(decisionAborted.code === 130 && /stopped before the pass began/.test(decisionAborted.err) && decisionAborted.seen === 0, `…while a decision under an aborted signal returns 130 before connecting (exit ${decisionAborted.code}, ${decisionAborted.seen} connection(s))`);
   ok(!closed, "…and never closes the caller's client");
 }
 

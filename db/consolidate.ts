@@ -172,15 +172,16 @@ const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "a
  * the thought in hand, its unfinished claims back to the pool, and wakes a
  * follower's sleep. Aborted before the pass begins, it stops the run before
  * its next write — the agent's registration, a --retry-failed statement, the
- * pool — and run() returns 130 (a statement already committed stays so).
+ * pool — and run() returns 130 (a statement already committed stays so); a
+ * decision (--accept, --reject) stops the same way, before the key resolves
+ * and before the decision is written.
  * `onPass` is called once, as the pass begins — where the CLI installs its
  * signal handlers (stopOnSignals) — with the pass's stop (db/lease.ts's
  * PassStop). Its hard stop returns the leases at once, aborts the judge's
  * call in hand and wakes a worker pausing on a provider error, and run()
  * returns 130 (2 after the provider's refusal), writing and releasing nothing
  * more for the thought in hand; a call after run() has returned does nothing.
- * Neither is used by --status, --dry-run or a review (--list, --accept,
- * --reject, --stale), which have no pass.
+ * Neither is used by --status, --dry-run, --list or --stale, which only read.
  */
 export interface ConsolidateOptions {
   url?: string;
@@ -350,8 +351,9 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
     }
   }
   // A signal aborted before the call: nothing opened, nothing written. --status,
-  // --dry-run and a review have no pass to stop, and read on.
-  if (opts.signal?.aborted && !opts.status && !opts.dryRun && !reviewing) {
+  // --dry-run, --list and --stale only read, and read on; a decision writes, and
+  // stops as a run does (review pass 1).
+  if (opts.signal?.aborted && !opts.status && !opts.dryRun && (!reviewing || deciding)) {
     err(STOPPED_EARLY);
     return 130;
   }
@@ -448,7 +450,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // A run, or a review: both write and are attributed. --status, --dry-run, --list and --stale only read.
   const WRITES = ACCEPT !== undefined || REJECT !== undefined || !(STATUS_ONLY || DRY_RUN || REVIEW_ONLY);
   if (WRITES) {
-    if (!REVIEW_ONLY && stoppedEarly()) return 130;
+    if (stoppedEarly()) return 130;
     // Without a key the URL is not read; with one, run() refused a missing URL.
     const id = await workerIdentity(opts.url ?? "", env, {
       noKeyWarning: `  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`,
@@ -591,6 +593,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   if (REVIEW_ONLY) {
     let code = 0;
     if (ACCEPT || REJECT) {
+      // The key resolved; the decision is the next write (review pass 1).
+      if (stoppedEarly()) return 130;
       const decision = ACCEPT ? "accept" : "reject";
       const id = (ACCEPT ?? REJECT)!;
       // 070 (SMD-2313): an accept on a lineage pair — one side's derived_from
@@ -838,6 +842,23 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * row (a reviewer decided it, another pass replaced it, its thought is gone
    * between the read and this write), counted and not failed.
    */
+  /**
+   * A Writer's throw from inside processRow, marked so the worker's catch
+   * rethrows it — the Writer's error rejects run() — rather than classifying
+   * it as the thought's failure and recording it on the claim (review pass 1:
+   * a throw on the "not settled" line became last_error = "writer boom").
+   */
+  class WriterThrow {
+    constructor(readonly error: unknown) {}
+  }
+  const errInRow = (line: string): void => {
+    try {
+      err(line);
+    } catch (e) {
+      throw new WriterThrow(e);
+    }
+  };
+
   async function settleStale(s: StaleRow, why: string, olderFp: string, newerFp: string, settled: string, reason?: string): Promise<boolean> {
     const recipe = { ...proposalRecipe(cfg, { similarity: s.similarity ?? NaN, candidates: K, minSimilarity: MIN_SIM }), settled, ...(reason ? { reason } : {}) };
     if (s.similarity === null) delete (recipe as { similarity?: number }).similarity;
@@ -851,10 +872,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // 029's cascade took the row (first review pass, cold read: counted as a
       // decision before).
       staleMet.gone.add(s.id);
-      err(`  ${s.id}: not settled — the row is gone with a deleted thought`);
+      errInRow(`  ${s.id}: not settled — the row is gone with a deleted thought`);
     } else {
       staleMet.raced.add(s.id);
-      err(`  ${s.id}: not settled — ${res.error === "NOT_STALE" ? `the row is ${res.status} now (a reviewer or another pass reached it first)` : res.error}`);
+      errInRow(`  ${s.id}: not settled — ${res.error === "NOT_STALE" ? `the row is ${res.status} now (a reviewer or another pass reached it first)` : res.error}`);
     }
     return false;
   }
@@ -1098,6 +1119,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               try {
                 outcome = await processRow(row);
               } catch (e) {
+                if (e instanceof WriterThrow) throw e.error;
                 const kind = classifyError(e);
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
                 if (kind === "thought") {
