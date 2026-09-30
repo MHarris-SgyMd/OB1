@@ -37,10 +37,12 @@
 # file as the stack does (quotes, inline comments, `export`, CRLF, a BOM) under
 # the shell's own variables, which win there too. Of that, only what tier.ts and
 # migrate.ts read is handed on — the OB1_* knobs (migrate.ts's OB1_EMBEDDING_*
-# on a refresh; the replay's OB1_EVAL_* and OB1_LLM_*), POSTGRES_PASSWORD, which
-# builds the URLs, and the provider settings the replay's embed reads
-# (OPENROUTER_API_KEY, OLLAMA_BASE). Access keys, LINEAR_API_KEY and the rest
-# stay behind. The values travel in a mode-600 temporary env file, so they are
+# on a refresh; the replay's OB1_LLM_*, OB1_EMBEDDING_* and OB1_EGRESS_*, now that
+# it embeds each logged query with the brain's model through the egress gate —
+# SMD-2290), POSTGRES_PASSWORD, which builds the URLs, and the key the replay's
+# embed falls back to when OB1_LLM_API_KEY is unset (OPENROUTER_API_KEY). Access
+# keys, LINEAR_API_KEY and the rest stay behind (OLLAMA_BASE too, now that the
+# replay reads OB1_LLM_BASE_URL through resolveEmbedConfig, not evals/lib.ts). The values travel in a mode-600 temporary env file, so they are
 # not on this command line or the runtime's; they are in the container's
 # environment (`inspect` shows it while it runs), and the URLs are on the
 # argument lists inside it (bun's, pg_dump's, pg_restore's, migrate.ts's), which
@@ -170,7 +172,7 @@ while IFS= read -r line; do
   name="${line%%=*}"
   case "$name" in
     OB1_ALLOW_REMOTE_DB|OB1_ENV_FILE|OB1_ENV_FILES) continue ;;
-    OB1_*|POSTGRES_PASSWORD|OPENROUTER_API_KEY|OLLAMA_BASE) ;;
+    OB1_*|POSTGRES_PASSWORD|OPENROUTER_API_KEY) ;;
     *) continue ;;
   esac
   printf '%s\n' "$line" >> "$TMP_ENV"
