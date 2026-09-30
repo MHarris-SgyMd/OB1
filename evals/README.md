@@ -6369,9 +6369,215 @@ read, never values. The grant set was measured as that role in the kit's
 runner, one group at a time, until the fixture's items were inserted and
 embedded.
 
+## The authorization server on Bun: oidc-provider against criteria 1–5 (SMD-2285)
+
+SMD-2285 picked oidc-provider 9.12.2, run as a small Bun service of our own, as
+the brain's authorization server (`../docs/operator-surface-tiers.md`, decisions
+13–16). Its Work step 2 asks for a proof of concept that shows the ticket's
+criteria 1–5 on a clean stack, twice. This is that proof. Better Auth, the
+runner-up, is the kit's second candidate and follows in its own PR.
+
+**The setup.** `eval-auth.ts` runs `auth/compose.yaml` plus
+`auth/compose.<candidate>.yaml` as the project `ob1-auth-<candidate>`, from
+one image built from `auth/`. No brain is needed: the MCP server and REST core
+of the ADR do not exist yet (SMD-2287, SMD-2284), so the stack runs
+stand-ins for both.
+- **A stand-in proxy.** The ADR's route table on one origin: `/auth`, the three
+  discovery paths outside it, each tier's `/mcp` and its RFC 9728 metadata, and
+  the opt-in `/api`. It has the only published port, `127.0.0.1:8020`.
+- **Two tiers** (stable and `/canary`), each a real SDK v2 MCP server and a REST
+  core. The MCP server exchanges the caller's token for a REST-core one and
+  reports what the REST core saw.
+- **`https://cimd.test`**, a client-metadata-document host with a self-signed
+  certificate only the server trusts. It sits on a network whose subnet,
+  `11.0.0.0/24`, is outside every special-use range, so the fetch guard admits
+  it on its own rules, with no exception made for the POC.
+- **A bait** on the internal mesh, as `bait.ob1.internal` and
+  `private-host.test`, that logs every connection it is offered.
+
+```sh
+cd evals
+bun eval-auth.ts --up oidc-provider
+bun eval-auth.ts --verify oidc-provider [--json]
+bun eval-auth.ts --down oidc-provider      # containers, networks and image
+bun eval-auth.ts --self-check              # guard, route table, policy; no stack
+```
+
+It needs docker or podman compose and openssl. Under podman on macOS, the host
+port sometimes fails to forward after a fresh up, while the proxy answers
+inside its container (1 to 3 of 6 down-then-up cycles, measured with and
+without the internal network). So `--up` restarts the proxy once if the port
+does not answer within 20 s, and says so. It writes `auth/.env` (the
+signing key, the client secrets, and the operator's password beside its
+argon2id hash) and `auth/.poc/` (the certificate), both gitignored, once, and
+reuses them.
+
+**The result: 28 of 28, twice on one stack, 1.0 to 2.4 s per run**, over
+repeated down-up-verify-verify cycles (2026-09-29, the dogfood Mac's podman
+VM). A second run on one stack proves the same things afresh. It registers new
+clients, asks for metadata-document URLs that carry its own run name (so they
+are new to the server, which caches a fetched document for at least 30 s),
+signs in again, and reads only the log lines written since it started. Run
+one verify at a time: two at once would count each other's bait connections.
+
+A refusal is matched on its error code, and on its reason or its cause
+wherever the check names one. The cause comes from the `error_detail` that the
+POC server adds to its error replies, only while `OB1_AUTH_POC_ERROR_DETAIL=1`,
+which the POC's compose file alone sets. The library withholds that detail on
+purpose, since it says what a name resolves to and whether a client id exists,
+and the deploy never sets the switch.
+
+The checks, by criterion:
+
+| group | criterion | what passes |
+| --- | --- | --- |
+| D1–D6 | 5, issuer under a path | One document is served on `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, `/auth/.well-known/openid-configuration` and Claude Code's bare `/.well-known/oauth-authorization-server`. Its `issuer` is exactly `http://localhost:8020/auth`, and its five endpoints (authorization, token, JWKS, registration, revocation) sit under it. A request with a spoofed `Host` gets the same document. It offers S256 only and `code` as its only response type. It does not advertise implicit, DPoP, userinfo, logout or PAR. It advertises CIMD with `"none"` (claude.ai's two conditions), sends `iss` in the authorization response, and lists the exchange grant. The SDK v2 client's discovery parses it both ways, including the strict OIDC parse (typescript-sdk#2733). Each tier's `/mcp` answers a tokenless call with 401 naming its metadata, and the metadata names the issuer. Of the running containers, only the proxy publishes a port, and the server sits on the internal mesh with none. |
+| R1–R3 | 3, registration | The SDK v2 client reaches stable `/mcp` by CIMD and canary `/mcp` by DCR, each through a sign-in page and a consent page, down to a tool call. In the CIMD case, the `client_id` is a document URL new to the run, fetched in the run, and the client sends no registration request. The consent page names the client by what the server checked (the document's host, `cimd.test`) and the origin it returns to. The guard refuses ten `client_id`s, each for its own cause: the mesh, `localhost` and a compose service name by the name rule (so a lookup refusing them later, for their address, would not pass), and a private name, IPv4 and IPv6 loopback, RFC 1918, CGNAT, cloud metadata and IPv4-mapped loopback by the address rule. After the probes, the bait logs the one control connection the verifier opens from the server's container, and nothing else. A document behind a redirect, and one of 6 KiB, are refused for exactly those causes (`unexpected response status 302`, `response too large`). |
+| G1–G6 | 4, grants | The GUI's confidential client runs code + PKCE for the REST core through sign-in and consent. `iss` and `state` round-trip, and the REST core sees `oauth:operator` with no actor. A missing challenge and `plain` are each refused for that reason, and so are a wrong verifier and a replayed code. The runner's client-credentials token names the runner, within `brain:capture`, and `/mcp` is refused to it. A third-party client with `offline_access` refreshes for its one granted resource, after a consent page that named its client id and redirect origin, and both listed and explained `offline_access`. The consent page shows a custom-scheme redirect (`evilapp://localhost:8020/mcp`, from a client calling itself "Open Brain dashboard") as "the app registered for evilapp:", not as the brain's own host, and names the resource of a request for `openid` alone. |
+| A1–A8 | 2, resource indicators | Every token checked has one audience. A `/mcp` token is refused by the REST core, by canary `/mcp` and by the canary REST core, and a REST-core token is refused by `/mcp`. Also refused: an unknown resource; two resources at once from a client allowed both; a DCR client asking for the REST core; and a third-party client registering for client credentials (by DCR and by a metadata document), for the implicit grant (by DCR), or with `grant_types` as a string. A request that names no resource gets no token: at the authorization endpoint it is refused before any page is shown. A token for a resource that carries no brain scope (a request for `openid` alone gets one, with an empty scope) is refused by the MCP server and the REST core with `insufficient_scope`. |
+| X1–X4 | 1, token exchange | Through `/mcp`, the REST core sees subject `oauth:operator`, actor `mcp`, audience `/api`. Done directly, the exchange keeps `sub`, adds `act: {sub: "mcp"}`, narrows scope on request, and ends no later than the subject token. Ten cases are refused, each with its expected error and its own cause (a subject token of the wrong audience is `ERR_JWT_CLAIM_VALIDATION_FAILED aud`, a tampered one `ERR_JWS_SIGNATURE_VERIFICATION_FAILED`). The cases: across tiers, for another tier's target, to the GUI client, with a wrong secret, for a wider scope, a tampered, already-exchanged or REST-core subject token, an `actor_token`, and a missing token type. The exchanged token works at its own REST core only. |
+
+Two rows stay manual, because they need a public origin: a claude.ai connector
+(claude.ai refuses private and CGNAT hosts), and whether Claude Code 2.1.275
+accepts the bare-path document, whose `issuer` carries `/auth`
+(anthropics/claude-code#95270). Memory at rest after a verify: the server
+45 MiB, the stand-ins 28 MiB, the proxy 8 MiB. The image is 105 MB.
+
+**What the kit found in the library:**
+- **oidc-provider's SSRF protection does not load under Bun.** It is an undici
+  dispatcher, which Bun lacks. The library prints `failed to setup SSRF
+  protection for fetch` and then dials whatever the `client_id` names. With the
+  kit's guard swapped for the library's own `fetch`, R3 fails, and in the first
+  such run the server connected to the bait on the mesh four times. So the
+  service's `fetch` option is `auth/fetch-guard.ts`. It allows https and GET
+  only, refuses by name and by every resolved address inside the socket's own
+  lookup, and caps the body. Measured on Bun 1.4.0: `node:https` dials the
+  address that lookup returns, so the address checked is the address dialled
+  and DNS rebinding gains nothing; and the library's 2.5 s abort signal ends a
+  request hung before its headers or mid-body. The deploy keeps this guard on
+  any runtime.
+- **Its defaults open more than the brain needs.** The kit's first versions
+  inherited these, and the server now closes each:
+  - **Open registration plus client credentials let anyone hold a working
+    `/mcp` token with no user.** A third-party client (DCR or CIMD) may now
+    register for authorization code and refresh only (A6).
+  - **A request naming no resource got an opaque token with no audience.** It
+    is now refused at the authorization endpoint before any page, and at the
+    token endpoint (A7).
+  - **Implicit and hybrid response types, DPoP, userinfo, RP-initiated logout
+    and PAR were on.** DPoP was the dangerous one: the exchange would turn a
+    DPoP-bound `/mcp` token into a bearer REST-core token, and nothing in the
+    stack checks a proof. Userinfo could never answer, since every access token
+    is bound to a resource. The logout page loads Google Fonts into the
+    operator's browser. All are off (D1).
+  - **The endpoints followed the request's `Host`.** The service now builds
+    URLs from the configured origin (D6).
+- **The first consent pages misled.** They had three problems, each caught by
+  a review pass:
+  - A client was named by its self-chosen `client_name`. One registered as
+    "Open Brain dashboard" with a redirect to a host of its own would have
+    looked like the operator's own.
+  - A custom-scheme redirect was shown by its host. `evilapp://localhost:8020/…`
+    read as the brain's own origin, while the code goes to whichever app owns
+    `evilapp:`.
+  - Only the scopes the grant still lacked were listed. `offline_access`, and
+    the resource of a request for `openid` alone, went unshown.
+
+  The page now names what the server checked (the client id, or for a metadata
+  document its host), where the code goes (an http(s) origin, or the app that
+  owns a scheme), and the scopes and resources the request names, with a
+  sentence for `offline_access` (R1, G5, G6).
+- **A request for `openid` alone gets a token for its resource with an empty
+  scope.** The stand-ins accepted it until they checked scope. Now both answer
+  it with 403 `insufficient_scope`, which the real MCP server and REST core must
+  do too (A8).
+- **A number in `ttl.AccessToken` overrides each resource's `accessTokenTTL`.**
+  The library's default function reads the resource's TTL, and a number
+  replaces that function. With one set, X2 caught an exchanged token ending a
+  second after its subject token. The exchange now sets `exp` itself.
+- **Smaller facts about the library:**
+  - DCR fails with only an ES256 key unless `clientDefaults` sets the ID
+    token's algorithm, because the library's default is RS256.
+  - oidc-provider refuses a grant a client lacks with `invalid_request`, where
+    RFC 6749 names `unauthorized_client`. X3 accepts either code.
+  - Its `invalid_grant` reply always carries the same text ("grant request is
+    invalid"), so only the POC server's `error_detail` tells the causes apart.
+- **Two checks on the server were unreachable, so neither is kept:**
+  - An `act` check on the subject token: an exchanged token's audience is a
+    REST core, which the audience rule already refuses. The case stays in X3.
+  - A refusal in the MCP stand-in of a token whose subject is its own client:
+    no user-less `/mcp` token can be issued once the third-party rule holds.
+    The real MCP server (SMD-2287) should still refuse one.
+
+**Held by.** Twenty-six drop-the-mechanism mutants (`/tmp`, not committed), each on
+a rebuilt stack. Each one turned exactly its own checks red:
+
+| mutant | checks turned red |
+| --- | --- |
+| the library's `fetch` in place of the guard | R3 |
+| any resource for any client | G4, A5 |
+| the exchange ignoring the subject's audience | X3 |
+| `act` removed | R2, X1, X2, X4 |
+| scope widening allowed | X3 |
+| the expiry cap removed | X2 |
+| PKCE at the library default | G2 |
+| the proxy's bare discovery path removed | D2 |
+| the REST core ignoring its audience | A2, A3, X4 |
+| the third-party rule removed | A6 |
+| its type guard on `grant_types` removed | A6 |
+| the no-resource refusal removed | A7 |
+| response types at the library default | D1 |
+| DPoP, userinfo or logout at the library default, or PAR on (four mutants) | D1 |
+| the configured origin not pinned | D6 |
+| the guard's mesh name rule removed | R3 |
+| the POC's `error_detail` switch off | R3, G3, X3 |
+| the stand-ins' scope check removed | A8 |
+| consent naming the client by its own `client_name` | R1, G5, G6 |
+| consent showing a custom scheme's host | R1, G5, G6 |
+| consent omitting the resource asked for | G6 |
+| consent dropping the `offline_access` sentence, or `offline_access` from its scope list (two mutants) | G5 |
+
+Two stack faults were also tested, each on a stack that had already passed
+once:
+- With the metadata host stopped, the next verify fails R1, R3 and A6 (and D5,
+  which counts the running containers) rather than passing on the first run's
+  evidence.
+- With the bait stopped, R3 fails: its control connection cannot be made.
+
+**Not proven here, and where it goes:**
+- **Work step 3:**
+  - storage in its own `ob1_auth` database (the library's in-memory adapter
+    runs here);
+  - passkeys and the loopback break-glass;
+  - the service in `deploy/compose.yaml`;
+  - the TTL or purge for DCR rows;
+  - leaving `OB1_AUTH_POC_ERROR_DETAIL` unset, so the POC's `error_detail`
+    stays off.
+- **Also Work step 3:**
+  - the guard's 64 KiB body cap is never exercised live (the oversize case
+    stops at the library's 5 KiB limit first); it matters for `jwks_uri`, which
+    the library leaves uncapped. A live check belongs with the guard when it
+    moves into `deploy/`;
+  - **access tokens cannot be revoked.** They are JWTs, and the revocation
+    endpoint refuses them. After a refresh token or a grant is revoked,
+    including by the library's own revoke on refresh-token reuse, the
+    outstanding `/mcp` token still works at `/mcp` and still exchanges until it
+    expires, at most 10 minutes. Opaque `/mcp` tokens, or a shorter TTL, is the
+    deploy's call;
+  - **a refused refresh spends the refresh token.** With rotation (the default
+    for a public client), the library replaces the refresh token before it
+    resolves the resource. So a refresh refused there (an ungranted resource;
+    or none named on a grant for two resources) loses the new token, and the
+    client's retry with the old one revokes the grant. Reproduced by the
+    review. The deploy should check the resource before rotation, or accept it
+    and document it.
+- **SMD-2382:** the `auth` profile's configured and reachable states.
+- **SMD-2309:** sign-in brute-force limits.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
+- `../docs/operator-surface-tiers.md` — the decision the authorization-server section above proves out: oidc-provider on Bun, one server for every tier, keys forwarded and OAuth tokens exchanged (SMD-2282, SMD-2285)
 - `../docs/event-log-as-truth.md` — the decision the two gate sections above (SMD-1998, SMD-1999) opened: the event log as the source of truth, the `thoughts` row its projection (SMD-1997)
 - `../docs/orchestration-tool.md` — the decision the orchestration section above informs: n8n, as an opt-in sidecar, with the licence and egress gates (SMD-1863)
 - `../db/config.mjs` — `KNOWN_MODEL_DIMS`, so a model/width mismatch is caught
