@@ -21,7 +21,7 @@ WORKDIR /app
 # The pipeline's import graph, as the checkout has it, so `bun db/ingest-records.ts`
 # and `bun db/reembed.ts` run here exactly as from a checkout. Not bundled: a
 # bundle runs scripts/fork-index.ts's main block, which rewrites FORK.md.
-COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts db/cli.ts db/connect.ts db/worker-bootstrap.ts db/ingest-*.ts db/reembed.ts db/lease.ts /app/db/
+COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts db/cli.ts db/connect.ts db/worker-bootstrap.ts db/ingest-*.ts db/reembed.ts db/weekly-digest.ts db/lease.ts /app/db/
 COPY server-portable/*.ts /app/server-portable/
 COPY scripts/fragments.ts scripts/fork-index.ts /app/scripts/
 COPY evals/linear-corpus.ts /app/evals/
@@ -41,7 +41,7 @@ COPY deploy/orchestration/runner.ts /app/deploy/orchestration/
 # resolved, then the runner's own rules. The one package named external is
 # server-portable/store-postgrest.ts's, a store the pipeline never loads (it is
 # imported lazily, for Workers); the bundler follows it anyway.
-RUN bun build db/ingest-records.ts db/reembed.ts deploy/orchestration/runner.ts --target=bun --external @supabase/supabase-js --outdir=/tmp/resolve \
+RUN bun build db/ingest-records.ts db/reembed.ts db/weekly-digest.ts deploy/orchestration/runner.ts --target=bun --external @supabase/supabase-js --outdir=/tmp/resolve \
  && rm -rf /tmp/resolve \
  && bun deploy/orchestration/runner.ts --self-check
 # pipelines.json in a layer of its own, after the self-check, so an allowlist

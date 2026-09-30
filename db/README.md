@@ -3137,12 +3137,13 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2315 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 998 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1001 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
+bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -3259,6 +3260,32 @@ the `classifyError` rules and the identity cases that refuse before connecting;
 `test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that
 no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
 `resolve_agent(` or `parseKeyRecords`.
+
+`weekly-digest.ts` (SMD-2239) is the first **sink** on this harness — it pages
+the week's `thoughts`, has the chat model synthesize an importance-ranked digest,
+and delivers it to Telegram, a file, or stdout. Two hops leave the box and both
+pass the gate: the synthesis (the thoughts → the chat provider) through the gated
+dialler `providerCall`, and the Telegram send (the digest → `api.telegram.org`)
+through `mayLeaveBox` against the endpoint `telegramEndpoint` derives from
+`OB1_TELEGRAM_API_BASE` / `OB1_TELEGRAM_LOCAL`. The gate names content units, not
+hosts, and a digest belongs to no single row, so it declares its own —
+`metadata.type = "digest"`, `metadata.source = "weekly-digest"`, the worker key
+as the actor — and one term opts the sink in: `OB1_EGRESS_ALLOW=type:digest` (or
+`source:weekly-digest`, or `actor:<key>`). Under the default deny with no such
+term the send is refused, the refusal names the rule, and the digest is printed
+to stdout instead — nothing reaches Telegram; `--output stdout|file` never leaves
+the box (the synthesis still does). The sensitivity boundary is fail-closed: with
+no `sensitivity_tier` column the run refuses rather than page every row, unless
+`--no-sensitivity-filter` says so. `test-weekly-digest.ts` holds the ranking, the
+chunking and the gate over a digest subject (the drop-the-gate mutant and each
+allow term); `test-live.ts` [36] the sink end to end — a stub that records zero
+Telegram sends under deny and one when allowed.
+
+```bash
+bun weekly-digest.ts --url … --output stdout                 # synthesize + print; no send hop
+bun weekly-digest.ts --url … --window 14 --min-importance 3  # a wider window, a lower bar
+OB1_EGRESS_ALLOW=type:digest bun weekly-digest.ts --url …    # post to Telegram (TELEGRAM_BOT_TOKEN/CHAT_ID)
+```
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
