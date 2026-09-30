@@ -3044,7 +3044,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2300 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 970 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 975 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -3126,15 +3126,19 @@ held to its flag's rule, refused in the CLI's words; `env` is what the run
 reads for the model, endpoints, egress policy and worker key (process.env when
 absent). A caller's client needs a connection per worker and a spare the
 heartbeat beats through (`max` at least workers + 1), and the worker key
-resolves on a connection of its own, so a keyed run needs `url` beside `sql`.
-`signal` stops the pass as a first signal does — every worker after the
-thought in hand. `onPass` is called once as the pass begins, where the script
-installed its handlers, with the pass's stop (`lease.ts`'s `PassStop`): the
-first call stops after the thought in hand; one while it is already stopping
-(a second, or the first after the provider's refusal stopped the workers)
-returns the release of every worker's leases. The CLI installs
-`lease.ts`'s `stopOnSignals` there, which exits 130 when that release settles
-or after 3 s. Consolidation and re-embedding become engines next, one PR each.
+resolves on a connection of its own, so a keyed run needs `url` beside `sql`;
+a reserved connection or a transaction's handle is refused (one connection
+whatever `max` it reports). `signal` stops the pass as a first signal does —
+every worker after the thought in hand — and, aborted before the pass, stops
+the run before its next write with 130. `onPass` is called once as the pass
+begins, where the script installed its handlers, with the pass's stop
+(`lease.ts`'s `PassStop`): the first call stops after the thought in hand;
+one while it is already stopping (a second, or the first after the provider's
+refusal stopped the workers) returns the release of every worker's leases,
+and the thought in hand is abandoned — nothing written or released for it.
+The CLI installs `lease.ts`'s `stopOnSignals` there, which exits 130 when that
+release settles or after 3 s, and takes it off when run() settles.
+Consolidation and re-embedding become engines next, one PR each.
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket

@@ -129,23 +129,26 @@ export async function workerIdentity(
     return { ok: false, message: "\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this." };
   }
   const store = new SqlStore(url, { max: 1 });
+  let res: Awaited<ReturnType<SqlStore["resolveAgent"]>>;
   try {
-    const res = await store.resolveAgent({ keyHash: hash, label: record.name, scope: record.scope });
-    if (!res.ok && res.error === "REVOKED") {
-      return { ok: false, message: `\n  The worker's key was revoked at ${res.revokedAt}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.` };
-    }
-    if (res.ok) {
-      write(`  agent:  ${record.name} (${record.scope}, ${res.agentId})`);
-      return { ok: true, identity: { agentId: res.agentId, keyName: record.name } };
-    }
-    warn(`  ⚠  resolve_agent answered ${res.detail}; rows will carry no agent id`);
-    return { ok: true, identity: none };
+    res = await store.resolveAgent({ keyHash: hash, label: record.name, scope: record.scope });
   } catch (e) {
     warn(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
     return { ok: true, identity: none };
   } finally {
     await store.close();
   }
+  // Outside the resolve's try: a writer that throws on the agent line is the
+  // writer's error, not an identity that did not resolve (SMD-2304 review pass 2).
+  if (!res.ok && res.error === "REVOKED") {
+    return { ok: false, message: `\n  The worker's key was revoked at ${res.revokedAt}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.` };
+  }
+  if (res.ok) {
+    write(`  agent:  ${record.name} (${record.scope}, ${res.agentId})`);
+    return { ok: true, identity: { agentId: res.agentId, keyName: record.name } };
+  }
+  warn(`  ⚠  resolve_agent answered ${res.detail}; rows will carry no agent id`);
+  return { ok: true, identity: none };
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────

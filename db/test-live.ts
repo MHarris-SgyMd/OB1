@@ -3159,8 +3159,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // While set, every answer takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
   let slowMs = 0;
-  /** While above zero, the next calls are refused, 300 ms in, as a bad key would be — the provider's refusal, fatal to the pass. */
+  /** While above zero, the next calls are refused, 300 ms in, as a bad key would be — the provider's refusal, fatal to the pass; `refused` counts those sent. */
   let refuseCalls = 0;
+  let refused = 0;
+  /** While above zero, the next calls answer 503 at once — the provider unavailable, a transient error the worker pauses on. */
+  let unavailableCalls = 0;
   const model = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -3173,7 +3176,12 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
         refuseCalls--;
         // A beat late, so another worker's call is in hand by then.
         await Bun.sleep(300);
+        refused++;
         return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
+      }
+      if (unavailableCalls > 0) {
+        unavailableCalls--;
+        return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       }
       await Bun.sleep(5 + slowMs);
       if ((hemlockIsProse && /hemlock/.test(prompt)) || [...proseKeys].some((k) => prompt.includes(k))) {
@@ -3472,15 +3480,19 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   refuseCalls = 1;
   slowMs = 2000;
   let fatalStop: PassStop | undefined;
+  const fatalFrom = calls, refusedFrom = refused;
   const fatalRun = extractInProcess({ workers: 2, onPass: (s) => { fatalStop = s; } });
-  await Bun.sleep(1000);
+  // Both calls at the stub and the refusal sent — not a fixed sleep (review pass 2).
+  for (let i = 0; i < 100 && !(calls >= fatalFrom + 2 && refused > refusedFrom); i++) await Bun.sleep(50);
+  await Bun.sleep(100);
   const afterFatal = fatalStop?.();
   await afterFatal;
   const fatal = await fatalRun;
   slowMs = 0;
   refuseCalls = 0;
   assert(fatal.code === 2 && fatal.stderr.includes("The provider refused the request itself") && afterFatal instanceof Promise && fatal.stderr.includes("second signal — exiting now")
-         && !fatal.stderr.includes("stopping after the current thought") && (await noteClaims()).succeeded === 2 && !(await noteClaims()).claimed,
+         && !fatal.stderr.includes("stopping after the current thought") && !fatal.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(fatal.stdout)
+         && (await noteClaims()).succeeded === 2 && !(await noteClaims()).claimed,
          `after the provider's refusal, the pass's first stop is the hard one: the other worker's thought in hand is released, not finished (exit ${fatal.code}, ${afterFatal instanceof Promise ? "a release" : String(afterFatal)}, claims ${JSON.stringify(await noteClaims())})`);
 
   // A caller's signal aborted during start-up stops the run before its next
@@ -3531,6 +3543,64 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   await pool.close();
   assert([onReserved, onTx].every((r) => r.code === 2 && r.stdout === "" && /needs a pool, not a reserved connection or a transaction's handle/.test(r.stderr)),
          `a reserved connection and a transaction's handle are refused as a run's client (exits ${onReserved.code}, ${onTx.code})`);
+  // The hard stop wakes a worker pausing on a provider error: run() returns at
+  // once, and the thought is not sent again after the leases are gone (review
+  // pass 2: the 5-45 s pause ran out, then the call was made).
+  unavailableCalls = 100;
+  let pauseStop: PassStop | undefined;
+  const pauseFrom = calls;
+  const pauseErrs: string[] = [];
+  const pauseRun = runExtract({ url: URL_!, env, workers: 1, onPass: (s) => { pauseStop = s; }, writer: { out: () => {}, err: (l) => pauseErrs.push(l) } });
+  for (let i = 0; i < 100 && !(calls > pauseFrom && pauseErrs.some((l) => l.includes("provider unavailable"))); i++) await Bun.sleep(50);
+  pauseStop?.();
+  const pauseRelease = pauseStop?.();
+  const pauseAt = Date.now(), callsAtStop = calls;
+  const pauseCode = await pauseRun;
+  const pauseMs = Date.now() - pauseAt;
+  await pauseRelease;
+  unavailableCalls = 0;
+  assert(pauseCode === 130 && pauseMs < 1500 && calls === callsAtStop && !(await noteClaims()).claimed,
+         `a hard stop during a provider-error pause returns 130 at once, sending nothing more (exit ${pauseCode} after ${pauseMs} ms, ${calls - callsAtStop} call(s) after the stop)`);
+
+  // A Writer that throws on the line naming the rows a worker returned is the
+  // Writer's error, not a lease left unreturned (review pass 2): run() rejects
+  // with it, and the rows are back in the pool.
+  slowMs = 600;
+  const freedAc = new AbortController();
+  const freedErrs: string[] = [];
+  const freedFrom = calls;
+  const freedRun = runExtract({ url: URL_!, env, workers: 1, batch: 2, signal: freedAc.signal, writer: { out: () => {}, err: (l) => { if (/returned \d+ unfinished row\(s\)/.test(l)) throw new Error("writer boom"); freedErrs.push(l); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+  for (let i = 0; i < 100 && !((await noteClaims()).claimed === 2 && calls > freedFrom); i++) await Bun.sleep(50);
+  freedAc.abort();
+  const freedOutcome = await freedRun;
+  slowMs = 0;
+  assert(freedOutcome === "writer boom" && !freedErrs.some((l) => l.includes("could not return its leases")) && !(await noteClaims()).claimed,
+         `a Writer that throws on a worker's "returned N unfinished" line rejects run() with its error, not "could not return its leases" (${freedOutcome})`);
+
+  // The identity's agent line through a Writer that throws: the Writer's
+  // error, not an identity that did not resolve (review pass 2).
+  const idOutcome = await workerIdentity(URL_!, env, { noKeyWarning: "", write: () => { throw new Error("writer boom"); } }).then((r) => (r.ok ? `resolved, agent ${r.identity.agentId ?? "none"}` : r.message), (e: Error) => e.message);
+  assert(idOutcome === "writer boom", `workerIdentity's agent line through a throwing writer rejects with the writer's error (${idOutcome})`);
+
+  // A follower's sleep wakes on a stop: a first stop returns 0, the hard stop
+  // 130 — at once, not when the sleep ends (review pass 2: 19 s, and 0).
+  const followRun = async (stopIt: (stop: PassStop | undefined, ac: AbortController) => void) => {
+    const ac2 = new AbortController();
+    let st: PassStop | undefined;
+    const r = runExtract({ url: URL_!, env, workers: 1, follow: 30, signal: ac2.signal, onPass: (x) => { st = x; }, writer: { out: () => {}, err: () => {} } });
+    await Bun.sleep(1500);
+    const at = Date.now();
+    stopIt(st, ac2);
+    const code = await r;
+    return { code, ms: Date.now() - at };
+  };
+  const followSoft = await followRun((_, ac2) => ac2.abort());
+  const followHard = await followRun((st) => { st?.(); void st?.(); });
+  assert(followSoft.code === 0 && followSoft.ms < 1500 && followHard.code === 130 && followHard.ms < 1500,
+         `a follower asleep wakes on a caller's abort (exit ${followSoft.code} after ${followSoft.ms} ms) and on the hard stop, which is 130 (exit ${followHard.code} after ${followHard.ms} ms)`);
+  // --status reads on under a signal already aborted: it has no pass to stop.
+  const statusAborted = await extractInProcess({ status: true, signal: AbortSignal.abort() });
+  assert(statusAborted.code === 0 && /\n  status: \d+ thoughts/.test(`\n${statusAborted.stdout}`), `--status in-process under an aborted signal reports, exit 0 (exit ${statusAborted.code})`);
   for (const id of notes) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   // run() takes its listener off a caller's signal when it returns: an abort
   // after a (no-op) pass writes nothing more.

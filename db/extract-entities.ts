@@ -171,15 +171,17 @@ const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.js
  * egress policy and the worker key: process.env when absent.
  *
  * `signal` stops the pass as the CLI's first signal does: every worker after
- * the thought in hand, its unfinished claims back to the pool. Aborted before
- * the pass begins, it stops the run before its next write — the agent's
- * registration, the key, a --retry-* statement, the pool — and run() returns
- * 130. `onPass` is called once, as the pass begins — where the CLI installs
- * its signal handlers (stopOnSignals) — with the pass's stop (db/lease.ts's
- * PassStop). Its hard stop returns the leases at once, but run() returns only
- * when the model call in hand does (at most --timeout per window), writing
- * nothing for it; a call after run() has returned does nothing. Neither is
- * used by --status or --dry-run, which have no pass.
+ * the thought in hand, its unfinished claims back to the pool, and wakes a
+ * follower's sleep. Aborted before the pass begins, it stops the run before
+ * its next write — the agent's registration, the key, a --retry-* statement,
+ * the pool — and run() returns 130 (a statement already committed stays so).
+ * `onPass` is called once, as the pass begins — where the CLI installs its
+ * signal handlers (stopOnSignals) — with the pass's stop (db/lease.ts's
+ * PassStop). Its hard stop returns the leases at once and wakes a worker
+ * pausing on a provider error, and run() returns 130 once the model call in
+ * hand does (at most --timeout per window), writing and releasing nothing for
+ * it; a call after run() has returned does nothing. Neither is used by
+ * --status or --dry-run, which have no pass.
  */
 export interface ExtractOptions {
   url?: string;
@@ -295,8 +297,9 @@ export async function run(opts: ExtractOptions): Promise<number> {
       return 2;
     }
   }
-  // A signal aborted before the call: nothing opened, nothing written.
-  if (opts.signal?.aborted) {
+  // A signal aborted before the call: nothing opened, nothing written. --status
+  // and --dry-run have no pass to stop, and read on (review pass 2).
+  if (opts.signal?.aborted && !opts.status && !opts.dryRun) {
     err(STOPPED_EARLY);
     return 130;
   }
@@ -645,6 +648,21 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * again, and may already be another worker's (review pass 1).
    */
   let hardStopped = false;
+  /**
+   * Resolved by the first stop and by the hard stop: a follower's sleep wakes
+   * on the first, a transient pause on the hard, so neither holds run() — nor
+   * sends the thought again after the leases are gone (review pass 2).
+   */
+  let wakeOnStop = () => {};
+  const onStop = new Promise<void>((resolve) => { wakeOnStop = resolve; });
+  let wakeOnHardStop = () => {};
+  const onHardStop = new Promise<void>((resolve) => { wakeOnHardStop = resolve; });
+  /** `ms`, or less when `wake` resolves first; the timer cleared, so none outlives the run. */
+  const sleepUnless = (ms: number, wake: Promise<void>) =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      void wake.then(() => { clearTimeout(timer); resolve(); });
+    });
   let done = 0;
   /** Of `done`, the thoughts extracted over a prefix only (SMD-2240), and those with windows left out as malformed, a prefix of one included, with how many windows (SMD-2260). */
   let partial = 0;
@@ -822,6 +840,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // that key is set, so re-queue under THIS job explicitly (idempotent) rather
     // than leave a lease held on a promise.
     if (res.stale) {
+      // Past the hard stop the row may be another worker's: 016's requeue would
+      // take it from its holder (review pass 2).
+      if (hardStopped) return { outcome: "abandoned" };
       await sql`SELECT requeue_thought_work(${JOB}, ${row.id}::uuid)`;
       return { outcome: "superseded" };
     }
@@ -861,7 +882,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     activeWorkers.add(workerId);
     const hb = startHeartbeat({
       sql, job: JOB, workerId, ttlS: TTL, everyS: HEARTBEAT,
-      onLost: (ids) => errAside(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it, or at its release if it was the row in hand`),
+      onLost: (ids) => { if (!hardStopped) errAside(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it, or at its release if it was the row in hand`); },
       onError: (e, consecutive) => { if (consecutive === 1) errAside(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
     });
     try {
@@ -925,7 +946,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   return;
                 } else if (attempt < TRANSIENT_PAUSES_MS.length && !stopping) {
                   err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
-                  await Bun.sleep(TRANSIENT_PAUSES_MS[attempt]);
+                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onHardStop);
+                  if (hardStopped) return;
                 } else {
                   // Still failing after the pauses. This row is recorded failed
                   // with the error — if the provider is down it is one row per
@@ -1017,13 +1039,16 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     } finally {
       hb.stop();
       beats += hb.beats;
+      let freed = 0;
       try {
-        const [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
-        if (freed > 0 && !FOLLOW) err(`  ${workerId}: returned ${freed} unfinished row(s) to the pool`);
+        [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       } catch (e) {
         err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s`);
       }
       activeWorkers.delete(workerId);
+      // Outside the release's try: a Writer's throw here is the Writer's, not a
+      // lease left unreturned (review pass 2).
+      if (freed > 0 && !FOLLOW) err(`  ${workerId}: returned ${freed} unfinished row(s) to the pool`);
     }
   }
 
@@ -1037,10 +1062,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (detach.aborted) return null;
     if (stopping) {
       hardStopped = true;
+      wakeOnHardStop();
+      wakeOnStop();
+      // Started before the line is written: a Writer that throws does not keep the leases.
+      const release = Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
       err(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
-      return Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
+      return release;
     }
     stopping = true;
+    wakeOnStop();
     err("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)");
     return null;
   };
@@ -1049,6 +1079,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   const abort = () => {
     if (stopping) return;
     stopping = true;
+    wakeOnStop();
     errAside("\n  stopping after the current thought; unfinished claims go back to the pool");
   };
   if (stoppedEarly()) return 130;
@@ -1131,7 +1162,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     say();
     // "This many thoughts, then stop" holds while following too.
     while (!stopping && !limitReached()) {
-      await Bun.sleep(FOLLOW * 1000);
+      await sleepUnless(FOLLOW * 1000, onStop);
       if (stopping) break;
       after = await pass();
       say();
@@ -1170,7 +1201,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // The alarm before the failures: a model at fault explains them, and
   // --retry-failed under it would fail them again. Leased and pending rows keep
   // their own lines below.
-  const exitCode = configError ? 2 : stopping ? (FOLLOW ? 0 : 130) : alarms > 0 ? 3 : incomplete ? 1 : 0;
+  // A follower stopped exits 0 — unless hard-stopped, which is a signal's 130 (review pass 2).
+  const exitCode = configError ? 2 : stopping ? (FOLLOW && !hardStopped ? 0 : 130) : alarms > 0 ? 3 : incomplete ? 1 : 0;
   if (alarmLine) err(`${alarmLine} ${exitCode === 3 ? "Exiting 3." : `Exiting ${exitCode}, not 3: ${exitCode === 2 ? "the provider refused the request itself (below)" : "stopped by a signal"}.`}`);
   printCounts(after, "after");
   await printGraph();
@@ -1217,6 +1249,10 @@ if (import.meta.main) {
   // One connection per worker and a spare (run()'s rule), opened lazily: a
   // refusal before the first query opens none.
   const sql = openSql(url, { max: workers + 1 });
+  // The signal handlers go when run() settles: a signal while the door closes
+  // the pool and flushes ends the process, as one before the pass does,
+  // rather than reaching a stop with no pass left (review pass 2).
+  let uninstall = () => {};
   await closeThenExit(sql, async () => {
     return run({
       sql, url, workers, batch, ttl, heartbeat, timeout, limit, follow,
@@ -1229,7 +1265,7 @@ if (import.meta.main) {
       retryPartial: cli.has("retry-partial"),
       retryLeftOut: cli.has("retry-left-out"),
       decide: cli.has("decide"),
-      onPass: (stop) => { stopOnSignals(stop); },
-    });
+      onPass: (stop) => { uninstall = stopOnSignals(stop); },
+    }).finally(() => uninstall());
   });
 }

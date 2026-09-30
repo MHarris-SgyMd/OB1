@@ -256,9 +256,10 @@ export function startHeartbeat(opts: {
  * thought in hand, their unfinished claims going back to the pool, and returns
  * null. A call made while the pass is already stopping — a second call, or the
  * first after the provider's refusal stopped the workers itself — is the hard
- * stop: it returns the release of every worker's leases, after which the
- * workers write and release nothing more, and the CLI ends the process when
- * it settles (stopOnSignals). A call after the run has returned does nothing.
+ * stop: it returns the release of every worker's leases, after which a worker
+ * writes nothing more nor releases the thought in hand (each still returns
+ * its own leases as it ends), and the CLI ends the process when it settles
+ * (stopOnSignals). A call after the run has returned does nothing.
  */
 export type PassStop = () => Promise<unknown> | null;
 
