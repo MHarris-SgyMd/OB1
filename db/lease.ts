@@ -250,6 +250,9 @@ export function startHeartbeat(opts: {
   return hb;
 }
 
+/** What an engine's run() says when a caller's signal was aborted before its pass began (SMD-2304). */
+export const STOPPED_EARLY = "\n  stopped before the pass began: the caller's signal was aborted; nothing was claimed";
+
 /**
  * Wait `ms`, or less when `wake` aborts first — a stop waking a follower's
  * poll or a pause on a provider error (SMD-2304). Nothing is kept once it

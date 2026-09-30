@@ -41,6 +41,7 @@ import { workerIdentity } from "./worker-bootstrap.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { run as runExtract, type ExtractOptions } from "./extract-entities.ts";
+import { run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
@@ -95,6 +96,11 @@ async function migrateInProcess(opts: Omit<MigrateOptions, "writer"> = {}): Prom
 /** An in-process run and a spawned one agree: exit code, stdout and stderr, each byte for byte. */
 function same(a: { code: number; stdout: string; stderr: string }, b: { code: number; stdout: string; stderr: string }): boolean {
   return a.code === b.code && a.stdout === b.stdout && a.stderr === b.stderr;
+}
+
+/** A run with its wall-clock seconds masked ("in 0.4s", "0.0s in 0 model call(s)"): two runs that did the same compare byte for byte. */
+function untimed(r: { code: number; stdout: string; stderr: string }): { code: number; stdout: string; stderr: string } {
+  return { code: r.code, stdout: r.stdout.replace(/\d+\.\d+s\b/g, "<s>"), stderr: r.stderr.replace(/\d+\.\d+s\b/g, "<s>") };
 }
 
 const unit = (i: number) => {
@@ -3237,8 +3243,6 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
     return { code, stdout: lines(outs), stderr: lines(errs) };
   };
-  /** A run with its wall-clock seconds masked ("in 0.4s", "0.0s in 0 model call(s)"): two runs that did the same compare byte for byte. */
-  const untimed = (r: { code: number; stdout: string; stderr: string }) => ({ code: r.code, stdout: r.stdout.replace(/\d+\.\d+s\b/g, "<s>"), stderr: r.stderr.replace(/\d+\.\d+s\b/g, "<s>") });
   const graph = async () => (await sql`
     SELECT (SELECT count(*)::int FROM ob1_entities) AS entities,
            (SELECT count(*)::int FROM thought_entities) AS mentions,
@@ -3526,7 +3530,10 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // no pass going on behind the rejection (review pass 1).
   for (let i = 0; i < 6; i++) notes.push(await seed(`A thrown note, number ${i}.`));
   slowMs = 300;
-  const thrownAt = await runExtract({ url: URL_!, env, workers: 2, writer: { out: (l) => { if (/^  \d+\/\d+  /.test(l)) throw new Error("writer boom"); }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+  // It throws once: thrown on every progress line, the other worker met its own throw
+  // 3 s later and stopped whether or not the rest are stopped (SMD-2304 PR 3, mutant).
+  let threwOnce = false;
+  const thrownAt = await runExtract({ url: URL_!, env, workers: 2, writer: { out: (l) => { if (!threwOnce && /^  \d+\/\d+  /.test(l)) { threwOnce = true; throw new Error("writer boom"); } }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
   const rightAfter = await noteClaims();
   await Bun.sleep(1200);
   const later2 = await noteClaims();
@@ -3592,7 +3599,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     await Bun.sleep(1500);
     const at = Date.now();
     stopIt(st, ac2);
-    const code = await r;
+    // A stop that does not reach the follower fails here rather than hanging the suite.
+    const code = await Promise.race([r, Bun.sleep(10_000).then(() => -1)]);
     return { code, ms: Date.now() - at };
   };
   const followSoft = await followRun((_, ac2) => ac2.abort());
@@ -4273,6 +4281,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   // While set, every verdict takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
   let slowMs = 0;
+  /** Awaited inside each judge call, when set (SMD-2304: a reviewer racing the pass's settle). */
+  let onJudge: (() => Promise<void>) | null = null;
+  /** While above zero, the next judge calls answer 503 at once — a transient error the worker pauses on (SMD-2304). */
+  let judgeUnavailable = 0;
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -4283,6 +4295,12 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
       const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
       seen.push({ a, b });
+      if (judgeUnavailable > 0) {
+        judgeUnavailable--;
+        return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      }
+      // Run during the call, before the verdict: a reviewer's decision racing the pass.
+      if (onJudge) await onJudge();
       await Bun.sleep(5 + slowMs);
       if (hemlockIsProse && /hemlock/.test(a + b)) return Response.json({ choices: [{ message: { content: "I'd rather not say." } }] });
       let answer: Record<string, unknown>;
@@ -4332,8 +4350,15 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     MCP_ACCESS_KEYS: `consolidator:write:${hashKey(rawKey)}`,
   };
   const dump = `/tmp/ob1-consolidate-test-${process.pid}.jsonl`;
-  const consolidate = (...extra: string[]): Promise<{ code: number; out: string }> =>
+  const consolidate = (...extra: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> =>
     runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, ...extra], { env: env as Record<string, string>, cwd: HERE });
+  /** consolidate.ts's run() in this process (SMD-2304) under the spawned worker's environment, its lines per stream as a child's are. */
+  const consolidateInProcess = async (opts: Omit<ConsolidateOptions, "writer"> = {}): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const outs: string[] = [], errs: string[] = [];
+    const code = await runConsolidate({ url: URL_!, env, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, stdout: lines(outs), stderr: lines(errs) };
+  };
   const claimCounts = async () =>
     Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} GROUP BY status`)
       .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
@@ -4348,6 +4373,9 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
          `--dry-run counts the eleven thoughts with entities and a vector — not the one without entities, nor the one without a vector — and writes nothing (exit ${dry.code}: ${dry.out.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 300)})`);
   assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0 && (await proposals()).length === 0, "…no claim row, no proposal");
   assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'consolidator'`)[0].c === 0, "…and it did not register the worker's agent either");
+  // The same dry run through run() in this process (SMD-2304).
+  const dryC = await consolidateInProcess({ dryRun: true });
+  assert(same(dryC, dry), `consolidate run() in-process prints the spawned --dry-run's stdout and stderr byte for byte, with its exit code (${dryC.code})`);
   const shortLease = await consolidate("--ttl", "3", "--heartbeat", "2");
   assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out), "a lease under two heartbeats is refused (migration 031)");
   const bigBatch = await consolidate("--dry-run", "--batch", "4", "--k", "5", "--timeout", "120");
@@ -4445,8 +4473,15 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const status = await consolidate("--status");
   assert(status.code === 0 && /11 thoughts with entities — 10 judged, 1 failed/.test(status.out) && /queue: 2 pending \(1 without a direction\), 0 accepted, 0 rejected/.test(status.out),
          `--status reports the pass and the queue (${status.out.split("\n").filter((l) => /status:|queue:/.test(l)).join(" | ").trim()})`);
+  // …and on a caller's client, in-process: the same lines, the client open after.
+  const callerC = new SQL({ url: URL_, max: 3 });
+  const statusC = await consolidateInProcess({ status: true, sql: callerC });
+  assert(same(statusC, status) && (await callerC`SELECT 1 AS one`)[0].one === 1, `consolidate run() --status on a caller's client prints the spawned --status byte for byte, and leaves the client open (exit ${statusC.code})`);
+  await callerC.close();
   const second = await consolidate();
   assert(second.code === 1 && /0 thought\(s\) judged, 0 failed/.test(second.out) && calls === callsAfterFirst, "a second run has nothing to judge, makes no call, and still exits 1 for the failed row");
+  const secondC = await consolidateInProcess();
+  assert(same(untimed(secondC), untimed(second)) && calls === callsAfterFirst, `…and run() in-process prints what the spawned run printed, stream by stream, its seconds aside (exit ${secondC.code})`);
 
   // --list prints both thoughts, the IDs, and the decision each row takes.
   const list = await consolidate("--list");
@@ -4454,10 +4489,14 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
          "--list names both verdicts");
   assert(list.out.includes(`ID: ${reversal}`) && list.out.includes(`ID: ${decision}`) && list.out.includes(`--accept ${directed.id}`) && list.out.includes(`--accept ${undirected.id} --direction <newer|older>`),
          "…with the thought ids and the accept command, asking for a direction where the judge gave none");
+  const listC = await consolidateInProcess({ list: "pending" });
+  assert(same(listC, list), `consolidate run() in-process lists the queue as the spawned --list does, byte for byte (exit ${listC.code})`);
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);
   assert(needDir.code === 1 && /pass --direction newer or --direction older/.test(needDir.out), "accepting the undirected proposal without a direction is refused with the fix");
+  const needDirC = await consolidateInProcess({ accept: undirected.id });
+  assert(same(needDirC, needDir), `…and run() in-process refuses it in the same words, on the same streams (exit ${needDirC.code})`);
   assert((await supersedesOf(green)) === null, "…and nothing was written");
   const accUndirected = await consolidate("--accept", undirected.id, "--direction", "newer");
   assert(accUndirected.code === 0 && new RegExp(`accepted ${undirected.id}: ${green} now supersedes ${blue}`).test(accUndirected.out), "…with a direction it is accepted");
@@ -4829,6 +4868,205 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(/older \[infinity\]/.test(oddList.out) && /newer \[undated\]/.test(oddList.out),
            `…the CLI's day() renders infinity and NULL as their own text (${oddList.out.split("\n").filter((l) => /\[(infinity|undated|Invalid|1970)/.test(l)).join(" | ").slice(0, 200)})`);
     assert(!/\[1970-01-01\]/.test(oddList.out) && !/Invalid Date/.test(oddList.out), "…and fabricates no epoch date");
+  }
+
+  // Stopping a pass (SMD-2304). Twelve pairs, each an older and a newer
+  // thought sharing an entity and a vector axis, so every newer thought costs
+  // one judge call; the older have nothing older and cost none. One worker
+  // and slow verdicts: a stop lands while a call is in hand.
+  {
+    await consolidate();
+    const pairs: { older: string; newer: string }[] = [];
+    for (let i = 0; i < 12; i++) pairs.push({ older: await seed(`signal pair ${i}, the first`, 40 + i, 3, [`sigpair-${i}`]), newer: await seed(`signal pair ${i}, the second`, 40 + i, 0, [`sigpair-${i}`]) });
+    const ids = pairs.flatMap((q) => [q.older, q.newer]);
+    const newers = pairs.map((q) => q.newer);
+    const sigClaims = async () =>
+      Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[]) GROUP BY status`)
+        .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
+    const judgedNewers = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'succeeded' AND thought_id = ANY(${sql.array(newers, "TEXT")}::uuid[])`)[0].c);
+    // In hand: a claim held and its judge call at the stub.
+    const inHand = async (from: number) => { for (let i = 0; i < 100 && !((await sigClaims()).claimed === 1 && calls > from); i++) await Bun.sleep(50); };
+    const proposalsBefore = (await proposals()).length;
+
+    // A caller's AbortSignal: every worker after the thought in hand, run() 130.
+    slowMs = 600;
+    const ac = new AbortController();
+    const softFrom = calls;
+    const softRun = consolidateInProcess({ workers: 1, signal: ac.signal });
+    await inHand(softFrom);
+    const softJudged = await judgedNewers();
+    ac.abort();
+    const soft = await softRun;
+    const afterSoft = await sigClaims();
+    assert(soft.code === 130 && soft.stderr.includes("\n  stopping after the current thought; unfinished claims go back to the pool\n") && !afterSoft.claimed && (await judgedNewers()) === softJudged + 1,
+           `a caller's AbortSignal stops consolidate's pass after the thought in hand, and run() returns 130 (exit ${soft.code}, claims ${JSON.stringify(afterSoft)})`);
+
+    // The hard stop aborts the judge's call in hand: run() returns at once,
+    // the thought abandoned — no verdict written, no claim left.
+    slowMs = 5000;
+    let hardStop: PassStop | undefined;
+    const hardFrom = calls;
+    const judgedBeforeHard = await judgedNewers();
+    const hardRun = consolidateInProcess({ workers: 1, onPass: (x) => { hardStop = x; } });
+    await inHand(hardFrom);
+    hardStop?.();
+    const hardAt = Date.now();
+    await hardStop?.();
+    const hard = await hardRun;
+    const hardMs = Date.now() - hardAt;
+    assert(hard.code === 130 && hardMs < 1500 && !(await sigClaims()).claimed && (await judgedNewers()) === judgedBeforeHard && (await proposals()).length === proposalsBefore && hard.stderr.includes("second signal — exiting now") && hardStop?.() === null,
+           `the hard stop aborts the judge's call in hand: run() returns 130 at once, the thought abandoned, nothing written, and the stop inert after (exit ${hard.code} after ${hardMs} ms)`);
+
+    // The CLI's signals: one SIGINT after the thought in hand, two at once.
+    const cliRun = () => Bun.spawn(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    slowMs = 600;
+    const onceFrom = calls;
+    const once = cliRun();
+    await inHand(onceFrom);
+    const onceJudged = await judgedNewers();
+    once.kill("SIGINT");
+    const [, onceErr] = await Promise.all([new Response(once.stdout).text(), new Response(once.stderr).text()]);
+    const onceCode = await once.exited;
+    assert(onceCode === 130 && onceErr.includes("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)\n") && (await judgedNewers()) === onceJudged + 1 && !(await sigClaims()).claimed,
+           `one SIGINT stops consolidate's CLI after the thought in hand and exits 130 (exit ${onceCode})`);
+    slowMs = 5000;
+    const twiceFrom = calls;
+    const twice = cliRun();
+    await inHand(twiceFrom);
+    twice.kill("SIGINT");
+    await Bun.sleep(100);
+    const twiceAt = Date.now();
+    twice.kill("SIGINT");
+    const [, twiceErr] = await Promise.all([new Response(twice.stdout).text(), new Response(twice.stderr).text()]);
+    const twiceCode = await twice.exited;
+    const twiceMs = Date.now() - twiceAt;
+    assert(twiceCode === 130 && twiceErr.includes("second signal — exiting now") && twiceMs < 2500 && !(await sigClaims()).claimed,
+           `a second SIGINT exits consolidate's CLI 130 at once, its lease returned (exit ${twiceCode} after ${twiceMs} ms)`);
+    slowMs = 0;
+
+    // A signal aborted during start-up: at the egress line the key is never
+    // resolved; at the agent line --retry-failed's statement never runs, and
+    // the failed row stays failed.
+    const failedPair = pairs[11].newer;
+    await sql`UPDATE thought_work_claims SET status = 'failed', last_error = 'planted', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${KEY} AND thought_id = ${failedPair}::uuid`;
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, last_error, finished_at) SELECT ${failedPair}::uuid, ${KEY}, 'failed', 'planted', now() WHERE NOT EXISTS (SELECT 1 FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${failedPair}::uuid)`;
+    const startUp = async (at: string) => {
+      const ac2 = new AbortController();
+      const outs: string[] = [], errs: string[] = [];
+      const code = await runConsolidate({ url: URL_!, env, retryFailed: true, signal: ac2.signal, writer: { out: (l) => { outs.push(l); if (l.startsWith(at)) ac2.abort(); }, err: (l) => errs.push(l) } });
+      const [{ status: st }] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${failedPair}::uuid`;
+      return { code, st, agent: outs.some((l) => l.startsWith("  agent:")), said: errs.some((l) => l.includes("stopped before the pass began")) };
+    };
+    const atEgress = await startUp("  egress:");
+    const atAgent = await startUp("  agent:");
+    assert(atEgress.code === 130 && atEgress.said && !atEgress.agent && atEgress.st === "failed" && atAgent.code === 130 && atAgent.said && atAgent.agent && atAgent.st === "failed",
+           `a signal aborted during consolidate's start-up stops it before the key resolves (${JSON.stringify(atEgress)}) and before --retry-failed's statement (${JSON.stringify(atAgent)})`);
+
+    // A follower's sleep wakes on a stop: a first stop 0, the hard stop 130, at once.
+    const followRun = async (stopIt: (st: PassStop | undefined, ac2: AbortController) => void) => {
+      const ac2 = new AbortController();
+      let st: PassStop | undefined;
+      const r = runConsolidate({ url: URL_!, env, workers: 1, follow: 30, signal: ac2.signal, onPass: (x) => { st = x; }, writer: { out: () => {}, err: () => {} } });
+      for (let i = 0; i < 100 && (await sigClaims()).pending; i++) await Bun.sleep(50);
+      await Bun.sleep(500);
+      const at = Date.now();
+      stopIt(st, ac2);
+      // A stop that does not reach the follower fails here rather than hanging
+      // the suite: report() exits whatever still polls.
+      const code = await Promise.race([r, Bun.sleep(10_000).then(() => -1)]);
+      return { code, ms: Date.now() - at };
+    };
+    const followSoft = await followRun((_, ac2) => ac2.abort());
+    const followHard = await followRun((st) => { st?.(); void st?.(); });
+    assert(followSoft.code === 0 && followSoft.ms < 1500 && followHard.code === 130 && followHard.ms < 1500,
+           `consolidate's follower asleep wakes on a caller's abort (exit ${followSoft.code} after ${followSoft.ms} ms) and on the hard stop, 130 (exit ${followHard.code} after ${followHard.ms} ms)`);
+
+    // A Writer that throws in one worker stops the other and rejects run()
+    // with its error once it has, nothing left claimed or going on after.
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+    // A Writer that throws on the line naming the rows a worker returned is the
+    // Writer's error, not a lease left unreturned: run() rejects with it, and the
+    // rows are back in the pool. Four per claim, a call in hand and others held.
+    slowMs = 600;
+    const freedAc = new AbortController();
+    const freedErrs: string[] = [];
+    const freedFrom = calls;
+    const freedRun = runConsolidate({ url: URL_!, env, workers: 1, batch: 4, signal: freedAc.signal, writer: { out: () => {}, err: (l) => { if (/returned \d+ unfinished row\(s\)/.test(l)) throw new Error("writer boom"); freedErrs.push(l); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+    for (let i = 0; i < 100 && !(((await sigClaims()).claimed ?? 0) >= 2 && calls > freedFrom); i++) await Bun.sleep(50);
+    freedAc.abort();
+    const freedOutcome = await freedRun;
+    assert(freedOutcome === "writer boom" && !freedErrs.some((l) => l.includes("could not return its leases")) && !(await sigClaims()).claimed,
+           `a Writer that throws on a consolidate worker's "returned N unfinished" line rejects run() with its error, not "could not return its leases" (${freedOutcome})`);
+    slowMs = 300;
+    // It throws once, so the other worker stops only if the rest are stopped.
+    let threwOnce = false;
+    const thrown = await runConsolidate({ url: URL_!, env, workers: 2, writer: { out: (l) => { if (!threwOnce && /^  \d+\/\d+  /.test(l)) { threwOnce = true; throw new Error("writer boom"); } }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+    const rightAfter = await sigClaims();
+    await Bun.sleep(1200);
+    const later = await sigClaims();
+    slowMs = 0;
+    assert(thrown === "writer boom" && !rightAfter.claimed && (rightAfter.pending ?? 0) > 0 && JSON.stringify(rightAfter) === JSON.stringify(later),
+           `a Writer that throws in one of consolidate's workers stops the other and rejects run(), nothing claimed or going on after (${thrown}; ${JSON.stringify(rightAfter)} → ${JSON.stringify(later)})`);
+    // A Writer that throws inside processRow — on the pass's "not settled"
+    // line, a reviewer having rejected the stale row during the judge's call —
+    // is the Writer's error: run() rejects with it, and the claim does not
+    // record it as the thought's failure (review pass 1: last_error = "writer boom").
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+    await consolidate();
+    const [{ id: racedId }] = await sql`SELECT record_supersession_proposal(${pairs[0].older}::uuid, ${pairs[0].newer}::uuid, 'newer_supersedes_older', 0.8, 'raced', 0.9, ${KEY}, NULL) AS id`;
+    await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${racedId}::uuid`;
+    onJudge = async () => { await sql`UPDATE supersession_proposals SET status = 'rejected', review_note = 'by a reviewer, mid-pass', reviewed_at = now() WHERE id = ${racedId}::uuid`; };
+    const racedOutcome = await runConsolidate({ url: URL_!, env, workers: 1, writer: { out: () => {}, err: (l) => { if (/not settled/.test(l)) throw new Error("writer boom"); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+    onJudge = null;
+    const [racedClaim] = await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${pairs[0].newer}::uuid`;
+    assert(racedOutcome === "writer boom" && racedClaim !== undefined && racedClaim.last_error !== "writer boom" && racedClaim.status !== "claimed",
+           `a Writer that throws inside processRow (the "not settled" line of a raced stale row) rejects run() with its error, not recorded as the thought's failure (${racedOutcome}; claim ${JSON.stringify(racedClaim)})`);
+    // A decision is a write: a signal aborted as it starts stops it before the
+    // key resolves (at the job line: no agent line), and one aborted as the key
+    // resolves stops it before the decision (the proposal still pending, no
+    // pointer written) — review pass 1.
+    const [{ id: pendingId }] = await sql`SELECT record_supersession_proposal(${pairs[1].older}::uuid, ${pairs[1].newer}::uuid, 'newer_supersedes_older', 0.8, 'to decide', 0.9, ${KEY}, NULL) AS id`;
+    const decideAborted = async (at: string) => {
+      const ac2 = new AbortController();
+      const outs: string[] = [];
+      const code = await runConsolidate({ url: URL_!, env, accept: pendingId, signal: ac2.signal, writer: { out: (l) => { outs.push(l); if (l.startsWith(at)) ac2.abort(); }, err: () => {} } });
+      const [{ status: st }] = await sql`SELECT status FROM supersession_proposals WHERE id = ${pendingId}::uuid`;
+      return { code, st, agent: outs.some((l) => l.startsWith("  agent:")), pointer: await supersedesOf(pairs[1].newer) };
+    };
+    const atJob = await decideAborted("  job:");
+    const atKey = await decideAborted("  agent:");
+    assert(atJob.code === 130 && !atJob.agent && atJob.st === "pending" && atKey.code === 130 && atKey.agent && atKey.st === "pending" && atKey.pointer === null,
+           `a decision aborted as it starts resolves no key (${JSON.stringify(atJob)}), and one aborted as the key resolves writes no decision (${JSON.stringify(atKey)})`);
+
+    // The hard stop wakes a worker pausing on a provider error: run() back at
+    // once, and the pair not judged again after the leases are gone — held on
+    // extract in [10], and here on consolidate's own wiring (review pass 3).
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+    judgeUnavailable = 100;
+    let pauseStop: PassStop | undefined;
+    const pauseFrom = calls;
+    const pauseErrs: string[] = [];
+    const pauseRun = runConsolidate({ url: URL_!, env, workers: 1, onPass: (x) => { pauseStop = x; }, writer: { out: () => {}, err: (l) => pauseErrs.push(l) } });
+    for (let i = 0; i < 100 && !(calls > pauseFrom && pauseErrs.some((l) => l.includes("provider unavailable"))); i++) await Bun.sleep(50);
+    pauseStop?.();
+    const pauseRelease = pauseStop?.();
+    const pauseAt = Date.now(), callsAtStop = calls;
+    const pauseCode = await pauseRun;
+    const pauseMs = Date.now() - pauseAt;
+    await pauseRelease;
+    judgeUnavailable = 0;
+    assert(pauseCode === 130 && pauseMs < 1500 && calls === callsAtStop && !(await sigClaims()).claimed,
+           `a hard stop during a consolidate worker's provider-error pause returns 130 at once, judging nothing more (exit ${pauseCode} after ${pauseMs} ms, ${calls - callsAtStop} call(s) after the stop)`);
+
+    // run() takes its listener off a caller's signal when it returns: an abort
+    // after the run writes nothing more (review pass 3, as [10] holds for extract).
+    const afterRun = new AbortController();
+    const afterErrs: string[] = [];
+    const afterCode = await runConsolidate({ url: URL_!, env, workers: 1, signal: afterRun.signal, writer: { out: () => {}, err: (l) => afterErrs.push(l) } });
+    const afterBefore = afterErrs.length;
+    afterRun.abort();
+    assert(afterCode !== 130 && afterErrs.length === afterBefore, `…and an abort after consolidate's run() has returned writes nothing: its listener went with it (exit ${afterCode}, ${afterErrs.length - afterBefore} line(s) after)`);
+    for (const id of ids) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   judge.stop(true);

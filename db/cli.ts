@@ -109,7 +109,9 @@ export interface CommandLine<K extends string = string> extends Args<K> {
  * a caller reading the stream live sees each as it happens. The CLI passes
  * consoleWriter; a caller that drives an engine in-process passes its own and
  * captures them. A writer should not throw; one that does makes the engine's
- * run() reject with its error — what the run had done by then stays done.
+ * run() reject with its error — what the run had done by then stays done. Its
+ * calls are synchronous: a promise it returns is not awaited, and one that
+ * rejects is the host's unhandled rejection.
  */
 export interface Writer {
   out(line: string): void;
@@ -220,13 +222,24 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
 export function readNumber(flag: string, raw: string, rule: { min: number; max?: number; fraction?: boolean }): number | { error: string } {
   const shape = rule.fraction ? /^-?(\d+(\.\d*)?|\.\d+)$/ : /^-?\d+$/;
   const n = shape.test(raw) ? Number(raw) : NaN;
-  if (!Number.isFinite(n) || n < rule.min || (rule.max !== undefined && n > rule.max)) {
+  const problem = numberProblem(flag, n, rule);
+  return problem === null ? n : { error: problem };
+}
+
+/**
+ * readNumber's rule over a number already read — an engine's option, passed
+ * in-process (SMD-2304) — in the scanner's words: out of range, not finite or
+ * (for an integer) fractional is refused as the flag's rule; in range but past
+ * 2^53 an integer is not exact ("9007199254740993" reads as ...992). Null when
+ * it holds. Judged by value, so 1e-7 is a decimal number as "0.0000001" is.
+ */
+export function numberProblem(flag: string, n: number, rule: { min: number; max?: number; fraction?: boolean }): string | null {
+  if (typeof n !== "number" || !Number.isFinite(n) || n < rule.min || (rule.max !== undefined && n > rule.max) || (!rule.fraction && !Number.isInteger(n))) {
     const kind = rule.fraction ? "a decimal number" : "a decimal integer";
-    return { error: `${flag} must be ${kind} >= ${rule.min}${rule.max !== undefined ? ` and <= ${rule.max}` : ""}` };
+    return `${flag} must be ${kind} >= ${rule.min}${rule.max !== undefined ? ` and <= ${rule.max}` : ""}`;
   }
-  // In range but past 2^53, an integer is not read exactly: "9007199254740993" is 9007199254740992.
-  if (!rule.fraction && !Number.isSafeInteger(n)) return { error: `${flag} is too large to read exactly` };
-  return n;
+  if (!rule.fraction && !Number.isSafeInteger(n)) return `${flag} is too large to read exactly`;
+  return null;
 }
 
 /**
