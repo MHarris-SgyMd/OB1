@@ -132,8 +132,8 @@ import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractio
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, sleepUnless, startHeartbeat, stopOnSignals, type PassStop } from "./lease.ts";
-import { commandLine, consoleWriter, flagList, readNumber, type Writer } from "./cli.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
 
@@ -221,8 +221,8 @@ type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number;
 function numbers(opts: ExtractOptions): Numbers | string {
   const read = (flag: string, v: number | null | undefined, absent: number): number | string => {
     if (v == null) return absent;
-    const n = readNumber(flag, String(v), { min: 1 });
-    return typeof n === "number" ? n : `${n.error}\n${flagList(FLAGS, HINTS)}`;
+    const problem = numberProblem(flag, v, { min: 1 });
+    return problem === null ? v : `${problem}\n${flagList(FLAGS, HINTS)}`;
   };
   const workers = read("--workers", opts.workers, 2);
   if (typeof workers === "string") return workers;
@@ -314,9 +314,6 @@ export async function run(opts: ExtractOptions): Promise<number> {
     if (opts.sql == null) await sql.close().catch(() => {});
   }
 }
-
-/** What run() says when a caller's signal was aborted before the pass began (review pass 1). */
-const STOPPED_EARLY = "\n  stopped before the pass began: the caller's signal was aborted; nothing was claimed";
 
 /** The run once its options are settled: the script's body as it was, printing through the Writer and returning where it exited. */
 async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out: Writer["out"], err: Writer["err"], detach: AbortSignal): Promise<number> {

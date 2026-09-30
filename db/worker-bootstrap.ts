@@ -12,9 +12,9 @@
  *
  * These functions RETURN their outcome — a refusal string, or null when at
  * least one call would go through — and never call process.exit or touch the
- * sql client. extract-entities.ts's importable run() turns the result into a
- * return code (SMD-2304); consolidate.ts and reembed.ts still exit on it until
- * they are engines. Banners are returned as
+ * sql client. extract-entities.ts's and consolidate.ts's importable run()
+ * turn the result into a return code (SMD-2304); reembed.ts still exits on it
+ * until it is an engine. Banners are returned as
  * strings for the caller to print with its own label and spacing.
  */
 
