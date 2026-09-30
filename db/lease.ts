@@ -251,6 +251,26 @@ export function startHeartbeat(opts: {
 }
 
 /**
+ * Wait `ms`, or less when `wake` aborts first — a stop waking a follower's
+ * poll or a pause on a provider error (SMD-2304). Nothing is kept once it
+ * returns: the timer is cleared on a wake and the listener removed on the
+ * timer, so a follower polling for days holds no more than one (review pass
+ * 3: a promise's `.then` per sleep kept ~430 bytes each until a stop).
+ */
+export function sleepUnless(ms: number, wake: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (wake.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      wake.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    wake.addEventListener("abort", done, { once: true });
+  });
+}
+
+/**
  * A pass's stop, as a claim worker's engine hands it to its caller when the
  * pass begins (SMD-2304). The first call asks every worker to stop after the
  * thought in hand, their unfinished claims going back to the pool, and returns

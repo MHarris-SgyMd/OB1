@@ -349,6 +349,34 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   ok(listenerCounts() === before, `the uninstall takes both handlers off (${before} → ${listenerCounts()})`);
 }
 
+// ---------------------------------------------------------------------------
+// db/lease.ts's sleepUnless: a stop wakes it, and a follower's thousands of
+// polls keep nothing (review pass 3: a `.then` per sleep kept ~430 bytes each).
+// ---------------------------------------------------------------------------
+{
+  const { sleepUnless } = await import("./lease.ts");
+  const wake = new AbortController();
+  const t0 = Date.now();
+  const long = sleepUnless(10_000, wake.signal);
+  setTimeout(() => wake.abort(), 30);
+  await long;
+  const woke = Date.now() - t0;
+  ok(woke < 500, `sleepUnless wakes when its signal aborts, not at its end (${woke} ms of 10000)`);
+  const t1 = Date.now();
+  await sleepUnless(10_000, wake.signal);
+  ok(Date.now() - t1 < 50, "…and returns at once on a signal already aborted");
+  const never = new AbortController();
+  const t2 = Date.now();
+  await sleepUnless(40, never.signal);
+  ok(Date.now() - t2 >= 35, "…and waits its time out when nothing aborts");
+  Bun.gc(true);
+  const before = process.memoryUsage().heapUsed;
+  for (let i = 0; i < 20_000; i++) await sleepUnless(0, never.signal);
+  Bun.gc(true);
+  const grew = process.memoryUsage().heapUsed - before;
+  ok(grew < 2_000_000, `20,000 sleeps on a signal that never aborts keep nothing (${(grew / 1e6).toFixed(2)} MB of heap after, under 2)`);
+}
+
 listener.stop(true);
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

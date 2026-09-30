@@ -132,7 +132,7 @@ import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractio
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat, stopOnSignals, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, sleepUnless, startHeartbeat, stopOnSignals, type PassStop } from "./lease.ts";
 import { commandLine, consoleWriter, flagList, readNumber, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -178,8 +178,8 @@ const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.js
  * `onPass` is called once, as the pass begins — where the CLI installs its
  * signal handlers (stopOnSignals) — with the pass's stop (db/lease.ts's
  * PassStop). Its hard stop returns the leases at once and wakes a worker
- * pausing on a provider error, and run() returns 130 once the model call in
- * hand does (at most --timeout per window), writing and releasing nothing for
+ * pausing on a provider error, and run() returns 130 (2 after the provider's
+ * refusal) once the model call in hand does (at most --timeout per window), writing and releasing nothing for
  * it; a call after run() has returned does nothing. Neither is used by
  * --status or --dry-run, which have no pass.
  */
@@ -649,20 +649,13 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    */
   let hardStopped = false;
   /**
-   * Resolved by the first stop and by the hard stop: a follower's sleep wakes
+   * Aborted by the first stop and by the hard stop: a follower's sleep wakes
    * on the first, a transient pause on the hard, so neither holds run() — nor
-   * sends the thought again after the leases are gone (review pass 2).
+   * sends the thought again after the leases are gone (review pass 2) —
+   * through db/lease.ts's sleepUnless, which keeps nothing per sleep (pass 3).
    */
-  let wakeOnStop = () => {};
-  const onStop = new Promise<void>((resolve) => { wakeOnStop = resolve; });
-  let wakeOnHardStop = () => {};
-  const onHardStop = new Promise<void>((resolve) => { wakeOnHardStop = resolve; });
-  /** `ms`, or less when `wake` resolves first; the timer cleared, so none outlives the run. */
-  const sleepUnless = (ms: number, wake: Promise<void>) =>
-    new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      void wake.then(() => { clearTimeout(timer); resolve(); });
-    });
+  const onStop = new AbortController();
+  const onHardStop = new AbortController();
   let done = 0;
   /** Of `done`, the thoughts extracted over a prefix only (SMD-2240), and those with windows left out as malformed, a prefix of one included, with how many windows (SMD-2260). */
   let partial = 0;
@@ -946,7 +939,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   return;
                 } else if (attempt < TRANSIENT_PAUSES_MS.length && !stopping) {
                   err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
-                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onHardStop);
+                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onHardStop.signal);
                   if (hardStopped) return;
                 } else {
                   // Still failing after the pauses. This row is recorded failed
@@ -1062,15 +1055,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (detach.aborted) return null;
     if (stopping) {
       hardStopped = true;
-      wakeOnHardStop();
-      wakeOnStop();
+      onHardStop.abort();
+      onStop.abort();
       // Started before the line is written: a Writer that throws does not keep the leases.
       const release = Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
       err(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
       return release;
     }
     stopping = true;
-    wakeOnStop();
+    onStop.abort();
     err("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)");
     return null;
   };
@@ -1079,7 +1072,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   const abort = () => {
     if (stopping) return;
     stopping = true;
-    wakeOnStop();
+    onStop.abort();
     errAside("\n  stopping after the current thought; unfinished claims go back to the pool");
   };
   if (stoppedEarly()) return 130;
@@ -1162,7 +1155,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     say();
     // "This many thoughts, then stop" holds while following too.
     while (!stopping && !limitReached()) {
-      await sleepUnless(FOLLOW * 1000, onStop);
+      await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
       after = await pass();
       say();
