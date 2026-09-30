@@ -255,20 +255,30 @@ export function startHeartbeat(opts: {
  * poll or a pause on a provider error (SMD-2304). Nothing is kept once it
  * returns: the timer is cleared on a wake and the listener removed on the
  * timer, so a follower polling for days holds no more than one (review pass
- * 3: a promise's `.then` per sleep kept ~430 bytes each until a stop).
+ * 3: a promise's `.then` per sleep kept ~430 bytes each until a stop). A
+ * wait past what a timer holds (MAX_TIMER_MS) is re-armed in steps, where a
+ * single timer would fire after 1 ms: a --follow of 25 days or more polled
+ * in a hot loop (review pass 4); main's Bun.sleep held it.
  */
 export function sleepUnless(ms: number, wake: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
     if (wake.aborted) return resolve();
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const done = () => {
       clearTimeout(timer);
       wake.removeEventListener("abort", done);
       resolve();
     };
-    const timer = setTimeout(done, ms);
+    const arm = (left: number) => {
+      timer = left > MAX_TIMER_MS ? setTimeout(() => arm(left - MAX_TIMER_MS), MAX_TIMER_MS) : setTimeout(done, Math.max(0, left));
+    };
+    arm(ms);
     wake.addEventListener("abort", done, { once: true });
   });
 }
+
+/** The longest delay a timer holds: a 32-bit signed millisecond count; past it, the runtime fires after 1 ms. */
+export const MAX_TIMER_MS = 2147483647;
 
 /**
  * A pass's stop, as a claim worker's engine hands it to its caller when the

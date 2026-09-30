@@ -179,9 +179,9 @@ const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.js
  * signal handlers (stopOnSignals) — with the pass's stop (db/lease.ts's
  * PassStop). Its hard stop returns the leases at once and wakes a worker
  * pausing on a provider error, and run() returns 130 (2 after the provider's
- * refusal) once the model call in hand does (at most --timeout per window), writing and releasing nothing for
- * it; a call after run() has returned does nothing. Neither is used by
- * --status or --dry-run, which have no pass.
+ * refusal) once the model call in hand does (at most --timeout per window),
+ * writing and releasing nothing for it; a call after run() has returned does
+ * nothing. Neither is used by --status or --dry-run, which have no pass.
  */
 export interface ExtractOptions {
   url?: string;

@@ -369,9 +369,22 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   const t2 = Date.now();
   await sleepUnless(40, never.signal);
   ok(Date.now() - t2 >= 35, "…and waits its time out when nothing aborts");
+  // Past a timer's 32-bit ceiling it sleeps on, where one timer fires after 1 ms (review pass 4).
+  const far = new AbortController();
+  let farDone = false;
+  const farSleep = sleepUnless(3e9, far.signal).then(() => { farDone = true; });
+  await Bun.sleep(100);
+  const stillAsleep = !farDone;
+  far.abort();
+  await farSleep;
+  ok(stillAsleep && farDone, "…and a sleep past a timer's ceiling (3e9 ms) sleeps on until its signal aborts, not 1 ms");
+  // The baseline settled first — garbage from the cases above would read as
+  // negative growth — and the sleeps run at once, as many pauses can.
+  await Bun.sleep(50);
+  Bun.gc(true);
   Bun.gc(true);
   const before = process.memoryUsage().heapUsed;
-  for (let i = 0; i < 20_000; i++) await sleepUnless(0, never.signal);
+  await Promise.all(Array.from({ length: 20_000 }, () => sleepUnless(0, never.signal)));
   Bun.gc(true);
   const grew = process.memoryUsage().heapUsed - before;
   ok(grew < 2_000_000, `20,000 sleeps on a signal that never aborts keep nothing (${(grew / 1e6).toFixed(2)} MB of heap after, under 2)`);
