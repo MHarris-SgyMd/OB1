@@ -3158,7 +3158,8 @@ classifies a provider error into thought / transient / fatal for both workers
 (extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
 `actorPayload` rather than by hand. The module returns its outcome rather than
-exiting, so SMD-2304's importable `run()` will turn it into a return code.
+exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s
+now, `consolidate.ts`'s and `reembed.ts`'s once they are engines (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
 the `classifyError` rules and the identity cases that refuse before connecting;
 `test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that

@@ -974,6 +974,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               return;
             }
           }
+          // Never true here (the hard stop returned above); it narrows `outcome` for the release below.
           if (outcome.outcome === "abandoned") return;
           // Out of the heartbeat's set before the release goes out, so a beat in
           // flight across the release does not read the released row as lost.

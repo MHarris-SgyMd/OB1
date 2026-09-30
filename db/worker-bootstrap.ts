@@ -12,8 +12,9 @@
  *
  * These functions RETURN their outcome — a refusal string, or null when at
  * least one call would go through — and never call process.exit or touch the
- * sql client. The CLI worker exits on the result today; SMD-2304's importable
- * run() will turn the same result into a return code. Banners are returned as
+ * sql client. extract-entities.ts's importable run() turns the result into a
+ * return code (SMD-2304); consolidate.ts and reembed.ts still exit on it until
+ * they are engines. Banners are returned as
  * strings for the caller to print with its own label and spacing.
  */
 
