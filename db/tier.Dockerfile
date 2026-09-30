@@ -15,7 +15,8 @@
 # a release artifact.
 FROM oven/bun:1.4.0-alpine
 # The client major matches the stack's server, pgvector/pgvector:0.8.6-pg16.
-# refreshToolsReady refuses a pg_dump older than the source server. A newer one
+# refreshToolsReady refuses a pg_dump older than either server (the source for
+# the dump, --to for the probe that reads it before the reset). A newer one
 # works, with noise: pg_dump 17 writes `SET transaction_timeout`, a setting a
 # pg16 server does not have, and the restore reports it as an error (measured in
 # review: exit 0 overall, rows intact). The package name pins the major and

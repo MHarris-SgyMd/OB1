@@ -323,7 +323,8 @@ handler's shape (signature, replay window, loop guard) is SMD-1862's.
 
 `db/tier.ts` builds the canary and working tiers from stable (`db/README.md`,
 "The canary and working tiers"). Its `--refresh` runs under Bun and shells to
-`pg_dump` / `pg_restore` at the source server's major, and no image here
+`pg_dump` / `pg_restore`, `pg_dump` at least both servers' major (it reads
+`--to` too, to show it reaches it before the reset), and no image here
 carries both. `tier.sh` is the runnable form. It builds `db/tier.Dockerfile`
 (`oven/bun:1.4.0-alpine` plus `postgresql16-client`, the major of the postgres
 service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
