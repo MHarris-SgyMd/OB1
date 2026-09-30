@@ -201,16 +201,14 @@ async function register(meta: Meta, grantTypes = ["authorization_code"]): Promis
 
 /**
  * Authorization code + PKCE for a public client; returns the token reply, or
- * the redirect's error. `resource` goes on both requests as given (none, one
- * or several).
+ * the redirect's error. `resource` goes on both requests as given (one or
+ * several).
  */
-async function publicCode(c: Ctx, clientId: string, resource: string | string[] | undefined, scope: string): Promise<TokenReply> {
+async function publicCode(c: Ctx, clientId: string, resource: string | string[], scope: string): Promise<TokenReply> {
   const pk = pkce();
   const back = await new Browser(c.env.OB1_AUTH_OPERATOR_PASSWORD).authorize(authorizeUrl(c.meta, { client_id: clientId, response_type: "code", redirect_uri: NATIVE_REDIRECT, scope, resource, code_challenge: pk.challenge, code_challenge_method: "S256", state: "s" }), NATIVE_REDIRECT);
   if (!back.get("code")) return { status: 400, body: { error: back.get("error"), error_description: back.get("error_description") } };
-  const params: Record<string, string | string[]> = { grant_type: "authorization_code", code: back.get("code")!, redirect_uri: NATIVE_REDIRECT, code_verifier: pk.verifier };
-  if (resource !== undefined) params.resource = resource;
-  return tokenRequest(c.meta.token_endpoint, params, { id: clientId });
+  return tokenRequest(c.meta.token_endpoint, { grant_type: "authorization_code", code: back.get("code")!, redirect_uri: NATIVE_REDIRECT, code_verifier: pk.verifier, resource }, { id: clientId });
 }
 
 const failed = (e: Error): TokenReply => ({ status: 0, body: { error: e.message } });

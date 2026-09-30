@@ -70,8 +70,8 @@ export function layout(origin: string) {
     clients,
     /** The resources a client may ask for: its policy's, or the MCP servers' for a third-party client. */
     allowedResources(clientId: string): string[] {
+      if (!Object.hasOwn(clients, clientId)) return mcpResources;
       const p = clients[clientId];
-      if (!p) return mcpResources;
       return p.kind === "exchange" ? [] : p.resources;
     },
     /** The four discovery paths the proxy routes to the server: RFC 8414 and OIDC under the issuer's path, and Claude Code's bare one. */

@@ -18,8 +18,6 @@ type Cookie = { value: string; path: string };
 
 export class Browser {
   private cookies = new Map<string, Cookie>();
-  /** Every URL this browser was sent to, in order, for the report. */
-  readonly trail: string[] = [];
   /** Every page it answered (`login`, `consent`), in order: a check that a user signed in reads this. */
   readonly prompts: string[] = [];
   /** The text of each page it answered, in the same order, so a check can read what the operator was shown. */
@@ -45,7 +43,6 @@ export class Browser {
   }
 
   async request(url: URL, init: { method?: string; body?: URLSearchParams } = {}): Promise<Response> {
-    this.trail.push(`${init.method ?? "GET"} ${url.pathname}`);
     const headers: Record<string, string> = { cookie: this.cookieHeader(url) };
     if (init.body) headers["content-type"] = "application/x-www-form-urlencoded";
     const res = await fetch(url, { method: init.method ?? "GET", headers, body: init.body, redirect: "manual" });

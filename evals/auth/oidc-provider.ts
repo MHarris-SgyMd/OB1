@@ -121,7 +121,7 @@ const provider = new Provider(L.issuer, {
     validator(_ctx, key, _value, metadata) {
       if (key !== "ob1_third_party_rule") return;
       delete (metadata as Record<string, unknown>)[key];
-      if (L.clients[String(metadata.client_id)]) return;
+      if (Object.hasOwn(L.clients, String(metadata.client_id))) return;
       const declared = metadata.grant_types as unknown;
       if (declared !== undefined && (!Array.isArray(declared) || declared.some((g) => typeof g !== "string"))) {
         throw new errors.InvalidClientMetadata("grant_types must be an array of strings");
@@ -184,7 +184,9 @@ const EXCHANGE_PARAMS = ["subject_token", "subject_token_type", "actor_token", "
 
 provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   const { params, client } = ctx.oidc as unknown as { params: Record<string, string | undefined>; client: { clientId: string } };
-  const policy = L.clients[client.clientId];
+  // The library refuses a client without this grant before the handler runs;
+  // this line narrows the policy's type, and holds if the two ever drift.
+  const policy = Object.hasOwn(L.clients, client.clientId) ? L.clients[client.clientId] : undefined;
   if (policy?.kind !== "exchange") throw new errors.UnauthorizedClient("this client may not exchange tokens");
   if (!params.subject_token) throw new errors.InvalidRequest("subject_token is required");
   if (params.subject_token_type !== ACCESS_TOKEN_TYPE) throw new errors.InvalidRequest(`subject_token_type must be ${ACCESS_TOKEN_TYPE}`);
@@ -275,7 +277,7 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
     // token can carry no scope or resource beyond these. (prompt.details lists
     // only what the grant still lacks, which is empty on a repeat consent.)
     const asked = String(params.scope ?? "").split(" ").filter(Boolean);
-    const resources = [String(params.resource ?? "")].flat().filter(Boolean);
+    const resources = [params.resource ?? []].flat().map(String).filter(Boolean);
     const offline = asked.includes("offline_access") ? " It may keep access after you close it (<code>offline_access</code>)." : "";
     return page(res, 200, "consent", `<p>${who}, asks for <code>${esc(asked.join(" "))}</code> on <code>${esc(resources.join(" "))}</code>.${offline}</p><form method="post" action="/auth/interaction/${esc(uid)}/confirm"><button>Allow</button></form><form method="post" action="/auth/interaction/${esc(uid)}/abort"><button>Deny</button></form>`);
   }
