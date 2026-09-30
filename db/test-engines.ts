@@ -342,6 +342,8 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["a short lease and --limit 0", { url: AT, ttl: 3, heartbeat: 2, limit: 0 }, ["--url", AT, "--ttl", "3", "--heartbeat", "2", "--limit", "0"], {}],
     ["--stale 0 and a bad --list word", { url: AT, stale: 0, list: "maybe" }, ["--url", AT, "--stale", "0", "--list", "maybe"], {}],
     ["a bad --list word", { url: AT, list: "maybe" }, ["--url", AT, "--list", "maybe"], {}],
+    // Refused before the client opens, as main refused it: a URL Bun's client rejects meets the --list rule first (review pass 3).
+    ["a bad --list word beside a URL Bun's client rejects", { url: `${AT}?sslmode=bogus`, list: "maybe" }, ["--url", `${AT}?sslmode=bogus`, "--list", "maybe"], {}],
     ["--accept not a UUID", { url: AT, accept: "12" }, ["--url", AT, "--accept", "12"], {}],
     ["--accept with --reject", { url: AT, accept: ID, reject: ID }, ["--url", AT, "--accept", ID, "--reject", ID], {}],
     ["--direction without --accept", { url: AT, direction: "newer" }, ["--url", AT, "--direction", "newer"], {}],

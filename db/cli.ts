@@ -109,7 +109,9 @@ export interface CommandLine<K extends string = string> extends Args<K> {
  * a caller reading the stream live sees each as it happens. The CLI passes
  * consoleWriter; a caller that drives an engine in-process passes its own and
  * captures them. A writer should not throw; one that does makes the engine's
- * run() reject with its error — what the run had done by then stays done.
+ * run() reject with its error — what the run had done by then stays done. Its
+ * calls are synchronous: a promise it returns is not awaited, and one that
+ * rejects is the host's unhandled rejection.
  */
 export interface Writer {
   out(line: string): void;

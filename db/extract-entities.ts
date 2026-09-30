@@ -167,7 +167,8 @@ const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.js
  * the same time takes the spare. A reserved connection or a transaction's
  * handle is refused. The worker key resolves on a connection of its own
  * (db/worker-bootstrap.ts), so a run with OB1_WORKER_KEY set needs `url`
- * beside `sql`. `env` is what the run reads for the model, the endpoints, the
+ * beside `sql` — the URL of the database `sql` is connected to: nothing checks that the two name one database: a URL for another registers the agent there, and
+ * the rows here carry its id (review pass 3). `env` is what the run reads for the model, the endpoints, the
  * egress policy and the worker key: process.env when absent.
  *
  * `signal` stops the pass as the CLI's first signal does: every worker after
@@ -1238,7 +1239,8 @@ if (import.meta.main) {
   const limit = cli.has("limit") ? cli.int("limit", { absent: 0, min: 1 }) : undefined;
   const follow = cli.has("follow") ? cli.int("follow", { absent: 0, bare: 15, min: 1 }) : undefined;
   // One connection per worker and a spare (run()'s rule), opened lazily: a
-  // refusal before the first query opens none.
+  // refusal before the first query opens none — and the first opens them all,
+  // Bun's pool connecting every one it may hold.
   const sql = openSql(url, { max: workers + 1 });
   // The signal handlers go when run() settles: a signal while the door closes
   // the pool and flushes ends the process, as one before the pass does,

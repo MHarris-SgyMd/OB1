@@ -26,8 +26,8 @@
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, or a lineage pair (070)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
- *   await run({ url, dryRun: true })                      # a dry run, in-process: import { run } from "./consolidate.ts" (SMD-2304)
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
+ *   await run({ url, dryRun: true })                      # a dry run, in-process: import { run } from "./consolidate.ts" (SMD-2304)
  *   --k N (3)   --min-sim F (0.6)   --min-confidence F (0.5)
  *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (120, per model call; this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
  *
@@ -164,7 +164,9 @@ const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "a
  * same time takes the spare. A reserved connection or a transaction's handle
  * is refused. The worker key resolves on a connection of its own
  * (db/worker-bootstrap.ts), so a run or a decision with OB1_WORKER_KEY set
- * needs `url` beside `sql`. `env` is what the run reads for the judge model,
+ * needs `url` beside `sql` — the URL of the database `sql` is connected to:
+ * nothing checks that the two name one database: a URL for another registers the agent there, and
+ * the rows here carry its id (review pass 3). `env` is what the run reads for the judge model,
  * the endpoints, the egress policy and the worker key: process.env when
  * absent.
  *
@@ -176,7 +178,7 @@ const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "a
  * decision (--accept, --reject) stops the same way, before the key resolves
  * and before the decision is written, saying so. --status, --dry-run, --list
  * and --stale only read, and do not read it.
- * `onPass` is called once, as a run's pass begins — a decision has none — where the CLI installs its
+ * `onPass` is called once, as a run's pass begins (a decision has none) — where the CLI installs its
  * signal handlers (stopOnSignals) — with the pass's stop (db/lease.ts's
  * PassStop). Its hard stop returns the leases at once, aborts the judge's
  * call in hand and wakes a worker pausing on a provider error, and run()
@@ -330,7 +332,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
   // A run and a decision write — resolve the key, and stop under an aborted
   // signal; --status, --dry-run, --list and --stale only read (review pass 2:
   // the two rules had drifted apart for a decision beside --dry-run).
-  const writes = deciding || !(opts.status || opts.dryRun || reviewing);
+  const writes = deciding || !(opts.status === true || opts.dryRun === true || reviewing);
   if (opts.sql != null) {
     // A reserved connection or a transaction's handle reports its pool's max
     // but is one connection, and a transaction keeps the run's claims from the
@@ -841,13 +843,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean; lineage_pair: boolean };
 
   /**
-   * 067: the pass settles a stale row — rejected with the marker note, its
-   * lineage re-recorded at the texts judged under this key — through
-   * settle_supersession_proposal. NOT_STALE and NOT_FOUND are facts about the
-   * row (a reviewer decided it, another pass replaced it, its thought is gone
-   * between the read and this write), counted and not failed.
-   */
-  /**
    * A Writer's throw from inside processRow, marked so the worker's catch
    * rethrows it — the Writer's error rejects run() — rather than classifying
    * it as the thought's failure and recording it on the claim (review pass 1:
@@ -863,6 +858,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       throw new WriterThrow(e);
     }
   };
+
+  /**
+   * 067: the pass settles a stale row — rejected with the marker note, its
+   * lineage re-recorded at the texts judged under this key — through
+   * settle_supersession_proposal. NOT_STALE and NOT_FOUND are facts about the
+   * row (a reviewer decided it, another pass replaced it, its thought is gone
+   * between the read and this write), counted and not failed.
+   */
 
   async function settleStale(s: StaleRow, why: string, olderFp: string, newerFp: string, settled: string, reason?: string): Promise<boolean> {
     const recipe = { ...proposalRecipe(cfg, { similarity: s.similarity ?? NaN, candidates: K, minSimilarity: MIN_SIM }), settled, ...(reason ? { reason } : {}) };
@@ -1389,8 +1392,18 @@ if (import.meta.main) {
   const limit = cli.has("limit") ? cli.int("limit", { absent: 0, min: 1 }) : undefined;
   const follow = cli.has("follow") ? cli.int("follow", { absent: 0, bare: 15, min: 1 }) : undefined;
   const stale = cli.has("stale") ? cli.int("stale", { absent: 0, bare: 90, min: 1 }) : undefined;
+  const list = cli.has("list") ? (cli.value("list") ?? "pending") : undefined;
+  // The review flags' rules before the client, where the script refused them:
+  // a URL Bun's client rejects then still meets a bad --list word first, as on
+  // main (review pass 3). run() refuses through the same function.
+  const review = reviewProblem({ list, accept: cli.value("accept"), reject: cli.value("reject"), direction: cli.value("direction"), force: cli.has("force"), note: cli.value("note"), limit });
+  if (review !== null) {
+    console.error(review);
+    process.exit(2);
+  }
   // One connection per worker and a spare (run()'s rule), opened lazily: a
-  // refusal before the first query opens none.
+  // refusal before the first query opens none — and the first opens them all,
+  // Bun's pool connecting every one it may hold.
   const sql = openSql(url, { max: workers + 1 });
   // The signal handlers go when run() settles: a signal while the door closes
   // the pool and flushes ends the process, as one before the pass does.
@@ -1399,7 +1412,7 @@ if (import.meta.main) {
     return run({
       sql, url, workers, batch, ttl, heartbeat, timeout, k, minSim, minConfidence, limit, follow, stale,
       dump: cli.value("dump"),
-      list: cli.has("list") ? (cli.value("list") ?? "pending") : undefined,
+      list,
       accept: cli.value("accept"),
       reject: cli.value("reject"),
       direction: cli.value("direction"),

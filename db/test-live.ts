@@ -4279,6 +4279,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   let slowMs = 0;
   /** Awaited inside each judge call, when set (SMD-2304: a reviewer racing the pass's settle). */
   let onJudge: (() => Promise<void>) | null = null;
+  /** While above zero, the next judge calls answer 503 at once — a transient error the worker pauses on (SMD-2304). */
+  let judgeUnavailable = 0;
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -4289,6 +4291,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
       const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
       seen.push({ a, b });
+      if (judgeUnavailable > 0) {
+        judgeUnavailable--;
+        return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      }
       // Run during the call, before the verdict: a reviewer's decision racing the pass.
       if (onJudge) await onJudge();
       await Bun.sleep(5 + slowMs);
@@ -5028,6 +5034,35 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const atKey = await decideAborted("  agent:");
     assert(atJob.code === 130 && !atJob.agent && atJob.st === "pending" && atKey.code === 130 && atKey.agent && atKey.st === "pending" && atKey.pointer === null,
            `a decision aborted as it starts resolves no key (${JSON.stringify(atJob)}), and one aborted as the key resolves writes no decision (${JSON.stringify(atKey)})`);
+
+    // The hard stop wakes a worker pausing on a provider error: run() back at
+    // once, and the pair not judged again after the leases are gone — held on
+    // extract in [10], and here on consolidate's own wiring (review pass 3).
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+    judgeUnavailable = 100;
+    let pauseStop: PassStop | undefined;
+    const pauseFrom = calls;
+    const pauseErrs: string[] = [];
+    const pauseRun = runConsolidate({ url: URL_!, env, workers: 1, onPass: (x) => { pauseStop = x; }, writer: { out: () => {}, err: (l) => pauseErrs.push(l) } });
+    for (let i = 0; i < 100 && !(calls > pauseFrom && pauseErrs.some((l) => l.includes("provider unavailable"))); i++) await Bun.sleep(50);
+    pauseStop?.();
+    const pauseRelease = pauseStop?.();
+    const pauseAt = Date.now(), callsAtStop = calls;
+    const pauseCode = await pauseRun;
+    const pauseMs = Date.now() - pauseAt;
+    await pauseRelease;
+    judgeUnavailable = 0;
+    assert(pauseCode === 130 && pauseMs < 1500 && calls === callsAtStop && !(await sigClaims()).claimed,
+           `a hard stop during a consolidate worker's provider-error pause returns 130 at once, judging nothing more (exit ${pauseCode} after ${pauseMs} ms, ${calls - callsAtStop} call(s) after the stop)`);
+
+    // run() takes its listener off a caller's signal when it returns: an abort
+    // after the run writes nothing more (review pass 3, as [10] holds for extract).
+    const afterRun = new AbortController();
+    const afterErrs: string[] = [];
+    const afterCode = await runConsolidate({ url: URL_!, env, workers: 1, signal: afterRun.signal, writer: { out: () => {}, err: (l) => afterErrs.push(l) } });
+    const afterBefore = afterErrs.length;
+    afterRun.abort();
+    assert(afterCode !== 130 && afterErrs.length === afterBefore, `…and an abort after consolidate's run() has returned writes nothing: its listener went with it (exit ${afterCode}, ${afterErrs.length - afterBefore} line(s) after)`);
     for (const id of ids) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
