@@ -1,0 +1,72 @@
+# The authorization-server POC's shared stack (SMD-2285). A candidate's overlay
+# (compose.<candidate>.yaml) adds its `auth` service; the driver runs both as
+# the project `ob1-auth-<candidate>`:
+#
+#   bun evals/eval-auth.ts --up oidc-provider
+#
+# Three networks:
+# - `edge` carries the one published port, the proxy's, on loopback;
+# - `mesh` is internal, with no route out, like the ADR's (decision 4). The
+#   stand-ins, the authorization server and the bait live here under
+#   `*.ob1.internal` names;
+# - `internet` stands in for the public internet. Its subnet, 11.0.0.0/24, is
+#   routable address space, not a special-use range, so the fetch guard lets
+#   `cimd.test` through by its own rules and the POC needs no exception.
+# Secrets come from evals/auth/.env (gitignored), written by the driver.
+
+x-bun: &bun
+  build: { context: ., dockerfile: Dockerfile }
+  image: ob1-auth-poc:local
+  pull_policy: build
+  restart: "no"
+  environment: &env
+    OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:?run bun evals/eval-auth.ts --up}
+
+services:
+  proxy:
+    <<: *bun
+    command: ["bun", "proxy.ts"]
+    ports:
+      - "127.0.0.1:${AUTH_POC_PORT:-8020}:8000"
+    networks: [edge, mesh]
+
+  resources:
+    <<: *bun
+    command: ["bun", "resources.ts"]
+    environment:
+      <<: *env
+      OB1_AUTH_SECRET_MCP: ${OB1_AUTH_SECRET_MCP:?}
+      OB1_AUTH_SECRET_MCP_CANARY: ${OB1_AUTH_SECRET_MCP_CANARY:?}
+    networks:
+      mesh:
+        aliases: [mcp.ob1.internal, api.ob1.internal]
+
+  cimd:
+    <<: *bun
+    command: ["bun", "cimd.ts", "host"]
+    # https://cimd.test has no port in it, so the host listens on 443 as `bun`.
+    sysctls: { net.ipv4.ip_unprivileged_port_start: 0 }
+    volumes:
+      - ./.poc:/poc:ro,z
+    networks:
+      # Any address in the subnet is routable; a fixed one only races podman's
+      # IPAM when compose recreates the container.
+      internet:
+        aliases: [cimd.test]
+
+  bait:
+    <<: *bun
+    command: ["bun", "cimd.ts", "bait"]
+    sysctls: { net.ipv4.ip_unprivileged_port_start: 0 }
+    networks:
+      mesh:
+        aliases: [bait.ob1.internal, private-host.test]
+
+networks:
+  edge: {}
+  mesh:
+    internal: true
+  internet:
+    ipam:
+      config:
+        - subnet: 11.0.0.0/24

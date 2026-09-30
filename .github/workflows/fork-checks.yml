@@ -291,6 +291,12 @@ jobs:
         working-directory: evals
         run: bun eval-orchestration.ts --self-check
 
+      # The authorization POC's fetch guard, proxy route table and resource
+      # policy (SMD-2285), with no stack; the auth-poc job runs the stack.
+      - name: Authorization POC rules
+        working-directory: evals
+        run: bun eval-auth.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -1436,6 +1442,50 @@ jobs:
         if: always()
         working-directory: deploy
         run: docker compose -f compose.yaml down -v
+
+  # SMD-2285: the authorization server's proof of concept, evals/auth/. The
+  # upstream of oidc-provider declines Bun support, so the server runs on Bun
+  # only while this job holds every criterion: discovery under /auth,
+  # registration by metadata document and by DCR from the SDK v2 client, the
+  # fetch guard (the library's own SSRF protection does not load under Bun),
+  # PKCE and client credentials, one audience per token, and token exchange.
+  # Twice on one stack, as the ticket's Verify asks. An oidc-provider bump is a
+  # PR that runs this job.
+  auth-poc:
+    name: Authorization server POC (oidc-provider on Bun)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install the evals' pinned packages
+        working-directory: evals
+        run: bun install --frozen-lockfile
+
+      - name: The stack comes up
+        working-directory: evals
+        run: bun eval-auth.ts --up oidc-provider
+
+      - name: Every criterion holds, twice
+        working-directory: evals
+        run: |
+          bun eval-auth.ts --verify oidc-provider
+          bun eval-auth.ts --verify oidc-provider
+
+      - name: Logs on failure
+        if: failure()
+        working-directory: evals/auth
+        run: docker compose -p ob1-auth-oidc-provider --env-file .env -f compose.yaml -f compose.oidc-provider.yaml logs --tail 80
+
+      - name: Tear down
+        if: always()
+        working-directory: evals
+        run: bun eval-auth.ts --down oidc-provider
 
   compat-shim:
     name: supabase-js compatibility shim

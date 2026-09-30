@@ -1,0 +1,39 @@
+# The winner (SMD-2285 decision 1): oidc-provider 9.12.2 on Bun, as its own
+# service. An overlay on compose.yaml. Paths are relative to evals/auth/, the
+# first -f file's directory.
+#
+# It joins the mesh as auth.ob1.internal and the `internet` network for the
+# fetches a client's metadata document asks of it (the ADR's egress network),
+# and publishes no port: the proxy is the only way in. NODE_EXTRA_CA_CERTS
+# trusts the POC's own certificate for cimd.test and nothing else changes.
+
+services:
+  auth:
+    build: { context: ., dockerfile: Dockerfile }
+    image: ob1-auth-poc:local
+    pull_policy: build
+    restart: "no"
+    command: ["bun", "oidc-provider.ts"]
+    environment:
+      OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:?run bun evals/eval-auth.ts --up}
+      OB1_AUTH_JWKS: ${OB1_AUTH_JWKS:?}
+      OB1_AUTH_COOKIE_KEYS: ${OB1_AUTH_COOKIE_KEYS:?}
+      OB1_AUTH_OPERATOR_PASSWORD_HASH: ${OB1_AUTH_OPERATOR_PASSWORD_HASH:?}
+      OB1_AUTH_SECRET_GUI: ${OB1_AUTH_SECRET_GUI:?}
+      OB1_AUTH_SECRET_RUNNER: ${OB1_AUTH_SECRET_RUNNER:?}
+      OB1_AUTH_SECRET_MCP: ${OB1_AUTH_SECRET_MCP:?}
+      OB1_AUTH_SECRET_MCP_CANARY: ${OB1_AUTH_SECRET_MCP_CANARY:?}
+      NODE_EXTRA_CA_CERTS: /poc/cimd.pem
+      # POC only: error replies name their cause, for the verifier. The deploy never sets it.
+      OB1_AUTH_POC_ERROR_DETAIL: "1"
+    volumes:
+      - ./.poc:/poc:ro,z
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      mesh:
+        aliases: [auth.ob1.internal]
+      internet: {}

@@ -722,7 +722,7 @@ its measurements are in the change file named.
 ### Landing a rebase on `main`, which is protected
 
 `main` is the working default and carries a ruleset: every one of
-`fork-checks.yml`'s ten jobs required, on a head up to date with `main` and
+`fork-checks.yml`'s eleven jobs required, on a head up to date with `main` and
 satisfied only by a run of the Actions app; changes only through a pull request;
 no deletion, **no force-push**, and no bypass actors — it applies to admins too.
 The ruleset is a file, `.github/rulesets/main.json`, applied with
@@ -744,7 +744,7 @@ reaching `main` goes through a PR, which is two commands:
 
 ```bash
 gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the ten checks pass
+gh pr merge --merge --auto        # lands itself once the eleven checks pass
 ```
 
 History keeps both lines, which is what happened when the fork's work first landed
