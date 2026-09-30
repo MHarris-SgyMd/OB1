@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-2317]
-migrations: []
----
-
-## Changelog
-
-A command that drops a schema asks the server which database it reached: `dropSchema` and `tier.ts --refresh` refuse when an exported `PGDATABASE` beat the URL's database, or the URL names no database, no host, or no port while `PGPORT` is exported, and every `db/` script refuses a database URL that Bun and libpq read as different targets (a query key other than `sslmode`, `application_name` and `options`, a fragment, a stray `@`, a host list, a `.`/`..` path segment, a `+` or a malformed part in the query), whatever `OB1_ALLOW_REMOTE_DB` says; `pg_dump`/`pg_restore` get a connection string built from the URL's parts with the password off their argv and libpq's redirecting `PG*` variables removed, and `pg_dump` must find a table made on `--to` before anything is dropped (SMD-2317).
-
-## FORK
-
-The reset guards ask the connection, not the URL, and the libpq tools never parse it — a URL two clients read as two databases is refused, and neither PGDATABASE nor PGSERVICE picks what is dropped (SMD-2317)
+# 238. The reset guards ask the connection, not the URL, and the libpq tools never parse it — a URL two clients read as two databases is refused, and neither PGDATABASE nor PGSERVICE picks what is dropped (SMD-2317)
 
 **What changed.** `db/connect.ts`'s resolver, reset rule and tool connection,
 and their two destructive callers. Two PRs.

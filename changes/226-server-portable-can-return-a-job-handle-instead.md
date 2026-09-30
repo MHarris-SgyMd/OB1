@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2273]
-migrations: []
----
-
-## Changelog
-
-server-portable gains an async job-handle pattern for long-running work (SMD-2273): a tool can return a `{ jobId, status: "accepted", poll, stream }` handle at once, and the caller fetches the result through the `job_status` tool (MCP), the keyed `GET /jobs/<id>` poll or the `GET /jobs/<id>/stream` SSE route. The first job-backed tool, `scan_thoughts`, ships with it. In-memory store, no migration.
-
-## FORK
-
-server-portable can return a job handle instead of blocking — a POST starts long-running work and hands back a handle the caller polls or subscribes to (SMD-2273)
+# 226. server-portable can return a job handle instead of blocking — a POST starts long-running work and hands back a handle the caller polls or subscribes to (SMD-2273)
 
 **What changed.** A new `server-portable/jobs.ts` holds an in-memory registry, a detached runner and an SSE fan-out. `startJob(principal, kind, run)` mints a job, kicks the `run` off without awaiting it, and returns a `{ jobId, status: "accepted", poll: "/jobs/<id>", stream: "/jobs/<id>/stream" }` handle; the run reports progress through a `JobContext` and its resolution/rejection moves the job to `succeeded`/`failed`. `index.ts` adds two keyed REST routes before the MCP catch-all — `GET /jobs/<id>` (poll) and `GET /jobs/<id>/stream` (SSE, wrapped in `withSseKeepalive`, SMD-1864) — modelled on the `worker-status`/`worker-action` mirrors (SMD-2131/2132): the same `authenticateRequest` + `canRead` gate and identity race, `c.json(..., corsHeaders)` shapes, a no/wrong/capture key shown plain `"ok"`. A job is visible only to the key that started it (its `keyHash`), so another key — or an unknown/aged-out id — gets `404 not found`. Two new tools register in `buildServer` (both `read`-scoped, in `tools.ts`/`tools.json`): `job_status` (the MCP-client mirror of the poll, since a client cannot reach a REST route) and `scan_thoughts`, the first async-job-backed tool — a bounded, paged corpus scan (`countThoughts` + `pageThoughtMeta`) that returns a handle at once and reports progress per page. On SIGTERM the drain (`shutdown.ts`) already waits on the job bodies — they run inside `toolCalls.track` — and `markRunningLost()` in the drain's `onCut` marks anything still running `lost`, so an in-flight poll or stream sees a terminal answer.
 

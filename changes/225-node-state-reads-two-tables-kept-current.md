@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-2256]
-migrations: [068]
----
-
-## Changelog
-
-`node_state` reads a stored projection kept current on write: migration 068's `ob1_ticket_head` (each ticket's head) and `ob1_superseded_by` (each thought's newest successor), fed by statement triggers on `thoughts`, so `search_thoughts`' `prefer_current` costs a lookup, not the brain — signatures and rows unchanged, the capture group gains the writes on both tables, a write that moves a ticket's key, status or watermark, a pointer or a successor's created_at is refused under REPEATABLE READ, and preflight fails a connection whose default is REPEATABLE READ; roles granted before 068 need `migrate.ts --grant` again (SMD-2256).
-
-## FORK
-
-node_state reads two tables kept current on write, so prefer_current costs its window, not the corpus (SMD-2256)
+# 225. node_state reads two tables kept current on write, so prefer_current costs its window, not the corpus (SMD-2256)
 
 **What changed.** `db/migrations/068_node_state_projection.sql`:
 `ob1_ticket_head` (keyed by `md5(issue)::uuid`, the issue beside it: the head

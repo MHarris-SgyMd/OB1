@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-1842]
-migrations: []
----
-
-## Changelog
-
-The supersession grading report from `evals/eval-consolidate.ts` prints each proposal thought's date as `2026-09-09`, not `Wed Sep 09`. An infinity-dated thought prints `infinity` and an undated one `undated`, not `Infinity` and `null`. The report and `db/consolidate.ts --list` / `--stale` now print a day through one helper, `isoDay` in `server-portable/store.ts`. It cuts only `toISOString`'s own form to its date, so the CLI prints a BC date (`-000043-03-15`) or a year past 9999 (`+012345-01-01`) as a whole day where it printed a stub (`-000043-03`, `+012345-01`) (SMD-1842).
-
-## FORK
-
-The grading report's proposal dates go through one day renderer, `isoDay`: `2026-09-09`, not `Wed Sep 09` (SMD-1842)
+# 230. The grading report's proposal dates go through one day renderer, `isoDay`: `2026-09-09`, not `Wed Sep 09` (SMD-1842)
 
 **Why.** `evals/eval-consolidate.ts` reads proposals with raw Bun SQL (`SELECT * FROM list_supersession_proposals(...)`), not through `normaliseProposal`. So `older_created_at` and `newer_created_at` are the driver's own values, and `String(d).slice(0, 10)` printed the head of each one's `toString()`. On pg16 through Bun: a `Date` printed `Wed Sep 09`, `infinity` printed `Infinity` (Bun returns the number) and NULL printed `null`. That is every row of the report. It does not throw and does not make up the epoch, so SMD-1328's and SMD-1803's fixes did not reach it.
 

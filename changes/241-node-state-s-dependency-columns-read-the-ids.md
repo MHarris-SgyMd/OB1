@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-2267]
-migrations: [071]
----
-
-## Changelog
-
-`node_state`'s dependency columns read the ids they are asked for: migration 071 stores `node_dependencies()`' gate as `ob1_source_gate` (each source row's system and whether its thought states a known status), fed by triggers on `thought_sources` and `thoughts`, reads a ticket's links by index from the ids, and has `source_thought()` find the board sync's claim by 068's issue index — so `node_state(<ids>)`, inlined with its ids, costs its ids' links, not the brain (a generic plan still scans every thought, a follow-up), and a whole-brain read no longer pays a GIN scan per blocker the brain does not hold; signatures and rows unchanged; the capture group gains SELECT, INSERT, UPDATE and DELETE on the new table; an insert or move of a source row, or a status move between a known and an unknown `status_type`, is refused under REPEATABLE READ; roles granted before 071 need `migrate.ts --grant` again (SMD-2267).
-
-## FORK
-
-node_state's dependency columns read the ids asked for: the gate stored, the links probed (SMD-2267)
+# 241. node_state's dependency columns read the ids asked for: the gate stored, the links probed (SMD-2267)
 
 **What changed.** `db/migrations/071_node_dependencies_keyed.sql`:
 `ob1_source_gate` — one row per `thought_sources` row, its system and whether

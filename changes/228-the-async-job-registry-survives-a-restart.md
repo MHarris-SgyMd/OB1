@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2318]
-migrations: ["069"]
----
-
-## Changelog
-
-The async job registry gains an optional durable backing store (migration 069's `jobs` table): on the Bun/SQL server a job's record is written through to Postgres as the in-memory registry moves it along, so a job that finished before a restart is still readable with its result through `GET /jobs/<id>`, the `job_status` tool and the SSE stream, and a job left running at a restart is reconciled to `lost` rather than becoming `not found`. Retention is `prune_jobs()`. Workers stays in-memory. The HTTP and tool surface is unchanged (SMD-2318).
-
-## FORK
-
-the async job registry survives a restart — a durable `jobs` table behind the same handle/poll/stream contract (SMD-2318)
+# 228. the async job registry survives a restart — a durable `jobs` table behind the same handle/poll/stream contract (SMD-2318)
 
 **What changed.** SMD-2273 shipped the job registry (`server-portable/jobs.ts`) as an in-memory `Map`: a job did not survive a restart, and a poll for one afterwards got `not found`. This adds an optional durable sink behind the *same* `startJob` / `readJob` / `subscribe` / `markRunningLost` contract, so nothing on the transport changes. Migration 069 adds the `jobs` table (id, kind, `owner_key_hash`, actor, status, progress/result/error jsonb, lifecycle timestamps) and `prune_jobs(p_keep_minutes)` — a bounded `DELETE … WHERE ended_at < …` mirroring `prune_query_log` (034). A new `JobSink` interface (`write` / `read` / `reconcileRunningLost`) is implemented on the SQL store (`store-sql.ts`) and returns `null` on the PostgREST store (`store-postgrest.ts`), so Workers — no long-lived process to persist or resume a detached run — stays pure in-memory. `jobs.ts` stays driver-free: `index.ts` injects the sink once, the first time the SQL store is built (`db()`), then runs `reconcileDurableJobsLost()`. The registry writes through best-effort — an INSERT on start, an UPDATE on the running-transition, progress throttled to at most once a second, and the terminal state — serialized per job on a write chain and frozen at the terminal row (`ON CONFLICT … WHERE jobs.ended_at IS NULL`). `readJob` and `subscribe` become async: the live in-process record is authoritative, and a job no longer in the `Map` (evicted under the cap, or from a prior process after a restart) is read back through the sink. A job still running at a restart is reconciled to a durable `lost` (code `SERVER_RESTARTED`) at startup, not resumed — the detached `run` closure does not survive the process (the single-process semantic). `jobs` joins `db/config.mjs`'s `ROLE_GRANTS`/`ROLE_GRANT_GROUPS`, the `db/test-support.ts` drop lists and the `db/README.md` grants table and migration map.
 

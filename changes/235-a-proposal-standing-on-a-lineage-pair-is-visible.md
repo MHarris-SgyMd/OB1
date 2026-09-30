@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-2313]
-migrations: ["070"]
----
-
-## Changelog
-
-Migration 070: a supersession proposal standing on a lineage pair — one side's `derived_from` names the other, a page and its evidence — is visible as such: `list_supersession_proposals` gains a `lineage` column and a selector, `consolidate.ts --list` tags the row `LINEAGE PAIR` with the reject to run and `--list lineage` selects the unreviewed ones, the MCP tool prints the tag, and preflight's `lineage` check counts such rows and names the remedy (SMD-2313).
-
-## FORK
-
-A proposal standing on a lineage pair is visible as such — the listing flags it, the CLI and the MCP tool print the flag, preflight counts the unreviewed ones (SMD-2313)
+# 235. A proposal standing on a lineage pair is visible as such — the listing flags it, the CLI and the MCP tool print the flag, preflight counts the unreviewed ones (SMD-2313)
 
 **What changed.** Migration `070_listing_flags_lineage_pair.sql` redefines 029's `list_supersession_proposals` on its body with a trailing `lineage boolean` column — 066's predicate on the pair, `derived_from` read in either direction, direct members only, NULL-safe, in 066's spelling — and a third parameter `p_lineage boolean DEFAULT NULL` (NULL every pair, true the lineage pairs alone, false the rest). A `RETURNS TABLE` cannot gain a column under `CREATE OR REPLACE`, so the two-argument form is dropped first and the three-argument one created; a two-argument call resolves to it through the default; EXECUTE is PUBLIC as on 029's and no role grant names the function, so no ACL is carried. The body carries the sentinel `ob1:listing-flags-the-lineage-pair`. The readers follow in the same change: `db/consolidate.ts --list` prints `LINEAGE PAIR` on such a row and a line naming the reject (`--reject <id> --note "lineage pair (066)"`), `--list lineage` lists the unreviewed rows standing on a lineage pair (pending, then stale, a list that hits its cap saying so), `--status` counts them, `--accept` on such a row is refused naming the reject unless `--force` (029's edited-since rule, CLI-side — a guard, not a verdict; the listing's and the tool's accept lines carry `--force`), `--list` on a brain without 070 names the file instead of a driver stack, `--limit` beside `--list` is refused rather than dropped, and a lineage pair accepted before it was one is tagged under `--list accepted` and by the tool with `--reject <id>`, which clears the pointer (029), named as the repair; the store type `SupersessionProposal` gains `lineage`, both stores pass the third argument on every call (029 re-applied by hand lands its two-argument form beside 070's, and a call short of three arguments is then ambiguous — not unique — and fails; measured on Postgres in the first review pass), and the MCP tool `list_supersession_proposals` tags the row with the reject and takes `lineage: true`; preflight's `lineage` check gains a bounded census of unreviewed (pending, stale) proposals on a lineage pair and WARNs with the count, the first ids and the remedy — the listing's selector and the reject, after 070 where the listing is older — and a second arm WARNs when the listing is from before 070 or 029's two-argument form stands beside it, naming 070. `db/README.md` gains the 070 paragraph, the reviewing paragraph's tag, the `--list` usage line's `lineage`; the 066 paragraph now says 070 flags the row.
 

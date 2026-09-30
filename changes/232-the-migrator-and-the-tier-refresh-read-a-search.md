@@ -1,18 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2247]
-migrations: []
----
-
-## Changelog
-
-The migrator and `tier.ts` read a `search_path` as Postgres does. The path the migrator gives migration 021's transaction, with `pg_temp` taken out, no longer puts the real `public` on it for a name that starts with a non-breaking space, and no longer drops a schema named `"PG_TEMP"`. A refresh no longer copies a raw database path such as `NoWhere` as the different schema `"NoWhere"`, and copies a `temp_tablespaces` entry naming the database's default tablespace. A refresh also copies a setting holding a backslash as written where the target's session has `standard_conforming_strings` off, and a preload library path over 63 bytes whole (SMD-2247).
-The migrator builds the brain in `public` whatever its connection's `search_path` puts first: a path naming no schema no longer fails its ledger with `3F000`, and a `"$user"` schema, or another tool's `thoughts`, first on the path no longer takes the build or fails it. It refuses, changing nothing, where the path reaches a brain's ledger in another schema and `public` holds no brain, or where `public` is missing or the role has no USAGE on it (SMD-2247).
-
-## FORK
-
-The migrator and the tier refresh read a search_path with preflight's parser (SMD-2247)
+# 232. The migrator and the tier refresh read a search_path with preflight's parser (SMD-2247)
 
 **What changed.**
 

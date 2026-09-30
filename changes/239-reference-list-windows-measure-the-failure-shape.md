@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-2269]
-migrations: []
----
-
-## Changelog
-
-Measured why a research paper's reference-list windows fail JSON entity extraction, and whether a larger answer budget or skipping the bibliography window recovers them; the measurement and verdict are recorded in `evals/README.md`. No change to the extraction worker or its defaults (SMD-2269).
-
-## FORK
-
-Reference-list windows: measure the failure shape and the two candidate fixes (SMD-2269)
+# 239. Reference-list windows: measure the failure shape and the two candidate fixes (SMD-2269)
 
 The windows left out of a partial row (SMD-2260) are almost all bibliographies; a bigger model does not fix them (SMD-2000). This measures the failure shape and the candidates before either is assumed.
 

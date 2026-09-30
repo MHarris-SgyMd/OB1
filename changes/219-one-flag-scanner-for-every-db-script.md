@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-2134, SMD-2015]
-migrations: []
----
-
-## Changelog
-
-Every `db/` script reads its arguments through one flag scanner, `db/cli.ts`: a flag it does not have, given twice, missing its value or joined with `=` exits 2 with the script's flag list, `--help` prints it, and a number is decimal digits only — `consolidate.ts` and `extract-entities.ts` no longer run the default on a typo (SMD-2134, SMD-2015).
-
-## FORK
-
-One flag scanner for every db/ script — a mistyped flag on a worker is refused, not run as the default (SMD-2134 / 2015)
+# 219. One flag scanner for every db/ script — a mistyped flag on a worker is refused, not run as the default (SMD-2134 / 2015)
 
 **What changed.** `db/cli.ts` is the one argument scanner, declared per script as
 a table of what each flag takes — `none`, `one`, `two`, `optional`, `many` or

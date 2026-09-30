@@ -1,18 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2238]
-migrations: []
----
-
-## Changelog
-
-Preflight no longer tells a migrated brain to migrate or re-apply when the fault is a refusal. The `schema` row names a missing database, a role refused at login, a missing SELECT on `thoughts` (with the GRANT), and a row-level security policy that fails the count. The `audit events`, `chunk context` and `vector models` rows read columns from `pg_attribute`, which information_schema hid from a role without privileges on the table (SMD-2238).
-The `vector extension` row prints the `schema` row's search-path statement with pgvector's schema added — the login role's setting in the database, its path kept and `public` once, or the connection string's `options=` value — where it printed a plain `ALTER ROLE`, `public` twice, or an `ALTER DATABASE` a role's setting outranks (SMD-2238).
-
-## FORK
-
-Preflight's remedies for a refusal or a hidden column: the `schema` row reads the SQLSTATE, three column checks read `pg_attribute`, the `vector extension` row prints the `schema` row's statement (SMD-2238)
+# 216. Preflight's remedies for a refusal or a hidden column: the `schema` row reads the SQLSTATE, three column checks read `pg_attribute`, the `vector extension` row prints the `schema` row's statement (SMD-2238)
 
 **What changed.**
 
