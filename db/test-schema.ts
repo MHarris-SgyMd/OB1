@@ -6471,8 +6471,10 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert((await resolveSubject(run, "twentyfirst", keep)).how === "alias", "…and kept, the alias rung finds it");
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [t13]);
   await db.query(`UPDATE ob1_entities SET aliases = '{}' WHERE id = $1`, [NUM]);
-  // The shipped writer back for the sections after, and with it 056's pass over what this one wrote.
-  await restoreShipped("record_thought_entities");
+  // The shipped writer back for the sections after, and with it 056's pass
+  // over what this one wrote — and the shipped resolver, which 071 redefines
+  // after 053 (first review pass: 053's stood until [62]).
+  await restoreShipped("record_thought_entities", "source_thought");
 }
 
 console.log("\n[45] Migration 049: the agent registry records a capture-only key's scope, and the CHECK still refuses a scope the server does not mint (SMD-1298)");
@@ -7120,8 +7122,9 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   await reapply("053");
   // 053 re-creates the six-argument record_thought_entities beside 061's
   // seven-argument one, and every positional call is then "function is not
-  // unique" — the shipped file, restored, drops it again (its DROP IF EXISTS).
-  await restoreShipped("record_thought_entities");
+  // unique" — the shipped file, restored, drops it again (its DROP IF EXISTS);
+  // and 071's resolver over 053's.
+  await restoreShipped("record_thought_entities", "source_thought");
   assert((await links(t1)).length === 3 && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 1 && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")), "re-applying 053 (and restoring 061 after it, which drops 053's six-argument form again) keeps every row and every definition");
 
   // The takeover (first review pass): the board sync's head row for a ticket
@@ -7971,8 +7974,8 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_name_gate_056'`);
   await reapply("056");
   // 061 after it: the gated writer under its shipped seven-argument form,
-  // 056's six-argument one dropped (SMD-1731).
-  await restoreShipped("record_thought_entities");
+  // 056's six-argument one dropped (SMD-1731); 071's resolver over 053's.
+  await restoreShipped("record_thought_entities", "source_thought");
   const firstRecord = await recorded();
   const pass = { r: JSON.parse(firstRecord ?? "{}") as J };
   assert(pass.r.ok === true && pass.r.refused_entities === 2 && pass.r.dropped_mentions === 2 && pass.r.dropped_edges === 1 && pass.r.moved_entities === 1 && pass.r.merged_entities === 4,
@@ -8051,16 +8054,15 @@ console.log("\n[53] A role migrate.ts --grant set up runs the entity writer (an 
   // thought_sources was the one (053). A migrations' group is one whose rows
   // are all dated by a migration number — not the community, extension and
   // recipe groups (dated by their files), whose table names a migration table
-  // could share (`entities`). OWNER_ONLY is what no role is granted on
-  // purpose: migrate.ts's ledger, which this suite's brain lacks (it applies
-  // the files itself) and a migrated one has.
-  const OWNER_ONLY = new Set(["schema_migrations"]);
+  // could share (`entities`). migrate.ts's ledger, which this suite's brain
+  // lacks (it applies the files itself), is named too since SMD-2289: the
+  // worker group reads it.
   const migrationGroups = ROLE_GRANT_GROUPS.filter((g) => ROLE_GRANTS[g].every((r) => /^\d{3}$/.test(r.since)));
   const namedTables = new Set(grantedTables(migrationGroups));
   assert(migrationGroups.includes("structure") && migrationGroups.includes("capture") && !migrationGroups.includes("community") && !namedTables.has("entities"),
     `the migrations' groups are the ones dated by migration number (${migrationGroups.join(", ")}), so a community-only table (entities) is not counted as named`);
-  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t) && !OWNER_ONLY.has(t));
-  assert(ungranted.length === 0, `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, migrate.ts's ledger aside (unnamed: ${ungranted.join(", ") || "none"})`);
+  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t));
+  assert(ungranted.length === 0 && namedTables.has("schema_migrations"), `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, and so is migrate.ts's ledger (unnamed: ${ungranted.join(", ") || "none"})`);
   // The community row for 016's mention table is issued on every migrated
   // brain, so it is held to the extraction row's privileges, no wider and now
   // no narrower (config.mjs, the schemas/entity-extraction comment).
@@ -8224,26 +8226,26 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   assert(counts.all_ === 2 && counts.none === 0 && counts.nul === 0 && counts.one === 1 && hubRow.open === true && hubRow.synced_at === "2026-09-25T00:00:00.000Z" && hubRow.blocked === false,
     `node_state(NULL) is every thought, an empty or all-NULL list none, a named id its one row; the ticket open with its own watermark as its freshness (${JSON.stringify(counts)}, ${JSON.stringify(hubRow)})`);
 
-  // The gate projected, as coverage reads it: its reads of thoughts — the
-  // gate's only use of that table — do not grow with the facets, and no
-  // subplan runs per facet (first review pass: a correlated EXISTS ran once per
-  // link; second: a LATERAL aggregate has no SubPlan and ran its scan once per
-  // facet; third: the scan's own loop count is a property of the source rows,
-  // not the gate, so the loops are compared at two facets and at four over the
-  // same source rows).
+  // The gate projected, as coverage reads it: its reads of the gate's table —
+  // since 071 the stored mirror, ob1_source_gate, and no longer thoughts — do
+  // not grow with the facets, and no subplan runs per facet (first review
+  // pass: a correlated EXISTS ran once per link; second: a LATERAL aggregate
+  // has no SubPlan and ran its scan once per facet; third: the scan's own loop
+  // count is a property of the source rows, not the gate, so the loops are
+  // compared at two facets and at four over the same source rows).
   await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-8001', 'SMD-8001', 'text/markdown')`, [hub]);
   const gateReads = async (targets: string[]) => {
     await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [hub, JSON.stringify(targets.map((target) => ({ relation: "blocked_by", target })))]);
     const planLines = (await q<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT system, gates FROM node_dependencies()`)).map((r) => r["QUERY PLAN"]);
-    const scans = planLines.filter((l) => /Scan.* on thoughts\b/.test(l));
+    const scans = planLines.filter((l) => /Scan.* on ob1_source_gate\b/.test(l));
     const loops = scans.reduce((a, l) => a + Number(/loops=(\d+)\)/.exec(l)?.[1] ?? NaN), 0);
     const [{ n }] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM node_dependencies() WHERE active`);
-    return { facets: n, loops, subplan: planLines.some((l) => /SubPlan/.test(l)), scans: scans.map((l) => l.trim()).join(" | ") };
+    return { facets: n, loops, subplan: planLines.some((l) => /SubPlan/.test(l)), thoughts: planLines.some((l) => /Scan.* on thoughts\b/.test(l)), scans: scans.map((l) => l.trim()).join(" | ") };
   };
   const atTwo = await gateReads(["SMD-8002", "SMD-8003"]);
   const atFour = await gateReads(["SMD-8002", "SMD-8003", "SMD-8004", "SMD-8005"]);
-  assert(atTwo.facets === 2 && atFour.facets === 4 && atTwo.loops > 0 && atFour.loops === atTwo.loops && !atTwo.subplan && !atFour.subplan,
-    `node_dependencies()' gate is one grouped pass over the source rows: its reads of thoughts are ${atTwo.loops} at two facets and ${atFour.loops} at four, and no subplan runs (${atFour.scans})`);
+  assert(atTwo.facets === 2 && atFour.facets === 4 && atTwo.loops > 0 && atFour.loops === atTwo.loops && !atTwo.subplan && !atFour.subplan && !atTwo.thoughts && !atFour.thoughts,
+    `node_dependencies()' gate is one initplan over the stored gate: its reads of ob1_source_gate are ${atTwo.loops} at two facets and ${atFour.loops} at four, none of thoughts, and no subplan runs (${atFour.scans})`);
   // The role split: every migrations' group but structure — thoughts,
   // thought_facets and the graph — with the server group's SELECT on
   // thought_sources, which it holds since 059 (search_thoughts'
@@ -8304,8 +8306,11 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
       && (skewSettled ?? "").includes("knows triage,backlog,unstarted,started,completed,canceled (settled: completed)") && reordered === null,
     `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); a known or settled set that is not the script's is refused naming both, and the same members in another order are not (${skewKnown})`);
   // The replays above left 058's bodies; 068 redefines two of them over its
-  // projection, and the sections after read the shipped ones.
-  await restoreShipped("node_state");
+  // projection and 071 two over its gate (node_state again, and
+  // node_dependencies, which only 071 redefines), and the sections after read
+  // the shipped ones — named both, as node_lifecycle's last definer is 068 and
+  // node_state's 071.
+  await restoreShipped("node_state", "node_lifecycle", "node_dependencies");
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`SELECT prune_orphan_entities()`);
@@ -8602,8 +8607,8 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert(!/set_config\('ob1\.event', COALESCE/.test(two) && !/set_config\('ob1\.event', COALESCE/.test(three) && !/set_config\('ob1\.event', COALESCE/.test(upd) && (two.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (upd.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (dlt.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1,
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
-  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
-    `thirteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
+    `fourteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -9050,7 +9055,10 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   // the trigger's snapshot write and the check's read of the event; short of
   // either of 060's two, the write fails inside the trigger.
   await db.exec(`CREATE ROLE ob1_test_capture NOLOGIN`);
-  for (const s of grantStatements("ob1_test_capture", { groups: ["capture", "server", "worker"] })) await db.exec(s);
+  // Granted as --grant grants, only what is there: the worker group names the migrator's ledger, which this schema, applied without the migrator, has not (SMD-2289).
+  const captureGroups = ["capture", "server", "worker"];
+  const capturePresent = new Set((await db.query<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects(captureGroups)))).rows.filter((r) => r.present).map((r) => r.name));
+  for (const s of grantStatements("ob1_test_capture", { groups: captureGroups, present: capturePresent })) await db.exec(s);
   const asCapture = async (): Promise<string> => {
     try {
       await db.transaction(async (tx) => {
@@ -10825,6 +10833,519 @@ console.log("\n[64] Migration 070: a proposal standing on a lineage pair is visi
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM derivations`);
   await db.exec(`DELETE FROM ob1_entities`);
+}
+
+// ── 65. Migration 071: node_state's dependency columns keyed (SMD-2267) ──
+//
+// node_dependencies()' gate reads a mirror of the source rows the triggers on
+// thought_sources and thoughts keep current, and node_state's dependency
+// columns read, for the ids asked, each ticket's links by index — every
+// thought when NULL. Held here: the catalog; after every statement of two
+// seeded sequences of writes — source rows recorded, taken, moved and deleted,
+// link sets recorded, links inserted, closed, re-opened and deleted, statuses
+// moved between known and unknown on sourced rows and on blockers' heads,
+// pointers on the board sync's fallback rows, thoughts deleted, rollbacks —
+// drift() is empty and node_dependencies(), node_state() and node_state(ids)
+// are 058's own formulas' rows; the plan an id list gets (no whole-brain
+// branch, index probes available); the grant; the replays; the rebuild after a
+// write with triggers disabled; REPEATABLE READ refused where it must be;
+// TRUNCATE. The races are test-live's.
+console.log("\n[65] Migration 071: node_state's dependency columns read the ids asked for — the catalog, 058's rows after every kind of source, link and status write, the keyed plan, the grant, the replays, the rebuild, the isolation levels and TRUNCATE (SMD-2267)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+  // [62] replays 058 and 068 and leaves 068's node_state over 058's
+  // node_dependencies; the shipped bodies are 071's.
+  await restoreShipped("node_state", "node_dependencies");
+
+  // The contract.
+  const [cat] = await q<{ cols: string; fks: number; idx: string | null; srcTrig: string; thTrig: string; secdef: number; comments: boolean; depsBody: string; stateBody: string }>(`
+    SELECT (SELECT string_agg(column_name || ' ' || data_type, ', ' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ob1_source_gate') AS cols,
+           (SELECT count(*)::int FROM pg_constraint WHERE contype = 'f' AND (conrelid = 'ob1_source_gate'::regclass OR confrelid = 'ob1_source_gate'::regclass)) AS fks,
+           pg_get_indexdef(to_regclass('ob1_source_gate_system_idx')) AS idx,
+           (SELECT string_agg(tgname || ':' || (tgtype & 1)::text || ':' || coalesce(tgoldtable::text, '-') || ':' || coalesce(tgnewtable::text, '-'), ' ' ORDER BY tgname)
+              FROM pg_trigger WHERE tgrelid = 'thought_sources'::regclass AND tgname LIKE 'thought_sources_node_gate_%') AS "srcTrig",
+           (SELECT string_agg(tgname || ':' || (tgtype & 1)::text || ':' || coalesce(tgoldtable::text, '-') || ':' || coalesce(tgnewtable::text, '-'), ' ' ORDER BY tgname)
+              FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname LIKE 'thoughts_node_source_gate_%') AS "thTrig",
+           (SELECT count(*)::int FROM pg_proc WHERE (proname LIKE 'ob1\\_source\\_gate%' OR proname IN ('ob1_rebuild_source_gate', 'ob1_node_dependencies_of', 'ob1_system_gates')) AND prosecdef) AS secdef,
+           (SELECT bool_and(obj_description(oid, 'pg_proc') LIKE '%Migration 058 / SMD-2074%' AND obj_description(oid, 'pg_proc') LIKE '%071 / SMD-2267%')
+              FROM pg_proc WHERE oid IN ('node_dependencies()'::regprocedure, 'node_state(uuid[])'::regprocedure)) AS comments,
+           (SELECT prosrc FROM pg_proc WHERE oid = 'node_dependencies()'::regprocedure) AS "depsBody",
+           (SELECT prosrc FROM pg_proc WHERE oid = 'node_state(uuid[])'::regprocedure) AS "stateBody"`);
+  assert(cat.cols === "thought_id uuid, system text, gates boolean" && cat.fks === 0 && /\(system\) WHERE gates/.test(cat.idx ?? "")
+      && cat.srcTrig === "thought_sources_node_gate_delete:0:old_rows:- thought_sources_node_gate_insert:0:-:new_rows thought_sources_node_gate_truncate:0:-:- thought_sources_node_gate_update:0:old_rows:new_rows"
+      && cat.thTrig === "thoughts_node_source_gate_update:0:old_rows:new_rows" && cat.secdef === 0 && cat.comments === true
+      && /ob1_source_gate/.test(cat.depsBody) && !/GROUP BY/.test(cat.depsBody) && /ob1_node_dependencies_of\(p_ids\)/.test(cat.stateBody)
+      && !/^\s*WITH\b/i.test(cat.stateBody) && !/thought_facets|thought_sources/.test(cat.stateBody),
+    `the mirror's columns and no foreign key either way; the partial index on its system; four statement triggers on thought_sources and one on thoughts (tgtype bit 0 clear), the row-change ones with transition tables; nothing SECURITY DEFINER; node_dependencies and node_state name 058 and 071 in their COMMENTs; the gate reads the mirror, not a grouped pass; node_state has no top-level WITH and reads the links only through ob1_node_dependencies_of (${cat.srcTrig}; ${cat.thTrig})`);
+
+  // 058's three bodies, verbatim from its file, as temporary functions: what
+  // the reads must equal. Their inner calls name the temporary copies, so the
+  // oracle is 058's all the way down.
+  const src058 = readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith("058_"))!), "utf8");
+  const fn058 = (name: string) => { const at = src058.indexOf(`CREATE OR REPLACE FUNCTION ${name}`); return src058.slice(at, src058.indexOf("\n$$;", at) + 4); };
+  const oracle = [fn058("node_lifecycle()"), fn058("node_dependencies()"), fn058("node_state(")]
+    .map((t) => t.replaceAll("node_lifecycle()", "pg_temp.node_lifecycle_058()").replaceAll("node_dependencies()", "pg_temp.node_dependencies_058()")
+                 .replace("FUNCTION node_state(", "FUNCTION pg_temp.node_state_058("));
+  assert(oracle.length === 3 && /GROUP BY o\.system/.test(oracle[1]) && /row_number\(\) OVER/.test(oracle[0]) && /deps AS MATERIALIZED/.test(oracle[2]) && /pg_temp\.node_dependencies_058\(\)/.test(oracle[2]),
+    "the oracle is 058's own text: its lifecycle window, its grouped gate, and node_state's dependency CTEs over them");
+  for (const t of oracle) await db.exec(t);
+  // 053's resolver too: 071 redefines it to find the board sync's claim by
+  // 068's issue index, and 058's node_state above calls the new one.
+  const src053 = readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith("053_"))!), "utf8");
+  const resolver053 = (() => { const at = src053.indexOf("CREATE OR REPLACE FUNCTION source_thought("); return src053.slice(at, src053.indexOf("\n$$;", at) + 4); })()
+    .replace("FUNCTION source_thought(", "FUNCTION pg_temp.source_thought_053(");
+  assert(/metadata @> jsonb_build_object\('source', 'linear', 'issue', p_identity\)/.test(resolver053), "…and 053's resolver, its board-sync claim a containment");
+  await db.exec(resolver053);
+  const both = (a: string, b: string) => `(SELECT count(*)::int FROM (((${a}) EXCEPT ALL (${b})) UNION ALL ((${b}) EXCEPT ALL (${a}))) x)`;
+  const diverged = async (keyed: string[]) => (await q<{ drift: number; deps: number; state: number; keyed: number; resolver: number }>(`
+    SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift,
+           ${both("SELECT * FROM node_dependencies()", "SELECT * FROM pg_temp.node_dependencies_058()")} AS deps,
+           ${both("SELECT * FROM node_state()", "SELECT * FROM pg_temp.node_state_058()")} AS state,
+           ${both("SELECT * FROM node_state($1::uuid[])", "SELECT * FROM pg_temp.node_state_058($1::uuid[])")} AS keyed,
+           (SELECT count(*)::int FROM (SELECT DISTINCT i.system, i.identity FROM (
+               SELECT f.payload->>'system' AS system, f.payload->>'target' AS identity FROM thought_facets f WHERE f.kind = 'link'
+               UNION ALL SELECT s.system, s.identity FROM thought_sources s
+               UNION ALL SELECT 'linear', t.metadata->>'issue' FROM thoughts t WHERE t.metadata ? 'issue'
+               UNION ALL VALUES ('linear', NULL::text), ('linear', 'L-9'), ('linear', '7'), ('github', 'G-1')) i) k
+             WHERE source_thought(k.system, k.identity) IS DISTINCT FROM pg_temp.source_thought_053(k.system, k.identity)) AS resolver`, [keyed]))[0];
+
+  // Two seeded sequences of writes, checked after every statement.
+  // X-1 is every system's: a link in one system naming it must not reach
+  // another system's X-1 (first review pass: pools disjoint by system let a
+  // keyed read that dropped the link's system survive).
+  const IDS: Record<string, string[]> = { linear: ["L-1", "L-2", "L-3", "L-4", "L-5", "L-6", "X-1"], github: ["G-1", "G-2", "G-3", "X-1"], markdown: ["M-1", "M-2", "M-3", "X-1"], jira: ["J-1", "J-2", "X-1"] };
+  const SYSTEMS = Object.keys(IDS);
+  const TYPES = ["completed", "started", "unstarted", "canceled", "backlog", "weird"];
+  let serial = 0;
+  const kinds = new Map<string, number>();
+  let failure = "";
+  let blockedSeen = 0;
+  let unknownSeen = 0;
+  for (const seed of [2267, 7622]) {
+    const { rnd } = seededRandom(seed);
+    const pick = <T,>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)];
+    const meta = () => {
+      const m: Record<string, unknown> = {};
+      const r = rnd();
+      if (r < 0.35) { m.source = "linear"; m.issue = pick(IDS.linear); } else if (r < 0.5) m.ticket = pick(IDS.linear); else if (r < 0.55) m.issue = null;
+      if (rnd() < 0.65) { m.status_type = pick(TYPES); m.status = `S-${m.status_type}`; }
+      if (rnd() < 0.5) m.linear_updated_at = `2026-09-0${1 + Math.floor(rnd() * 4)}`;
+      return m;
+    };
+    const ids = async () => (await q<{ id: string }>(`SELECT id::text AS id FROM thoughts ORDER BY id`)).map((r) => r.id);
+    const some = async (n: number) => { const all = await ids(); return Array.from({ length: n }, () => pick(all)).filter(Boolean); };
+    const sources = async () => q<{ id: string; system: string; identity: string }>(`SELECT thought_id::text AS id, system, identity FROM thought_sources ORDER BY thought_id`);
+    const free = async (system: string) => { const held = new Set((await sources()).filter((s) => s.system === system).map((s) => s.identity)); return IDS[system].filter((i) => !held.has(i)); };
+    const content = () => `[65] thought ${seed}-${++serial}`;
+    for (let k = 0; k < 24; k++) await db.query(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb)`, [content(), JSON.stringify(meta())]);
+    // Two claims containment and a text compare read differently: an issue
+    // that is a number, a source that is an array holding "linear".
+    await db.query(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{"source": "linear", "issue": 7}'), ($2, '{"source": ["linear"], "issue": "L-2"}')`, [content(), content()]);
+    for (let step = 0; step < 240 && !failure; step++) {
+      const r = rnd();
+      let kind = "";
+      let wrote = false;
+      const run = async (sqlText: string, params: unknown[] = []) => { if (((await db.query(sqlText, params)).affectedRows ?? 0) > 0) wrote = true; };
+      try {
+        if (r < 0.06) {
+          kind = "insert thought";
+          const [target] = await some(1);
+          await run(`INSERT INTO thoughts (content, metadata, supersedes) VALUES ($1, $2::jsonb, $3::uuid)`, [content(), JSON.stringify(meta()), rnd() < 0.2 ? target ?? null : null]);
+        } else if (r < 0.16) {
+          kind = "record source";
+          const [id] = await some(1);
+          const system = pick(SYSTEMS);
+          const out = (await q<{ r: { ok: boolean; outcome?: string } }>(`SELECT record_thought_source($1::uuid, $2, $3, $4, 'text/plain', NULL, false) AS r`,
+            [id, system, pick(IDS[system]), `canonical ${serial}`]))[0].r;
+          wrote = out.ok && out.outcome !== "unchanged";
+        } else if (r < 0.20) {
+          // The board sync's take: the identity follows the caller's thought,
+          // the holder's source row goes and its links from the system close.
+          kind = "take a source";
+          const held = await sources();
+          const [id] = await some(1);
+          if (held.length && id) {
+            const h = pick(held);
+            const out = (await q<{ r: { ok: boolean; taken_from?: string | null } }>(`SELECT record_thought_source($1::uuid, $2, $3, 'taken', 'text/plain', NULL, true) AS r`, [id, h.system, h.identity]))[0].r;
+            wrote = out.ok && !!out.taken_from;
+          }
+        } else if (r < 0.23) {
+          kind = "re-record canonical";
+          const held = await sources();
+          if (held.length) { const h = pick(held); await run(`UPDATE thought_sources SET canonical = canonical || '+', canonical_hash = encode(sha256(convert_to(canonical || '+', 'UTF8')), 'hex') WHERE thought_id = $1`, [h.id]); }
+        } else if (r < 0.27) {
+          kind = "move a source row";
+          const held = await sources();
+          if (held.length) {
+            const h = pick(held);
+            const system = pick(SYSTEMS);
+            const open = await free(system);
+            if (open.length) await run(`UPDATE thought_sources SET system = $2, identity = $3 WHERE thought_id = $1`, [h.id, system, pick(open)]);
+          }
+        } else if (r < 0.30) {
+          kind = "delete a source row";
+          const held = await sources();
+          if (held.length) await run(`DELETE FROM thought_sources WHERE thought_id = $1`, [pick(held).id]);
+        } else if (r < 0.42) {
+          // Mostly the holder's own system; now and then another, whose links
+          // the holder's source row does not vouch for.
+          kind = "record links";
+          const held = await sources();
+          if (held.length) {
+            const h = pick(held);
+            const system = rnd() < 0.85 ? h.system : pick(SYSTEMS);
+            const links = Array.from({ length: Math.floor(rnd() * 4) }, () => ({ relation: pick(["blocks", "blocked_by", "blocked_by", "blocks", "references"]), target: rnd() < 0.1 ? `${system}-missing` : pick(IDS[system]) }));
+            const out = (await q<{ r: { added: number; closed: number } }>(`SELECT record_source_links($1::uuid, $2, $3::jsonb) AS r`, [h.id, system, JSON.stringify(links)]))[0].r;
+            wrote = out.added + out.closed > 0;
+          }
+        } else if (r < 0.47) {
+          kind = "insert a link";
+          const [id] = await some(1);
+          const system = pick(SYSTEMS);
+          const own = (await sources()).find((s) => s.id === id);
+          const target = pick(IDS[system].filter((i) => !(own && own.system === system && own.identity === i)));
+          await run(`INSERT INTO thought_facets (thought_id, kind, payload)
+                     SELECT $1::uuid, 'link', jsonb_build_object('relation', $2::text, 'system', $3::text, 'target', $4::text)
+                      WHERE NOT EXISTS (SELECT 1 FROM thought_facets f WHERE f.thought_id = $1::uuid AND f.kind = 'link' AND f.valid_until IS NULL
+                                           AND f.payload->>'system' = $3 AND f.payload->>'relation' = $2 AND f.payload->>'target' = $4)`,
+            [id, pick(["blocks", "blocked_by"]), system, target]);
+        } else if (r < 0.51) {
+          kind = "close a link";
+          const [f] = await q<{ id: string }>(`SELECT id::text AS id FROM thought_facets WHERE kind = 'link' AND valid_until IS NULL ORDER BY md5(id::text || $1) LIMIT 1`, [String(step)]);
+          if (f) await run(`UPDATE thought_facets SET valid_until = now() WHERE id = $1`, [f.id]);
+        } else if (r < 0.54) {
+          // Not one whose target has since become its holder's own identity:
+          // the validator refuses a self-link on any write but a close.
+          kind = "re-open a link";
+          const [f] = await q<{ id: string }>(`SELECT c.id::text AS id FROM thought_facets c WHERE c.kind = 'link' AND c.valid_until IS NOT NULL
+                                               AND NOT EXISTS (SELECT 1 FROM thought_sources s WHERE s.thought_id = c.thought_id
+                                                                  AND s.system = c.payload->>'system' AND s.identity = c.payload->>'target')
+                                               AND NOT EXISTS (SELECT 1 FROM thought_facets a WHERE a.thought_id = c.thought_id AND a.kind = 'link' AND a.valid_until IS NULL
+                                                                  AND a.payload->>'system' = c.payload->>'system' AND a.payload->>'relation' = c.payload->>'relation'
+                                                                  AND a.payload->>'target' = c.payload->>'target')
+                                             ORDER BY md5(c.id::text || $1) LIMIT 1`, [String(step)]);
+          if (f) await run(`UPDATE thought_facets SET valid_until = NULL WHERE id = $1`, [f.id]);
+        } else if (r < 0.57) {
+          kind = "delete a link";
+          const [f] = await q<{ id: string }>(`SELECT id::text AS id FROM thought_facets WHERE kind = 'link' ORDER BY md5(id::text || $1) LIMIT 1`, [String(step)]);
+          if (f) await run(`DELETE FROM thought_facets WHERE id = $1`, [f.id]);
+        } else if (r < 0.69) {
+          // Mostly a sourced row (the gate) or a linear head (a blocker's
+          // status), between known and unknown.
+          kind = "move a status";
+          const held = await sources();
+          const heads = (await q<{ id: string }>(`SELECT id::text AS id FROM thoughts WHERE metadata ? 'issue' ORDER BY id`)).map((x) => x.id);
+          const pool = rnd() < 0.5 && held.length ? held.map((h) => h.id) : heads.length ? heads : await ids();
+          const t = rnd() < 0.15 ? null : pick(TYPES);
+          await run(t === null ? `UPDATE thoughts SET metadata = metadata - 'status_type' WHERE id = $1` : `UPDATE thoughts SET metadata = metadata || jsonb_build_object('status_type', $2::text) WHERE id = $1`,
+            t === null ? [pick(pool)] : [pick(pool), t]);
+        } else if (r < 0.72) {
+          kind = "move statuses, several";
+          const picked = [...(await sources()).map((h) => h.id).filter(() => rnd() < 0.4), ...(await some(2))];
+          await run(`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status_type', $2::text) WHERE id = ANY($1::uuid[])`, [picked, pick(TYPES)]);
+        } else if (r < 0.78) {
+          kind = "replace metadata";
+          const [id] = await some(1);
+          await run(`UPDATE thoughts SET metadata = $2::jsonb WHERE id = $1`, [id, JSON.stringify(meta())]);
+        } else if (r < 0.83) {
+          // A pointer on the board sync's fallback rows: source_thought()
+          // resolves a linear identity with no source row to the chain's head.
+          kind = "set pointer";
+          const fallback = (await q<{ id: string }>(`SELECT id::text AS id FROM thoughts WHERE metadata->>'source' = 'linear' ORDER BY id`)).map((x) => x.id);
+          const [id, target] = fallback.length > 1 && rnd() < 0.7 ? [pick(fallback), pick(fallback)] : await some(2);
+          if (id && target && id !== target) await run(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [id, target]);
+        } else if (r < 0.85) {
+          kind = "clear pointer";
+          const [id] = (await q<{ id: string }>(`SELECT id::text AS id FROM thoughts WHERE supersedes IS NOT NULL ORDER BY id`)).map((x) => x.id);
+          if (id) await run(`UPDATE thoughts SET supersedes = NULL WHERE id = $1`, [id]);
+        } else if (r < 0.91) {
+          // A thought's delete cascades to its source row and its facets.
+          kind = "delete thought";
+          const held = await sources();
+          const picked = rnd() < 0.6 && held.length ? [pick(held).id] : await some(1 + Math.floor(rnd() * 2));
+          await run(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [picked]);
+          if (!(await ids()).length) for (let k = 0; k < 6; k++) await db.query(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb)`, [content(), JSON.stringify(meta())]);
+        } else if (r < 0.94) {
+          kind = "delete and move a status, one CTE";
+          const held = await sources();
+          const [a, b] = held.length > 1 ? [pick(held).id, pick(held).id] : await some(2);
+          if (a && b && a !== b) await run(`WITH d AS (DELETE FROM thoughts WHERE id = $1 RETURNING id) UPDATE thoughts SET metadata = metadata || jsonb_build_object('status_type', $3::text) WHERE id = $2`, [a, b, pick(TYPES)]);
+        } else if (r < 0.97) {
+          kind = "rolled back";
+          const [id] = await some(1);
+          await db.transaction(async (tx) => {
+            const out = (await tx.query<{ r: { ok: boolean } }>(`SELECT record_thought_source($1::uuid, 'github', 'G-rollback', 'x', 'text/plain') AS r`, [id])).rows[0].r;
+            wrote = out.ok;
+            await tx.query(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = $1`, [id]);
+            await tx.rollback();
+          });
+        } else {
+          kind = "savepoint";
+          const held = await sources();
+          const [b] = await some(1);
+          await db.transaction(async (tx) => {
+            await tx.exec(`SAVEPOINT s63`);
+            if (held.length) await tx.query(`DELETE FROM thought_sources WHERE thought_id = $1`, [pick(held).id]);
+            await tx.exec(`ROLLBACK TO SAVEPOINT s63`);
+            wrote = ((await tx.query(`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status_type', $2::text) WHERE id = $1`, [b, pick(TYPES)])).affectedRows ?? 0) > 0;
+          });
+        }
+      } catch (e) {
+        failure = `seed ${seed} step ${step} (${kind}) threw: ${(e as Error).message.split("\n")[0]}`;
+        break;
+      }
+      if (wrote) kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+      const keyed = [...(await some(1 + Math.floor(rnd() * 6))), ...(rnd() < 0.2 ? ["00000000-0000-4000-8000-000000000063"] : [])];
+      const d = await diverged(keyed);
+      if (d.drift || d.deps || d.state || d.keyed || d.resolver) failure = `seed ${seed} step ${step} (${kind}): drift ${d.drift}, node_dependencies ${d.deps}, node_state ${d.state}, node_state(ids) ${d.keyed}, source_thought ${d.resolver}`;
+      const [seen] = await q<{ b: number; u: number }>(`SELECT count(*) FILTER (WHERE blocked)::int AS b, count(*) FILTER (WHERE unknown_blockers IS NOT NULL)::int AS u FROM node_state()`);
+      blockedSeen += seen.b;
+      unknownSeen += seen.u;
+    }
+  }
+  const [shape] = await q<{ gates: number; open: number }>(`SELECT (SELECT count(*)::int FROM ob1_source_gate) AS gates, (SELECT count(*)::int FROM ob1_source_gate WHERE NOT gates) AS open`);
+  assert(failure === "" && kinds.size === 20 && blockedSeen > 0 && unknownSeen > 0 && shape.gates > 0,
+    `after every statement of two seeded sequences of writes — each of twenty kinds writing at least once: ${[...kinds].map(([k, n]) => `${k} ×${n}`).join(", ")} — drift() is empty, node_dependencies(), node_state() and node_state(ids) are 058's formulas' rows, both ways, and source_thought() resolves every identity as 053's did (${failure || `${blockedSeen} blocked and ${unknownSeen} unknown-blocker rows read along the way; ${shape.gates} mirror rows at the end`})`);
+
+  // A link in a system its holder has no source row of — a github issue
+  // carrying a linear `blocks` link to a linear ticket — vouches for nothing:
+  // node_dependencies() joins the holder's source row of the link's system,
+  // and there is none, so the ticket is neither blocked nor named by it, read
+  // by id as for the whole brain (mutation testing: the sequences write such
+  // a link too rarely to catch a keyed read that dropped the check).
+  const [fxTicket] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a linear ticket', '{"status_type": "started"}') RETURNING id::text AS id`);
+  const [fxHolder] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a github issue', '{"status_type": "started"}') RETURNING id::text AS id`);
+  await q(`SELECT record_thought_source($1::uuid, 'linear', 'L-FX', 'x', 'text/plain')`, [fxTicket.id]);
+  await q(`SELECT record_thought_source($1::uuid, 'github', 'G-FX', 'x', 'text/plain')`, [fxHolder.id]);
+  await q(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocks", "target": "L-FX"}]'::jsonb)`, [fxHolder.id]);
+  const foreign = await diverged([fxTicket.id, fxHolder.id]);
+  const [fxRow] = await q<{ blockers: string[] | null; in_dependencies: boolean }>(`SELECT blockers, in_dependencies FROM node_state(ARRAY[$1::uuid])`, [fxTicket.id]);
+  // And a link that names another system's identity by its text: a linear
+  // ticket's `blocks` link to "G-FX" names linear's G-FX, not the github
+  // issue's (first review pass: a keyed read without the link's system let it
+  // block the github issue).
+  await q(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocks", "target": "G-FX"}]'::jsonb)`, [fxTicket.id]);
+  const sameText = await diverged([fxTicket.id, fxHolder.id]);
+  const [fxIssue] = await q<{ blocked: boolean; in_dependencies: boolean }>(`SELECT blocked, in_dependencies FROM node_state(ARRAY[$1::uuid])`, [fxHolder.id]);
+  // A blocker whose status is one no lifecycle knows: open, and unknown — by
+  // id as for the whole brain (fourth review pass: the sequences' random ids
+  // caught a keyed read that read only a missing status as unknown, and then
+  // did not).
+  const [fxWeird] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a weird blocker', '{"status_type": "weird"}') RETURNING id::text AS id`);
+  await q(`SELECT record_thought_source($1::uuid, 'linear', 'L-FXW', 'x', 'text/plain')`, [fxWeird.id]);
+  await q(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocked_by", "target": "L-FXW"}]'::jsonb)`, [fxTicket.id]);
+  const weird = await diverged([fxTicket.id, fxWeird.id]);
+  const [fxBlocked] = await q<{ blockers: string[] | null; unknown_blockers: string[] | null }>(`SELECT blockers, unknown_blockers FROM node_state(ARRAY[$1::uuid])`, [fxTicket.id]);
+  await db.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[fxTicket.id, fxHolder.id, fxWeird.id]]);
+  assert(!weird.keyed && !weird.state && JSON.stringify(fxBlocked.blockers) === JSON.stringify(["L-FXW"]) && JSON.stringify(fxBlocked.unknown_blockers) === JSON.stringify(["L-FXW"]),
+    `a blocker whose status_type no lifecycle knows is an open blocker and an unknown one, read by id as for the whole brain (${JSON.stringify(fxBlocked)}; ${JSON.stringify(weird)})`);
+  assert(!foreign.keyed && !foreign.state && !foreign.deps && fxRow.blockers === null && fxRow.in_dependencies === false
+      && !sameText.keyed && !sameText.state && fxIssue.blocked === false && fxIssue.in_dependencies === false,
+    `a linear link carried by a thought whose source row is github's holds nothing: the ticket it names, read by id, is neither blocked nor in the dependencies; and a linear link naming "G-FX" does not reach the github issue G-FX — as 058's read has it (${JSON.stringify(foreign)}; ${JSON.stringify(sameText)})`);
+
+  // The plan an id list gets: the whole-brain branch folded away for a
+  // constant list, a one-time filter for a parameter; and with sequential
+  // scans off, an index for every table the keyed read touches.
+  const plan = async (sql: string) => (await q<{ "QUERY PLAN": string }>(`EXPLAIN (COSTS OFF) ${sql}`)).map((r) => r["QUERY PLAN"]).join("\n");
+  const some5 = (await q<{ id: string }>(`SELECT id::text AS id FROM thoughts ORDER BY id LIMIT 5`)).map((r) => r.id);
+  const listed = `SELECT * FROM node_state('{${some5.join(",")}}'::uuid[])`;
+  const constant = await plan(listed);
+  await db.exec(`SET enable_seqscan = off`);
+  const probed = await plan(listed);
+  await db.exec(`RESET enable_seqscan`);
+  await db.exec(`SET plan_cache_mode = force_generic_plan`);
+  await db.exec(`PREPARE s63_keyed(uuid[]) AS SELECT * FROM node_state($1)`);
+  const generic = await plan(`EXECUTE s63_keyed('{${some5.join(",")}}')`);
+  await db.exec(`DEALLOCATE s63_keyed; RESET plan_cache_mode`);
+  const seqs = [...probed.matchAll(/Seq Scan on (\w+)/g)].map((m) => m[1]);
+  assert(!/CTE ticket_of|CTE deps|\$1 IS NULL/.test(constant) && /thought_facets/.test(constant)
+      && seqs.every((t) => !["thoughts", "thought_facets", "thought_sources", "ob1_source_gate", "ob1_ticket_head", "ob1_superseded_by"].includes(t))
+      && /One-Time Filter: \(\$1 IS NULL\)/.test(generic),
+    `node_state(<ids>) read for every column: for a constant list no whole-brain branch is planned, and with sequential scans off every table is reached by index; for a parameter the whole-brain branch sits behind a one-time filter (${seqs.join(", ") || "no sequential scan"})`);
+
+  // The gate's locks are buckets of the thought's id, 256 in class 22563
+  // (second review pass: row locks on thoughts until then): six hundred source
+  // rows written in one transaction hold at most 256 of them, and more than
+  // one bucket's worth.
+  let gateLocks = -1;
+  await db.transaction(async (tx) => {
+    const many = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) SELECT '[65] lock bound ' || g, '{}'::jsonb FROM generate_series(1, 600) g RETURNING id::text AS id`)).rows;
+    for (const [k, m] of many.entries()) await tx.query(`SELECT record_thought_source($1::uuid, 'github', $2, 'x', 'text/plain')`, [m.id, `LB-${k}`]);
+    gateLocks = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND classid = 22563`)).rows[0].n;  // one session: PGlite's pg_locks does not carry pg_backend_pid()
+    await tx.rollback();
+  });
+  assert(gateLocks > 128 && gateLocks <= 256, `six hundred source rows written in one transaction hold ${gateLocks} of the gate's locks — buckets of the thought's id, never more than 256`);
+
+  // The grant. A structured pass's role (capture, server, structure) records
+  // a source row and its links, moves its status and reads the dependency
+  // columns; a capture role alone moves a sourced thought's status and
+  // deletes it (the cascade's trigger runs as the caller, and a delete reads
+  // no source row); without the mirror a source write and a status move are
+  // refused on it, and a plain capture is not.
+  const asRole = async (name: string, groups: string[], revoke: boolean, body: () => Promise<unknown>, alsoRevoke = "") => {
+    await db.exec(`CREATE ROLE ${name} NOLOGIN`);
+    const present = new Set((await q<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects()))).filter((r) => r.present).map((r) => r.name));
+    for (const s of [`GRANT USAGE ON SCHEMA public TO "${name}";`, ...grantStatements(name, { groups: groups as never, present })]) await db.exec(s);
+    if (revoke) await db.exec(`REVOKE ALL ON ob1_source_gate FROM ${name}`);
+    if (alsoRevoke) await db.exec(`REVOKE ${alsoRevoke} FROM ${name}`);
+    await db.exec(`SET ROLE ${name}`);
+    let out = "ok";
+    try { await body(); } catch (e) { out = (e as Error).message.split("\n")[0]; } finally { await db.exec(`RESET ROLE`); }
+    await db.exec(`DROP OWNED BY ${name}; DROP ROLE ${name}`);
+    return out;
+  };
+  const structured = await asRole("ob1_gate_structure", ["capture", "server", "structure"], false, async () => {
+    const [a] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a granted ticket', '{"status_type": "started"}') RETURNING id::text AS id`);
+    await q(`SELECT record_thought_source($1::uuid, 'github', 'G-granted', 'x', 'text/plain')`, [a.id]);
+    await q(`SELECT record_source_links($1::uuid, 'github', '[{"relation": "blocked_by", "target": "G-1"}]'::jsonb)`, [a.id]);
+    await q(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = $1`, [a.id]);
+    await q(`SELECT count(blockers) FROM node_state($1::uuid[])`, [[a.id]]);
+    await q(`SELECT count(*) FROM node_dependencies()`);
+  });
+  const [sourced] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a sourced row', '{"status_type": "started"}') RETURNING id::text AS id`);
+  await q(`SELECT record_thought_source($1::uuid, 'github', 'G-sourced', 'x', 'text/plain')`, [sourced.id]);
+  // Without SELECT on thought_sources (the server group's): the delete's
+  // trigger reads the mirror alone.
+  const captureOnly = await asRole("ob1_gate_capture", ["capture", "server"], false, async () => {
+    await q(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = $1`, [sourced.id]);
+    await q(`DELETE FROM thoughts WHERE id = $1`, [sourced.id]);
+  }, "SELECT ON thought_sources");
+  // The locks are advisory: a structured pass's role without UPDATE on
+  // thoughts writes and deletes a source row as it did before this file.
+  const noUpdate = await asRole("ob1_gate_no_update", ["capture", "server", "structure"], false, async () => {
+    const [c] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a source without UPDATE', '{"status_type": "started"}') RETURNING id::text AS id`);
+    await q(`SELECT record_thought_source($1::uuid, 'github', 'G-no-update', 'x', 'text/plain')`, [c.id]);
+    await q(`DELETE FROM thought_sources WHERE thought_id = $1`, [c.id]);
+  }, "UPDATE ON thoughts");
+  const [bareRow] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a bare sourced row', '{"status_type": "started"}') RETURNING id::text AS id`);
+  await q(`SELECT record_thought_source($1::uuid, 'github', 'G-bare', 'x', 'text/plain')`, [bareRow.id]);
+  const bareCapture = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a plain capture', '{"status_type": "started"}')`));
+  // An edit that moves no status between known and unknown, and a delete of a
+  // thought with no source row — whose cascade fires the delete trigger with
+  // nothing deleted — need nothing of the mirror (first review pass: every
+  // delete was refused).
+  const [bareNote] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a bare note', '{"status_type": "started"}') RETURNING id::text AS id`);
+  const bareEdit = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`UPDATE thoughts SET content = content || ' (edited)', metadata = metadata || '{"status_type": "canceled"}' WHERE id = $1`, [bareNote.id]));
+  const bareDelete = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`DELETE FROM thoughts WHERE id = $1`, [bareNote.id]));
+  // Reads (fourth review pass: no test held SAFETY's read claims). A linear
+  // ticket blocked by another, both sourced and gating: without the table a
+  // read of its dependency columns by id is refused, a read of its lifecycle
+  // columns by id is not.
+  const [rdTicket] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a read ticket', '{"status_type": "started"}') RETURNING id::text AS id`);
+  const [rdBlocker] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a read blocker', '{"status_type": "started"}') RETURNING id::text AS id`);
+  await q(`SELECT record_thought_source($1::uuid, 'linear', 'L-RD', 'x', 'text/plain')`, [rdTicket.id]);
+  await q(`SELECT record_thought_source($1::uuid, 'linear', 'L-RD2', 'x', 'text/plain')`, [rdBlocker.id]);
+  await q(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocked_by", "target": "L-RD2"}]'::jsonb)`, [rdTicket.id]);
+  const bareDeps = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`SELECT blockers FROM node_state(ARRAY[$1::uuid])`, [rdTicket.id]));
+  const bareLife = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`SELECT status_type, superseded_by FROM node_state(ARRAY[$1::uuid])`, [rdTicket.id]));
+  const bareStatus = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, () => q(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = $1`, [bareRow.id]));
+  const bareSource = await asRole("ob1_gate_bare", ["capture", "server", "structure"], true, async () => {
+    const [c] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a bare source', '{}') RETURNING id::text AS id`);
+    await q(`SELECT record_thought_source($1::uuid, 'github', 'G-bare-2', 'x', 'text/plain')`, [c.id]);
+  });
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[65] a %'`);
+  const [gone] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_source_gate WHERE thought_id = $1`, [sourced.id]);
+  assert(structured === "ok" && captureOnly === "ok" && noUpdate === "ok" && gone.n === 0 && bareCapture === "ok" && bareEdit === "ok" && bareDelete === "ok"
+      && /permission denied for table ob1_source_gate\b/.test(bareDeps) && bareLife === "ok"
+      && /permission denied for table ob1_source_gate\b/.test(bareStatus) && /permission denied for table ob1_source_gate\b/.test(bareSource)
+      && ROLE_GRANTS.capture.some((r) => (r as { table?: string }).table === "ob1_source_gate"),
+    `a structured pass's role records a source row and its links, moves its status and reads the dependency columns; a capture role without SELECT on the source rows moves a sourced thought's status and deletes it, its mirror row going with it; a role without UPDATE on thoughts writes and deletes a source row (the gate's locks are advisory); without the mirror a plain capture, an edit that keeps its status known, a delete of an unsourced thought and a lifecycle read by id succeed, and a status move, a source write and a read of a linked ticket's dependency columns are refused on it (${structured}; ${captureOnly}; ${noUpdate}; ${bareEdit}; ${bareDelete}; ${bareLife}; ${bareStatus}; ${bareSource}; ${bareDeps})`);
+
+  // Replays: 071 over itself writes nothing; 058 alone puts back its grouped
+  // gate and its whole-brain node_state, and the triggers keep the mirror
+  // exact under them; 068 then 071 is the shipped state again.
+  const snapshot = async () => (await q<{ s: string | null }>(`SELECT string_agg(row(g.*)::text, '|' ORDER BY thought_id) AS s FROM ob1_source_gate g`))[0].s;
+  const before = await snapshot();
+  await reapply("071");
+  await reapply("071");
+  const twice = await snapshot();
+  const [clean] = await q<{ w: number }>(`SELECT written + deleted AS w FROM ob1_rebuild_source_gate()`);
+  await reapply("058");
+  const oldDeps = (await q<{ b: string }>(`SELECT prosrc AS b FROM pg_proc WHERE oid = 'node_dependencies()'::regprocedure`))[0].b;
+  const held = await q<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources ORDER BY thought_id LIMIT 1`);
+  if (held[0]) await db.query(`UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled"}' WHERE id = $1`, [held[0].id]);
+  if (held[0]) await db.query(`UPDATE thoughts SET metadata = metadata - 'status_type' WHERE id = $1`, [held[0].id]);
+  const underOld = await diverged(held.map((h) => h.id));
+  await reapply("068");
+  await reapply("071");
+  const [restored] = await q<{ deps: string; state: string; trig: number }>(`
+    SELECT (SELECT prosrc FROM pg_proc WHERE oid = 'node_dependencies()'::regprocedure) AS deps, (SELECT prosrc FROM pg_proc WHERE oid = 'node_state(uuid[])'::regprocedure) AS state,
+           (SELECT count(*)::int FROM pg_trigger WHERE tgname LIKE 'thought_sources_node_gate_%' OR tgname = 'thoughts_node_source_gate_update') AS trig`);
+  const afterReplays = await diverged(held.map((h) => h.id));
+  assert(held.length === 1 && before === twice && clean.w === 0 && /GROUP BY o\.system/.test(oldDeps) && !underOld.drift && !underOld.deps && !underOld.state
+      && /ob1_source_gate/.test(restored.deps) && /ob1_node_dependencies_of/.test(restored.state) && restored.trig === 5 && !afterReplays.drift && !afterReplays.keyed,
+    `071 replayed twice writes nothing and a rebuild after it finds nothing to fix; 058 replayed alone puts its grouped gate back, and a sourced row's status moves under it keep the mirror exact; 068 then 071 restore the stored gate, the keyed read and the five triggers (${JSON.stringify(underOld)})`);
+
+  // A write with the tables' user triggers disabled bypasses the mirror:
+  // drift() names it, the rebuild repairs it and says what it did.
+  const [plain] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a github row', '{"status_type": "started"}') RETURNING id::text AS id`);
+  await q(`SELECT record_thought_source($1::uuid, 'github', 'G-disabled', 'x', 'text/plain')`, [plain.id]);
+  const [other] = await q<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources WHERE thought_id <> $1 ORDER BY thought_id LIMIT 1`, [plain.id]);
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER USER; ALTER TABLE thought_sources DISABLE TRIGGER USER`);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}' WHERE id = $1`, [plain.id]);
+  if (other) await db.query(`DELETE FROM thought_sources WHERE thought_id = $1`, [other.id]);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER USER; ALTER TABLE thought_sources ENABLE TRIGGER USER`);
+  const stale = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_node_projection_drift() WHERE projection = 'source_gate'`))[0].n;
+  const [fixed] = await q<{ w: number; d: number }>(`SELECT written AS w, deleted AS d FROM ob1_rebuild_source_gate()`);
+  const after = await diverged([plain.id]);
+  assert(!!other && stale === 2 && fixed.w === 1 && fixed.d === 1 && !after.drift && !after.deps && !after.state && !after.keyed,
+    `a status move and a source delete with the triggers disabled leave drift() naming both (${stale} rows); ob1_rebuild_source_gate() rewrites one and deletes the other (${fixed.w}, ${fixed.d}) and leaves none`);
+
+  // REPEATABLE READ is refused for a write that moves a source row or a
+  // status between known and unknown — the status move's snapshot could miss
+  // a mirror row committed meanwhile — and not for a plain write, a status
+  // move that stays known, or a source row's delete (by key, reading
+  // nothing); SERIALIZABLE runs; the rebuild refuses both.
+  const underIso = async (iso: string, sqlText: string) => {
+    let out = "ok";
+    try { await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL ${iso}`); await tx.exec(sqlText); }); }
+    catch (e) { out = (e as Error).message.split("\n")[0]; }
+    return out;
+  };
+  const rrStatus = await underIso("REPEATABLE READ", `UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = '${plain.id}'`);
+  await q(`INSERT INTO thoughts (content, metadata) VALUES ('[65] a known row', '{"status_type": "started"}')`);
+  const rrKnown = await underIso("REPEATABLE READ", `UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled"}' WHERE content = '[65] a known row'`);
+  const rrSource = await underIso("REPEATABLE READ", `SELECT record_thought_source('${plain.id}'::uuid, 'jira', 'J-rr', 'x', 'text/plain')`);
+  const [unsourced] = await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[65] an unsourced row', '{"status_type": "started"}') RETURNING id::text AS id`);
+  const rrInsert = await underIso("REPEATABLE READ", `SELECT record_thought_source('${unsourced.id}'::uuid, 'jira', 'J-rr-new', 'x', 'text/plain')`);
+  // A re-record of plain's row as it stands — the upsert's no-op branch, an
+  // INSERT that inserted nothing — moves nothing and runs (first review pass:
+  // no test held the insert's early return).
+  const [asIs] = await q<{ system: string; identity: string; canonical: string }>(`SELECT system, identity, canonical FROM thought_sources WHERE thought_id = $1`, [plain.id]);
+  const rrUnchanged = await underIso("REPEATABLE READ", `SELECT record_thought_source('${plain.id}'::uuid, '${asIs.system}', '${asIs.identity}', '${asIs.canonical}', 'text/plain')`);
+  const rrPlain = await underIso("REPEATABLE READ", `INSERT INTO thoughts (content, metadata) VALUES ('[65] a plain capture under repeatable read', '{}')`);
+  const rrDelete = await underIso("REPEATABLE READ", `DELETE FROM thought_sources WHERE thought_id = '${plain.id}'`);
+  await q(`SELECT record_thought_source($1::uuid, 'github', 'G-disabled', 'x', 'text/plain')`, [plain.id]);
+  const serStatus = await underIso("SERIALIZABLE", `UPDATE thoughts SET metadata = metadata || '{"status_type": "started"}' WHERE id = '${plain.id}'`);
+  const rrRebuild = await underIso("REPEATABLE READ", `SELECT * FROM ob1_rebuild_source_gate()`);
+  const serRebuild = await underIso("SERIALIZABLE", `SELECT * FROM ob1_rebuild_source_gate()`);
+  const iso = await diverged([plain.id]);
+  assert(/moves a thought's status_type between known and unknown, and node_state's gate \(migration 071\) cannot be kept under REPEATABLE READ/.test(rrStatus)
+      && /moves a source row, and node_state's gate \(migration 071\) cannot be kept under REPEATABLE READ/.test(rrSource)
+      && /moves a source row, and node_state's gate \(migration 071\) cannot be kept under REPEATABLE READ/.test(rrInsert)
+      && rrKnown === "ok" && rrPlain === "ok" && rrDelete === "ok" && rrUnchanged === "ok" && serStatus === "ok" && !iso.drift && !iso.keyed
+      && /must run under READ COMMITTED; this transaction is REPEATABLE READ/.test(rrRebuild) && /this transaction is SERIALIZABLE/.test(serRebuild),
+    `under REPEATABLE READ a status move between known and unknown and a source write — an update of a source row and an insert of one — are refused naming the level, and a plain capture, a re-record that changes nothing and a source row's delete are not; under SERIALIZABLE the move runs and the mirror stays exact; the rebuild refuses both levels (${rrStatus}; ${rrSource}; ${rrDelete}; ${serStatus}; ${rrRebuild})`);
+
+  // TRUNCATE leaves no source row, so no mirror row: directly, and through
+  // TRUNCATE thoughts ... CASCADE (064's page revisions refuse a TRUNCATE, so
+  // their guard is set aside for the one statement, as [62] does).
+  const [pre] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_source_gate`);
+  await db.exec(`TRUNCATE thought_sources`);
+  const [cut] = await q<{ n: number; drift: number }>(`SELECT (SELECT count(*)::int FROM ob1_source_gate) AS n, (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift`);
+  await q(`SELECT record_thought_source($1::uuid, 'github', 'G-truncated', 'x', 'text/plain')`, [plain.id]);
+  await db.exec(`ALTER TABLE page_section_revisions DISABLE TRIGGER page_section_revisions_immutable_truncate`);
+  await db.exec(`TRUNCATE thoughts CASCADE`);
+  await db.exec(`ALTER TABLE page_section_revisions ENABLE TRIGGER page_section_revisions_immutable_truncate`);
+  const [cascaded] = await q<{ n: number; drift: number }>(`SELECT (SELECT count(*)::int FROM ob1_source_gate) AS n, (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift`);
+  assert(pre.n > 0 && cut.n === 0 && cut.drift === 0 && cascaded.n === 0 && cascaded.drift === 0,
+    `TRUNCATE thought_sources empties the mirror (${pre.n} rows before), and so does TRUNCATE thoughts CASCADE; drift() is empty after each`);
+
+  await db.exec(`DROP FUNCTION pg_temp.node_state_058(uuid[]); DROP FUNCTION pg_temp.node_dependencies_058(); DROP FUNCTION pg_temp.node_lifecycle_058(); DROP FUNCTION pg_temp.source_thought_053(text, text)`);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

@@ -295,6 +295,42 @@ export type ExtractWindowing = {
    * leaves it undefined when it would equal `metadataModel`.
    */
   escalateModel?: string;
+  /**
+   * A multiplier on the `max_tokens` a budgeted call requests, for measuring a
+   * LARGER answer budget on dense-name windows (SMD-2269) — a reference list of
+   * dozens of authors that the shipped budget cuts might parse at twice it.
+   * Undefined or 1 leaves the budget as extractOutputBudget sizes it, so the
+   * worker's call is unchanged; windowingFor never sets it. An eval arm sets 2
+   * or 3, or a per-window value it computes from the text's density. No effect
+   * unless `outputBudget` is on (a call with no budget requests no max_tokens).
+   */
+  budgetTimes?: number;
+  /**
+   * A per-window diagnostic sink, called once for every window BEFORE the caller
+   * reads the merged answer (SMD-2269): the failure-shape measurement needs the
+   * finish reason and a sample of the raw answer, neither of which the merged
+   * Extraction carries. Undefined on the worker (windowingFor never sets it), so
+   * the shipped path makes no extra work; an eval passes it to classify each
+   * malformed window as cut at the budget, wrong-shape JSON, or prose.
+   */
+  observe?: (rec: ExtractWindowObservation) => void;
+};
+
+/** What `ExtractWindowing.observe` is told about one window's call (SMD-2269): the diagnostic the merged Extraction cannot carry. */
+export type ExtractWindowObservation = {
+  index: number;
+  of: number;
+  tokens: number;
+  /** The `max_tokens` the call requested, or undefined when it was not budgeted. */
+  budget?: number;
+  /** The call's `finish_reason` (`length` names a cut answer), or undefined when it streamed to an abort or carried none. */
+  finishReason?: string;
+  /** The stream-abort detector fired — a repeated-item runaway, not a clean cut. */
+  aborted: boolean;
+  /** The answer did not parse as JSON of the expected shape. */
+  malformed: boolean;
+  /** The opening of the raw answer, for telling wrong-shape JSON from prose; absent on an abort (the partial answer is not read). */
+  answerSample?: string;
 };
 
 /**
@@ -305,6 +341,9 @@ export type ExtractWindowing = {
  * call that converges is the p1 request plus its budget and nothing else.
  */
 export const RUNAWAY_PENALTY = 0.5;
+
+/** How much of a raw answer ExtractWindowing.observe samples (SMD-2269): the opening, enough to tell wrong-shape JSON (`{"…`) from prose (`References …`). */
+export const OBSERVE_SAMPLE = 400;
 
 /**
  * How many copies of one item — an entity by (type, name), a relation by
@@ -743,13 +782,24 @@ export function extractionKey(model: string): string {
  * (SMD-1879): an answer that does not converge ends at the budget as a
  * malformed answer — visible, retryable — not at the context's end.
  */
-async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort">, second: { penalty?: boolean; model?: string } = {}): Promise<Extraction & { runaway: boolean }> {
+async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort" | "budgetTimes" | "observe">, second: { penalty?: boolean; model?: string } = {}): Promise<Extraction & { runaway: boolean }> {
   // Named by the windowing, not positional booleans (second review pass).
   const { outputBudget: budget, streamAbort: stream } = w;
   // The retry dials the escalation model when given (SMD-2000), the metadata
   // model otherwise; the penalty rides the SAME-model retry, never the
   // escalation (the larger model answers unpenalised, the same messages).
   const model = second.model ?? cfg.metadataModel;
+  // extractOutputBudget once (reused by the request and the observe record),
+  // scaled by budgetTimes for the larger-budget measurement (SMD-2269) — 1 when
+  // unset, so the worker's call is unchanged; only sent when budget is on.
+  const inputTokens = estimateTokens(text);
+  const budgetTokens = budget ? Math.ceil(extractOutputBudget(inputTokens) * (w.budgetTimes ?? 1)) : undefined;
+  // A per-window diagnostic (SMD-2269): the finish reason and a sample of the
+  // raw answer, which the merged Extraction does not carry. No-op unless an eval
+  // passed a sink. Sample the opening — enough to tell wrong-shape JSON from prose.
+  const report = (finishReason: string | undefined, aborted: boolean, malformed: boolean, raw: string | undefined) => {
+    w.observe?.({ index: part?.index ?? 0, of: part?.of ?? 1, tokens: inputTokens, budget: budgetTokens, finishReason, aborted, malformed, answerSample: raw?.slice(0, OBSERVE_SAMPLE) });
+  };
   const t0 = Date.now();
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
@@ -768,7 +818,7 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
       response_format: { type: "json_object" },
       temperature: cfg.metadataTemperature,
       ...cfg.metadataReasoning,
-      ...(budget ? { max_tokens: extractOutputBudget(estimateTokens(text)) } : {}),
+      ...(budget ? { max_tokens: budgetTokens } : {}),
       ...(second.penalty ? { frequency_penalty: RUNAWAY_PENALTY } : {}),
       ...(stream ? { stream: true } : {}),
       messages: buildMessages(text, part),
@@ -792,19 +842,24 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
       // Aborted: a runaway by the detector's rule, whatever the budget — the
       // partial answer is not read (it could not parse), and the caller's
       // deadline, on the fetch's signal, bounds the read as it does the whole.
-      if (got.repeated !== null) return { ...MALFORMED(), runaway: true, abortedMs: Date.now() - t0 };
-      return { ...parseExtraction(got.content), runaway: budget && got.finish === "length" };
+      if (got.repeated !== null) { report(got.finish, true, true, undefined); return { ...MALFORMED(), runaway: true, abortedMs: Date.now() - t0 }; }
+      const ex = parseExtraction(got.content);
+      report(got.finish, false, ex.malformed, got.content);
+      return { ...ex, runaway: budget && got.finish === "length" };
     }
     d = JSON.parse(got.text);
   } else {
     d = (await r.json()) as typeof d;
   }
   const answer = d?.choices?.[0]?.message?.content;
+  const finish = d?.choices?.[0]?.finish_reason;
   // A cut answer is a runaway only when the call was budgeted: without a
   // budget the provider's own limit is what `length` names.
-  const runaway = budget && d?.choices?.[0]?.finish_reason === "length";
-  if (typeof answer !== "string") return { ...MALFORMED(), runaway };
-  return { ...parseExtraction(answer), runaway };
+  const runaway = budget && finish === "length";
+  if (typeof answer !== "string") { report(finish, false, true, undefined); return { ...MALFORMED(), runaway }; }
+  const ex = parseExtraction(answer);
+  report(finish, false, ex.malformed, answer);
+  return { ...ex, runaway };
 }
 
 type StreamVerdict = { kind: "end" } | { kind: "repeated"; key: string } | null;

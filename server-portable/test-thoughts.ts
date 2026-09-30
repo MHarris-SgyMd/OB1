@@ -516,6 +516,9 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   assert(windowingFor(plain).streamAbort === true, "the shipped windowing streams the answer and aborts a runaway on it (EXTRACT_STREAM_ABORT)");
   assert(describeExtractWindow(plain).includes("; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0.5 frequency penalty, read whole"), `…and the banner/preflight sentence names the abort, the retry and that the retry is read whole (${describeExtractWindow(plain)})`);
   assert(windowingFor(resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_METADATA_REASONING: "medium" })).streamAbort === false, "with OB1_METADATA_REASONING on the answer is read whole: no budget, no retry, no abort");
+  // SMD-2269: the measurement hooks are never on the worker's windowing — only an
+  // eval passes budgetTimes/observe explicitly, so the shipped call is unchanged.
+  assert(windowingFor(plain).budgetTimes === undefined && windowingFor(plain).observe === undefined, "windowingFor sets neither the budget multiplier nor the diagnostic sink (SMD-2269) — the worker's call carries the plain budget and no observer");
 
   // The merge carries the longest abort of the windows, and none when none was.
   const win = (index: number, abortedMs?: number): ExtractionWindow => ({ index, tokens: 100, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, ...(abortedMs !== undefined ? { abortedMs } : {}) });

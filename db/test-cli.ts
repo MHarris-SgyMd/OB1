@@ -158,11 +158,27 @@ const entries = sources.filter((f) => {
   ok(entries.length >= 20, `the entry-point census finds the scripts (${entries.length}: ${entries.join(", ")})`);
   for (const must of ["extract-entities.ts", "consolidate.ts", "reembed.ts", "migrate.ts", "tier.ts", "sync-linear.ts", "graph-centrality.ts", "bench-hnsw.ts"])
     ok(entries.includes(must), `the census counts ${must} as an entry point`);
-  for (const lib of ["cli.ts", "lease.ts", "env.ts", "brain-compare.ts", "ingest-contract.ts", "bench-oracle.ts"])
+  for (const lib of ["cli.ts", "lease.ts", "env.ts", "brain-compare.ts", "ingest-contract.ts", "bench-oracle.ts", "worker-bootstrap.ts"])
     ok(!entries.includes(lib), `the census does not count the library ${lib}`);
   for (const f of entries) ok(/from "\.\/cli\.ts"/.test(readFileSync(join(HERE, f), "utf8")), `${f} imports ./cli.ts`);
   for (const f of sources.filter((s) => s !== "cli.ts"))
     ok(!/process\.argv/.test(readFileSync(join(HERE, f), "utf8")), `${f} reads no process.argv of its own — its arguments go through cli.ts`);
+}
+
+// ---------------------------------------------------------------------------
+// SMD-2303. The db/ claim workers bootstrap their provider egress and identity
+// through one module, db/worker-bootstrap.ts: no other db/ file reaches
+// egress.ts's `refusesEverything`/`describeEgress` or resolves a worker key
+// (`resolve_agent(`, `parseKeyRecords`) directly, so the blanket-gate wording
+// and the capped resolve cannot drift back into per-worker copies.
+// ---------------------------------------------------------------------------
+{
+  const MODULE = "worker-bootstrap.ts";
+  for (const f of sources.filter((s) => s !== MODULE)) {
+    const text = readFileSync(join(HERE, f), "utf8");
+    for (const banned of ["refusesEverything", "describeEgress", "resolve_agent(", "parseKeyRecords"])
+      ok(!text.includes(banned), `${f} does not reach ${banned} directly — the worker bootstrap goes through ${MODULE} (SMD-2303)`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +245,22 @@ const entries = sources.filter((f) => {
   ok(strayKey.code === 2 && /^unknown argument 4: a value where no flag takes one$/m.test(strayKey.err) && !strayKey.err.includes("sk-not-a-real-key") && /connector name/.test(strayKey.err), `tier.ts --compare refuses a stray value by position, with the compare usage, not echoing it (exit ${strayKey.code})`);
   const grant = run("migrate.ts", "--grant", "--url=postgres://u:s3cret@h/db");
   ok(grant.code === 2 && /^--grant needs a value; a flag follows it$/m.test(grant.err) && !grant.err.includes("s3cret"), `migrate.ts --grant with a joined --url after it does not echo the password (exit ${grant.code})`);
+  // SMD-2289: --groups narrows --grant, is refused on its own before the URL is read, and names an unknown group from the list.
+  const lone = run("migrate.ts", "--groups", "capture");
+  ok(lone.code === 2 && /^--groups narrows --grant to some of its groups; it does nothing on its own/m.test(lone.err), `migrate.ts --groups without --grant is refused as that, not as a missing URL (exit ${lone.code}: ${lone.err.split("\n")[0]})`);
+  const unknownGroup = run("migrate.ts", "--grant", "r", "--groups", "capture,bogus", "--url", "postgres://u:s3cret@127.0.0.1:1/db");
+  ok(unknownGroup.code === 2 && /not a group: "bogus"/.test(unknownGroup.err) && /capture, server, worker/.test(unknownGroup.err) && !unknownGroup.err.includes("s3cret"), `migrate.ts --groups names an unknown group and the list, before connecting (exit ${unknownGroup.code})`);
+  const loneExact = run("migrate.ts", "--exact");
+  ok(loneExact.code === 2 && /^--exact makes --grant all a role holds; it does nothing on its own/m.test(loneExact.err), `migrate.ts --exact without --grant is refused as that, not as a missing URL (exit ${loneExact.code}: ${loneExact.err.split("\n")[0]})`);
+  const noGroups = run("migrate.ts", "--grant", "r", "--groups", ",", "--url", "postgres://u@127.0.0.1:1/db");
+  ok(noGroups.code === 2 && /none was given/.test(noGroups.err), `migrate.ts --groups with no group in it is refused (exit ${noGroups.code})`);
+  // SMD-2289: login-role.ts refuses what it would not make, before connecting, and never echoes the password.
+  const noPw = run("login-role.ts", "--role", "ob1_x", "--password-env", "OB1_TEST_UNSET_PW", "--url", "postgres://u@127.0.0.1:1/db");
+  ok(noPw.code === 2 && /OB1_TEST_UNSET_PW is not set: run `bun deploy\/orchestration\/provision.ts --init`/.test(noPw.err), `login-role.ts refuses an unset password variable, naming --init (exit ${noPw.code})`);
+  const badName = run("login-role.ts", "--role", "Postgres; DROP", "--password-env", "PATH");
+  ok(badName.code === 2 && /must be a lower-case identifier/.test(badName.err), `login-role.ts refuses a role name that is not a plain identifier (exit ${badName.code})`);
+  const onlyRole = run("login-role.ts", "--role", "ob1_x");
+  ok(onlyRole.code === 2 && /needs --role <name> and --password-env <VAR>/.test(onlyRole.err), `login-role.ts needs both flags (exit ${onlyRole.code})`);
   const glued = run("migrate.ts", "--urlpostgres://u:s3cret@h/db");
   ok(glued.code === 2 && !glued.err.includes("s3cret"), `migrate.ts with the space after --url missed does not echo the password (exit ${glued.code})`);
   const ids = run("reembed.ts", "--accept-failed", "a", "--dry-run", "b");

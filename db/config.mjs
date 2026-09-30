@@ -1480,6 +1480,81 @@ export async function setPathWithoutTemp(tx) {
 }
 
 /**
+ * Put public first on the migrating session's search_path, before the
+ * migrator creates or reads anything unqualified (SMD-2247). Every migration
+ * and the ledger are unqualified, so they land in the first schema on the path
+ * and find the first table of a name: with another schema first — the
+ * default path's "$user" when a schema is named for the role, a connection
+ * string's options=, a role's setting — the build went there, or found
+ * another tool's `thoughts` and failed on it, and with no schema on the path
+ * at all the ledger's CREATE failed with 3F000. The brain lives in public,
+ * where preflight and --baseline look, so public goes first and the rest of
+ * the path follows in its order, read as Postgres reads it: an extension's
+ * schema on it (Supabase's `extensions`) still resolves. Session scope
+ * (`set_config(…, false)`), as alignVectorSearchPath's is: it holds for each
+ * migration's transaction on this connection, and for this run alone — the
+ * server's connection keeps its own path, which preflight's `schema` row
+ * judges.
+ *
+ * Judged first, before the path is touched: `{ refused: "ledger", schema }`
+ * where a schema on the path other than public holds this migrator's ledger —
+ * `schema_migrations` of its shape, with `name` and `sha256` — and public
+ * holds no brain: that ledger and `thoughts` beside it. An empty ledger
+ * alone in public, which --dry-run or a first run failed at 001 leaves, is
+ * no brain. `adopting` (--baseline, which records a schema built by hand
+ * and has just found public.thoughts) takes public's `thoughts` alone as
+ * the brain there. `viaUser` is true where the schema is the role's own and
+ * the path names it as `"$user"`, which the operator does not see spelled. Building on would start a second brain in public. Every schema
+ * the path resolves to (current_schemas: those this role may use) is read,
+ * not the first ledger a name resolves to, so another tool's
+ * `schema_migrations` (Rails', Ecto's: a `version`, no `sha256`) neither
+ * hides a brain behind it nor counts as one. This holds where public is
+ * first too: a brain behind an empty public refuses.
+ *
+ * Then, where public is not already the first schema Postgres searches, the
+ * path is set, and re-read: `{ refused: "public", missing, role, owner }`
+ * where public is still not first — there is no schema public, or this role
+ * has no USAGE on it, which Postgres takes as off the path. The path has
+ * been set by then, and resolves as before; the migrator exits on the
+ * refusal. Otherwise
+ * `{ refused: null, was }`: `was` is the path it replaced, or null where
+ * public was already first. Catalog reads by pg_class and pg_attribute,
+ * which need no privilege on the schema. Bun.sql only (a tagged-template
+ * client).
+ */
+export async function pinPublicFirst(sql, adopting = false) {
+  const [state] = await sql`
+    SELECT current_setting('search_path') AS path,
+           current_setting('server_version_num')::int AS version,
+           current_schemas(false)::text[] AS schemas,
+           current_user AS "user"`;
+  /** This migrator's ledger in `schema`: `schema_migrations` with its two columns. */
+  const holdsBrain = async (schema) =>
+    (await sql`
+      SELECT (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = ${schema} AND c.relname = 'schema_migrations' AND a.attname IN ('name', 'sha256')
+                 AND a.attnum > 0 AND NOT a.attisdropped) = 2 AS brain`)[0].brain;
+  const publicThoughts = (await sql`SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                                                     WHERE n.nspname = 'public' AND c.relname = 'thoughts') AS present`)[0].present;
+  if (!(publicThoughts && (adopting || (await holdsBrain("public"))))) {
+    for (const schema of state.schemas) {
+      if (schema !== "public" && (await holdsBrain(schema))) {
+        const viaUser = schema === state.user && searchPathSchemas(state.path, state.version).includes("$user");
+        return { refused: "ledger", schema, viaUser };
+      }
+    }
+  }
+  if (state.schemas[0] === "public") return { refused: null, was: null };
+  const rest = searchPathSchemas(state.path, state.version).filter((s) => s !== "public");
+  await sql`SELECT set_config('search_path', ${["public", ...rest].map(quoteIdent).join(", ")}, false)`;
+  const [after] = await sql`
+    SELECT (current_schemas(false))[1] AS first, to_regnamespace('public') IS NULL AS missing, quote_ident(current_user) AS role,
+           (SELECT quote_ident(pg_get_userbyid(datdba)) FROM pg_database WHERE datname = current_database()) AS owner`;
+  if (after.first !== "public") return { refused: "public", missing: after.missing, role: after.role, owner: after.owner };
+  return { refused: null, was: state.path };
+}
+
+/**
  * The bounds as this session sees them: `current_setting` per name, NULL for
  * a placeholder pgvector has not defined yet. One SQL text, with the names
  * inlined as literals (they are this module's constants, not input), so a
@@ -1694,7 +1769,7 @@ export const SHARED_SETTING_SOURCES = ["environment variable", "configuration fi
  * written five times in three idioms. Parse with parseSetConfig.
  */
 export const DB_LEVEL_SETTINGS_SQL =
-  "SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = current_database() AND s.setrole = 0";
+  "SELECT s.setconfig AS cfg FROM pg_catalog.pg_db_role_setting s JOIN pg_catalog.pg_database d ON d.oid = s.setdatabase WHERE d.datname = pg_catalog.current_database() AND s.setrole = 0";
 
 /** `["a=1","b=x"]` → `{a: "1", b: "x"}`; a value may itself contain `=`. */
 export function parseSetConfig(cfg) {
@@ -1816,6 +1891,15 @@ export const ROLE_GRANTS = Object.freeze({
     // (SMD-2256).
     Object.freeze({ table: "ob1_ticket_head",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "068" }),
     Object.freeze({ table: "ob1_superseded_by", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "068" }),
+    // 071's triggers run as the caller on every write of a source row (a
+    // delete of a thought that has one included, through the cascade) and on
+    // every status move between a known and an unknown status_type, and keep
+    // node_state's gate; node_dependencies()' gates and the dependency
+    // columns read it. A role without these cannot make those writes nor
+    // read those columns; a delete of an unsourced thought, an edit that
+    // moves no status and a re-record that changes only the canonical need
+    // none of it (SMD-2267).
+    Object.freeze({ table: "ob1_source_gate",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "071" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
@@ -1852,7 +1936,8 @@ export const ROLE_GRANTS = Object.freeze({
   // record/accept functions run as the caller).
   worker: Object.freeze([
     Object.freeze({ table: "thought_work_claims",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
-    Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["INSERT", "UPDATE"]),                     since: "006" }),
+    // SELECT too: reembed reads the model and its job keys before it writes them, which the server group's SELECT used to cover — and a role given the worker group for that alone would take the server group's key writes with it (SMD-2289 review pass 1).
+    Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),           since: "006" }),
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
     // 063's rebuild_derived (SMD-1732), run by db/rebuild.ts or by SMD-1723's
     // forget: the forget arm removes the snapshot rows at a leaving thought's
@@ -1861,6 +1946,12 @@ export const ROLE_GRANTS = Object.freeze({
     // granted before 063 fails preflight's write privileges over it; SMD-1723
     // decides the capture group when forget lands on the server.
     Object.freeze({ table: "ob1_embedding_snapshot", privileges: Object.freeze(["DELETE"]),                              since: "063" }),
+    // The migrator's own ledger, which reembed reads on every start to name
+    // the migration a brain is missing: without it every pass under a
+    // --grant role stopped at "permission denied for table
+    // schema_migrations" (SMD-2289, measured as the orchestration runner's
+    // role). The ledger is the migrator's, there before 001.
+    Object.freeze({ table: "schema_migrations",      privileges: Object.freeze(["SELECT"]),                              since: "001" }),
   ]),
   // The entity-extraction worker, additionally, writes the entity graph — and
   // so does a structured pass (`source:` mentions). UPDATE on the mention and
@@ -2104,6 +2195,8 @@ export const ROLE_GRANTS = Object.freeze({
   ]),
 });
 
+/** The advisory lock (`pg_advisory_xact_lock(hashtext(GRANT_LOCK))`) every `migrate.ts --grant` and `db/login-role.ts` take, so two at once in one database queue rather than deadlock or collide on "tuple concurrently updated" over the same catalog rows (SMD-2289). */
+export const GRANT_LOCK = "ob1:grants";
 /** The order groups are issued and documented in. */
 export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
 
@@ -2191,7 +2284,7 @@ export function grantedObjects(groups = ROLE_GRANT_GROUPS) {
  * answer "is this object documented at all", this keeps an object's rows apart,
  * because db/README.md documents privileges per group and an object can appear
  * in more than one with a different set (`ob1_config`: SELECT in `server`,
- * INSERT/UPDATE in `worker`; `thought_audit`: INSERT in `capture`, SELECT in
+ * SELECT/INSERT/UPDATE in `worker`; `thought_audit`: INSERT in `capture`, SELECT in
  * `server`, SELECT and INSERT in `community`). check-fork-consistency's privilege comparison reads it
  * (SMD-1471).
  */
@@ -2262,7 +2355,7 @@ export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = nu
  * The groups' rows merged per object — [{ kind, name, privileges }] in
  * group/list order, privileges in a stable order. An object can appear in
  * more than one group with different privileges (ob1_config: SELECT in
- * `server`, INSERT/UPDATE in `worker`; thought_audit: INSERT in `capture`,
+ * `server`, SELECT/INSERT/UPDATE in `worker`; thought_audit: INSERT in `capture`,
  * SELECT and INSERT in `community`), so the role gets one GRANT combining
  * them. `present` (object names) drops what a database lacks. Shared by
  * grantStatements and grantVerifySql so what is granted and what is checked

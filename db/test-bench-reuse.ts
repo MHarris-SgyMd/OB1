@@ -59,7 +59,7 @@ import { BENCH_MARKER, REMOTE_DB_FLAG, assertThrowawayDatabase, createAssert, ha
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = requireDatabaseUrl("test-bench-reuse.ts");
-assertThrowawayDatabase(URL_);
+await assertThrowawayDatabase(URL_);
 const SCALE = 150_000;
 /**
  * What passes through from the shell to the spawned bench: the build's own

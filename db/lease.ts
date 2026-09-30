@@ -1,6 +1,7 @@
 /**
  * lease.ts — the heartbeat that keeps a worker's leases alive while it works,
- * and the one rule for sizing a lease against it.
+ * the one rule for sizing a lease against it, and the signals that stop a
+ * pass (`stopOnSignals`, SMD-2304).
  *
  * Shared by the three consumers of migration 015's table — reembed.ts,
  * extract-entities.ts and consolidate.ts — so the rule lives once (SMD-1023).
@@ -133,11 +134,12 @@ async function lostReason(sql: SQL, job: string, workerId: string, id: string): 
  * The lost-at-top step the three loops share: ask the row, print the line, say
  * which count the row joins — "deleted" for a deleted thought, "lost" for the
  * rest. A read that fails is printed as such, not thrown: the next row's
- * write or the next claim is where a database gone stops the worker.
+ * write or the next claim is where a database gone stops the worker. `err`
+ * is where the line goes: an engine's Writer (SMD-2304), stderr otherwise.
  */
-export async function reportLost(sql: SQL, job: string, workerId: string, id: string): Promise<"deleted" | "lost"> {
+export async function reportLost(sql: SQL, job: string, workerId: string, id: string, err: (line: string) => void = (l) => console.error(l)): Promise<"deleted" | "lost"> {
   const why = await lostReason(sql, job, workerId, id).catch(() => null);
-  console.error(`  ${id}: ${describeLoss(why)}`);
+  err(`  ${id}: ${describeLoss(why)}`);
   return why?.kind === "deleted" ? "deleted" : "lost";
 }
 
@@ -246,4 +248,71 @@ export function startHeartbeat(opts: {
   const timer = setInterval(() => void beat(), Math.max(1, opts.everyS) * 1000);
   timer.unref?.();
   return hb;
+}
+
+/**
+ * Wait `ms`, or less when `wake` aborts first — a stop waking a follower's
+ * poll or a pause on a provider error (SMD-2304). Nothing is kept once it
+ * returns: the timer is cleared on a wake and the listener removed on the
+ * timer, so a follower polling for days holds no more than one (review pass
+ * 3: a promise's `.then` per sleep kept ~430 bytes each until a stop). A
+ * wait past what a timer holds (MAX_TIMER_MS) is re-armed in steps, where a
+ * single timer would fire after 1 ms: a --follow of 25 days or more polled
+ * in a hot loop (review pass 4); main's Bun.sleep held it.
+ */
+export function sleepUnless(ms: number, wake: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (wake.aborted) return resolve();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const done = () => {
+      clearTimeout(timer);
+      wake.removeEventListener("abort", done);
+      resolve();
+    };
+    const arm = (left: number) => {
+      timer = left > MAX_TIMER_MS ? setTimeout(() => arm(left - MAX_TIMER_MS), MAX_TIMER_MS) : setTimeout(done, Math.max(0, left));
+    };
+    arm(ms);
+    wake.addEventListener("abort", done, { once: true });
+  });
+}
+
+/** The longest delay a timer holds: a 32-bit signed millisecond count; past it, the runtime fires after 1 ms. */
+export const MAX_TIMER_MS = 2147483647;
+
+/**
+ * A pass's stop, as a claim worker's engine hands it to its caller when the
+ * pass begins (SMD-2304). The first call asks every worker to stop after the
+ * thought in hand, their unfinished claims going back to the pool, and returns
+ * null. A call made while the pass is already stopping — a second call, or the
+ * first after the provider's refusal stopped the workers itself — is the hard
+ * stop: it returns the release of every worker's leases, after which a worker
+ * writes nothing more nor releases the thought in hand (each still returns
+ * its own leases as it ends), and the CLI ends the process when it settles
+ * (stopOnSignals). A call after the run has returned does nothing.
+ */
+export type PassStop = () => Promise<unknown> | null;
+
+/**
+ * The CLI's signals for a claim worker's pass: SIGINT and SIGTERM call the
+ * pass's stop, and a stop that returns a release ends the process with 130
+ * once the leases are returned, or after `graceMs` if they are not — leases
+ * not returned expire as a dead worker's do. The CLI installs it from the
+ * engine's onPass hook, which the engine calls where the script installed its
+ * handlers before, so a signal before the pass still ends the process at once.
+ * Returns the uninstall; `exit` is for the suite.
+ */
+export function stopOnSignals(stop: PassStop, exit: (code: number) => void = (code) => process.exit(code), graceMs = 3000): () => void {
+  const handler = () => {
+    const release = stop();
+    if (release === null) return;
+    const hardStop = setTimeout(() => exit(130), graceMs);
+    void release.catch(() => null).finally(() => { clearTimeout(hardStop); exit(130); });
+  };
+  process.on("SIGINT", handler);
+  process.on("SIGTERM", handler);
+  return () => {
+    process.off("SIGINT", handler);
+    process.off("SIGTERM", handler);
+  };
 }
