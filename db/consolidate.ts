@@ -493,8 +493,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** 067: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). */
   const readStaleStandings = async () => staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], JOB);
   /** 070: --status's clause for the unreviewed rows standing on a lineage pair — the listing named, or the file it needs first (its own SQL reads on a brain at 068). */
-  const lineageClause = (n: number, has069: boolean): string =>
-    `${n} unreviewed standing on a lineage pair (${has069 ? "--list lineage shows them" : "apply migration 070 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
+  const lineageClause = (n: number, has070: boolean): string =>
+    `${n} unreviewed standing on a lineage pair (${has070 ? "--list lineage shows them" : "apply migration 070 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
   const staleClause = (st: ReturnType<typeof staleStandings>): string =>
     `${st.total} stale (a text moved under the verdict: ${staleStandingsText(st, JOB)}; the pass replaces one it finds in conflict again and settles one it does not)`;
 
