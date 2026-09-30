@@ -35,6 +35,7 @@
           { "context": "Schema against real Postgres", "integration_id": 15368 },
           { "context": "SQL data layer against real Postgres", "integration_id": 15368 },
           { "context": "Full stack, no Supabase", "integration_id": 15368 },
+          { "context": "Authorization server POC (oidc-provider on Bun)", "integration_id": 15368 },
           { "context": "supabase-js compatibility shim", "integration_id": 15368 },
           { "context": "Commit messages", "integration_id": 15368 },
           { "context": "Workflow lint (actionlint + shellcheck)", "integration_id": 15368 }
