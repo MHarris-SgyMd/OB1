@@ -282,7 +282,7 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     ["a short lease and --limit 0", { url: AT, ttl: 3, heartbeat: 2, limit: 0 }, ["--url", AT, "--ttl", "3", "--heartbeat", "2", "--limit", "0"], {}],
     ["--timeout 0 and a short lease", { url: AT, timeout: 0, ttl: 1 }, ["--url", AT, "--timeout", "0", "--ttl", "1"], {}],
     ["--follow 0", { url: AT, follow: 0 }, ["--url", AT, "--follow", "0"], {}],
-    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, and AbortSignal.timeout's range.
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, Bun's pool max, and AbortSignal.timeout's range.
     ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
     ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
     ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
@@ -376,7 +376,7 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     ["--force without --accept", { url: AT, force: true }, ["--url", AT, "--force"], {}],
     ["--limit beside --list", { url: AT, limit: 5, list: "pending" }, ["--url", AT, "--limit", "5", "--list"], {}],
     ["--note alone", { url: AT, note: "hm" }, ["--url", AT, "--note", "hm"], {}],
-    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, a call signal's range, and --stale's reach back.
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, Bun's pool max, a call signal's range, and --stale's reach back.
     ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
     ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
     ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
@@ -463,7 +463,7 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     ["--accept-failed with --retry-failed", { url: AT, acceptFailed: [], retryFailed: true }, ["--url", AT, "--accept-failed", "--retry-failed"], {}],
     ["--retire with --switch-model", { url: AT, retire: "reembed:x@1024", switchModel: true }, ["--url", AT, "--retire", "reembed:x@1024", "--switch-model"], {}],
     ["--all alone", { url: AT, all: true }, ["--url", AT, "--all"], {}],
-    // The bound the CLI never had (SMD-2304 PR 5): claim_thoughts' int — read before the modes' rule.
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int and Bun's pool max — read before the modes' rule.
     ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
     ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
     ["--batch past its bound and two modes", { url: AT, batch: 2147483648, status: true, retire: "k" }, ["--url", AT, "--batch", "2147483648", "--status", "--retire", "k"], {}],
