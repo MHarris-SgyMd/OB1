@@ -175,9 +175,10 @@ script may stop requiring it. The first two ports landed with SMD-2144 — `brai
 `lint-sweep`, both read-only, driven in `db/test-live.ts` [26] against a real Postgres; the first
 writers with SMD-2139 — `thought-enrichment`'s three backfills, `type`, `sensitivity_tier` and
 metadata through `.update().eq()`, never content or vector, driven in [29]; `weekly-digest`,
-the third read-only script at the decision, left the class instead: it is a sink, posting thought text
-to Telegram, and a shim port would read from below the egress gate (SMD-2239, the rescope of
-2026-09-26; the orchestration ADR's decision 9, written for templates, read to cover it).
+the third read-only script at the decision, left the class: a sink posting thought text to Telegram,
+it is now the `db/` verb `db/weekly-digest.ts` behind the egress gate — both the synthesis and the
+Telegram send pass the gate — rather than a shim port (SMD-2239; the orchestration ADR's decision 9,
+written for templates, read to cover a `bun` sink too).
 
 **The entity tables.** Four scripts — atomizer's, authorship-edges', entity-wiki's,
 typed-edge-classifier's — assume upstream's `schemas/entity-extraction` tables; on a fork
@@ -227,7 +228,7 @@ nothing.
 | `source-filtering` | `backfill-metadata.ts` (2) | `thoughts` (PATCH of metadata) | port onto the shim | SMD-2021 |
 | `thought-enrichment` | `enrich-thoughts.mjs` (0; was 4), `backfill-type.mjs` (0; was 1), `backfill-sensitivity.mjs` (0; was 1) | `thoughts` (an update of metadata, `type`, `sensitivity_tier`) | on the shim since SMD-2139; the first writers — `SUPABASE_URL` a `postgres://` string, the key ignored, a refused write ends the run; a stopgap until SMD-1930's runner | SMD-2139 |
 | `typed-edge-classifier` | `classify-edges.mjs` (1) | `thoughts`, `thought_entities` (016's on a fork brain — above), `thought_edges`; `thought_edges_upsert` (reads `OPEN_BRAIN_URL`) | port onto the shim | SMD-2141 |
-| `weekly-digest` | `weekly-digest.mjs` (1) | `thoughts` (read; either URL name) → Telegram | a sink, not a maintenance script: an n8n sink template after SMD-2211's checkpoint, or a `db/` verb behind SMD-2134's gate — not a shim port (rescoped 2026-09-26) | SMD-2239 |
+| `weekly-digest` | `weekly-digest.mjs` (gone) | `thoughts` (read) → Telegram | **retired**: a sink, rebuilt as the `db/` verb `db/weekly-digest.ts` behind the egress gate (both the synthesis and the Telegram send pass it) — the `.mjs` is gone, the README is a pointer | SMD-2239 ✅ |
 | `wiki-synthesis` | `scripts/synthesize-wiki.mjs` (1), `scripts/backfill-gmail-wikis.mjs` (1) | `synthesize-wiki.mjs` reads `thoughts` and writes files; `backfill-gmail-wikis.mjs` reads `thoughts` and `thought_edges`, captures through `upsert_thought` — a raw `POST /thoughts` when the function is absent — and DELETEs pages (both read `OPEN_BRAIN_URL`) | port onto the shim; page deletes through `delete_thought` | SMD-2143 |
 
 ## How the "verified no references" gate is applied
@@ -359,7 +360,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `thought-enrichment` | keep + audited → **on the shim (SMD-2139)** | Retroactive LLM classification + sensitivity backfills; `type`, `sensitivity_tier` and metadata through the shim, never content or vector; SMD-1930 re-expresses them as transforms. |
 | `typed-edge-classifier` | keep + audited → **SMD-2126**: port onto the shim (SMD-2141) | Opus/Haiku classifier populating the kept `thought_edges` (`typed-reasoning-edges`); SMD-1253 lineage. |
 | `vercel-neon-telegram` | keep + audited *(own-database)* | Alternative Vercel + Neon + Telegram stack building **its own Neon brain** (guard OWN_DATABASE line 1409; `sql/001`/`002` owned as NEON). Its `match_thoughts` is its own install, not a clobber. Uses the Vercel AI SDK (no supabase-js). |
-| `weekly-digest` | keep + audited → **SMD-2126 → SMD-2239**: a sink, not a shim port | Scheduled importance-ranked digest to Telegram — brain content leaves the box, so it waits for SMD-2211's egress checkpoint (an n8n sink template) or a `db/` verb behind SMD-2134's gate. |
+| `weekly-digest` | keep (pointer) → **SMD-2126 → SMD-2239 done**: retired for the `db/` verb | Scheduled importance-ranked digest to Telegram — a sink, so brain content leaves only through the egress gate. Rebuilt as `db/weekly-digest.ts` (the synthesis and the Telegram send are each gated); the `weekly-digest.mjs` script is gone and the recipe README points at the verb. |
 | `wiki-compiler` | keep + audited | Orchestrates graph extraction + typed edges + entity/topic synthesis into scheduled wiki refreshes; wires the kept entity worker + edge tables. |
 | `wiki-synthesis` | keep + audited → **SMD-2126**: port onto the shim (SMD-2143) | Topic/email-thread wiki synthesis from atomic thoughts via any OpenAI-compatible LLM. |
 | `work-operating-model-activation` | keep + audited + SMD-1798 | Operating-model elicitation workflow; own `schema.sql`; `index.ts` uses supabase-js → SMD-1798. |
