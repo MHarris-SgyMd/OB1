@@ -1530,7 +1530,9 @@ jobs:
   # fetch guard (the library's own SSRF protection does not load under Bun),
   # PKCE and client credentials, one audience per token, and token exchange.
   # Twice on one stack, as the ticket's Verify asks. An oidc-provider bump is a
-  # PR that runs this job.
+  # PR that runs this job. The runner-up, Better Auth, runs the same verifier
+  # after it (its one known difference is listed in eval-auth.ts), so a change
+  # to the shared kit cannot quietly break the comparison the pick rests on.
   auth-poc:
     name: Authorization server POC (oidc-provider on Bun)
     runs-on: ubuntu-24.04
@@ -1566,6 +1568,26 @@ jobs:
         if: always()
         working-directory: evals
         run: bun eval-auth.ts --down oidc-provider
+
+      - name: The runner-up comes up (Better Auth)
+        working-directory: evals
+        run: bun eval-auth.ts --up better-auth
+
+      - name: The runner-up holds every criterion, twice (its departures from a standard are noted, not excused)
+        working-directory: evals
+        run: |
+          bun eval-auth.ts --verify better-auth
+          bun eval-auth.ts --verify better-auth
+
+      - name: Runner-up logs on failure
+        if: failure()
+        working-directory: evals/auth
+        run: docker compose -p ob1-auth-better-auth --env-file .env -f compose.yaml -f compose.better-auth.yaml logs --tail 80
+
+      - name: Runner-up torn down
+        if: always()
+        working-directory: evals
+        run: bun eval-auth.ts --down better-auth
 
   compat-shim:
     name: supabase-js compatibility shim

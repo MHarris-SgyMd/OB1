@@ -18,10 +18,16 @@ type Cookie = { value: string; path: string };
 
 export class Browser {
   private cookies = new Map<string, Cookie>();
+  /** The Origin its consent form is posted with, when a check plays a page of another origin (a CSRF): the page's own otherwise. */
+  consentOrigin?: string;
   /** Every page it answered (`login`, `consent`), in order: a check that a user signed in reads this. */
   readonly prompts: string[] = [];
   /** The text of each page it answered, in the same order, so a check can read what the operator was shown. */
   readonly pages: string[] = [];
+  /** The headers of each page it answered, in the same order. */
+  readonly pageHeaders: Headers[] = [];
+  /** The URL of each page it answered, in the same order. */
+  readonly pageUrls: URL[] = [];
 
   constructor(private password: string) {}
 
@@ -42,8 +48,10 @@ export class Browser {
     }
   }
 
-  async request(url: URL, init: { method?: string; body?: URLSearchParams } = {}): Promise<Response> {
+  async request(url: URL, init: { method?: string; body?: URLSearchParams; origin?: string } = {}): Promise<Response> {
     const headers: Record<string, string> = { cookie: this.cookieHeader(url) };
+    // A browser sends Origin on every POST.
+    if ((init.method ?? "GET") === "POST") headers.origin = init.origin ?? url.origin;
     if (init.body) headers["content-type"] = "application/x-www-form-urlencoded";
     const res = await fetch(url, { method: init.method ?? "GET", headers, body: init.body, redirect: "manual" });
     this.keep(url, res);
@@ -73,12 +81,15 @@ export class Browser {
         throw new Error(`authorization stopped at ${url.pathname}: HTTP ${res.status} ${body.slice(0, 200).replace(/\s+/g, " ")}`);
       }
       this.prompts.push(prompt);
+      this.pageHeaders.push(res.headers);
+      this.pageUrls.push(url);
       this.pages.push(body.replace(/<[^>]+>/g, " ").replace(/&ldquo;|&rdquo;/g, '"').replace(/\s+/g, " ").trim());
       const forms = [...body.matchAll(/<form method="post" action="([^"]+)"/g)].map((m) => m[1].replace(/&#(\d+);/g, (_, c) => String.fromCharCode(Number(c))));
-      const action = prompt === "login" ? forms[0] : forms.find((f) => f.endsWith(consent ? "/confirm" : "/abort"));
+      // By path: a form's action may carry the interaction's own query (Better Auth's signed one).
+      const action = prompt === "login" ? forms[0] : forms.find((f) => new URL(f, url).pathname.endsWith(consent ? "/confirm" : "/abort"));
       if (!action) throw new Error(`no ${prompt} form at ${url.pathname}`);
       url = new URL(action, url);
-      res = await this.request(url, { method: "POST", body: new URLSearchParams(prompt === "login" ? { password: this.password } : {}) });
+      res = await this.request(url, { method: "POST", body: new URLSearchParams(prompt === "login" ? { password: this.password } : {}), origin: prompt === "consent" ? this.consentOrigin : undefined });
     }
     throw new Error("authorization did not finish in 20 steps");
   }
@@ -99,7 +110,7 @@ export async function tokenRequest(endpoint: string, params: Record<string, stri
   if (client?.secret !== undefined) headers.authorization = `Basic ${btoa(`${encodeURIComponent(client.id)}:${encodeURIComponent(client.secret)}`)}`;
   else if (client) body.set("client_id", client.id);
   const r = await fetch(endpoint, { method: "POST", headers, body });
-  return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, unknown> };
+  return { status: r.status, body: ((await r.json().catch(() => null)) ?? {}) as Record<string, unknown> };
 }
 
 export type Claims = { iss?: string; sub?: string; iat?: number; aud?: string | string[]; exp?: number; scope?: string; client_id?: string; act?: { sub?: string } };
