@@ -172,6 +172,14 @@ export async function workerIdentity(
  */
 export type ErrorKind = "thought" | "transient" | "fatal";
 
+/**
+ * The longest --timeout a model call takes, in whole seconds: the call's
+ * signal is AbortSignal.timeout(seconds × 1000), which throws past 2^53 − 1
+ * ms, so every call failed at once and extract marked every thought failed
+ * (SMD-2304).
+ */
+export const MAX_CALL_TIMEOUT_S = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
+
 /** The back-off between retries of a transient provider failure, one pause per attempt. */
 export const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
 
