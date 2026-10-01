@@ -165,6 +165,9 @@ export function resolveEmbeddingDimensions(
 /** Whether to send the OpenAI `dimensions` parameter. OB1_EMBEDDING_DIMENSIONS. */
 export const EMBEDDING_DIMENSIONS: boolean;
 
+/** EMBEDDING_MODEL, EMBEDDING_DIM and EMBEDDING_DIMENSIONS read from `record` by the same rules (SMD-2304). */
+export function embeddingContract(record: Record<string, string | undefined>): { model: string; dim: number; truncate: boolean };
+
 /** Whether migration 011 builds the trigram index. On by default since SMD-944. */
 export const DEFAULT_TRGM_INDEX: boolean;
 export const TRGM_INDEX: boolean;
