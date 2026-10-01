@@ -86,10 +86,9 @@
  * Needs docker (or podman) compose and openssl.
  */
 import { generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { discoverAuthorizationServerMetadata, discoverOAuthProtectedResourceMetadata } from "@modelcontextprotocol/client";
-import { parseEnv } from "../db/env.ts";
 import { layoutFromEnv } from "../deploy/auth/layout.ts";
 import { guardProbes } from "./auth/fetch-guard-probes.ts";
 import { Browser, claimsOf, pkce, tampered, tokenRequest, type Claims, type TokenReply } from "./auth/flows.ts";
@@ -372,7 +371,7 @@ function endpointsOutside(L: Layout, doc: Record<string, unknown>): string[] {
     .map(([k, v]) => `${k}=${v}`);
 }
 
-async function discovery(L: Layout, candidate: Candidate): Promise<Meta> {
+async function discovery(L: Layout, env: Record<string, string>, candidate: Candidate): Promise<Meta> {
   const docs = await Promise.all(L.discovery.map(async (u) => {
     const r = await fetch(u);
     return { u, status: r.status, body: ((await r.json().catch(() => null)) ?? {}) as Record<string, unknown> };
@@ -448,7 +447,7 @@ async function discovery(L: Layout, candidate: Candidate): Promise<Meta> {
   row("D7 routes outside the protocol answer 404", answered.length === 0, answered.length ? answered.join("; ") : `${offProtocol.length} routes (sign-up, sign-in, sessions, account, consent, client management, userinfo, logout, introspection) all 404`);
 
   // A DPoP proof at the token endpoint must bind nothing: nothing in the stack checks one.
-  const runnerSecret = parseEnv(readFileSync(ENV_FILE, "utf8")).OB1_AUTH_SECRET_RUNNER;
+  const runnerSecret = env.OB1_AUTH_SECRET_RUNNER;
   const dpop = await fetch(meta.token_endpoint, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${btoa(`runner:${runnerSecret}`)}`, dpop: dpopProof("POST", meta.token_endpoint) },
@@ -906,7 +905,7 @@ async function verify(candidate: Candidate, json: boolean): Promise<number> {
   const t0 = Date.now();
   const runLog = logsFromNow(candidate, ["auth", "cimd", "bait"]);
   const run = `run-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
-  const meta = await discovery(L, candidate);
+  const meta = await discovery(L, env, candidate);
   const c: Ctx = { L, meta, env, candidate, runLog, run };
   const { cimd } = await registration(c);
   const { gui } = await grants(c);
@@ -1007,6 +1006,7 @@ function selfCheck(): number {
     ["a tier the tiers do not list", { OB1_AUTH_SERVICES: "runner=brain:capture@canary" }, /names a tier OB1_AUTH_TIERS does not: canary/],
     ["an empty service tier", { OB1_AUTH_SERVICES: "runner=brain:capture@stable," }, /"runner"'s tiers has an empty entry/],
     ["a repeated service tier", { OB1_AUTH_SERVICES: "runner=brain:capture@stable,stable" }, /"runner"'s tiers lists stable twice/],
+    ["a missing origin", { OB1_PUBLIC_ORIGIN: "" }, /OB1_PUBLIC_ORIGIN is not set/],
   ];
   for (const [what, env, why] of refused) {
     let said = "(accepted)";
@@ -1017,13 +1017,6 @@ function selfCheck(): number {
     }
     expect(`the deploy's settings refuse ${what} (${said})`, why.test(said));
   }
-  let noOrigin = "(accepted)";
-  try {
-    layoutFromEnv({});
-  } catch (e) {
-    noOrigin = (e as Error).message;
-  }
-  expect(`the deploy's settings refuse a missing origin (${noOrigin})`, /OB1_PUBLIC_ORIGIN is not set/.test(noOrigin));
 
   if (failures.length) {
     for (const f of failures) console.error(`FAIL ${f}`);

@@ -51,7 +51,7 @@ export type Service = { scope: string; tiers: TierName[] };
 /** The environment variable holding a static client's secret. */
 export const secretName = (clientId: string) => `OB1_AUTH_SECRET_${clientId.toUpperCase().replace(/-/g, "_")}`;
 
-export function layout(origin: string, tiers: TierName[] = ["stable"], services: Record<string, Service> = {}) {
+export function layout(origin: string, tiers: TierName[], services: Record<string, Service>) {
   const issuer = `${origin}/auth`;
   const prefixes = tiers.map((t) => TIER_PREFIX[t]);
   const mcp = (prefix: TierPrefix) => `${origin}${prefix}/mcp`;
