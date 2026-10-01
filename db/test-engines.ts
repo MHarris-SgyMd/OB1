@@ -180,6 +180,20 @@ ok(!censusSees(code("/** prints with console.log(line) and exits via process.exi
 ok(censusSees(code(`const g = "migrations/*.sql";\nprocess.exit(2);\n/** doc */\nconst t = \`--url \${g} // bad\`; process.exit(3);\n`)), "…and a /* or a // inside a string hides no code after it");
 ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late() {}\n")?.after.trim() === "function late() {}", "…and code after the CLI block is found, a brace in a string not counted");
 
+/**
+ * The scanner's words for a number past its flag's bound (SMD-2304 PR 5): a
+ * bound case must open with them, not with a later rule both paths fall
+ * through to when a bound is dropped from the CLI and run() at once — the
+ * egress gate, the lease pair (review pass 1: five of six such doubles passed).
+ */
+const BOUND_WORDS: [RegExp, string][] = [
+  [/^--batch past/, "--batch must be a decimal integer >= 1 and <= 2147483647"],
+  [/^--timeout past/, "--timeout must be a decimal integer >= 1 and <= 9007199254740"],
+  [/^--stale past/, "--stale must be a decimal integer >= 1 and <= 2000000"],
+  [/^--workers past/, "--workers must be a decimal integer >= 1 and <= 2147483647"],
+];
+const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re]) => re.test(what))?.[1];
+
 // ---------------------------------------------------------------------------
 // run() refuses in the CLI's words, before connecting.
 // ---------------------------------------------------------------------------
@@ -270,6 +284,7 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["--follow 0", { url: AT, follow: 0 }, ["--url", AT, "--follow", "0"], {}],
     // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, and AbortSignal.timeout's range.
     ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
     ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
     // …each where the script read its number, before the lease pair the CLI checks after them.
     ["--batch past its bound and a short lease", { url: AT, batch: 2147483648, ttl: 3, heartbeat: 2 }, ["--url", AT, "--batch", "2147483648", "--ttl", "3", "--heartbeat", "2"], {}],
@@ -283,6 +298,8 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["extract-entities.ts", ...argv], env);
+    const words = boundWords(what);
+    if (words) ok(cli.err.startsWith(words) && r.err.startsWith(words), `…refused for its bound, in the scanner's words (${JSON.stringify(cli.err.split("\n")[0].slice(0, 80))})`);
     ok(r.code === 2 && cli.code === 2, `extract run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
     ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
     ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
@@ -358,6 +375,7 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["--note alone", { url: AT, note: "hm" }, ["--url", AT, "--note", "hm"], {}],
     // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, a call signal's range, and --stale's reach back.
     ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
     ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
     // …each where the script read its number, before the lease pair the CLI checks after them.
     ["--batch past its bound and a short lease", { url: AT, batch: 2147483648, ttl: 3, heartbeat: 2 }, ["--url", AT, "--batch", "2147483648", "--ttl", "3", "--heartbeat", "2"], {}],
@@ -370,6 +388,8 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["consolidate.ts", ...argv], env);
+    const words = boundWords(what);
+    if (words) ok(cli.err.startsWith(words) && r.err.startsWith(words), `…refused for its bound, in the scanner's words (${JSON.stringify(cli.err.split("\n")[0].slice(0, 80))})`);
     ok(r.code === 2 && cli.code === 2, `consolidate run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
     ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
     ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
@@ -439,6 +459,7 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["--all alone", { url: AT, all: true }, ["--url", AT, "--all"], {}],
     // The bound the CLI never had (SMD-2304 PR 5): claim_thoughts' int — read before the modes' rule.
     ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
     ["--batch past its bound and two modes", { url: AT, batch: 2147483648, status: true, retire: "k" }, ["--url", AT, "--batch", "2147483648", "--status", "--retire", "k"], {}],
     // Every number before the modes, the modes before the configuration, as the script judged them.
     ["--workers 0 and two modes", { url: AT, workers: 0, status: true, acceptFailed: [ID] }, ["--url", AT, "--workers", "0", "--status", "--accept-failed", ID], {}],
@@ -457,6 +478,8 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["reembed.ts", ...argv], env);
+    const words = boundWords(what);
+    if (words) ok(cli.err.startsWith(words) && r.err.startsWith(words), `…refused for its bound, in the scanner's words (${JSON.stringify(cli.err.split("\n")[0].slice(0, 80))})`);
     ok(r.code === 2 && cli.code === 2, `reembed run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
     ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
     ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);

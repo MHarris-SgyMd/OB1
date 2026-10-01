@@ -29,7 +29,7 @@
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90; at most 2000000, inside Postgres's timestamp range)
  *   await run({ url, dryRun: true })                      # a dry run, in-process: import { run } from "./consolidate.ts" (SMD-2304)
  *   --k N (3)   --min-sim F (0.6)   --min-confidence F (0.5)
- *   --workers N (2)   --batch N (1; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (120, per model call; this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT; at most 9007199254740, a call signal's range)
+ *   --workers N (2; at most 2147483647, the pool's max)   --batch N (1; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (120, per model call; this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT; at most 9007199254740, a call signal's range)
  *
  * ── The cost ────────────────────────────────────────────────────────────────
  * One LLM call per candidate PAIR, so up to --k per thought, recurring: every
@@ -127,7 +127,7 @@ import {
 } from "../server-portable/consolidate.ts";
 import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
@@ -243,7 +243,7 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
     const problem = numberProblem(flag, v, rule);
     return problem === null ? v : `${problem}\n${flagList(FLAGS, HINTS)}`;
   };
-  const workers = read("--workers", opts.workers, 2);
+  const workers = read("--workers", opts.workers, 2, { min: 1, max: MAX_WORKERS });
   if (typeof workers === "string") return workers;
   // One thought per claim: up to --k model calls per thought against a claim of
   // half a millisecond, so a bigger batch buys nothing, and a worker that dies
@@ -1382,7 +1382,7 @@ if (import.meta.main) {
   // The numbers by the scanner's rules, in run()'s order — the lease pair
   // between them, as run() checks it — so a command breaking two rules is
   // refused for the same one it always was.
-  const workers = cli.int("workers", { absent: 2, min: 1 });
+  const workers = cli.int("workers", { absent: 2, min: 1, max: MAX_WORKERS });
   const batch = cli.int("batch", { absent: 1, min: 1, max: MAX_BATCH });
   const ttl = cli.int("ttl", { absent: DEFAULT_TTL_S, min: 1 });
   const heartbeat = cli.has("heartbeat") ? cli.int("heartbeat", { absent: DEFAULT_HEARTBEAT_S, min: 1 }) : undefined;

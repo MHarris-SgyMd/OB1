@@ -62,6 +62,15 @@ export const MAX_TTL_S = 2147483647;
  * stopping with the pool untouched — the dry run having accepted it (SMD-2304).
  */
 export const MAX_BATCH = 2147483647;
+/**
+ * The most workers a run takes: a connection each and the heartbeat's spare is
+ * the pool's max, which Bun's client takes up to 2^31 — past it the client
+ * threw, connect.ts read that as "the database client refused the URL", the
+ * CLI ended in a stack trace and run() threw rather than returned 2, the dry
+ * run included (review pass 1). Far below it a pool that size stalls on its
+ * first query; that is the pool's sizing, not a number refused here.
+ */
+export const MAX_WORKERS = 2147483647;
 /** The longest interval a timer holds: a 32-bit signed millisecond count, whole seconds. */
 export const MAX_HEARTBEAT_S = 2147483;
 
