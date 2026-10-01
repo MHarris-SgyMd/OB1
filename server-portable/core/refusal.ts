@@ -33,5 +33,5 @@ export const refuse = <T = never>(refusal: Refusal): Outcome<T> => ({ ok: false,
  * client to retry the first is the worse error. capture_thought's own
  * STORE_UNAVAILABLE (SMD-1978) classifies its faults and says retryable.
  */
-export type Failure = { code: "FAILED"; retryable: false; message: string };
+export type Failure = { code: "FAILED"; retryable: false; message: string; hint?: string };
 export const failure = (err: unknown): Failure => ({ code: "FAILED", retryable: false, message: (err as Error)?.message ?? String(err) });

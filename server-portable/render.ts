@@ -29,11 +29,19 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
 /**
  * A fault an operation threw — the store down, a missing migration — as every
  * tool has always said it, `Error: <message>`, with the tool's hint for the
- * message when it has one; FAILED beside it (core/refusal.ts says why final).
+ * message when it has one; FAILED beside it (core/refusal.ts says why final),
+ * carrying the hint too, so a program reading the value learns the migration
+ * or grant that fixes it. One message for both: a thrown non-Error (a string,
+ * undefined) is said as itself rather than `undefined`, and never throws here.
  */
 export function failed(err: unknown, hint?: (msg: string) => string): Reply {
-  const msg = (err as Error).message;
-  return { content: [{ type: "text", text: `Error: ${msg}${hint ? hint(msg) : ""}` }], isError: true, structuredContent: { ...failure(err) } };
+  const f = failure(err);
+  const remedy = hint ? hint(f.message) : "";
+  return {
+    content: [{ type: "text", text: `Error: ${f.message}${remedy}` }],
+    isError: true,
+    structuredContent: { ...f, ...(remedy ? { hint: remedy.replace(/^ — /, "") } : {}) },
+  };
 }
 
 /**
@@ -160,7 +168,7 @@ export const renderSearch = (o: Outcome<object>): Reply => render(o, (v) => JSON
 export const renderFetch = (o: Outcome<object>): Reply =>
   render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)));
 
-export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, preferCurrent: boolean): Reply {
+export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
   return render(o, (v) => {
     const { query, hits: data, facts } = v;
     if (data.length === 0) {
@@ -236,7 +244,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, preferCur
     const notes: string[] = [];
     if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
-    if (truncated.length) notes.push(`Outside the top ${data.length}${preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
+    if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
@@ -245,12 +253,12 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, preferCur
       notes.push(matchedAny.size
         ? "The query is only literals, so exact matches are ranked first and the rest by similarity."
         : head.commonNeedles.length
-          ? `The query is only literals, and too common to match exactly, so these results are by similarity alone${preferCurrent ? ", current ones first" : ""}.`
-          : `The query is only literals and no thought contains them, so these results are by similarity alone${preferCurrent ? ", current ones first" : ""}.`);
+          ? `The query is only literals, and too common to match exactly, so these results are by similarity alone${v.preferCurrent ? ", current ones first" : ""}.`
+          : `The query is only literals and no thought contains them, so these results are by similarity alone${v.preferCurrent ? ", current ones first" : ""}.`);
     }
 
     return `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}\n\n${results.join("\n\n")}`;
-  }, (r) => searchRefusal(r, preferCurrent ? currentSearchHint : undefined));
+  }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined));
 }
 
 export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {

@@ -1310,8 +1310,14 @@ console.log("\n[16d] A fault an operation throws is said as it always was, typed
   assert(plain.isError === true && plain.content[0].text === "Error: connection refused" && plain.structuredContent.code === "FAILED" && plain.structuredContent.retryable === false && plain.structuredContent.message === "connection refused",
     `the text is \`Error: <message>\`; the value is FAILED, final, with the message (${JSON.stringify(plain.structuredContent)})`);
   const hinted = failed(new Error("function search_thoughts_current(vector) does not exist"), (m) => (m.includes("search_thoughts_current") ? " — a hint" : ""));
-  assert(hinted.content[0].text === "Error: function search_thoughts_current(vector) does not exist — a hint" && hinted.structuredContent.message === "function search_thoughts_current(vector) does not exist",
-    "a tool's hint follows the message in the text and stays out of the value");
+  assert(hinted.content[0].text === "Error: function search_thoughts_current(vector) does not exist — a hint" && hinted.structuredContent.message === "function search_thoughts_current(vector) does not exist" && hinted.structuredContent.hint === "a hint",
+    "a tool's hint follows the message in the text, and rides the value as its own field (review pass 1)");
+  assert(!("hint" in plain.structuredContent), "no hint, no field");
+  // A thrown non-Error: one message for text and value, and no throw from inside the catch (review pass 1).
+  const str = failed("boom");
+  const undef = failed(undefined);
+  assert(str.content[0].text === "Error: boom" && str.structuredContent.message === "boom" && undef.content[0].text === "Error: undefined" && undef.structuredContent.code === "FAILED",
+    `a thrown string is said as itself in both; a thrown undefined is said, not a TypeError in the catch (${str.content[0].text} / ${undef.content[0].text})`);
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
