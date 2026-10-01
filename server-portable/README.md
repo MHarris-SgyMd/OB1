@@ -512,18 +512,27 @@ MCP tools do rather than a copy of it:
 - **`index.ts`** — the Hono app, authentication, and the registration that joins the
   two: validate (the SDK runs the spec's schema), call the operation, render.
 
-Every read tool's reply carries its typed answer as `structuredContent` beside the
-text — the value on success, `{ code, retryable, … }` on a refusal (`NOT_FOUND`,
-`REFUSED_FILTER`, `REFUSED_EGRESS`, `REFUSED_SINCE`, `REFUSED_CURSOR`), and `FAILED`
-with the message for a fault (no `retryable` yet; classifying faults is SMD-2461). A
-value is always an object, so `worker_status`'s rows ride under `pools` while its
-text stays the bare array. Claude Code, VS Code and Codex show the model
-`structuredContent` alone when it is present, so a tool whose text is prose carries
-that text in its value as `text` (as every refusal and fault does), and says no
-more than the text and nothing less clean: it leaves out the thought bodies the text
-quotes in full (search hits, listed thoughts), and snips and cleans what the text
-snips and cleans (a proposal's sides, a change's head and writer). A tool whose text
-is its value's JSON needs nothing more. The write tools move into
+Every read tool's reply carries a typed answer as `structuredContent` beside the
+text. Claude Code, VS Code and Codex show the model `structuredContent` alone when it
+is present, so:
+
+- A tool whose text is its value's JSON (`search`, `fetch`, `list_thought_ids`,
+  `list_logged_searches`, `worker_status`, `job_status`, `scan_thoughts`) answers
+  the value itself. A value is always an object, so `worker_status`'s rows ride
+  under `pools` while its text stays the bare array.
+- A tool whose text is prose answers its `text` plus fields that cannot carry a
+  word a thought, a key or a judge wrote: ids, timestamps, counts, scores, booleans,
+  enum codes (a search hit's id, scores, `supersededBy` and demotion reasons; a
+  change's id, action, thought id and pointers; the stats' totals). Every such word
+  reaches the model through the text, cleaned and bounded there as it always was.
+  `brain_info` answers its whole record beside the table: it holds only the
+  server's and the database's own facts.
+- A refusal answers `{ code, retryable, text }` (`NOT_FOUND`, `REFUSED_FILTER`,
+  `REFUSED_EGRESS` with its `rule`, `REFUSED_SINCE`, `REFUSED_CURSOR`); a fault
+  `{ code: "FAILED", text }`, with no `retryable` yet — classifying faults is
+  SMD-2461.
+
+The core's values are whole, for the REST core. The write tools move into
 `core/` in SMD-2283's next two pull requests; until then they keep SMD-1978's codes.
 
 ## Expected outcome

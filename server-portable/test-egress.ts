@@ -325,10 +325,11 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
          `search_thoughts is refused, with the keyword tool and both operator remedies named (${search.text.slice(0, 100)})`);
   const compat = await call(GATED_KEY, "search", { query: "a note" });
   assert(compat.isError && /^Refused: the query text/.test(compat.text), "…and so is the ChatGPT-shaped search tool");
-  // The refusal is typed beside the words (SMD-2283): the code, final, the rule
-  // that refused and the key — what a program reads instead of the sentence.
-  assert(search.sc?.code === "REFUSED_EGRESS" && search.sc?.retryable === false && search.sc?.rule === "no-allow-term" && search.sc?.actor === "gated" && compat.sc?.code === "REFUSED_EGRESS",
-         `both refusals carry REFUSED_EGRESS, final, with the rule and the key (${JSON.stringify(search.sc)})`);
+  // The refusal is typed beside the words (SMD-2283): the code, final, and the
+  // rule's token — what a program reads instead of the sentence, which rides
+  // the value as `text` with the reason and the key (review pass 5).
+  assert(search.sc?.code === "REFUSED_EGRESS" && search.sc?.retryable === false && search.sc?.rule === "no-allow-term" && search.sc?.text === search.text && compat.sc?.code === "REFUSED_EGRESS",
+         `both refusals carry REFUSED_EGRESS, final, with the rule and the words (${JSON.stringify(search.sc)})`);
   const kw = await call(GATED_KEY, "search_thoughts_keyword", { query: "gated-thought-marker" });
   assert(!kw.isError && kw.text.includes(id), "search_thoughts_keyword finds the vectorless row by its text");
   assert(seen.length === before, `still zero requests (${seen.length - before})`);

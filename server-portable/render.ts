@@ -1,21 +1,21 @@
 // The MCP layer's words (SMD-2283): each tool's reply rendered from the typed
 // answer core/ returns — the same text the tools have always said, with the
-// answer itself beside it as `structuredContent`. Nothing here reads the store,
-// calls a model or decides a rule; a sentence that needs a fact gets it from the
-// value or the refusal it is handed.
+// answer beside it as `structuredContent`. Nothing here reads the store, calls a
+// model or decides a rule; a sentence that needs a fact gets it from the value
+// or the refusal it is handed.
 //
 // Claude Code, VS Code and Codex hand the model `structuredContent` alone when a
-// result carries it (anthropics/claude-code#55677, microsoft/vscode#290063,
-// openai/codex#10334), so the value must say what the text says: a tool whose
-// text is prose carries that text in its value as `text`, and a refusal or a
-// fault does too. A tool whose text is its value's JSON (the ChatGPT shapes, the
-// pages, the job records) needs nothing more. A prose value says no more than
-// its text, and nothing less clean: it leaves out the thought bodies the text
-// quotes in full (search hits, listed thoughts), so a reply does not carry
-// three copies of them, and carries a field the text snips or cleans (a
-// proposal's sides and reason, a change's head and writer) snipped and cleaned
-// the same way. The core's value keeps everything whole, for the REST core
-// (SMD-2284).
+// result carries it (claude-code issue 55677, vscode issue 290063, codex issue
+// 10334). So a tool whose text is prose answers `{ ...fields, text }`: its text,
+// which every word a thought, a key or a judge wrote reaches the model through,
+// cleaned and bounded by the renderer as it always was; and beside it only
+// fields that cannot carry such words — ids, timestamps, counts, scores,
+// booleans, enum codes (review pass 5: passes 2–5 each found another field the
+// value showed more of, or less cleanly, than the text). A refusal or a fault
+// answers the same way. A tool whose text is its value's JSON (the ChatGPT
+// shapes, the pages, the job records) answers the value itself, which says
+// exactly what its text does. The core's values keep everything, for the REST
+// core (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
@@ -28,25 +28,28 @@ import type { ChangesResult, KeywordResult, ListThoughtsResult, ProposalsResult,
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
 export type Reply = { content: { type: "text"; text: string }[]; isError?: true; structuredContent: Record<string, unknown> };
 
-/** What a value contributes to `structuredContent`, given the text rendered from it. */
-type Structured<T> = (v: T, text: string) => object;
-/** A prose tool's value: its text first, then its fields. */
-const withText = <T extends object>(v: T, text: string): object => ({ text, ...v });
-/** A tool whose text is its value's JSON: the value alone (the spec's structured-plus-serialized shape). */
-const asJson = <T extends object>(v: T): object => v;
-/** A row without the `content` its text quotes in full. Only for a row the text quotes whole; a field the text snips is snipped in the value instead (proposalsAsShown, changesAsShown). */
-const bodiless = <R extends { content: string }>({ content: _content, ...row }: R): Omit<R, "content"> => row;
-/** The two search tools' value: the text, then the hits without the bodies the text quotes whole. */
-const hitsWithoutBodies = <V extends { hits: { content: string }[] }>(v: V, text: string): object => ({ text, ...v, hits: v.hits.map(bodiless) });
+/** A prose tool's safe fields, picked from its value — never a word a thought, a key or a judge wrote. */
+type Safe<T> = (v: T) => object;
+/** A tool whose text is its value's JSON: the value itself (the spec's structured-plus-serialized shape). */
+const AS_JSON = Symbol("the value is the text's JSON");
 
-/** An outcome in the tool's words — its value's text, or its refusal's — with the text inside the value either way. */
-function render<T extends object>(o: Outcome<T>, value: (v: T) => string, refusal: (r: Refusal) => string, structured: Structured<T> = withText): Reply {
+/** An outcome in the tool's words — its value's text, or its refusal's — with the text inside the value, last, so no field can stand in for it. */
+function render<T extends object>(o: Outcome<T>, value: (v: T) => string, refusal: (r: Refusal) => string, safe: Safe<T> | typeof AS_JSON): Reply {
   if (!o.ok) {
     const text = refusal(o.refusal);
-    return { content: [{ type: "text", text }], isError: true, structuredContent: { text, ...o.refusal } };
+    return { content: [{ type: "text", text }], isError: true, structuredContent: { ...safeRefusal(o.refusal), text } };
   }
   const text = value(o.value);
-  return { content: [{ type: "text", text }], structuredContent: { ...structured(o.value, text) } };
+  return { content: [{ type: "text", text }], structuredContent: safe === AS_JSON ? { ...(o.value as Record<string, unknown>) } : { ...safe(o.value), text } };
+}
+
+/**
+ * A refusal's safe fields: its code, whether a retry can help, and the egress
+ * rule's token. The facts a sentence was built from — a caller's own `since`
+ * or id, a filter's message, the gate's reason — are in the text, bounded.
+ */
+function safeRefusal(r: Refusal): object {
+  return { code: r.code, retryable: r.retryable, ...(r.code === "REFUSED_EGRESS" ? { rule: r.rule } : {}) };
 }
 
 /** A refusal a tool's renderer has no sentence for — a code it does not return. Not reached; said rather than thrown. */
@@ -55,22 +58,61 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
 /**
  * A fault an operation threw — the store down, a missing migration — as every
  * tool has always said it, `Error: <message>`, with the tool's hint for the
- * message when it has one; FAILED beside it, unclassified (core/refusal.ts says why;
- * SMD-2461 classifies), carrying the text and the hint too, so
- * a program reading the value learns the migration or grant that fixes it. One
- * message for both: a thrown non-Error (a string, undefined) is said as itself
- * rather than `undefined`, and never throws here.
+ * message when it has one; FAILED beside it, unclassified (core/refusal.ts says
+ * why; SMD-2461 classifies), the message and hint in the text alone. A thrown
+ * non-Error (a string, undefined) is said as itself rather than `undefined`,
+ * and never throws here.
  */
 export function failed(err: unknown, hint?: (msg: string) => string): Reply {
   const f = failure(err);
-  const remedy = hint ? hint(f.message) : "";
-  const text = `Error: ${f.message}${remedy}`;
-  return {
-    content: [{ type: "text", text }],
-    isError: true,
-    structuredContent: { text, ...f, ...(remedy ? { hint: remedy.replace(/^ — /, "") } : {}) },
-  };
+  const text = `Error: ${f.message}${hint ? hint(f.message) : ""}`;
+  return { content: [{ type: "text", text }], isError: true, structuredContent: { code: f.code, text } };
 }
+
+/** An enum the store reads from a constrained column, kept only when it is one of the words it may be. */
+const oneOf = <W extends string>(words: readonly W[], v: unknown): W | null => (words as readonly unknown[]).includes(v) ? v as W : null;
+/** The reasons prefer_current demotes a row (059): the function's own words. */
+const DEMOTIONS = ["completed", "canceled", "superseded"] as const;
+
+/** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, and why it was demoted; the window prefer_current read. */
+const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
+  preferCurrent: v.preferCurrent,
+  literalOnly: v.facts?.literalOnly ?? false,
+  window: v.window,
+  hits: v.hits.map((h) => ({
+    id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
+    supersededBy: h.supersededBy, demoted: h.demoted.filter((d) => (DEMOTIONS as readonly string[]).includes(d)),
+  })),
+});
+/** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date and occurrence count. */
+const safeKeyword: Safe<KeywordResult> = (v) => ({
+  offset: v.offset, total: v.total,
+  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences })),
+});
+/** list_thoughts: per thought its id, date and the newer thought that supersedes it. */
+const safeList: Safe<ListThoughtsResult> = (v) => ({
+  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy })),
+});
+/** list_supersession_proposals: per proposal its ids, verdict, numbers and dates — the sides, the reason and the judge are in the text. */
+const safeProposals: Safe<ProposalsResult> = (v) => ({
+  status: v.status, ...(v.lineage === undefined ? {} : { lineage: v.lineage }),
+  proposals: v.proposals.map((p) => ({
+    id: p.id, status: p.status, verdict: p.verdict, confidence: p.confidence, similarity: p.similarity,
+    judgedAt: p.judgedAt, reviewedAt: p.reviewedAt, supersedingId: p.supersedingId, lineage: p.lineage,
+    older: { id: p.older.id, created_at: p.older.created_at, edited: p.older.edited },
+    newer: { id: p.newer.id, created_at: p.newer.created_at, edited: p.newer.edited },
+  })),
+});
+/** thought_stats: the totals and the date range — the breakdowns' keys are extracted words, in the text's top ten. */
+const safeStats: Safe<ThoughtStats> = (v) => ({ total: v.total, aggregated: v.aggregated, oldest: v.oldest, newest: v.newest });
+/** thought_changes: the page's bounds and cursor, and per change what happened to which thought, when — the head, writer and door are in the text. */
+const safeChanges: Safe<ChangesResult> = (v) => ({
+  more: v.more, bounded: v.bounded, since: v.since, after: v.after, actions: v.actions, cursor: v.cursor,
+  changes: v.changes.map((c) => ({
+    id: c.id, createdAt: c.createdAt, action: c.action, thoughtId: c.thoughtId, present: c.present,
+    actorKind: oneOf(SAID_BY, c.actorKind), supersedesBefore: c.supersedesBefore, supersedesAfter: c.supersedesAfter, derivation: c.derivation,
+  })),
+});
 
 /**
  * Untrusted text — a thought's, a citation's, a judge's reason — on one line
@@ -191,10 +233,10 @@ export function currentSearchHint(msg: string): string {
 // ── The read tools ───────────────────────────────────────────────────────────
 
 /** `search` and `fetch`: ChatGPT reads the text as JSON, so the text is the value. */
-export const renderSearch = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), searchRefusal, asJson);
+export const renderSearch = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
 export const renderFetch = (o: Outcome<object>): Reply =>
-  render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)), asJson);
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)), AS_JSON);
 
 export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
   return render(o, (v) => {
@@ -286,7 +328,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     }
 
     return `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}\n\n${results.join("\n\n")}`;
-  }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined), hitsWithoutBodies);
+  }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined), safeSearch);
 }
 
 export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
@@ -337,7 +379,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         : "";
 
     return `Showing ${shown} thought(s) containing "${query}".${more}\n\n${results.join("\n\n")}`;
-  }, (r) => searchRefusal(r), hitsWithoutBodies);
+  }, (r) => searchRefusal(r), safeKeyword);
 }
 
 export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
@@ -362,27 +404,8 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
       }
     );
     return `${data.length} recent thought(s):\n\n${results.join("\n\n")}`;
-  }, unknownRefusal, (v, text) => ({ text, thoughts: v.thoughts.map(bodiless) }));
+  }, unknownRefusal, safeList);
 }
-
-/**
- * The proposals as their text shows them (review pass 4): each side snipped
- * and cleaned as the listing quotes it, the judge's reason and the review note
- * cleaned. A value says no more than its text — the sides are whole thoughts,
- * up to 400 of them at limit 200, and a page is a thought (SMD-1812); the full
- * text is one `fetch` away.
- */
-const proposalsAsShown = (v: ProposalsResult, text: string): object => ({
-  text,
-  ...v,
-  proposals: v.proposals.map((p) => ({
-    ...p,
-    reason: p.reason === null ? null : cleanForDisplay(p.reason),
-    reviewNote: p.reviewNote === null ? null : cleanForDisplay(p.reviewNote),
-    older: { ...p.older, content: snipText(p.older.content, 200) },
-    newer: { ...p.newer, content: snipText(p.newer.content, 200) },
-  })),
-});
 
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
   return render(o, ({ status, lineage, proposals: data }) => {
@@ -424,7 +447,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
     });
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`;
-  }, unknownRefusal, proposalsAsShown);
+  }, unknownRefusal, safeProposals);
 }
 
 /**
@@ -481,7 +504,7 @@ export function renderThoughtStats(o: Outcome<ThoughtStats>): Reply {
     }
 
     return lines.join("\n");
-  }, unknownRefusal);
+  }, unknownRefusal, safeStats);
 }
 
 /** The two metadata keys 050's trigger owns (SMD-1726): the writer's kind and name, stamped as the content moves. */
@@ -551,30 +574,6 @@ function renderChange(c: AuditChange, n: number): string {
   return lines.join("\n");
 }
 
-/**
- * The changes as their text shows them (review pass 4): every untrusted field
- * — the head, the writer's name and door, the row's source, the metadata keys,
- * the writer filter echoed — through snipText at the bound renderChange gives
- * it, so a forged `Cursor:` line in a thought's text cannot reach a model that
- * reads the value alone (renderChange says why the text is cleaned).
- */
-const changesAsShown = (v: ChangesResult, text: string): object => {
-  const clean = (s: string | null, max: number) => (s === null ? null : snipText(s, max));
-  return {
-    text,
-    ...v,
-    agent: clean(v.agent, 80),
-    changes: v.changes.map((c) => ({
-      ...c,
-      head: clean(c.head, 200),
-      actorName: clean(c.actorName, 80),
-      origin: clean(c.origin, 80),
-      source: clean(c.source, 80),
-      metadataKeys: c.metadataKeys.map((k) => snipText(k, 40)),
-    })),
-  };
-};
-
 export function renderThoughtChanges(o: Outcome<ChangesResult>): Reply {
   return render(o, (v) => {
     // Both filters name themselves in the header, so `agent` set to the
@@ -594,7 +593,7 @@ export function renderThoughtChanges(o: Outcome<ChangesResult>): Reply {
     return `${head}\n\n${shown.map((c, i) => renderChange(c, i + 1)).join("\n\n")}\n\n${tail}`;
   }, (r) => (r.code === "REFUSED_SINCE"
     ? `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${snipText(r.value, 40)}".`
-    : unknownRefusal(r)), changesAsShown);
+    : unknownRefusal(r)), safeChanges);
 }
 
 export const changesHint = (msg: string): string =>
@@ -606,11 +605,11 @@ export const changesHint = (msg: string): string =>
 
 /** list_thought_ids: the page itself is the text, a JSON object a script reads. */
 export const renderThoughtIds = (o: Outcome<object>): Reply =>
-  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_CURSOR" ? "Error: `after` must be a thought id (a uuid) — pass the previous page's `cursor`." : unknownRefusal(r)), asJson);
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_CURSOR" ? "Error: `after` must be a thought id (a uuid) — pass the previous page's `cursor`." : unknownRefusal(r)), AS_JSON);
 
 /** list_logged_searches: the page itself is the text. */
 export const renderLoggedSearches = (o: Outcome<object>): Reply =>
-  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_SINCE" ? "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." : unknownRefusal(r)), asJson);
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_SINCE" ? "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." : unknownRefusal(r)), AS_JSON);
 
 export const loggedSearchesHint = (msg: string): string =>
   /query_log/.test(msg) && /does not exist|could not find/i.test(msg)
@@ -618,14 +617,14 @@ export const loggedSearchesHint = (msg: string): string =>
     : "";
 
 /** worker_status: the text is the bare array it has always been; the value keys it (a result is an object). */
-export const renderWorkerStatus = (o: Outcome<{ pools: unknown[] }>): Reply => render(o, (v) => JSON.stringify(v.pools), unknownRefusal, asJson);
+export const renderWorkerStatus = (o: Outcome<{ pools: unknown[] }>): Reply => render(o, (v) => JSON.stringify(v.pools), unknownRefusal, AS_JSON);
 
 /** job_status: the job record is the text; NOT_FOUND covers an unknown id, another key's job and a pruned one alike. */
 export const renderJobStatus = (o: Outcome<object>): Reply =>
-  render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `No job ${JSON.stringify(r.id)} for this key — an unknown id, another key's job, or one pruned from the registry.` : unknownRefusal(r)), asJson);
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `No job ${JSON.stringify(r.id)} for this key — an unknown id, another key's job, or one pruned from the registry.` : unknownRefusal(r)), AS_JSON);
 
-/** brain_info: the short table (brain-info.ts) beside the record the keyed /health body answers as JSON. */
-export const renderBrainInfoReply = (info: BrainInfo): Reply => render(ok(info), renderBrainInfo, unknownRefusal);
+/** brain_info: the short table (brain-info.ts), and the record the keyed /health body answers as JSON beside it — whole: it holds the server's and the database's own facts, no word a thought, a key or a judge wrote. */
+export const renderBrainInfoReply = (info: BrainInfo): Reply => render(ok(info), renderBrainInfo, unknownRefusal, (v) => v);
 
 /** scan_thoughts: the handle is the text. */
-export const renderJobHandle = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, asJson);
+export const renderJobHandle = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);

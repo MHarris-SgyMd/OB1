@@ -1806,6 +1806,21 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   };
   const marker = "smd2283-typed-marker";
   const id = /id ([0-9a-f-]{36})/.exec(await call("capture_thought", { content: `${marker}: the typed answer rides beside the words` }))![1];
+  // The rule, by construction (review pass 5): beside its `text`, a prose
+  // tool's value and every refusal hold only short tokens — ids, timestamps,
+  // counts, codes — never a word a thought, a key or a judge wrote, which
+  // reaches a value-only model (Claude Code, VS Code, Codex) through the text
+  // alone, cleaned and bounded there. Every string leaf but the top-level
+  // `text`: at most 40 characters, no control character, none of the words
+  // this section writes. Returns the paths that break it.
+  const wordless = (v: unknown, at = ""): string[] => {
+    if (typeof v === "string") return v.length <= 40 && !/[\x00-\x1f]/.test(v) && !v.includes(marker) && !v.includes("judged") ? [] : [at || "(root)"];
+    if (Array.isArray(v)) return v.flatMap((x, i) => wordless(x, `${at}[${i}]`));
+    if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => (at === "" && k === "text" ? [] : wordless(x, at ? `${at}.${k}` : k)));
+    return [];
+  };
+  const holds = (name: string, r: { text: string; sc?: Record<string, any> }) =>
+    assert(r.sc?.text === r.text && wordless(r.sc).length === 0, `${name}: the value carries the text, and beside it only tokens (${wordless(r.sc).join(", ") || "none other"})`);
 
   const s = await result("search", { query: marker });
   assert(!s.isError && Array.isArray(s.sc?.results) && JSON.stringify(s.sc) === s.text, `search: the value is the JSON its text has always been (${s.text.slice(0, 60)})`);
@@ -1813,35 +1828,32 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   assert(!f.isError && f.sc?.id === id && typeof f.sc?.text === "string" && JSON.stringify(f.sc) === f.text, "fetch: the document, as value and as text");
   const missing = "00000000-0000-4000-8000-000000000000";
   const fm = await result("fetch", { id: missing });
-  assert(fm.isError && fm.text === `Fetch error: no thought with id ${missing}` && fm.sc?.code === "NOT_FOUND" && fm.sc?.retryable === false && fm.sc?.id === missing, `fetch of no thought: the same words, NOT_FOUND beside them (${JSON.stringify(fm.sc)})`);
+  assert(fm.isError && fm.text === `Fetch error: no thought with id ${missing}` && fm.sc?.code === "NOT_FOUND" && fm.sc?.retryable === false, `fetch of no thought: the same words, NOT_FOUND beside them (${JSON.stringify(fm.sc)})`);
+  holds("fetch's refusal", fm);
 
   const st = await result("search_thoughts", { query: marker });
   const hit = st.sc?.hits?.find((h: { id: string }) => h.id === id);
-  assert(!st.isError && /^Found \d+ thought\(s\)/.test(st.text) && hit && hit.supersededBy === null && Array.isArray(hit.demoted) && st.sc?.preferCurrent === false && st.sc?.facts && Array.isArray(st.sc.facts.needles),
-    `search_thoughts: the hits with their facts and pointers (${JSON.stringify(st.sc?.facts)})`);
+  assert(!st.isError && /^Found \d+ thought\(s\)/.test(st.text) && hit !== undefined && hit.supersededBy === null && Array.isArray(hit.demoted) && st.sc?.preferCurrent === false && typeof st.sc?.literalOnly === "boolean" && st.text.includes(`${marker}: the typed answer rides beside the words`),
+    `search_thoughts: the hits' ids, scores and pointers beside the text that quotes them (${JSON.stringify(hit)})`);
+  holds("search_thoughts", st);
   const contradict = await result("search_thoughts_keyword", { query: marker, said_by: "agent", filter: { actor_kind: "operator" } });
   assert(contradict.isError && contradict.text === `Error: said_by is "agent" but filter.actor_kind is "operator" — pass one of the two` && contradict.sc?.code === "REFUSED_FILTER" && contradict.sc?.retryable === false,
     `a filter the boundary refuses keeps its words and carries REFUSED_FILTER (${JSON.stringify(contradict.sc)})`);
-  // A client that shows the model structuredContent alone (Claude Code, VS Code,
-  // Codex) reads the same words: a prose tool's value carries its text, and
-  // leaves out the bodies the text already quotes (review pass 2).
-  assert(st.sc?.text === st.text && hit !== undefined && !("content" in hit) && st.text.includes(`${marker}: the typed answer rides beside the words`),
-    "search_thoughts: the value carries the text, and no hit repeats the body the text quotes");
-  assert(contradict.sc?.text === contradict.text && fm.sc?.text === fm.text, "a refusal's value carries its words too");
+  holds("a filter refusal", contradict);
   const kw = await result("search_thoughts_keyword", { query: marker });
-  assert(kw.sc?.text === kw.text && kw.sc?.hits?.every((h: object) => !("content" in h)), "search_thoughts_keyword: the text in the value, no bodies");
   assert(!kw.isError && kw.sc?.total >= 1 && kw.sc?.offset === 0 && kw.sc?.hits?.some((h: { id: string; occurrences: number }) => h.id === id && h.occurrences === 1), `search_thoughts_keyword: the page, its total and occurrences (${kw.sc?.total})`);
+  holds("search_thoughts_keyword", kw);
 
   const lt = await result("list_thoughts", { limit: 3 });
-  assert(!lt.isError && Array.isArray(lt.sc?.thoughts) && lt.sc.thoughts.length === 3 && "supersededBy" in lt.sc.thoughts[0] && !("content" in lt.sc.thoughts[0]) && lt.sc.text === lt.text, "list_thoughts: the listed thoughts with their supersession, the text beside them, no bodies");
+  assert(!lt.isError && Array.isArray(lt.sc?.thoughts) && lt.sc.thoughts.length === 3 && "supersededBy" in lt.sc.thoughts[0], "list_thoughts: the listed thoughts' ids and supersession");
+  holds("list_thoughts", lt);
   const sp = await result("list_supersession_proposals", { status: "all" });
   assert(!sp.isError && sp.sc?.status === "all" && Array.isArray(sp.sc?.proposals), `list_supersession_proposals: the status asked and the proposals (${sp.sc?.proposals?.length})`);
-  // A side the text snips is snipped in the value too, and an escape sequence
-  // in the judge's reason is cleaned there as in the text: a model reading the
-  // value alone sees no more than the listing shows (review pass 4 — pass 3
-  // kept the sides whole, unbounded at limit 200). One proposal seeded as [9]
-  // seeds them, its newer side past the snip; it and its thought are removed
-  // again whatever the assertions do.
+  // A proposal whose sides, reason and judge are words: the text shows them
+  // snipped and cleaned, and the value carries none of them (review pass 5;
+  // passes 3–4 kept the sides whole, then snipped, and left a line break in the
+  // reason that could forge an `accept:` line). One proposal seeded as [9]
+  // seeds them; it and its thought are removed again whatever the assertions do.
   {
     const sql = new SQL({ url: URL_, max: 1 });
     const long = `${marker} newer side: ${"a sentence the listing snips. ".repeat(12)}the end`;
@@ -1852,10 +1864,9 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
       [{ id: pid }] = await sql`SELECT record_supersession_proposal(${id}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.8, ${"judged \x1b[31mred"}, 0.9, 'consolidate:stub@p2', NULL) AS id`;
       const sp1 = await result("list_supersession_proposals", {});
       const p = sp1.sc?.proposals?.find((x: { id: string }) => x.id === pid);
-      const shown = p?.newer?.content as string | undefined;
-      assert(shown !== undefined && shown.length <= 201 && shown.endsWith("…") && long.startsWith(shown.slice(0, -1)) && !sp1.text.includes(long) && sp1.text.includes(shown),
-        `list_supersession_proposals: a long side is snipped in the value as in the text (${shown?.length} of ${long.length} chars)`);
-      assert(typeof p?.reason === "string" && !p.reason.includes("\x1b") && p.reason.startsWith("judged"), `…and the judge's reason is cleaned in the value (${JSON.stringify(p?.reason)})`);
+      assert(p?.newer?.id === newer && p?.verdict === "newer_supersedes_older" && !sp1.text.includes(long) && sp1.text.includes(long.slice(0, 120)) && !sp1.text.includes("\x1b"),
+        `list_supersession_proposals: the proposal's ids and verdict in the value; its long side snipped and its reason cleaned in the text`);
+      holds("list_supersession_proposals", sp1);
     } finally {
       if (pid) await sql`DELETE FROM supersession_proposals WHERE id = ${pid}::uuid`;
       if (newer) await call("delete_thought", { id: newer }).catch(() => {});
@@ -1863,24 +1874,25 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
     }
   }
   const ts = await result("thought_stats");
-  assert(!ts.isError && typeof ts.sc?.total === "number" && ts.text.startsWith(`Total thoughts: ${ts.sc.total}`), `thought_stats: the counts the text prints (${ts.sc?.total})`);
+  assert(!ts.isError && typeof ts.sc?.total === "number" && ts.text.startsWith(`Total thoughts: ${ts.sc.total}`) && !("topics" in ts.sc), `thought_stats: the totals the text prints, not the breakdowns' extracted words (${ts.sc?.total})`);
+  holds("thought_stats", ts);
 
+  // The two newest changes are the long side's capture and its delete above:
+  // their heads are in the text, snipped, and nowhere in the value.
   const ch = await result("thought_changes", { limit: 2 });
-  assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`) && ch.sc.text === ch.text, "thought_changes: the page, its bound and the cursor the text names, the text beside them");
-  // The two newest changes are the long side's capture and its delete above
-  // (a capture row of a deleted thought has no head: its text is in the delete
-  // row): each head snipped in the value as the text quotes it, never the whole
-  // body with whatever it carries — a forged `Cursor:` line among it (review pass 4).
-  const heads = (ch.sc?.changes ?? []).map((c: { head: string | null }) => c.head).filter((h: string | null): h is string => h !== null);
-  assert(heads.length >= 1 && heads.some((h: string) => h.endsWith("…")) && heads.every((h: string) => h.length <= 201 && ch.text.includes(h)),
-    `thought_changes: each head is the snipped, cleaned line the text shows (${heads.map((h: string) => h.length).join(", ")} chars)`);
+  assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`) && ch.text.includes(`${marker} newer side`),
+    "thought_changes: the page, its bound and the cursor the text names; the heads in the text");
+  holds("thought_changes", ch);
   const chBad = await result("thought_changes", { since: "yesterday" });
-  assert(chBad.isError && chBad.text.startsWith("Refused: `since` must be an ISO-8601 time") && chBad.sc?.code === "REFUSED_SINCE" && chBad.sc?.value === "yesterday", `thought_changes refuses a since that is neither, REFUSED_SINCE (${JSON.stringify(chBad.sc)})`);
+  assert(chBad.isError && chBad.text.startsWith("Refused: `since` must be an ISO-8601 time") && chBad.text.includes(`not "yesterday"`) && chBad.sc?.code === "REFUSED_SINCE", `thought_changes refuses a since that is neither, REFUSED_SINCE (${JSON.stringify(chBad.sc)})`);
+  const chLong = await result("thought_changes", { since: `${marker} ${"x".repeat(500)}` });
+  holds("a since refusal of a long, word-bearing value", chLong);
 
   const ids = await result("list_thought_ids", { limit: 5 });
   assert(!ids.isError && Array.isArray(ids.sc?.ids) && JSON.stringify(ids.sc) === ids.text, "list_thought_ids: the page, as value and as text");
   const idsBad = await result("list_thought_ids", { after: "not-a-uuid" });
-  assert(idsBad.isError && idsBad.sc?.code === "REFUSED_CURSOR" && idsBad.sc?.value === "not-a-uuid", `list_thought_ids refuses a cursor that is not an id, REFUSED_CURSOR (${JSON.stringify(idsBad.sc)})`);
+  assert(idsBad.isError && idsBad.sc?.code === "REFUSED_CURSOR", `list_thought_ids refuses a cursor that is not an id, REFUSED_CURSOR (${JSON.stringify(idsBad.sc)})`);
+  holds("a cursor refusal", idsBad);
   const ls = await result("list_logged_searches", { limit: 5 });
   assert(!ls.isError && Array.isArray(ls.sc?.searches) && typeof ls.sc?.truncated === "boolean", "list_logged_searches: the page");
   const lsBad = await result("list_logged_searches", { since: "never" });
@@ -1891,7 +1903,8 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   const bi = await result("brain_info");
   assert(!bi.isError && typeof bi.sc?.version === "string" && bi.text.includes(bi.sc.version) && bi.sc.text === bi.text, `brain_info: the record the table renders (${bi.sc?.version})`);
   const js = await result("job_status", { job_id: missing });
-  assert(js.isError && js.text.startsWith(`No job "${missing}" for this key`) && js.sc?.code === "NOT_FOUND" && js.sc?.id === missing, "job_status of no job: the same words, NOT_FOUND beside them");
+  assert(js.isError && js.text.startsWith(`No job "${missing}" for this key`) && js.sc?.code === "NOT_FOUND", "job_status of no job: the same words, NOT_FOUND beside them");
+  holds("job_status's refusal", js);
 }
 
 server.stop();

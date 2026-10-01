@@ -1307,20 +1307,16 @@ console.log("\n[16d] A fault an operation throws is said as it always was, typed
 {
   const { failed } = await import("./render.ts");
   const plain = failed(new Error("connection refused"));
-  assert(plain.isError === true && plain.content[0].text === "Error: connection refused" && plain.structuredContent.code === "FAILED" && !("retryable" in plain.structuredContent) && plain.structuredContent.message === "connection refused",
-    `the text is \`Error: <message>\`; the value is FAILED with the message, no verdict (${JSON.stringify(plain.structuredContent)})`);
+  assert(plain.isError === true && plain.content[0].text === "Error: connection refused" && plain.structuredContent.code === "FAILED" && plain.structuredContent.text === "Error: connection refused" && Object.keys(plain.structuredContent).sort().join() === "code,text",
+    `the text is \`Error: <message>\`; the value is FAILED and that text, nothing else — no verdict, and the message, a store's words, only in the text (review pass 5) (${JSON.stringify(plain.structuredContent)})`);
   const hinted = failed(new Error("function search_thoughts_current(vector) does not exist"), (m) => (m.includes("search_thoughts_current") ? " — a hint" : ""));
-  assert(hinted.content[0].text === "Error: function search_thoughts_current(vector) does not exist — a hint" && hinted.structuredContent.message === "function search_thoughts_current(vector) does not exist" && hinted.structuredContent.hint === "a hint",
-    "a tool's hint follows the message in the text, and rides the value as its own field (review pass 1)");
-  assert(!("hint" in plain.structuredContent), "no hint, no field");
-  // A thrown non-Error: one message for text and value, and no throw from inside the catch (review pass 1).
+  assert(hinted.content[0].text === "Error: function search_thoughts_current(vector) does not exist — a hint" && hinted.structuredContent.text === hinted.content[0].text,
+    "a tool's hint follows the message in the text, and the value carries that text (review passes 1 and 5)");
+  // A thrown non-Error: said as itself, and no throw from inside the catch (review pass 1).
   const str = failed("boom");
   const undef = failed(undefined);
-  assert(str.content[0].text === "Error: boom" && str.structuredContent.message === "boom" && undef.content[0].text === "Error: undefined" && undef.structuredContent.code === "FAILED",
-    `a thrown string is said as itself in both; a thrown undefined is said, not a TypeError in the catch (${str.content[0].text} / ${undef.content[0].text})`);
-  // Clients that show the model structuredContent alone (Claude Code, VS Code,
-  // Codex) must read the words too (review pass 2).
-  assert(plain.structuredContent.text === "Error: connection refused" && hinted.structuredContent.text === hinted.content[0].text, "the fault's text rides inside its value");
+  assert(str.content[0].text === "Error: boom" && undef.content[0].text === "Error: undefined" && undef.structuredContent.code === "FAILED",
+    `a thrown string is said as itself; a thrown undefined is said, not a TypeError in the catch (${str.content[0].text} / ${undef.content[0].text})`);
 
   // No verdict, every one: the fault is unclassified until SMD-2461's one
   // classifier (review pass 3 cut pass 2's — a third list, whole SQLSTATE

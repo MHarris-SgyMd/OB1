@@ -347,7 +347,7 @@ type ToolErrorInfo = { code: ToolErrorCode; retryable: boolean; positions?: numb
  * pointer or position to drop (SMD-2283 review pass 3).
  */
 function toolError(text: string, info?: ToolErrorInfo) {
-  return { content: [{ type: "text" as const, text }], isError: true as const, ...(info ? { structuredContent: { text, ...info } } : {}) };
+  return { content: [{ type: "text" as const, text }], isError: true as const, ...(info ? { structuredContent: { ...info, text } } : {}) };
 }
 
 /**
