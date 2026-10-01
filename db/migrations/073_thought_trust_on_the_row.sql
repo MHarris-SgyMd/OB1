@@ -20,9 +20,11 @@
 --   * metadata.trust — the DATABASE's key, as 050's actor_kind and actor_name
 --     are: the trust of the write that put the standing text there, which is
 --     thought_audit.trust on that write's row (ob1_trust_ceiling of the key's
---     registry kind and the event's declaration). Absent when the key is
---     unclassified and nothing lower was declared — 046's rule: an
---     unclassified key supports no claim above the floor.
+--     registry kind and the event's declaration) — at most: the backfill
+--     lowers it under a key reclassified down and keeps a lower ladder word a
+--     writer set before 073. Absent when the key is unclassified and nothing
+--     lower was declared — 046's rule: an unclassified key supports no claim
+--     above the floor.
 --   * ob1_actor_stamp(jsonb, text) — 055's stamp with the write's declared
 --     trust: the payload's own trust is removed with the two marks and the
 --     ceiling written in its place. The 1-argument form is this one with no
@@ -35,8 +37,9 @@
 --     event declares none, so the one ladder decides it — a lower word
 --     stands, a higher one is clamped to the key's kind AND filed under
 --     claimed by the append (the count SMD-1724 asks for). The event's own
---     trust wins when both are given; the trust the row already carries is
---     an echo of a read, and declares nothing.
+--     trust wins when both are given; on a write that leaves the text, the
+--     trust the row already carries is an echo of a read and declares
+--     nothing (a new text weighs every word, the lowering the safe error).
 --   * upsert_thought (2- and 3-argument forms) and update_thought — 060's and
 --     061's bodies with the fold and the 2-argument stamp; nothing else moves.
 --     Since 060 the stamp must be in the body, before the diff: the projector
@@ -230,12 +233,15 @@ AS $$
   -- word as given, cut to 64 characters, so a word off the ladder is filed
   -- under claimed as sent (ob1_trust_ceiling clamps anything it cannot place
   -- to the key's kind). A JSON null, a non-string, or no key declares
-  -- nothing; nor does the trust the row already carries (p_old's): a client
-  -- that reads a thought and writes its metadata back — rest-api's enrich, a
-  -- recipe's `{...thought.metadata, ...}` — is echoing, not declaring, and an
-  -- echo filed as a claim, or weighed as a lowering of the editor's new text,
-  -- would make the count and the stamp say what nobody asked (first review
-  -- pass, run).
+  -- nothing; nor does, on a write that leaves the text, the trust the row
+  -- already carries (p_old's — the caller passes the row's metadata there,
+  -- and NULL for a new text): a client that reads a thought and writes its
+  -- metadata back — rest-api's enrich, a recipe's `{...thought.metadata,
+  -- ...}` — is echoing, and an echo filed as a claim would make the count say
+  -- what nobody asked (first review pass, run). A new text weighs the word
+  -- whatever the row said: an explicit lowering and an echo of a lower trust
+  -- cannot be told apart, and the lowering is the direction a label may err
+  -- in (second review pass, both readers; the maintainer's call).
   SELECT CASE
     WHEN jsonb_typeof(p_meta) = 'object'
          AND jsonb_typeof(p_meta->'trust') = 'string'
@@ -247,7 +253,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_declared_trust(jsonb, jsonb, jsonb) IS
-  'The write event with the payload''s metadata.trust folded in as its declared trust when the event declares none (the event''s own trust wins): a caller writing metadata.trust is declaring, not setting — the stamp writes ob1_trust_ceiling of the key''s kind and the declaration, and the append files a declaration above the kind under actor_context.claimed. A non-object metadata, an absent key, a JSON null or a non-string declares nothing, and neither does the trust the row already carries (p_old, the row''s metadata before the write; NULL for a new row) — an echo of a read. A string is cut to 64 characters. upsert_thought and update_thought call it once the row is read. Migration 073 / SMD-1724.';
+  'The write event with the payload''s metadata.trust folded in as its declared trust when the event declares none (the event''s own trust wins): a caller writing metadata.trust is declaring, not setting — the stamp writes ob1_trust_ceiling of the key''s kind and the declaration, and the append files a declaration above the kind under actor_context.claimed. A non-object metadata, an absent key, a JSON null or a non-string declares nothing; and on a write that leaves the text, neither does the trust the row already carries (p_old, the row''s metadata; the callers pass NULL for a new text, where every word declares) — an echo of a read. A string is cut to 64 characters. upsert_thought and update_thought call it once the row is read. Migration 073 / SMD-1724.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The raw path: 050's trigger, the declaration from the event handoff.
@@ -363,9 +369,10 @@ BEGIN
   -- ob1:write-stamps-trust — a CONTRACT SENTINEL, not prose (the 014
   -- convention); preflight's `atomic capture` and `edit signature` read it.
   -- 073: a payload's metadata.trust is a declaration — folded into the event
-  -- once the row is read (v_decl, below: an echo of the row's own trust is
-  -- none), so the stamp and the append weigh one word (ob1_declared_trust),
-  -- and a new text is stamped with its trust (ob1_actor_stamp(jsonb, text)).
+  -- once the row is read (v_decl, below: on a re-capture an echo of the
+  -- row's own trust is none), so the stamp and the append weigh one word
+  -- (ob1_declared_trust), and a new text is stamped with its trust
+  -- (ob1_actor_stamp(jsonb, text)).
 
   v_fingerprint := content_fingerprint_of(p_content);
 
@@ -558,9 +565,10 @@ BEGIN
   -- ob1:write-stamps-trust — a CONTRACT SENTINEL, not prose (the 014
   -- convention); preflight's `atomic capture` and `edit signature` read it.
   -- 073: a payload's metadata.trust is a declaration — folded into the event
-  -- once the row is read (v_decl, below: an echo of the row's own trust is
-  -- none), so the stamp and the append weigh one word (ob1_declared_trust),
-  -- and a new text is stamped with its trust (ob1_actor_stamp(jsonb, text)).
+  -- once the row is read (v_decl, below: on a re-capture an echo of the
+  -- row's own trust is none), so the stamp and the append weigh one word
+  -- (ob1_declared_trust), and a new text is stamped with its trust
+  -- (ob1_actor_stamp(jsonb, text)).
 
   v_fingerprint := content_fingerprint_of(p_content);
 
@@ -974,11 +982,12 @@ BEGIN
                    OR content_fingerprint_of(v_existing.content) IS NOT DISTINCT FROM v_fingerprint;
   -- ob1:write-stamps-trust — a CONTRACT SENTINEL, not prose (the 014
   -- convention); preflight's `edit signature` reads it. 073: the patch's
-  -- metadata.trust is a declaration — folded into the event against the
-  -- row's own (an echo of a read is none), so the stamp and the append weigh
-  -- one word (ob1_declared_trust), and a new text is stamped with its trust
+  -- metadata.trust is a declaration — folded into the event, against the
+  -- row's own when the text stays (an echo of a read is none) and as given
+  -- on a new text, so the stamp and the append weigh one word
+  -- (ob1_declared_trust), and a new text is stamped with its trust
   -- (ob1_actor_stamp(jsonb, text)).
-  v_event       := ob1_declared_trust(v_event, p_metadata_patch, v_existing.metadata);
+  v_event       := ob1_declared_trust(v_event, p_metadata_patch, CASE WHEN v_same_text THEN v_existing.metadata END);
   v_new_meta    := CASE WHEN p_metadata_patch IS NOT NULL THEN v_existing.metadata || p_metadata_patch ELSE v_existing.metadata END;
   v_new_meta    := CASE WHEN v_same_text THEN ob1_actor_stamp_kept(v_new_meta, v_existing.metadata) ELSE ob1_actor_stamp(v_new_meta, v_event->>'trust') END;
   -- 032: each provenance column moves only when the envelope names its key
@@ -1102,7 +1111,7 @@ COMMENT ON FUNCTION update_thought(uuid, text, jsonb, vector, jsonb, timestamptz
 --    third key — the same writing row, the same scan, the same lock.
 -- ---------------------------------------------------------------------------
 COMMENT ON COLUMN thoughts.metadata IS
-  'The thought''s metadata: the caller''s keys and the extractor''s (source, type, topics, people, action_items). Three keys are the DATABASE''s and a write cannot set them: actor_kind (operator | agent | ingested — who holds the key that wrote the current content, from ob1_agents.kind, 046) and actor_name (that key''s name), since 050; and trust (operator > agent > ingested — the ceiling on the current content: the thought_audit.trust of the write that put it there, the key''s kind unless that write declared lower, never higher), since 073. A payload''s metadata.trust is read as the write''s declaration (ob1_declared_trust), not stored. Absent when the key is unclassified (trust: unless the write declared ingested) or the write came from outside the server. Reads filter on actor_kind and actor_name through 014''s metadata route (`said_by`, `actor` on the search and list tools) and print them as `By: name (kind)`. Migration 050 / SMD-1726; trust 073 / SMD-1724.';
+  'The thought''s metadata: the caller''s keys and the extractor''s (source, type, topics, people, action_items). Three keys are the DATABASE''s and a write cannot set them: actor_kind (operator | agent | ingested — who holds the key that wrote the current content, from ob1_agents.kind, 046) and actor_name (that key''s name), since 050; and trust (operator > agent > ingested — the ceiling on the current content: at most the thought_audit.trust of the write that put it there, the key''s kind unless that write declared lower, never higher; lower when the key has since been reclassified down or a writer before 073 set a lower ladder word, which backfill_thought_actors keeps), since 073. A payload''s metadata.trust is read as the write''s declaration (ob1_declared_trust), not stored. Absent when the key is unclassified (trust: unless the write declared ingested) or the write came from outside the server. Reads filter on actor_kind and actor_name through 014''s metadata route (`said_by`, `actor` on the search and list tools) and print them as `By: name (kind)`. Migration 050 / SMD-1726; trust 073 / SMD-1724.';
 
 CREATE OR REPLACE FUNCTION backfill_thought_actors(p_limit integer DEFAULT NULL)
 RETURNS jsonb
@@ -1151,12 +1160,14 @@ BEGIN
    * kind NOW, so a key reclassified down takes its rows down with it; and
    * the row's own metadata.trust when it is a word on the ladder — what a
    * writer before 073 set, and a lowering the log cannot see (a raw
-   * multi-row statement under one ob1.event). A reclassification up raises
-   * none of them: the log cannot tell a write that declared its key's kind
-   * from one that declared nothing (first review pass, both readers), and a
-   * ceiling raised after the fact is the one direction a label must not
-   * move. So a key reclassified down and back up leaves its rows down —
-   * the named cost; an edit by the operator restamps one. Live, the stamp,
+   * multi-row statement under one ob1.event) — and only lowers: where the
+   * log supports no trust, the row gets none, its word stripped with its
+   * marks. A reclassification up raises none of them: the log cannot tell a
+   * write that declared its key's kind from one that declared nothing (first
+   * review pass, both readers), and a ceiling raised after the fact is the
+   * one direction a label must not move. So a key reclassified down and back
+   * up leaves its rows down — the named cost; a text-changing edit restamps
+   * one (a same-text write keeps the trust it finds). Live, the stamp,
    * the append and this read one word from the same inputs, so a pass after
    * live writes finds nothing to change unless the registry moved.
    *
@@ -1262,12 +1273,14 @@ BEGIN
     ) d
     -- 073: the trust, never raised (see the header comment): the log's, or
     -- the claim's for a write its key could not yet support, under the key's
-    -- kind now — then under the row's own word when it is one on the ladder.
+    -- kind now (b) — then under the row's own word, which only lowers a trust
+    -- the log supports: where b is none the row gets none (an unvouched
+    -- text's word goes with its marks — second review pass), and a word off
+    -- the ladder caps nothing (ob1_trust_ceiling places none).
     CROSS JOIN LATERAL (
-      SELECT ob1_trust_ceiling(
-               CASE WHEN d.w_trust IS NOT NULL THEN ob1_trust_ceiling(d.kind, d.w_trust)
-                    ELSE ob1_trust_ceiling(d.kind, d.w_claimed) END,
-               CASE WHEN d.present_trust IN ('operator', 'agent', 'ingested') THEN d.present_trust END) AS trust
+      SELECT CASE WHEN b.trust IS NOT NULL THEN ob1_trust_ceiling(b.trust, d.present_trust) END AS trust
+        FROM (SELECT CASE WHEN d.w_trust IS NOT NULL THEN ob1_trust_ceiling(d.kind, d.w_trust)
+                          ELSE ob1_trust_ceiling(d.kind, d.w_claimed) END AS trust) b
     ) x
   $scan$, v_tbl);
 
@@ -1324,7 +1337,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_actors(integer) IS
-  'Sets metadata.actor_kind, metadata.actor_name and (since 073) metadata.trust on every thought to what thought_audit derives for the write of its current content — the update row whose after-text is the row''s text, else the capture when no update ever changed the text (update rows present and none matching: nobody), the newest by created_at then seq among matches: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, its actor_name, and ob1_trust_ceiling of that kind and the write''s declaration (its actor_context.claimed trust, else a trust that differs from its kind) — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 050 / SMD-1726; trust 073 / SMD-1724.';
+  'Sets metadata.actor_kind, metadata.actor_name and (since 073) metadata.trust on every thought to what thought_audit derives for the write of its current content — the update row whose after-text is the row''s text, else the capture when no update ever changed the text (update rows present and none matching: nobody), the newest by created_at then seq among matches: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, its actor_name, and a trust that is never raised — the lowest of the trust that write recorded (thought_audit.trust; or, recorded none, the claim it filed under actor_context.claimed while its key was unclassified), that kind now, and the row''s own metadata.trust when it is a ladder word, none where the log supports none — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 050 / SMD-1726; trust 073 / SMD-1724.';
 
 -- Every thought already written takes its trust now — or the batch
 -- OB1_BACKFILL_LIMIT names, the rest by hand.

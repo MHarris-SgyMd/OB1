@@ -1393,6 +1393,16 @@ if (configFailed) {
             ? applied
             : `${applied} — or, if the ledger already records ${migration} (${whyUnread}): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}${reapplied ? ` ${reapplied}` : ""}`;
         };
+        /**
+         * The write functions' remedy: 073, their last definer — except on a
+         * brain whose ledger stops before 061, where 073's guard refuses (it
+         * needs 061's lineage writer) and the remedy is 061's file, which the
+         * migrator follows with the rest, 073 among them (second review pass).
+         */
+        const writersRemedy = (apply073: string, reapplied = ""): string =>
+          ledgerRead && !ledger.has("061")
+            ? ledgerRemedy("061", `${APPLY_061} The migrator applies the files after it, 073 — the write functions' last definer — among them.`)
+            : ledgerRemedy("073", apply073, reapplied);
         // By signature, not arity: a vendored bootstrap's upsert_thought(text,
         // vector, jsonb) is a third 3-argument form, and reading whichever the
         // catalog returned first judged a healthy brain by the wrong body
@@ -1448,7 +1458,7 @@ if (configFailed) {
         // Without it — 060 or 061 re-applied by hand — a declared trust never
         // reaches the row and a payload's raise is dropped unfiled (SMD-1724).
         const STAMPS_TRUST = /ob1:write-stamps-trust/;
-        const applyLast = (why: string) => ledgerRemedy("073", `Apply db/migrations/${LAST}${why}`);
+        const applyLast = (why: string) => writersRemedy(`Apply db/migrations/${LAST}${why}`);
         // The 2-argument body is judged on its own and said beside whichever
         // 3-argument state fires, so a brain with both replaced hears it once
         // rather than on the run after the first remedy (first review pass).
@@ -2761,14 +2771,14 @@ if (configFailed) {
             // a hand edit of 061's body, since 061 carries 060's.
             add("edit signature", "warn",
                 `${current[0].sig}: the form the servers and reembed.ts call since migration 061, alone, but its body is not 060's (edited by hand?): the row is written first and the trigger derives the event after it — the log describes the edit, it does not decide it (SMD-1997, step 2)`,
-                ledgerRemedy("073", APPLY_073));
+                writersRemedy(APPLY_073));
           } else if (current.length && extra.length === 0 && !/ob1:write-stamps-trust/.test(current[0].src)) {
             // 073's sentinel (SMD-1724): the body folds the patch's trust into
             // the event and stamps a new text with it. An 11-argument body
             // without it is 061's re-applied by hand, or a hand edit.
             add("edit signature", "warn",
                 `${current[0].sig}: the form the servers and reembed.ts call since migration 061, alone, but its body is from before migration 073 (061 re-applied by hand?): the trust an edit declares never reaches the row, and a patch's metadata.trust above the key is dropped without being filed (SMD-1724)`,
-                ledgerRemedy("073", APPLY_073));
+                writersRemedy(APPLY_073));
           } else if (current.length && extra.length === 0) {
             add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 073's body — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061), the declared trust stamped on a new text (073)`);
           } else if (current.length) {
@@ -2778,7 +2788,7 @@ if (configFailed) {
           } else if (tenAlone || nineAlone) {
             add("edit signature", "fail",
                 `${ut[0].sig} is the form from before migration ${tenAlone ? "061 (046's, which 060 kept)" : "046"}; the servers send p_lineage (the windows' and the tags' recipes), which only 061's form takes — so every edit would fail, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
-                ledgerRemedy("073", `${APPLY_073} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 073's DROP chain (061's, carried) reaches every older form and leaves the one the servers call."));
+                writersRemedy(`${APPLY_073} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 073's DROP chain (061's, carried) reaches every older form and leaves the one the servers call."));
           } else if (ut.some((r) => Number(r.nargs) === ARITY - 1) || ut.some((r) => Number(r.nargs) === ARITY - 2)) {
             // A 10- or 9-argument form among the leftovers and no 11: 046 or
             // 032 re-applied would drop the older forms and leave its own to be
@@ -2786,7 +2796,7 @@ if (configFailed) {
             // review pass of SMD-1730, one form later).
             add("edit signature", "fail",
                 `${extra.join(" and ")} are forms from before migration 061 with none the servers call — every call with fewer than eleven arguments is "function is not unique"`,
-                ledgerRemedy("073", `${APPLY_073} Its DROP chain reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form.`, "Re-applied, 073's DROP chain (061's, carried) reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form."));
+                writersRemedy(`${APPLY_073} Its DROP chain reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form.`, "Re-applied, 073's DROP chain (061's, carried) reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form."));
           } else {
             // 061 is the remedy here too: its DROP chain reaches the 8- and
             // 7-argument forms and leaves the one form the servers call, where
@@ -2794,7 +2804,7 @@ if (configFailed) {
             // start (run-it, third review pass of SMD-1730).
             add("edit signature", "fail",
                 `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db/reembed.ts refuses to run`,
-                ledgerRemedy("073", `${APPLY_073} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 073's DROP chain (061's, carried) reaches every older form and leaves the one the servers call."));
+                writersRemedy(`${APPLY_073} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 073's DROP chain (061's, carried) reaches every older form and leaves the one the servers call."));
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");

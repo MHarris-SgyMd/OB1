@@ -11401,9 +11401,9 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
                        && (b.match(/ob1_append_thought_event\(v_id, '(?:capture|update)', v_new_meta->>'source', v_diff, v_decl\)/g) ?? []).length === 2 && !/v_diff, v_event\)/.test(b)),
     "both capture forms fold the payload's trust into the event once the row is read — against nothing on a new row, against the row's own metadata on a re-capture — and stamp and append with the folded event: one word for the row and the log");
   const upd = await src("update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb, jsonb)");
-  assert(/v_event       := ob1_declared_trust\(v_event, p_metadata_patch, v_existing\.metadata\);/.test(upd) && /ELSE ob1_actor_stamp\(v_new_meta, v_event->>'trust'\) END/.test(upd)
+  assert(/v_event       := ob1_declared_trust\(v_event, p_metadata_patch, CASE WHEN v_same_text THEN v_existing\.metadata END\);/.test(upd) && /ELSE ob1_actor_stamp\(v_new_meta, v_event->>'trust'\) END/.test(upd)
       && upd.indexOf("INTO v_existing") < upd.indexOf("ob1_declared_trust("),
-    "update_thought folds the patch's trust against the row it read, and stamps a new text with the event's");
+    "update_thought folds the patch's trust against the row it read when the text stays, as given on a new text, and stamps a new text with the event's");
   const trig = await src("ob1_stamp_actor()");
   assert(/current_setting\('ob1\.event', true\)/.test(trig) && /NEW\.metadata := ob1_actor_stamp\(NEW\.metadata, v_declared\)/.test(trig) && !/set_config\('ob1\.event'/.test(trig),
     "the raw path's stamp reads the ob1.event handoff's trust and leaves the setting for the audit trigger to read and clear");
@@ -11474,9 +11474,20 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   assert(r.ok && (await audits(echoRow.id)).length === nAudit && after.u === read.u && (await marks(echoRow.id)) === "operator/op-key/operator",
     "another key writing back the metadata it read — the row's own trust among it — files no claim, writes no event and moves no updated_at");
   const reEcho = await cap("073: the operator's own note, read and written back", { metadata: read.m, actor: IMP }, 22);
-  assert(reEcho.existed && (await audits(echoRow.id)).length === nAudit, "…nor does a re-capture echoing it");
-  r = await edit(ing.id, "073: the page, rewritten by the operator from what they read", (await one<{ m: Meta }>(`SELECT metadata AS m FROM thoughts WHERE id = $1::uuid`, [ing.id])).m, OP);
-  assert(r.ok && (await marks(ing.id)) === "operator/op-key/operator", `…and a text edit echoing the old row's trust takes the editor's, not the echo's (${await marks(ing.id)})`);
+  await cap2("073: the operator's own note, read and written back", { metadata: read.m, actor: BOT });
+  assert(reEcho.existed && (await audits(echoRow.id)).length === nAudit, "…nor does a re-capture echoing it, through either capture form");
+  // A new text weighs the word whatever the row said: an explicit lowering
+  // and an echo of a lower trust cannot be told apart, and the lower label is
+  // the error a label may make (second review pass; the maintainer's call).
+  r = await edit(ing.id, "073: the page, rewritten by the operator from what they read", { trust: "ingested" }, OP);
+  a = await audits(ing.id);
+  assert(r.ok && (await marks(ing.id)) === "operator/op-key/ingested" && a.at(-1)?.trust === "ingested" && a.at(-1)?.claimed === null,
+    `a text edit declaring the trust the row already had — the operator's ingested page, or an echo of it — is weighed: the new text is ingested, no claim (${await marks(ing.id)})`);
+  const opNote = await cap("073: an operator's note an agent will rewrite", { metadata: {}, actor: OP }, 25);
+  r = await edit(opNote.id, "073: the operator's note, rewritten by an agent that echoed its metadata", (await one<{ m: Meta }>(`SELECT metadata AS m FROM thoughts WHERE id = $1::uuid`, [opNote.id])).m, BOT);
+  a = await audits(opNote.id);
+  assert(r.ok && (await marks(opNote.id)) === "agent/bot-key/agent" && a.at(-1)?.claimed?.trust === "operator",
+    `…and an agent's text edit echoing the operator's trust is clamped to the agent and filed (${await marks(opNote.id)})`);
   r = await edit(opw.id, "073: the operator's note, edited by an agent", null, BOT);
   assert(r.ok && (await marks(opw.id)) === "agent/bot-key/agent", `an edit that changes the text takes the editor's mark and trust, as 050 takes the mark (${await marks(opw.id)})`);
   r = await edit(opw.id, "073: the operator restating it from a page", null, OP, { trust: "ingested" });
@@ -11539,6 +11550,17 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   b = await backfill();
   assert(b.rows === 1 && (await one<{ has: boolean }>(`SELECT metadata ? 'trust' AS has FROM thoughts WHERE id = $1::uuid`, [RAW2])).has === false,
     "…a JSON null planted under the key, where the log derives none, is removed — the key's presence read, not only its value");
+  // A text the log does not vouch for — rewritten with the audit trigger off
+  // — is nobody's: its word goes with its marks, ingested too (second review
+  // pass: the floor survived).
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor_amend', 'backfill', true)`);
+    await tx.query(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`);
+    await tx.query(`UPDATE thoughts SET content = '073: rewritten where the log cannot see', metadata = metadata || '{"trust": "ingested"}' WHERE id = $1::uuid`, [opw.id]);
+    await tx.query(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`);
+  });
+  await backfill();
+  assert((await marks(opw.id)) === "-/-/-", `…and a text no audit row vouches for loses its trust with its marks, the floor too (${await marks(opw.id)})`);
   await db.exec(`SELECT set_agent_kind('bot-key', 'operator')`);
   b = await backfill();
   assert((await marks(offLadder.id)) === "operator/bot-key/agent" && (await marks(lower.id)) === "operator/bot-key/ingested",

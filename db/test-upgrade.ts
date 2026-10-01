@@ -3162,6 +3162,11 @@ console.log("\n[20x] Migration 073 on a schema without 061 — refused up front,
       && before.every((r) => r.id === planted || r.id === lowered || !("trust" in r.metadata)),
     "before 073 no writer stamps trust, and a payload's metadata.trust is stored as the caller said it");
   const audits = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  // The ingester's key reclassified up before the upgrade: the clamped row's
+  // log says ingested and its claim operator, and the backfill takes the
+  // log's word under the new kind, never the claim — a recorded trust is not
+  // raised (run-it, second review pass: the claim read over it survived).
+  await sql`SELECT set_agent_kind('imp-key', 'agent')`;
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the073 });
   const after = await rowsOf();
   const trustOf = (id: string) => after.find((r) => r.id === id)?.metadata.trust ?? "-";

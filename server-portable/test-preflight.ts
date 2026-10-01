@@ -1873,13 +1873,25 @@ else {
   // ledgered brain with stale forms was not told what re-applying does).
   const led046 = new SQL({ url: LIVE, max: 1 });
   await led046.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
-  await led046.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('073_thought_trust_on_the_row.sql', 'test')`);
+  await led046.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('061_derivations.sql', 'test'), ('073_thought_trust_on_the_row.sql', 'test')`);
   const ledgered = await run(SQL_ENV);
   await led046.unsafe(`DROP TABLE schema_migrations`);
   await led046.close();
   // The remedy prints on the line after the finding, so the whole output is read, as the arms above read it.
   assert(ledgered.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032/.test(ledgered.out) && /re-apply the recorded migrations with the migrator/.test(ledgered.out) && /Re-applied, 073's DROP chain \(061's, carried\) reaches every older form and leaves the one the servers call\./.test(ledgered.out) && !/Apply db\/migrations\/046/.test(ledgered.out),
          `with 073 recorded in the ledger the edit-signature remedy is the re-run alone, and it says what 073's DROP chain drops (exit ${ledgered.code}: ${ledgered.out.split("\n").filter((l) => /edit signature|re-apply the recorded|DROP chain/.test(l)).join(" | ").trim().slice(0, 400)})`);
+  // A ledger that stops at 060: 073's guard needs 061, so the writers' remedy
+  // is 061's file, which the migrator follows with the rest — and no "then
+  // 073", which the run applies anyway (second review pass).
+  const led060 = new SQL({ url: LIVE, max: 1 });
+  await led060.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+  await led060.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('060_append_then_project.sql', 'test')`);
+  const at060 = await run(SQL_ENV);
+  await led060.unsafe(`DROP TABLE schema_migrations`);
+  await led060.close();
+  const at060Fix = fix(at060.out, "edit signature");
+  assert(at060.code === 1 && /Apply db\/migrations\/061_derivations\.sql\. The migrator applies the files after it, 073 — the write functions' last definer — among them\./.test(at060Fix) && !/073_thought_trust_on_the_row/.test(at060Fix),
+         `with a ledger stopping at 060 the writers' remedy names 061, not 073, whose guard would refuse (${at060Fix.trim().slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const pre032 = await run(SQL_ENV);
   assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/073_thought_trust_on_the_row\.sql\. Its DROP chain reaches every older form/.test(pre032.out),

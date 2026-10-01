@@ -171,7 +171,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2355 assertions: 2355 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2357 assertions: 2357 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports seventy-three (73) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -937,9 +937,11 @@ key's registry kind, or lower when the write's event declared lower, never
 higher. A payload's own `metadata.trust` is read as that declaration
 (`ob1_declared_trust` folds it into the event when the event names none), so
 a raise is clamped to the key and filed under the audit row's
-`actor_context.claimed`, and a lowering stands; the trust the row already
-carries is an echo of a read (a client writing back the metadata it fetched)
-and declares nothing. The trust follows the content
+`actor_context.claimed`, and a lowering stands; on a write that leaves the
+text, the trust the row already carries is an echo of a read (a client
+writing back the metadata it fetched) and declares nothing, while a new text
+weighs every word — a lowering and an echo of a lower trust cannot be told
+apart there, and the lower label is the safe error. The trust follows the content
 as the mark does: a re-capture or a metadata-only edit keeps it, and a
 text-changing edit takes the editor's. The stamp has to be in the write
 functions' bodies, because since 060 the projector writes the row from the
@@ -952,8 +954,9 @@ from, so after `set_agent_kind` the same call fills both — and never raises
 one: the lowest of what that write recorded (or the claim it filed while its
 key was unclassified), the key's kind now, and the row's own word, so a key
 reclassified down takes its rows down, one reclassified up leaves their trust
-where it was (an edit restamps a row), and a lowering a writer set before 073
-is kept. Nothing reads it yet;
+where it was (a text-changing edit restamps a row), a lowering a writer set
+before 073 is kept (a word off the ladder is replaced), and a text no audit
+row vouches for loses its trust with its marks. Nothing reads it yet;
 the tools' label and `min_trust` are SMD-1724's later PRs. test-schema [66],
 test-upgrade [20x].
 
@@ -3164,7 +3167,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2355 assertions, PGlite, no container
+bun test-schema.ts                          # 2357 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1043 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
