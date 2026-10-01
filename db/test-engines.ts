@@ -40,7 +40,7 @@ function ok(cond: boolean, msg: string): void {
 const HERE = import.meta.dir;
 const MARK = "SECRET-2304";
 /** The engines, one more per SMD-2304 PR. */
-const ENGINES = ["migrate.ts", "extract-entities.ts"] as const;
+const ENGINES = ["migrate.ts", "extract-entities.ts", "consolidate.ts"] as const;
 
 /** A child's environment: this one without a database URL, any OB1_* knob or PG* variable; no .env file read. */
 const BASE_ENV: Record<string, string> = {};
@@ -312,6 +312,97 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   const nullWorkers = await run({ sql: stub, workers: null, dryRun: true, env: BASE_ENV, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
   ok(nullUrl.code === 2 && nullUrl.err === `${NO_DATABASE_URL}\n` && nullWorkers === "stub queried", `extract run() reads a null url or workers as absent (url: exit ${nullUrl.code}; workers: ${nullWorkers.slice(0, 40)})`);
   ok(process.listenerCount("SIGINT") === 0 && process.listenerCount("SIGTERM") === 0, "…and leaves no signal listener after its refusals");
+}
+
+// ---------------------------------------------------------------------------
+// consolidate.ts: run() refuses in the CLI's words, before connecting; its
+// review flags' rules are a pure function the CLI and run() share.
+// ---------------------------------------------------------------------------
+{
+  const { run, reviewProblem } = await import("./consolidate.ts");
+  const inProcess = async (opts: Record<string, unknown>) => {
+    seen = 0;
+    const w = capture();
+    const code = await run({ env: BASE_ENV, ...opts, writer: w } as never);
+    await Bun.sleep(50);
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, out: lines(w.outs), err: lines(w.errs), seen };
+  };
+  const ID = "00000000-0000-0000-0000-000000000001";
+  const cases: [string, Record<string, unknown>, string[], Record<string, string>][] = [
+    ["no URL", {}, [], {}],
+    ["an unparseable URL", { url: `postgres://u:${MARK}/x@127.0.0.1:1/x` }, ["--url", `postgres://u:${MARK}/x@127.0.0.1:1/x`], {}],
+    ["a URL the readers split (?database=)", { url: `${AT}?database=other` }, ["--url", `${AT}?database=other`], {}],
+    ["--workers 0", { url: AT, workers: 0 }, ["--url", AT, "--workers", "0"], {}],
+    ["--k 51", { url: AT, k: 51 }, ["--url", AT, "--k", "51"], {}],
+    ["--min-sim 1.5", { url: AT, minSim: 1.5 }, ["--url", AT, "--min-sim", "1.5"], {}],
+    ["--min-confidence -0.1", { url: AT, minConfidence: -0.1 }, ["--url", AT, "--min-confidence", "-0.1"], {}],
+    ["a lease under two heartbeats", { url: AT, ttl: 3, heartbeat: 2 }, ["--url", AT, "--ttl", "3", "--heartbeat", "2"], {}],
+    // Two rules broken: the lease pair before --limit, and every number before a review flag, as the script always did.
+    ["a short lease and --limit 0", { url: AT, ttl: 3, heartbeat: 2, limit: 0 }, ["--url", AT, "--ttl", "3", "--heartbeat", "2", "--limit", "0"], {}],
+    ["--stale 0 and a bad --list word", { url: AT, stale: 0, list: "maybe" }, ["--url", AT, "--stale", "0", "--list", "maybe"], {}],
+    ["a bad --list word", { url: AT, list: "maybe" }, ["--url", AT, "--list", "maybe"], {}],
+    // Refused before the client opens, as main refused it: a URL Bun's client rejects meets the --list rule first (review pass 3).
+    ["a bad --list word beside a URL Bun's client rejects", { url: `${AT}?sslmode=bogus`, list: "maybe" }, ["--url", `${AT}?sslmode=bogus`, "--list", "maybe"], {}],
+    ["--accept not a UUID", { url: AT, accept: "12" }, ["--url", AT, "--accept", "12"], {}],
+    ["--accept with --reject", { url: AT, accept: ID, reject: ID }, ["--url", AT, "--accept", ID, "--reject", ID], {}],
+    ["--direction without --accept", { url: AT, direction: "newer" }, ["--url", AT, "--direction", "newer"], {}],
+    ["--force without --accept", { url: AT, force: true }, ["--url", AT, "--force"], {}],
+    ["--limit beside --list", { url: AT, limit: 5, list: "pending" }, ["--url", AT, "--limit", "5", "--list"], {}],
+    ["--note alone", { url: AT, note: "hm" }, ["--url", AT, "--note", "hm"], {}],
+    ["--note with the pass's marker", { url: AT, reject: ID, note: "settled by the pass: mine" }, ["--url", AT, "--reject", ID, "--note", "settled by the pass: mine"], {}],
+    // The banner on stdout, then the blanket gate (SMD-1903), under a judge model named in env.
+    ["the egress gate's refusal under OB1_JUDGE_MODEL from env", { url: AT }, ["--url", AT], { OB1_JUDGE_MODEL: "env-judge" }],
+  ];
+  for (const [what, opts, argv, env] of cases) {
+    const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
+    const cli = await counted(["consolidate.ts", ...argv], env);
+    ok(r.code === 2 && cli.code === 2, `consolidate run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
+    ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
+    ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
+  }
+  // reviewProblem is pure and the rule itself: null for the combinations the CLI admits.
+  ok(reviewProblem({}) === null && reviewProblem({ list: "stale" }) === null && reviewProblem({ accept: ID, direction: "older", force: true, note: "read both" }) === null && reviewProblem({ reject: ID, note: "  a note" }) === null && reviewProblem({ list: null, accept: null, note: null } as never) === null,
+     "consolidate's reviewProblem admits what the CLI admits, null as absent");
+  ok(reviewProblem({ accept: ID, note: "  settled by the pass: x" })?.includes("marker is the pass's own") === true, "…and refuses a note carrying the pass's marker after leading spaces");
+  // A caller's client: the narrow one, the handles, a keyed run or decision without a URL; never closed.
+  let closed = false;
+  const stub = (extra: Record<string, unknown> = {}) => Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 3 }, close: async () => { closed = true; }, unsafe: () => { throw new Error("stub queried"); } }, extra);
+  const narrow = await inProcess({ sql: stub({ options: { max: 2 } }) });
+  ok(narrow.code === 2 && /needs a client of at least 3 connections for 2 worker\(s\)/.test(narrow.err), `consolidate run() refuses a client narrower than its workers and a spare (exit ${narrow.code})`);
+  const reserved = await inProcess({ sql: stub({ release: () => {} }), url: AT });
+  const tx = await inProcess({ sql: stub({ savepoint: async () => {} }), url: AT });
+  ok([reserved, tx].every((r) => r.code === 2 && /needs a pool, not a reserved connection or a transaction's handle/.test(r.err)), "…refuses a reserved connection and a transaction's handle");
+  const keyedRun = await inProcess({ sql: stub(), env: { ...BASE_ENV, OB1_WORKER_KEY: "k" } });
+  const keyedDecision = await inProcess({ sql: stub(), accept: ID, env: { ...BASE_ENV, OB1_WORKER_KEY: "k" } });
+  const keyedList = await run({ sql: stub(), list: "pending", env: { ...BASE_ENV, OB1_WORKER_KEY: "k" }, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  ok([keyedRun, keyedDecision].every((r) => r.code === 2 && /resolves OB1_WORKER_KEY on a connection of its own/.test(r.err)) && keyedList === "stub queried",
+     `…refuses a worker key beside a client without a URL for a run and a decision, not for a listing, which resolves nothing (list: ${keyedList.slice(0, 30)})`);
+  const early = await inProcess({ url: AT, signal: AbortSignal.abort() });
+  ok(early.code === 130 && /stopped before the pass began/.test(early.err) && early.seen === 0, `consolidate run() with a signal already aborted returns 130 before connecting (exit ${early.code})`);
+  const reviewAborted = await run({ sql: stub(), list: "pending", signal: AbortSignal.abort(), writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  ok(reviewAborted === "stub queried", `…and a listing under an aborted signal reads on — it only reads (${reviewAborted.slice(0, 30)})`);
+  // A decision writes: an aborted signal stops it before anything opens, as it stops a run (review pass 1).
+  const decisionAborted = await inProcess({ url: AT, accept: ID, signal: AbortSignal.abort() });
+  ok(decisionAborted.code === 130 && decisionAborted.err === "\n  stopped before the decision was written: the caller's signal was aborted\n" && decisionAborted.seen === 0, `…while a decision under an aborted signal returns 130 before connecting, in words that name no pass (exit ${decisionAborted.code}, ${decisionAborted.seen} connection(s))`);
+  // …beside --dry-run too: the decision writes whatever else is asked (review pass 2: it read the tables first).
+  const dryDecision = await inProcess({ url: AT, reject: ID, dryRun: true, signal: AbortSignal.abort() });
+  ok(dryDecision.code === 130 && dryDecision.seen === 0, `…and a decision beside --dry-run stops before connecting too (exit ${dryDecision.code}, ${dryDecision.seen} connection(s))`);
+  ok(!closed, "…and never closes the caller's client");
+}
+
+// cli.ts's numberProblem: the scanner's words, judged by value — the engines'
+// in-process numbers — and readNumber's own rule for a digit string.
+{
+  const { numberProblem, readNumber } = await import("./cli.ts");
+  ok(numberProblem("--min-sim", 1e-7, { min: -1, max: 1, fraction: true }) === null, "numberProblem reads 1e-7 as the decimal number it is (a digit string of it, 0.0000001, passes the scanner too)");
+  ok(numberProblem("--workers", 1.5, { min: 1 }) === "--workers must be a decimal integer >= 1" && numberProblem("--k", 51, { min: 1, max: 50 }) === "--k must be a decimal integer >= 1 and <= 50" && numberProblem("--x", 2 ** 60, { min: 1 }) === "--x is too large to read exactly" && numberProblem("--x", NaN, { min: 1 }) !== null,
+     "…and refuses a fraction for an integer, out of range, past 2^53 and NaN in the scanner's words");
+  for (const [raw, rule] of [["0", { min: 1 }], ["51", { min: 1, max: 50 }], ["1.5", { min: 1 }], ["0.5", { min: 0, max: 1, fraction: true }], ["9007199254740993", { min: 1 }], ["-1", { min: -1, max: 1, fraction: true }]] as const) {
+    const scanned = readNumber("--f", raw, rule);
+    const direct = numberProblem("--f", Number(raw), rule);
+    ok((typeof scanned === "number" ? null : scanned.error) === direct, `readNumber("${raw}") and numberProblem(${raw}) agree (${JSON.stringify(scanned)})`);
+  }
 }
 
 // ---------------------------------------------------------------------------
