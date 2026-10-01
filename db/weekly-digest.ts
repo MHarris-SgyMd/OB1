@@ -385,11 +385,9 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   const wantTelegram = args.output === "telegram" && !args.dryRun;
   // The blanket gate, up front, before the read and the LLM spend: when the
   // policy would refuse the digest whatever its text (no allow term names a unit
-  // it carries), say so now — the digest still prints to stdout, but it will not
-  // post. Null here means the policy MIGHT let it through, so the send is still
-  // decided per the digest's own text at delivery (a marker: term). When it will
-  // post, the credentials are required now, not after a synthesis that is then
-  // wasted (SMD-2239 review).
+  // it carries), say so now — the digest still prints to stdout, but will not
+  // post. A null defers to the per-send gate at delivery; when it will post, the
+  // credentials are required now, not after a synthesis that is then wasted.
   let telegramBlanket: string | null = null;
   if (wantTelegram) {
     console.log(`  Telegram egress: ${egressDescription(telegram, cfg.egress, OB1_TELEGRAM_LOCAL)}`);
