@@ -434,7 +434,7 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     // A blank value the scanner refuses, before the URL, refused by run() in its words (review pass 1: run() pooled under the key '').
     ["--job blank", { job: "" }, ["--job", ""], {}],
     ["--retire blank", { url: AT, retire: "  " }, ["--url", AT, "--retire", "  "], {}],
-    ["a blank --accept-failed id", { url: AT, acceptFailed: ["", "00000000-0000-0000-0000-000000000001"] }, ["--url", AT, "--accept-failed", "", "00000000-0000-0000-0000-000000000001"], {}],
+    ["a blank --accept-failed id", { url: AT, acceptFailed: ["", ID] }, ["--url", AT, "--accept-failed", "", ID], {}],
     // …under a model named in the environment run() is given: its key and banner name it, as the CLI's do.
     ["the gate's refusal under OB1_EMBEDDING_MODEL from env", { url: AT }, ["--url", AT], { OB1_EMBEDDING_MODEL: "  env-model ", OB1_EMBEDDING_DIM: "768" }],
   ];

@@ -79,12 +79,23 @@ export function tierProblem(raw) {
   return `OB1_TIER is ${JSON.stringify(raw)}, which is not a pipeline tier — set it to one of ${PIPELINE_TIERS.join(", ")}, or leave it unset for a plain brain. An unrecognised tier fails migration 045's query_log.tier CHECK, and because the log write is best-effort every query_log row is then silently dropped (SMD-1953).`;
 }
 
+/**
+ * One variable from an environment record by this module's rule: trimmed, an
+ * empty value unset. ENV reads the import-time environment through it, and
+ * embeddingContract a caller's record.
+ *
+ * @param {Record<string, string | undefined>} record
+ * @param {string} key
+ * @returns {string | undefined}
+ */
+function envValue(record, key) {
+  const v = record[key];
+  const t = typeof v === "string" ? v.trim() : v;
+  return t === "" ? undefined : t;
+}
+
 const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
-  get: (_t, k) => {
-    const v = RAW_ENV[/** @type {string} */ (k)];
-    const t = typeof v === "string" ? v.trim() : v;
-    return t === "" ? undefined : t;
-  },
+  get: (_t, k) => envValue(RAW_ENV, /** @type {string} */ (k)),
 });
 
 /**
@@ -785,14 +796,9 @@ export const EMBEDDING_DIMENSIONS = resolveEmbeddingDimensions(
  * @returns {{ model: string, dim: number, truncate: boolean }}
  */
 export function embeddingContract(record) {
-  const read = (/** @type {string} */ k) => {
-    const v = record[k];
-    const t = typeof v === "string" ? v.trim() : v;
-    return t === "" ? undefined : t;
-  };
-  const model = read("OB1_EMBEDDING_MODEL") ?? DEFAULT_EMBEDDING_MODEL;
-  const dim = Number(read("OB1_EMBEDDING_DIM") ?? DEFAULT_EMBEDDING_DIM);
-  return { model, dim, truncate: resolveEmbeddingDimensions(read("OB1_EMBEDDING_DIMENSIONS"), dim, model) };
+  const model = envValue(record, "OB1_EMBEDDING_MODEL") ?? DEFAULT_EMBEDDING_MODEL;
+  const dim = Number(envValue(record, "OB1_EMBEDDING_DIM") ?? DEFAULT_EMBEDDING_DIM);
+  return { model, dim, truncate: resolveEmbeddingDimensions(envValue(record, "OB1_EMBEDDING_DIMENSIONS"), dim, model) };
 }
 
 /**

@@ -648,7 +648,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   /**
    * A caller's signal aborted before the pass began stops the run before its
    * next write, returning 130, as a signal before the CLI's handlers ends the
-   * process where it stands.
+   * process where it stands. Aborted during the record and the pool's
+   * transaction, a run that then finds nothing to do returns that run's own
+   * 0 or 1: no write is left to stop before.
    */
   const stoppedEarly = (line: string = STOPPED_EARLY): boolean => {
     if (opts.signal?.aborted !== true) return false;
