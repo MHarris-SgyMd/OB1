@@ -506,7 +506,6 @@ if (import.meta.main) {
         model: "<id — else OB1_DIGEST_MODEL, else the brain's chat model>",
         output: "<telegram|stdout|file> (telegram)",
       },
-      note: "The header of db/weekly-digest.ts says what each does.",
     },
   );
 
