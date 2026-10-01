@@ -465,8 +465,8 @@ export function ingestActor(name?: string): IngestActor {
   return { name, via: INGEST_ACTOR.via };
 }
 
-/** The two keys 050's trigger owns: never compared, never merged — the trigger stamps them from the envelope. */
-const ACTOR_KEYS = ["actor_kind", "actor_name"] as const;
+/** The three keys the stamp owns — 050's two marks and 073's trust: never compared, never merged — the trigger stamps them from the envelope. */
+const ACTOR_KEYS = ["actor_kind", "actor_name", "trust"] as const;
 
 /** A run's name for thought_sources.ingest_run — this tool and the moment it started (ingest-structure.ts's rule, the ingester's name). */
 export function runName(tool: string = INGEST_ACTOR.via, at: Date = new Date()): string {
@@ -555,9 +555,10 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
       }
       // `old` is read before the write so RETURNING can say whether the text
       // moved — an UPDATE's RETURNING sees only the new row. The two actor
-      // keys are removed from EXCLUDED on both sides: 050's BEFORE INSERT
-      // trigger stamps them onto the proposed row, and a kind the operator
-      // classified since the last run would otherwise re-write every row once.
+      // keys and 073's trust are removed from EXCLUDED on both sides: 050's
+      // BEFORE INSERT trigger stamps them onto the proposed row, and a kind the
+      // operator classified since the last run would otherwise re-write every
+      // row once.
       const rows = (await tx`
         WITH old AS (SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${doc.id}::uuid)
         INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at, derived_from)
@@ -567,13 +568,13 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
               content_fingerprint = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN EXCLUDED.content_fingerprint ELSE thoughts.content_fingerprint END,
               embedding = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN NULL ELSE thoughts.embedding END,
               embedding_model = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN NULL ELSE thoughts.embedding_model END,
-              metadata = COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name'),
+              metadata = COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name' - 'trust'),
               derived_from = COALESCE(EXCLUDED.derived_from, thoughts.derived_from)
           WHERE (${wmValue}::text IS NULL OR thoughts.metadata->>(${wmKey}::text) IS NULL
                  OR thoughts.metadata->>(${wmKey}::text) < ${wmValue}::text
                  OR (thoughts.metadata->>(${wmKey}::text) = ${wmValue}::text AND (${asOf}::timestamptz IS NULL OR thoughts.updated_at <= ${asOf}::timestamptz)))
             AND (thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint
-              OR (COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')) IS DISTINCT FROM thoughts.metadata
+              OR (COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name' - 'trust')) IS DISTINCT FROM thoughts.metadata
               OR COALESCE(EXCLUDED.derived_from, thoughts.derived_from) IS DISTINCT FROM thoughts.derived_from)
         RETURNING (xmax = 0) AS inserted, ((SELECT fp FROM old) IS DISTINCT FROM thoughts.content_fingerprint) AS moved`) as { inserted: boolean; moved: boolean }[];
       // The guard asks "would the merge change the row" — the merged value
@@ -592,7 +593,7 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
           SELECT ((metadata->>(${wmKey}::text)) > ${wmValue}::text
                   OR ((metadata->>(${wmKey}::text)) = ${wmValue}::text AND updated_at > ${asOf}::timestamptz)) AS blocked,
                  (content_fingerprint IS DISTINCT FROM content_fingerprint_of(${doc.content})
-                  OR (COALESCE(metadata, '{}'::jsonb) || (${meta}::jsonb - 'actor_kind' - 'actor_name')) IS DISTINCT FROM metadata
+                  OR (COALESCE(metadata, '{}'::jsonb) || (${meta}::jsonb - 'actor_kind' - 'actor_name' - 'trust')) IS DISTINCT FROM metadata
                   OR COALESCE(${derivedFrom}::jsonb, derived_from) IS DISTINCT FROM derived_from) AS pending
           FROM thoughts WHERE id = ${doc.id}::uuid`) as { blocked: boolean | null; pending: boolean | null }[];
         if (w?.blocked === true && w.pending === true) return { outcome: "stale" };

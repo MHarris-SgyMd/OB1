@@ -495,12 +495,13 @@ const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 // `metadata`, and a caller naming one is refused rather than silently overruled
 // by the merge below: `source` (the origin label, set from the `source` arg),
 // the extractor's tag set (TAG_KEYS: type, topics, people…), the actor columns
-// migration 050 stamps from the key, the embedding model migration 021 records,
+// migration 050 stamps from the key and the trust migration 073 stamps beside
+// them (SMD-1724), the embedding model migration 021 records,
 // and the extractor's own failure marker. Everything else — `summary_model`,
 // which the session hook sets when a local model wrote the summary — is the
 // caller's to add.
 const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
-const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "embedding_model", "metadata_extraction_failed"]);
+const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed"]);
 const META_VALUE_MAX = 200;
 const META_KEYS_MAX = 8;
 /** The refusal for a bad `metadata` argument, or null when it is clean (or absent). Checked before the model calls, as the other shape refusals are. */
@@ -565,8 +566,8 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
   return { since: d.toISOString(), after: null };
 }
 
-/** The two metadata keys 050's trigger owns (SMD-1726): the writer's kind and name, stamped as the content moves. */
-const ACTOR_MARKS: ReadonlySet<string> = new Set(["actor_kind", "actor_name"]);
+/** The metadata keys the stamp owns: the writer's kind and name (050, SMD-1726) and the content's trust (073, SMD-1724), stamped as the content moves. */
+const ACTOR_MARKS: ReadonlySet<string> = new Set(["actor_kind", "actor_name", "trust"]);
 
 /**
  * One change as a client reads it: when, what and who on the first line with
@@ -589,7 +590,8 @@ function renderChange(c: AuditChange, n: number): string {
     : c.origin !== null ? `by ${snipText(c.origin, 80)} (no key)`
     : "from outside the server";
   // 050's stamp is not an edit (it holds the updated_at trigger): a row whose
-  // only change is the two marks is "marked" — the backfill's row above all.
+  // only change is the marks — 050's two, 073's trust — is "marked", the
+  // backfill's row above all.
   const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every((k) => ACTOR_MARKS.has(k));
   const verb = c.action === "capture" ? "captured" : c.action === "update" ? (marksOnly ? "marked" : "edited") : "deleted";
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
