@@ -1,4 +1,4 @@
-# The winner (SMD-2285 decision 1): oidc-provider 9.12.2 on Bun, as its own
+# The runner-up (SMD-2285 decision 1): Better Auth 1.7.6 on Bun, as its own
 # service. An overlay on compose.yaml. Paths are relative to evals/auth/, the
 # first -f file's directory.
 #
@@ -13,7 +13,7 @@ services:
     image: ob1-auth-poc:local
     pull_policy: build
     restart: "no"
-    command: ["bun", "oidc-provider.ts"]
+    command: ["bun", "better-auth.ts"]
     environment:
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:?run bun evals/eval-auth.ts --up}
       OB1_AUTH_JWKS: ${OB1_AUTH_JWKS:?}

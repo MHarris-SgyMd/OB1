@@ -6369,13 +6369,14 @@ read, never values. The grant set was measured as that role in the kit's
 runner, one group at a time, until the fixture's items were inserted and
 embedded.
 
-## The authorization server on Bun: oidc-provider against criteria 1–5 (SMD-2285)
+## The authorization server on Bun: oidc-provider and Better Auth against criteria 1–5 (SMD-2285)
 
 SMD-2285 picked oidc-provider 9.12.2, run as a small Bun service of our own, as
 the brain's authorization server (`../docs/operator-surface-tiers.md`, decisions
 13–16). Its Work step 2 asks for a proof of concept that shows the ticket's
-criteria 1–5 on a clean stack, twice. This is that proof. Better Auth, the
-runner-up, is the kit's second candidate and follows in its own PR.
+criteria 1–5 on a clean stack, twice, with the winner and one runner-up. This
+is that proof, for both: the same stack and the same verifier run oidc-provider
+and then Better Auth 1.7.6 ("The runner-up", below).
 
 **The setup.** `eval-auth.ts` runs `auth/compose.yaml` plus
 `auth/compose.<candidate>.yaml` as the project `ob1-auth-<candidate>`, from
@@ -6397,7 +6398,7 @@ stand-ins for both.
 
 ```sh
 cd evals
-bun eval-auth.ts --up oidc-provider
+bun eval-auth.ts --up oidc-provider        # or better-auth; one at a time (one port)
 bun eval-auth.ts --verify oidc-provider [--json]
 bun eval-auth.ts --down oidc-provider      # containers, networks and image
 bun eval-auth.ts --self-check              # guard, route table, policy; no stack
@@ -6412,7 +6413,7 @@ signing key, the client secrets, and the operator's password beside its
 argon2id hash) and `auth/.poc/` (the certificate), both gitignored, once, and
 reuses them.
 
-**The result: 28 of 28, twice on one stack, 1.0 to 2.4 s per run**, over
+**The winner's result: 32 of 32, twice on one stack, 1.0 to 5.3 s per run**, over
 repeated down-up-verify-verify cycles (2026-09-29, the dogfood Mac's podman
 VM). A second run on one stack proves the same things afresh. It registers new
 clients, asks for metadata-document URLs that carry its own run name (so they
@@ -6431,10 +6432,10 @@ The checks, by criterion:
 
 | group | criterion | what passes |
 | --- | --- | --- |
-| D1–D6 | 5, issuer under a path | One document is served on `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, `/auth/.well-known/openid-configuration` and Claude Code's bare `/.well-known/oauth-authorization-server`. Its `issuer` is exactly `http://localhost:8020/auth`, and its five endpoints (authorization, token, JWKS, registration, revocation) sit under it. A request with a spoofed `Host` gets the same document. It offers S256 only and `code` as its only response type. It does not advertise implicit, DPoP, userinfo, logout or PAR. It advertises CIMD with `"none"` (claude.ai's two conditions), sends `iss` in the authorization response, and lists the exchange grant. The SDK v2 client's discovery parses it both ways, including the strict OIDC parse (typescript-sdk#2733). Each tier's `/mcp` answers a tokenless call with 401 naming its metadata, and the metadata names the issuer. Of the running containers, only the proxy publishes a port, and the server sits on the internal mesh with none. |
-| R1–R3 | 3, registration | The SDK v2 client reaches stable `/mcp` by CIMD and canary `/mcp` by DCR, each through a sign-in page and a consent page, down to a tool call. In the CIMD case, the `client_id` is a document URL new to the run, fetched in the run, and the client sends no registration request. The consent page names the client by what the server checked (the document's host, `cimd.test`) and the origin it returns to. The guard refuses ten `client_id`s, each for its own cause: the mesh, `localhost` and a compose service name by the name rule (so a lookup refusing them later, for their address, would not pass), and a private name, IPv4 and IPv6 loopback, RFC 1918, CGNAT, cloud metadata and IPv4-mapped loopback by the address rule. After the probes, the bait logs the one control connection the verifier opens from the server's container, and nothing else. A document behind a redirect, and one of 6 KiB, are refused for exactly those causes (`unexpected response status 302`, `response too large`). |
-| G1–G6 | 4, grants | The GUI's confidential client runs code + PKCE for the REST core through sign-in and consent. `iss` and `state` round-trip, and the REST core sees `oauth:operator` with no actor. A missing challenge and `plain` are each refused for that reason, and so are a wrong verifier and a replayed code. The runner's client-credentials token names the runner, within `brain:capture`, and `/mcp` is refused to it. A third-party client with `offline_access` refreshes for its one granted resource, after a consent page that named its client id and redirect origin, and both listed and explained `offline_access`. The consent page shows a custom-scheme redirect (`evilapp://localhost:8020/mcp`, from a client calling itself "Open Brain dashboard") as "the app registered for evilapp:", not as the brain's own host, and names the resource of a request for `openid` alone. |
-| A1–A8 | 2, resource indicators | Every token checked has one audience. A `/mcp` token is refused by the REST core, by canary `/mcp` and by the canary REST core, and a REST-core token is refused by `/mcp`. Also refused: an unknown resource; two resources at once from a client allowed both; a DCR client asking for the REST core; and a third-party client registering for client credentials (by DCR and by a metadata document), for the implicit grant (by DCR), or with `grant_types` as a string. A request that names no resource gets no token: at the authorization endpoint it is refused before any page is shown. A token for a resource that carries no brain scope (a request for `openid` alone gets one, with an empty scope) is refused by the MCP server and the REST core with `insufficient_scope`. |
+| D1–D8 | 5, issuer under a path | One document is served on `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, `/auth/.well-known/openid-configuration` and Claude Code's bare `/.well-known/oauth-authorization-server`. Its `issuer` is exactly `http://localhost:8020/auth`, and its five endpoints (authorization, token, JWKS, registration, revocation) sit under it. A request with a spoofed `Host` gets the same document. It offers S256 only and `code` as its only response type. It does not advertise implicit, DPoP, userinfo, logout, introspection, back-channel logout, the claims parameter, sign-up's `prompt=create` or PAR. It advertises CIMD with `"none"` (claude.ai's two conditions), sends `iss` in the authorization response, and lists the exchange grant. The SDK v2 client's discovery parses it both ways, including the strict OIDC parse (typescript-sdk#2733). Each tier's `/mcp` answers a tokenless call with 401 naming its metadata, and the metadata names the issuer. Of the running containers, only the proxy publishes a port, and the server sits on the internal mesh with none. A sample of the routes either library carries beside the protocol (sign-up, sign-in, sessions, account, consent and client management, userinfo, logout, introspection) answers 404, and a DPoP proof sent to the token endpoint binds nothing: the token stays `Bearer` with no `cnf`. |
+| R1–R3 | 3, registration | The SDK v2 client reaches stable `/mcp` by CIMD and canary `/mcp` by DCR, each through a sign-in page and a consent page, down to a tool call. In the CIMD case, the `client_id` is a document URL new to the run, fetched in the run, and the client sends no registration request. The consent page names the client by what the server checked (the document's host, `cimd.test`) and the origin it returns to. Ten internal `client_id`s are refused before connecting, each for its own cause, read from the reply or from the guard's log line in the run (a library that refuses private ones itself, before any fetch, passes on its own words; see the runner-up): the mesh, `localhost` and a compose service name by the name rule (so a lookup refusing them later, for their address, would not pass), and a private name, IPv4 and IPv6 loopback, RFC 1918, CGNAT, cloud metadata and IPv4-mapped loopback by the address rule. After the probes, the bait logs the one control connection the verifier opens from the server's container, and nothing else. A document behind a redirect, and one of 6 KiB, are refused for exactly those causes (`unexpected response status 302`, `response too large`). |
+| G1–G8 | 4, grants | The GUI's confidential client runs code + PKCE for the REST core through sign-in and consent. `iss` and `state` round-trip, and the REST core sees `oauth:operator` with no actor. A missing challenge and `plain` are each refused for that reason, and so are a wrong verifier and a replayed code. The runner's client-credentials token names the runner, within `brain:capture`, and `/mcp` is refused to it. A third-party client with `offline_access` refreshes for its one granted resource, after a consent page that named its client id and redirect origin, and both listed and explained `offline_access`. The consent page shows a custom-scheme redirect (`com.evilapp://localhost:8020/mcp`, from a client calling itself "Open Brain dashboard") as "the app registered for com.evilapp:", not as the brain's own host, and names the resource of a request whose scope is none of the resource's (`openid` or `offline_access` alone); a library may instead refuse such a URI at registration, or such a request before any page, and `EXPECT` says which. A consent posted from another origin, with the operator signed in, issues nothing, and neither the sign-in nor the consent page may be framed (`X-Frame-Options: DENY`, `frame-ancestors 'none'`); a live sign-in page takes only GET and POST (a PUT is a 405). |
+| A1–A8 | 2, resource indicators | Every token checked has one audience. A `/mcp` token is refused by the REST core, by canary `/mcp` and by the canary REST core, and a REST-core token is refused by `/mcp`. Also refused: an unknown resource; two resources at once from a client allowed both, whether by authorization code (named at the token endpoint, or granted at authorization and redeemed naming none) or by client credentials from a service linked to both tiers' REST cores (`runner-tiers`); a DCR client asking for the REST core; and a third-party client registering for client credentials (by DCR and by a metadata document), for the implicit grant (by DCR), or with `grant_types` as a string. A `backchannel_logout_uri` is refused or dropped. A request naming no scope, from an operator already signed in and consented, asked twice, and one naming an empty scope, get no code (each candidate's refusal pinned). A request that names no resource gets no token: at the authorization endpoint it is refused before any page, and a POST to that endpoint from a signed-in, consented browser gets no code either (POST is off on both: 404 on the winner, 405 on the runner-up). Every token issued for a resource with no brain scope is refused where it is presented, with `insufficient_scope`; `EXPECT` names which each candidate issues (the winner: `/mcp` and the REST core, for `openid` alone; the runner-up: `/mcp`, for `offline_access` alone). |
 | X1–X4 | 1, token exchange | Through `/mcp`, the REST core sees subject `oauth:operator`, actor `mcp`, audience `/api`. Done directly, the exchange keeps `sub`, adds `act: {sub: "mcp"}`, narrows scope on request, and ends no later than the subject token. Ten cases are refused, each with its expected error and its own cause (a subject token of the wrong audience is `ERR_JWT_CLAIM_VALIDATION_FAILED aud`, a tampered one `ERR_JWS_SIGNATURE_VERIFICATION_FAILED`). The cases: across tiers, for another tier's target, to the GUI client, with a wrong secret, for a wider scope, a tampered, already-exchanged or REST-core subject token, an `actor_token`, and a missing token type. The exchanged token works at its own REST core only. |
 
 Two rows stay manual, because they need a public origin: a claude.ai connector
@@ -6482,11 +6483,14 @@ accepts the bare-path document, whose `issuer` carries `/auth`
     `evilapp:`.
   - Only the scopes the grant still lacked were listed. `offline_access`, and
     the resource of a request for `openid` alone, went unshown.
+  - Any page could frame them (found in the runner-up's review, true of both).
+    A same-site page could frame the consent page and have one disguised click
+    post it from the brain's own origin, past the Origin check.
 
   The page now names what the server checked (the client id, or for a metadata
   document its host), where the code goes (an http(s) origin, or the app that
   owns a scheme), and the scopes and resources the request names, with a
-  sentence for `offline_access` (R1, G5, G6).
+  sentence for `offline_access` (R1, G5, G6), and forbids framing (G8).
 - **A request for `openid` alone gets a token for its resource with an empty
   scope.** The stand-ins accepted it until they checked scope. Now both answer
   it with 403 `insufficient_scope`, which the real MCP server and REST core must
@@ -6499,7 +6503,8 @@ accepts the bare-path document, whose `issuer` carries `/auth`
   - DCR fails with only an ES256 key unless `clientDefaults` sets the ID
     token's algorithm, because the library's default is RS256.
   - oidc-provider refuses a grant a client lacks with `invalid_request`, where
-    RFC 6749 names `unauthorized_client`. X3 accepts either code.
+    RFC 6749 names `unauthorized_client`. X3 holds it to `invalid_request`, and
+    the departure is noted beside the row.
   - Its `invalid_grant` reply always carries the same text ("grant request is
     invalid"), so only the POC server's `error_detail` tells the causes apart.
 - **Two checks on the server were unreachable, so neither is kept:**
@@ -6509,7 +6514,7 @@ accepts the bare-path document, whose `issuer` carries `/auth`
     no user-less `/mcp` token can be issued once the third-party rule holds.
     The real MCP server (SMD-2287) should still refuse one.
 
-**Held by.** Twenty-six drop-the-mechanism mutants (`/tmp`, not committed), each on
+**Held by.** Twenty-eight drop-the-mechanism mutants (`/tmp`, not committed), each on
 a rebuilt stack. Each one turned exactly its own checks red:
 
 | mutant | checks turned red |
@@ -6527,7 +6532,9 @@ a rebuilt stack. Each one turned exactly its own checks red:
 | its type guard on `grant_types` removed | A6 |
 | the no-resource refusal removed | A7 |
 | response types at the library default | D1 |
-| DPoP, userinfo or logout at the library default, or PAR on (four mutants) | D1 |
+| DPoP at the library default | D1, D8 |
+| userinfo or logout at the library default (two mutants) | D1, D7 |
+| PAR on | D1 |
 | the configured origin not pinned | D6 |
 | the guard's mesh name rule removed | R3 |
 | the POC's `error_detail` switch off | R3, G3, X3 |
@@ -6535,7 +6542,12 @@ a rebuilt stack. Each one turned exactly its own checks red:
 | consent naming the client by its own `client_name` | R1, G5, G6 |
 | consent showing a custom scheme's host | R1, G5, G6 |
 | consent omitting the resource asked for | G6 |
-| consent dropping the `offline_access` sentence, or `offline_access` from its scope list (two mutants) | G5 |
+| consent dropping the `offline_access` sentence | G5 |
+| consent dropping `offline_access` from its scope list | G5, G6 |
+| the interaction Origin check removed | G7 |
+| the pages' frame headers removed | G8 |
+
+The consent mutants are in `auth/pages.ts`, which both candidates render.
 
 Two stack faults were also tested, each on a stack that had already passed
 once:
@@ -6543,6 +6555,148 @@ once:
   which counts the running containers) rather than passing on the first run's
   evidence.
 - With the bait stopped, R3 fails: its control connection cannot be made.
+
+**The runner-up: Better Auth 1.7.6.** With `@better-auth/oauth-provider` and
+`@better-auth/cimd` 1.7.6, pinned exactly (its 2026 advisories, among them
+CVE-2026-53512 and CVE-2026-53516), in `auth/better-auth.ts` beside the same
+stack. **32 of 32, twice on one stack, with one departure from a standard
+noted.**
+
+What it took, all in our server:
+- **An allowlist.** Better Auth is a whole account system. Its handler also
+  answers sign-up, profile, session, consent-management and client-management
+  routes, and with sign-up reachable anyone could make a user, consent as it,
+  and hold a working `/mcp` token. So the proxy's traffic reaches five protocol
+  routes and the shared pages; anything else is a 404 (D7), and POST on the
+  authorization route is a 405. The library reads a POST's body there, which
+  the hook below does not read (A7). Sign-up is off, and the operator's
+  password is checked against the winner's argon2id hash.
+- **An Origin check on every sign-in and consent POST.** Sign-in and consent
+  are called inside the process with the brain's origin as their Origin, so
+  the library's own CSRF check sees ours, not the browser's. And its signed
+  interaction query is not bound to the browser that started the flow. Review
+  pass 1 forged a consent from another same-site page, with the operator's
+  cookie and a query it fetched itself, and got a `/mcp` token. The server now
+  refuses an interaction POST from any other origin (G7). The winner refuses
+  one too, though its interaction is already bound to the browser's cookie.
+  Any other method on those routes is a 405, on both candidates (G8). Pass 2 found the pages could
+  be framed, which would let one disguised click post from the brain's own
+  origin, so every page forbids framing on both candidates (G8).
+- **The metadata, honestly.** `openid` stays in `scopes_supported`, as OIDC
+  discovery expects, though every request must name a resource and `openid`
+  beside one is refused. `select_account` and `prompt=create` are trimmed:
+  they only ever error.
+- **Resource rules in a before-hook.** The library lets one token carry
+  several audiences: from several `resource` values, or from `openid`, which
+  adds its userinfo endpoint. It issues an opaque token for a request naming
+  none. At the authorization endpoint the hook refuses, before any page, a
+  request that names no resource, more than one, no scope, or `openid`.
+  - **No scope.** Review pass 1 showed why a request must name its scopes:
+    with scope left out, the library filled in a registered `openid`, saved a
+    consent before the hook refused the flow, and gave the next request a
+    two-audience token with no page (A4). Pass 1's fix read the client's
+    registered scopes instead. Pass 2 found that a metadata-document client
+    has no row until the library fetches its document, after the hook has run.
+    So the hook now refuses a request naming no scope, with no lookup.
+  - **Where a refusal goes.** It is redirected to the client when the redirect
+    URI is exactly one the client registered. That is stricter than the
+    library, which lets a loopback port vary. Otherwise it is answered as JSON.
+  - **The token endpoint.** There the hook refuses more than one resource, and
+    client credentials naming none (A4, A7). It counts `resource` in the raw
+    form, because the parsed body keeps only the last of a repeated field.
+    Pass 2 found the parsed-body rule could never fire and removed it. Pass 3
+    found what that left open: the library re-reads the raw form and grants a
+    client-credentials token every resource the client is linked to, so a
+    service linked to both tiers got one token valid at both. Codes and
+    refresh tokens were already held to their grant's resources.
+  - **What requiring scopes costs.** A client must name its scopes. The SDK v2
+    client takes them from the protected resource's `scopes_supported`, so the
+    real MCP server must publish them (SMD-2287). A client that sends none is
+    refused here, where the winner would just grant it nothing.
+- **The third-party rule twice.** For DCR it lives in the same hook. For a
+  metadata document it lives in the fetch wrapper, because the CIMD plugin's
+  `onClientCreated` only notifies, logging anything it throws. Either way a
+  client may use authorization code and refresh only, and may not register a
+  `backchannel_logout_uri`, which the library would fetch with plain `fetch`
+  (A6).
+- **DPoP stripped, and the metadata trimmed.** The library offers DPoP to every
+  client, with no switch, so the server drops the header (D8). The metadata
+  stops advertising DPoP, userinfo, logout, introspection, back-channel logout,
+  the claims parameter and sign-up's `prompt=create` (D1).
+- **Token exchange through `extendOAuthProvider`.** The winner's rules apply.
+  The library strips a contributed `exp`, so an exchanged token cannot be cut
+  to its subject's expiry per issuance. Instead the REST cores' tokens live
+  60 s, and a subject token with less time left is refused. That rule is
+  untested live, since a subject token lives 600 s. The 60 s applies to every
+  REST-core token, so the GUI's tokens live 60 s here, not 600 s as on the
+  winner.
+- **Static clients as database rows.** The library has no clients in
+  configuration.
+- **Its own rate limiter turned off** for the verifier's dozens of
+  registrations. The deploy would weigh keeping it for SMD-2309. Whether it
+  would cover sign-in when called in-process, with no client address, is
+  untested.
+
+**Where it differs.** The verifier holds each candidate to what it actually
+answers, from a per-candidate table (`EXPECT` in `eval-auth.ts`), so every row
+is counted for both. Where an answer departs from a standard, `KNOWN` notes it
+beside the row. It notes, never excuses: the row still has to pass, and a
+change in the library fails it. Review pass 1 found the first version of
+`KNOWN` excused a whole row, which hid G3's replay half on this candidate.
+- **Departures noted.** On Better Auth, a wrong PKCE verifier gets
+  `invalid_request` (HTTP 401), where RFC 7636 §4.6 names `invalid_grant` (G3).
+  On the winner, a client without the exchange grant gets `invalid_request`,
+  where RFC 6749 names `unauthorized_client` (X3).
+- **Stronger than the winner:**
+  - It refuses `com.evilapp://localhost:8020/mcp` at registration (RFC 8252
+    §7.1: a private-use scheme has no naming authority). The winner accepted
+    that URI and relied on its consent page (G6).
+  - Its CIMD plugin refuses a private or loopback `client_id` before any fetch.
+    That covers seven of R3's ten, all with the one message "client_id URL
+    must not target a private or reserved address". Only the three names
+    (`bait.ob1.internal`, `private-host.test`, `postgres`) reach our guard and
+    its own causes.
+  - It ships an SSRF-safe fetcher of its own (`@better-auth/cimd/node`). With
+    that fetcher in place of our guard, the bait logged no connection. R3 still
+    failed, because the library words every fetch failure alike ("Failed to
+    fetch metadata document"). The protection holds, but an operator cannot
+    see why a client was refused.
+- **Weaker:**
+  - It needs an allowlist, an Origin check and three hooks to hold what
+    oidc-provider's configuration holds, and review pass 1 found three ways
+    round the first version of them.
+  - Consent is remembered per user and client in its database; the verifier
+    asks with `prompt=consent`.
+  - Dynamically registered clients default to `web`, which refuses
+    `http://localhost` redirects unless the client says `native`. The SDK v2
+    client does.
+
+**Held by.** Nineteen mutants on its server, each on a rebuilt stack, each
+turning its checks red:
+
+| mutant | checks turned red |
+| --- | --- |
+| the DCR third-party rule removed | A6 |
+| the metadata-document third-party rule removed | A6 |
+| a `backchannel_logout_uri` accepted | A6 |
+| the no-resource refusal removed | A7 |
+| POST on the authorization route allowed | A7 |
+| the one-resource rule removed | A4 |
+| a request naming no scope allowed | A4 |
+| `openid` beside a resource allowed | A4, A8, G6 |
+| the interaction Origin check removed | G7 |
+| the pages' frame headers removed | G8 |
+| any method taken by the interaction routes | G8 |
+| repeated `resource` counted from the parsed body | A4 |
+| an empty scope allowed | A4 |
+| the `DPoP` header passed through | D8 |
+| the metadata advertising what the library offers | D1 |
+| the allowlist removed | D7 |
+| plain `fetch` in place of the guard | R3 |
+| the exchange ignoring the subject's audience | X3 |
+| `act` removed | R2, X1, X2, X4 |
+
+The consent-page mutants above hold its pages too.
 
 **Not proven here, and where it goes:**
 - **Work step 3:**
