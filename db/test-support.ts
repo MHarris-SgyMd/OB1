@@ -281,6 +281,11 @@ const FUNCTIONS = [
   // 067 (SMD-2297): the pass's settle of a stale proposal; rebuild_derived
   // keeps its signature and is named above.
   "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)",
+  // 073 (SMD-1724): the stamp with the write's declared trust, and the fold
+  // of a payload's metadata.trust into the event; the writers, the stamp
+  // trigger, the 1-argument stamp and the backfill it redefines are above.
+  "ob1_actor_stamp(jsonb, text)",
+  "ob1_declared_trust(jsonb, jsonb, jsonb)",
 ];
 
 /**
