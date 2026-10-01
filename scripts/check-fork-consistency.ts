@@ -235,12 +235,13 @@
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
  *      speaking scripts" (an import emits ingestion-contract items, a
  *      maintenance script moves onto compat/supabase-sql, three retire), and
- *      POSTGREST_EXCEPTIONS counts the twenty files with a call site
+ *      POSTGREST_EXCEPTIONS counts the nineteen files with a call site
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired (SMD-2137,
  *      SMD-2138), brain-backup, lint-sweep and thought-enrichment's three
- *      moved onto the shim (SMD-2144, SMD-2139), and weekly-digest retired
- *      for the db/ verb db/weekly-digest.ts (SMD-2239)) with the ticket that
+ *      moved onto the shim (SMD-2144, SMD-2139), weekly-digest retired
+ *      for the db/ verb db/weekly-digest.ts (SMD-2239), and brain-smoke-test
+ *      retired into deploy/smoke.sh (SMD-2103)) with the ticket that
  *      ports or retires each — a landed
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
@@ -4872,12 +4873,13 @@ checkWorkflowPins();
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
 // (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
-// POSTGREST_EXCEPTIONS counts the twenty files with a call site (two
+// POSTGREST_EXCEPTIONS counts the nineteen files with a call site (two
 // more reach the gateway through a lib; twenty-eight until the two retirements,
 // obsidian-vault-import and local-ollama-embeddings — SMD-2137 and SMD-2138 —
 // the first five ports: brain-backup and lint-sweep — SMD-2144 — and
-// thought-enrichment's three — SMD-2139 — and weekly-digest's retirement for
-// the db/ verb db/weekly-digest.ts — SMD-2239)
+// thought-enrichment's three — SMD-2139 — weekly-digest's retirement for
+// the db/ verb db/weekly-digest.ts — SMD-2239 — and brain-smoke-test's into
+// deploy/smoke.sh — SMD-2103)
 // with the ticket that ports or retires each: a line past the count fails (a
 // new call beside the documented ones),
 // a count no line reaches fails as stale (the port landed on those lines —
@@ -4980,11 +4982,13 @@ const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun"
  * file → the ticket that ports or retires it, and the exact count of lines that speak PostgREST. Thirty files in
  * twenty-one recipes (SMD-2126's survey of f7693c4c, re-measured on d8e3de60); two more of the thirty —
  * atomizer's backfill-gmail-correspondents.mjs and authorship-edges' backfill-authorship.mjs — reach the
- * gateway through their `lib/` file alone and have no line of their own. Three of the thirty are gone:
+ * gateway through their `lib/` file alone and have no line of their own. Four of the thirty are gone:
  * obsidian-vault-import's import-obsidian.py (SMD-2137) and local-ollama-embeddings' embed-local.py (SMD-2138)
- * retired with their recipes, the first entries to leave, and weekly-digest's weekly-digest.mjs (SMD-2239),
+ * retired with their recipes, the first entries to leave; weekly-digest's weekly-digest.mjs (SMD-2239),
  * its live mode rebuilt as the db/ verb db/weekly-digest.ts (a sink, not a maintenance script — the
- * recipe's README stays a pointer). Five more are on the shim: brain-backup's
+ * recipe's README stays a pointer); and brain-smoke-test's smoke-all.js (SMD-2103), retired with its
+ * recipe once deploy/smoke.sh took the wrong-key refusal, the one check of its that applied here and
+ * that smoke.sh lacked. Five more are on the shim: brain-backup's
  * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land, and
  * thought-enrichment's enrich-thoughts.mjs, backfill-type.mjs and backfill-sensitivity.mjs (SMD-2139),
  * the first writers.
@@ -5015,8 +5019,7 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // templates, is read to cover it. Its
   // two read-only siblings, brain-backup and lint-sweep, are on the shim (SMD-2144, rescoped 2026-09-26).
   ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(SHIM, "SMD-2021", 2)],
-  // Smoke harnesses, each with its own ticket.
-  ["recipes/brain-smoke-test/smoke-all.js", POSTGREST("the smoke harness takes the fork's shape or deploy/smoke.sh absorbs it", "SMD-2103", 1)],
+  // The one smoke harness left, with its own ticket (brain-smoke-test's retired: deploy/smoke.sh absorbed its applicable checks, SMD-2103).
   ["recipes/ob-graph/smoke-graph-rpcs.mjs", POSTGREST("the smoke moves onto the shim or into extensions/test-tools.ts", "SMD-2146", 1)],
 ]);
 function checkPostgrestClients() {
