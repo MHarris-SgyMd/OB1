@@ -1905,9 +1905,6 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
             err(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
             return;
           }
-          // The hard stop's release beat this one to the row: not a lapse to
-          // report, the caller's own stop (review pass 3).
-          if (hardStopped) return;
           if (gone) {
             vanished++;
             err(`  ${b.thought_id}: deleted while it was being re-embedded`);
@@ -1915,6 +1912,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
             continue;
           }
           if (!ok) {
+            // The hard stop's release beat this one to the row: not a lapse to
+            // report, the caller's own stop (review pass 3); a release that
+            // went through first is counted below as any is (pass 4).
+            if (hardStopped) return;
             // The lease expired and the row is not ours to finish; our write to
             // `thoughts`, if we made one, stands — the same vector twice at
             // worst, harmless. Counted with the rows this worker lost, not the
