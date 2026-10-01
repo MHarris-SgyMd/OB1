@@ -11396,12 +11396,14 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   assert(["upsert_thought", "update_thought", "ob1_stamp_actor", "ob1_actor_stamp", "ob1_actor_stamp_kept", "ob1_declared_trust", "backfill_thought_actors"].every((f) => lastDefinerOf(f).startsWith("073")),
     "073 is the last definer of the three writers, the stamp trigger, both stamp arms, the fold and the backfill");
   const bodies = await Promise.all(["upsert_thought(text, jsonb)", "upsert_thought(text, jsonb, vector)"].map(src));
-  assert(bodies.every((b) => /v_event := ob1_declared_trust\(v_event, p_payload->'metadata'\)/.test(b) && /ob1_actor_stamp\(COALESCE\(p_payload->'metadata', '\{\}'::jsonb\), v_event->>'trust'\)/.test(b)
-                       && b.indexOf("ob1_declared_trust") < b.indexOf("ob1_actor_stamp(") && b.indexOf("ob1_actor_stamp(") < b.indexOf("ob1_append_thought_event")),
-    "both capture forms fold the payload's trust into the event, then stamp the new text with the event's trust, before the append — one word for the row and the log");
+  assert(bodies.every((b) => /v_decl     := ob1_declared_trust\(v_event, p_payload->'metadata', NULL\);\s+v_new_meta := ob1_actor_stamp\(COALESCE\(p_payload->'metadata', '\{\}'::jsonb\), v_decl->>'trust'\)/.test(b)
+                       && /v_decl     := ob1_declared_trust\(v_event, p_payload->'metadata', v_old_meta\);\s+v_new_meta := ob1_actor_stamp_kept/.test(b)
+                       && (b.match(/ob1_append_thought_event\(v_id, '(?:capture|update)', v_new_meta->>'source', v_diff, v_decl\)/g) ?? []).length === 2 && !/v_diff, v_event\)/.test(b)),
+    "both capture forms fold the payload's trust into the event once the row is read — against nothing on a new row, against the row's own metadata on a re-capture — and stamp and append with the folded event: one word for the row and the log");
   const upd = await src("update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb, jsonb)");
-  assert(/v_event := ob1_declared_trust\(v_event, p_metadata_patch\)/.test(upd) && /ELSE ob1_actor_stamp\(v_new_meta, v_event->>'trust'\) END/.test(upd),
-    "update_thought folds the patch's trust and stamps a new text with the event's");
+  assert(/v_event       := ob1_declared_trust\(v_event, p_metadata_patch, v_existing\.metadata\);/.test(upd) && /ELSE ob1_actor_stamp\(v_new_meta, v_event->>'trust'\) END/.test(upd)
+      && upd.indexOf("INTO v_existing") < upd.indexOf("ob1_declared_trust("),
+    "update_thought folds the patch's trust against the row it read, and stamps a new text with the event's");
   const trig = await src("ob1_stamp_actor()");
   assert(/current_setting\('ob1\.event', true\)/.test(trig) && /NEW\.metadata := ob1_actor_stamp\(NEW\.metadata, v_declared\)/.test(trig) && !/set_config\('ob1\.event'/.test(trig),
     "the raw path's stamp reads the ob1.event handoff's trust and leaves the setting for the audit trigger to read and clear");
@@ -11443,6 +11445,10 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   const ghostLow = await cap("073: an unclassified key declaring ingested", { metadata: {}, event: { trust: "ingested" }, actor: { name: "ghost-key" } }, 19);
   assert((await marks(ghost.id)) === "-/ghost-key/-" && (await marks(ghostLow.id)) === "-/ghost-key/ingested",
     `an unclassified key supports no trust above the floor: none stamped, except a declared ingested (${await marks(ghost.id)}; ${await marks(ghostLow.id)})`);
+  const nested = await cap("073: a trust that is not a string", { metadata: { trust: { level: "operator" } }, actor: BOT }, 20);
+  const long = await cap("073: a long word off the ladder", { metadata: { trust: "x".repeat(500) }, actor: BOT }, 21);
+  assert((await marks(nested.id)) === "agent/bot-key/agent" && (await audits(nested.id))[0].claimed === null && ((await audits(long.id))[0].claimed?.trust as string)?.length === 64,
+    "a non-string metadata.trust declares nothing (removed, no claim), and a long string is filed cut to 64 characters");
   const two = await cap2("073: the two-argument capture", { metadata: { trust: "operator" }, actor: IMP });
   assert((await marks(two.id)) === "ingested/imp-key/ingested" && (await audits(two.id))[0].claimed?.trust === "operator", "the 2-argument capture stamps and files the same way");
 
@@ -11457,6 +11463,20 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   a = await audits(ing.id);
   assert(r.ok && (await marks(ing.id)) === "ingested/imp-key/ingested" && a.at(-1)?.claimed?.trust === "operator" && a.at(-1)?.after?.note === "y",
     "a metadata-only edit naming trust lands the rest of the patch, keeps the trust, and files the attempt");
+  // An echo of a read is not a declaration: a client that fetches a thought
+  // and writes its metadata back (rest-api's enrich) files no claim, writes
+  // no event when nothing else moved, and leaves a new text the editor's.
+  const echoRow = await cap("073: the operator's own note, read and written back", { metadata: { source: "mcp" }, actor: OP }, 22);
+  const read = (await one<{ m: Meta; u: string }>(`SELECT metadata AS m, updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [echoRow.id]));
+  const nAudit = (await audits(echoRow.id)).length;
+  r = await edit(echoRow.id, null, read.m, BOT);
+  const after = (await one<{ u: string }>(`SELECT updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [echoRow.id]));
+  assert(r.ok && (await audits(echoRow.id)).length === nAudit && after.u === read.u && (await marks(echoRow.id)) === "operator/op-key/operator",
+    "another key writing back the metadata it read — the row's own trust among it — files no claim, writes no event and moves no updated_at");
+  const reEcho = await cap("073: the operator's own note, read and written back", { metadata: read.m, actor: IMP }, 22);
+  assert(reEcho.existed && (await audits(echoRow.id)).length === nAudit, "…nor does a re-capture echoing it");
+  r = await edit(ing.id, "073: the page, rewritten by the operator from what they read", (await one<{ m: Meta }>(`SELECT metadata AS m FROM thoughts WHERE id = $1::uuid`, [ing.id])).m, OP);
+  assert(r.ok && (await marks(ing.id)) === "operator/op-key/operator", `…and a text edit echoing the old row's trust takes the editor's, not the echo's (${await marks(ing.id)})`);
   r = await edit(opw.id, "073: the operator's note, edited by an agent", null, BOT);
   assert(r.ok && (await marks(opw.id)) === "agent/bot-key/agent", `an edit that changes the text takes the editor's mark and trust, as 050 takes the mark (${await marks(opw.id)})`);
   r = await edit(opw.id, "073: the operator restating it from a page", null, OP, { trust: "ingested" });
@@ -11473,6 +11493,14 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   assert((await marks(RAW1)) === "operator/op-key/ingested" && a.length === 1 && a[0].trust === "ingested",
     `a raw write under an envelope takes the handoff's trust — the one the audit trigger reads for the same row — and drops the payload's (${await marks(RAW1)})`);
   await db.exec(`INSERT INTO thoughts (id, content, metadata) VALUES ('${RAW2}', '073: a raw write with no envelope', '{"trust": "operator", "keep": 1}')`);
+  // One raw statement, three rows, one handoff: every row is stamped from it,
+  // the audit trigger reads it for the first alone (046's handoff, the named
+  // limit) — and the backfill, which never raises, leaves all three as stamped.
+  const multi = await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true), set_config('ob1.event', '{"trust": "ingested"}', true)`, [JSON.stringify(OP)]);
+    return (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('073: multi one', '{}'), ('073: multi two', '{}'), ('073: multi three', '{}') RETURNING id::text AS id`)).rows.map((x) => x.id);
+  });
+  assert((await Promise.all(multi.map(marks))).every((m) => m === "operator/op-key/ingested"), "a raw multi-row write under one handoff stamps every row from it");
   assert((await marks(RAW2)) === "-/-/-", "…and a raw write with neither names no trust: the payload's is removed, nothing invented");
 
   // Every row agrees with its log: the trust of the write of its text.
@@ -11482,30 +11510,52 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
        SELECT a.trust FROM thought_audit a
         WHERE a.thought_id = t.id AND (a.action = 'capture' OR (a.action = 'update' AND content_fingerprint_of(a.diff->'content'->>'after') = content_fingerprint_of(t.content)))
         ORDER BY a.seq DESC LIMIT 1)`);
-  assert(disagree.length === 0, `on every row metadata.trust is thought_audit.trust of the write that put its text there (${disagree.length} disagree)`);
+  assert(disagree.length === 2 && disagree.every((d) => multi.slice(1).includes(d.id)),
+    `on every row metadata.trust is thought_audit.trust of the write that put its text there, but for the multi-row statement's later rows, whose audit rows never saw the handoff (${disagree.length} disagree)`);
 
   // The backfill: the log decides, a planted value goes, a pass after live
   // writes and a second pass write nothing.
   let b = await backfill();
-  assert(b.rows === 0 && b.differing === 0, `a pass after live writes finds nothing to change — the stamp and the backfill read one rule (${JSON.stringify(b)})`);
+  assert(b.rows === 0 && b.differing === 0 && (await Promise.all(multi.map(marks))).every((m) => m === "operator/op-key/ingested"),
+    `a pass after live writes finds nothing to change — the stamp and the backfill read one rule — and leaves the multi-row statement's rows as stamped: the backfill never raises (${JSON.stringify(b)})`);
+  const opKeep = await cap("073: the operator's, to be reclassified", { metadata: {}, actor: OP }, 23);
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.actor_amend', 'backfill', true)`);
     await tx.query(`UPDATE thoughts SET metadata = metadata - 'trust' WHERE id = $1::uuid`, [paste.id]);
     await tx.query(`UPDATE thoughts SET metadata = metadata || '{"trust": "operator"}' WHERE id = $1::uuid`, [RAW2]);
     await tx.query(`UPDATE thoughts SET metadata = metadata || '{"trust": "agent"}' WHERE id = $1::uuid`, [lower.id]);
+    await tx.query(`UPDATE thoughts SET metadata = metadata || '{"trust": "ingested"}' WHERE id = $1::uuid`, [opKeep.id]);
+    await tx.query(`UPDATE thoughts SET metadata = metadata || '{"trust": "high"}' WHERE id = $1::uuid`, [two.id]);
   });
   b = await backfill();
-  assert(b.rows === 3 && (await marks(paste.id)) === "operator/op-key/ingested" && (await marks(RAW2)) === "-/-/-" && (await marks(lower.id)) === "agent/bot-key/ingested",
-    `the backfill restores a removed trust from the log (the declared ingested read back), strips one no audit row vouches for, and lowers a raised one (${JSON.stringify(b)})`);
+  assert(b.rows === 4 && (await marks(paste.id)) === "operator/op-key/ingested" && (await marks(RAW2)) === "-/-/-" && (await marks(lower.id)) === "agent/bot-key/ingested"
+      && (await marks(opKeep.id)) === "operator/op-key/ingested" && (await marks(two.id)) === "ingested/imp-key/ingested",
+    `the backfill restores a removed trust from the log (the declared ingested the log recorded), strips one no audit row vouches for, lowers a raised one, keeps a lower ladder word the row carries — a writer's lowering from before 073 — and replaces a word off the ladder (${JSON.stringify(b)})`);
   assert((await backfill()).rows === 0, "…and a second pass writes nothing");
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor_amend', 'backfill', true)`);
+    await tx.query(`UPDATE thoughts SET metadata = metadata || '{"trust": null}' WHERE id = $1::uuid`, [RAW2]);
+  });
+  b = await backfill();
+  assert(b.rows === 1 && (await one<{ has: boolean }>(`SELECT metadata ? 'trust' AS has FROM thoughts WHERE id = $1::uuid`, [RAW2])).has === false,
+    "…a JSON null planted under the key, where the log derives none, is removed — the key's presence read, not only its value");
   await db.exec(`SELECT set_agent_kind('bot-key', 'operator')`);
   b = await backfill();
-  assert((await marks(offLadder.id)) === "operator/bot-key/operator" && (await marks(lower.id)) === "operator/bot-key/ingested",
-    `a key reclassified reaches its rows' trust as it reaches their kind; a lower declaration stays lower (${await marks(offLadder.id)}; ${await marks(lower.id)})`);
+  assert((await marks(offLadder.id)) === "operator/bot-key/agent" && (await marks(lower.id)) === "operator/bot-key/ingested",
+    `a key reclassified up reaches its rows' kind and not their trust: the log cannot tell a write that declared its key's kind from one that declared nothing, and the backfill never raises (${await marks(offLadder.id)}; ${await marks(lower.id)})`);
+  await db.exec(`SELECT set_agent_kind('op-key', 'agent')`);
+  await backfill();
+  const down = await marks(opKeep.id), downEcho = await marks(echoRow.id);
+  await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
+  await backfill();
+  assert(down === "agent/op-key/ingested" && downEcho === "agent/op-key/agent" && (await marks(echoRow.id)) === "operator/op-key/agent",
+    `a key reclassified down takes its rows' trust down; back up, their kind returns and their trust stays down — the named cost of never raising (${downEcho}; ${await marks(echoRow.id)})`);
   await db.exec(`SELECT set_agent_kind('ghost-key', 'agent')`);
+  const ghostAgent = await cap("073: an unclassified key declaring agent", { metadata: { trust: "agent" }, actor: { name: "ghost2-key" } }, 24);
+  await db.exec(`SELECT set_agent_kind('ghost2-key', 'operator')`);
   b = await backfill();
-  assert((await marks(ghost.id)) === "agent/ghost-key/agent" && (await marks(ghostLow.id)) === "agent/ghost-key/ingested",
-    `a key classified after its writes: its rows take the kind's trust, the clamped claim only to the kind, and a declared ingested stays (${await marks(ghost.id)}; ${await marks(ghostLow.id)})`);
+  assert((await marks(ghost.id)) === "agent/ghost-key/agent" && (await marks(ghostLow.id)) === "agent/ghost-key/ingested" && (await marks(ghostAgent.id)) === "operator/ghost2-key/agent",
+    `a key classified after its writes: its rows take the kind's trust, under the claim each filed while it could not be supported — a claim above the kind clamped to it, one below kept — and a declared ingested stays (${await marks(ghost.id)}; ${await marks(ghostLow.id)}; ${await marks(ghostAgent.id)})`);
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);

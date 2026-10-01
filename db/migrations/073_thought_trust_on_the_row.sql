@@ -30,12 +30,13 @@
 --   * ob1_actor_stamp_kept — keeps trust with the two marks: the same text
 --     keeps the trust it had, whatever the patch or the key re-capturing it
 --     said (050's "the actor follows the content").
---   * ob1_declared_trust(event, metadata) — a payload's metadata.trust is a
---     declaration, not a value: folded into the write event when the event
---     declares none, so the one ladder decides it — a lower word stands, a
---     higher one is clamped to the key's kind AND filed under claimed by the
---     append (the count SMD-1724 asks for). The event's own trust wins when
---     both are given.
+--   * ob1_declared_trust(event, metadata, old) — a payload's metadata.trust
+--     is a declaration, not a value: folded into the write event when the
+--     event declares none, so the one ladder decides it — a lower word
+--     stands, a higher one is clamped to the key's kind AND filed under
+--     claimed by the append (the count SMD-1724 asks for). The event's own
+--     trust wins when both are given; the trust the row already carries is
+--     an echo of a read, and declares nothing.
 --   * upsert_thought (2- and 3-argument forms) and update_thought — 060's and
 --     061's bodies with the fold and the 2-argument stamp; nothing else moves.
 --     Since 060 the stamp must be in the body, before the diff: the projector
@@ -49,9 +50,12 @@
 --     raw path's one declaration, and the audit trigger never sees the payload.
 --   * backfill_thought_actors — 050's pass, deriving trust from the same
 --     audit row it already derives the writer from (the row that wrote the
---     standing text): ob1_trust_ceiling of the registry's kind NOW and that
---     write's declaration, read back from the row (its claimed trust, else a
---     trust that differs from its kind). Called once below.
+--     standing text), and never raising one: the lowest of the trust that
+--     row recorded (or, for a write its key could not yet support, the claim
+--     it filed), the registry's kind NOW, and the row's own metadata.trust
+--     when it is a ladder word — a writer's lowering from before 073 kept.
+--     A key reclassified up leaves its rows' trust where it was. Called once
+--     below.
 --
 -- NOT HERE
 --   * Reading it: the tools' label, the notice on ingested rows, min_trust and
@@ -216,27 +220,34 @@ COMMENT ON FUNCTION ob1_actor_stamp_kept(jsonb, jsonb) IS
 -- ---------------------------------------------------------------------------
 -- 2. A payload's metadata.trust is a declaration, folded into the event.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION ob1_declared_trust(p_event jsonb, p_meta jsonb)
+CREATE OR REPLACE FUNCTION ob1_declared_trust(p_event jsonb, p_meta jsonb, p_old jsonb)
 RETURNS jsonb
 LANGUAGE sql
 IMMUTABLE
 AS $$
   -- The event as validated (validate_write_event: an object or NULL), with
   -- the payload's metadata.trust as its trust when it declares none — the
-  -- word as given, so a word off the ladder is filed under claimed as sent
-  -- (ob1_trust_ceiling clamps anything it cannot place to the key's kind).
-  -- A JSON null, or no key, declares nothing.
+  -- word as given, cut to 64 characters, so a word off the ladder is filed
+  -- under claimed as sent (ob1_trust_ceiling clamps anything it cannot place
+  -- to the key's kind). A JSON null, a non-string, or no key declares
+  -- nothing; nor does the trust the row already carries (p_old's): a client
+  -- that reads a thought and writes its metadata back — rest-api's enrich, a
+  -- recipe's `{...thought.metadata, ...}` — is echoing, not declaring, and an
+  -- echo filed as a claim, or weighed as a lowering of the editor's new text,
+  -- would make the count and the stamp say what nobody asked (first review
+  -- pass, run).
   SELECT CASE
     WHEN jsonb_typeof(p_meta) = 'object'
-         AND p_meta->>'trust' IS NOT NULL
+         AND jsonb_typeof(p_meta->'trust') = 'string'
          AND NOT COALESCE(p_event ? 'trust', false)
-    THEN COALESCE(p_event, '{}'::jsonb) || jsonb_build_object('trust', p_meta->>'trust')
+         AND (p_meta->>'trust') IS DISTINCT FROM (CASE WHEN jsonb_typeof(p_old) = 'object' THEN p_old->>'trust' END)
+    THEN COALESCE(p_event, '{}'::jsonb) || jsonb_build_object('trust', left(p_meta->>'trust', 64))
     ELSE p_event
   END;
 $$;
 
-COMMENT ON FUNCTION ob1_declared_trust(jsonb, jsonb) IS
-  'The write event with the payload''s metadata.trust folded in as its declared trust when the event declares none (the event''s own trust wins): a caller writing metadata.trust is declaring, not setting — the stamp writes ob1_trust_ceiling of the key''s kind and the declaration, and the append files a declaration above the kind under actor_context.claimed. A non-object metadata, an absent key or a JSON null declares nothing. upsert_thought and update_thought call it on the validated event. Migration 073 / SMD-1724.';
+COMMENT ON FUNCTION ob1_declared_trust(jsonb, jsonb, jsonb) IS
+  'The write event with the payload''s metadata.trust folded in as its declared trust when the event declares none (the event''s own trust wins): a caller writing metadata.trust is declaring, not setting — the stamp writes ob1_trust_ceiling of the key''s kind and the declaration, and the append files a declaration above the kind under actor_context.claimed. A non-object metadata, an absent key, a JSON null or a non-string declares nothing, and neither does the trust the row already carries (p_old, the row''s metadata before the write; NULL for a new row) — an echo of a read. A string is cut to 64 characters. upsert_thought and update_thought call it once the row is read. Migration 073 / SMD-1724.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The raw path: 050's trigger, the declaration from the event handoff.
@@ -312,6 +323,7 @@ DECLARE
   v_id          uuid;
   v_existed     boolean := false;
   v_event       jsonb;
+  v_decl        jsonb;  -- 073: v_event with the payload's trust folded in
   v_old_meta    jsonb;
   v_new_meta    jsonb;
   v_diff        jsonb;
@@ -350,10 +362,10 @@ BEGIN
   PERFORM set_config('ob1.event', '', true);
   -- ob1:write-stamps-trust — a CONTRACT SENTINEL, not prose (the 014
   -- convention); preflight's `atomic capture` and `edit signature` read it.
-  -- 073: a payload's metadata.trust is a declaration — folded into the event,
-  -- so the stamp and the append weigh one word (ob1_declared_trust), and the
-  -- new text is stamped with the event's trust (ob1_actor_stamp(jsonb, text)).
-  v_event := ob1_declared_trust(v_event, p_payload->'metadata');
+  -- 073: a payload's metadata.trust is a declaration — folded into the event
+  -- once the row is read (v_decl, below: an echo of the row's own trust is
+  -- none), so the stamp and the append weigh one word (ob1_declared_trust),
+  -- and a new text is stamped with its trust (ob1_actor_stamp(jsonb, text)).
 
   v_fingerprint := content_fingerprint_of(p_content);
 
@@ -382,10 +394,11 @@ BEGIN
   IF NOT v_existed THEN
     BEGIN
       v_id       := gen_random_uuid();
-      v_new_meta := ob1_actor_stamp(COALESCE(p_payload->'metadata', '{}'::jsonb), v_event->>'trust');
+      v_decl     := ob1_declared_trust(v_event, p_payload->'metadata', NULL);
+      v_new_meta := ob1_actor_stamp(COALESCE(p_payload->'metadata', '{}'::jsonb), v_decl->>'trust');
       v_diff     := ob1_thought_diff('capture', NULL, p_content, NULL, v_new_meta, false, false,
                                      NULL, NULL, NULL, NULL, NULL, v_fingerprint);
-      v_ev       := ob1_append_thought_event(v_id, 'capture', v_new_meta->>'source', v_diff, v_event);
+      v_ev       := ob1_append_thought_event(v_id, 'capture', v_new_meta->>'source', v_diff, v_decl);
       IF v_ev IS NULL THEN
         RAISE EXCEPTION 'upsert_thought: the append recorded no capture event for %', v_id;
       END IF;
@@ -416,11 +429,12 @@ BEGIN
     -- something or the envelope declared stance, cites or a window; a write
     -- that changes nothing writes nothing and moves no updated_at (060's
     -- named delta).
+    v_decl     := ob1_declared_trust(v_event, p_payload->'metadata', v_old_meta);
     v_new_meta := ob1_actor_stamp_kept(v_old_meta || COALESCE(p_payload->'metadata', '{}'::jsonb), v_old_meta);
     v_diff     := ob1_thought_diff('update', p_content, p_content, v_old_meta, v_new_meta, false, false,
                                    NULL, NULL, NULL, NULL, v_fingerprint, v_fingerprint);
-    IF v_diff <> '{}'::jsonb OR COALESCE(v_event ?| ARRAY['stance', 'cites', 'valid_from', 'valid_until', 'trust', 'actor_kind'], false) THEN
-      v_ev := ob1_append_thought_event(v_id, 'update', v_new_meta->>'source', v_diff, v_event);
+    IF v_diff <> '{}'::jsonb OR COALESCE(v_decl ?| ARRAY['stance', 'cites', 'valid_from', 'valid_until', 'trust', 'actor_kind'], false) THEN
+      v_ev := ob1_append_thought_event(v_id, 'update', v_new_meta->>'source', v_diff, v_decl);
       IF v_ev IS NOT NULL THEN  -- 046's late gate may drop an unchanged write carrying only a trust or an actor_kind
         PERFORM ob1_project_thought_event(v_ev);
       END IF;
@@ -467,6 +481,7 @@ DECLARE
   v_derived        jsonb;
   v_supersedes     text  := p_payload->>'supersedes';
   v_event          jsonb;  -- 046
+  v_decl           jsonb;  -- 073: v_event with the payload's trust folded in
   v_new_meta       jsonb;
   v_diff           jsonb;
   v_ev             uuid;
@@ -542,10 +557,10 @@ BEGIN
   PERFORM set_config('ob1.event', '', true);
   -- ob1:write-stamps-trust — a CONTRACT SENTINEL, not prose (the 014
   -- convention); preflight's `atomic capture` and `edit signature` read it.
-  -- 073: a payload's metadata.trust is a declaration — folded into the event,
-  -- so the stamp and the append weigh one word (ob1_declared_trust), and the
-  -- new text is stamped with the event's trust (ob1_actor_stamp(jsonb, text)).
-  v_event := ob1_declared_trust(v_event, p_payload->'metadata');
+  -- 073: a payload's metadata.trust is a declaration — folded into the event
+  -- once the row is read (v_decl, below: an echo of the row's own trust is
+  -- none), so the stamp and the append weigh one word (ob1_declared_trust),
+  -- and a new text is stamped with its trust (ob1_actor_stamp(jsonb, text)).
 
   v_fingerprint := content_fingerprint_of(p_content);
 
@@ -586,10 +601,11 @@ BEGIN
       v_id       := gen_random_uuid();
       -- 050: a new text — the writer from the envelope. 025: derived_from and
       -- supersedes written on a fresh row, validated above.
-      v_new_meta := ob1_actor_stamp(COALESCE(p_payload->'metadata', '{}'::jsonb), v_event->>'trust');
+      v_decl     := ob1_declared_trust(v_event, p_payload->'metadata', NULL);
+      v_new_meta := ob1_actor_stamp(COALESCE(p_payload->'metadata', '{}'::jsonb), v_decl->>'trust');
       v_diff     := ob1_thought_diff('capture', NULL, p_content, NULL, v_new_meta, false, p_embedding IS NOT NULL,
                                      NULL, v_supersedes::uuid, NULL, v_derived, NULL, v_fingerprint);
-      v_ev       := ob1_append_thought_event(v_id, 'capture', v_new_meta->>'source', v_diff, v_event);
+      v_ev       := ob1_append_thought_event(v_id, 'capture', v_new_meta->>'source', v_diff, v_decl);
       IF v_ev IS NULL THEN
         RAISE EXCEPTION 'upsert_thought: the append recorded no capture event for %', v_id;
       END IF;
@@ -623,12 +639,13 @@ BEGIN
     -- 050: the same text — the mark as it was. 046's gate: an update event
     -- only when the merge changed something, the vector's presence flipped
     -- or the envelope declared stance, cites or a window.
+    v_decl     := ob1_declared_trust(v_event, p_payload->'metadata', v_old_meta);
     v_new_meta := ob1_actor_stamp_kept(v_old_meta || COALESCE(p_payload->'metadata', '{}'::jsonb), v_old_meta);
     v_diff     := ob1_thought_diff('update', p_content, p_content, v_old_meta, v_new_meta,
                                    v_old_has_vec, v_old_has_vec OR p_embedding IS NOT NULL,
                                    v_old_sup, v_old_sup, v_old_derived, v_old_derived, v_fingerprint, v_fingerprint);
-    IF v_diff <> '{}'::jsonb OR COALESCE(v_event ?| ARRAY['stance', 'cites', 'valid_from', 'valid_until', 'trust', 'actor_kind'], false) THEN
-      v_ev := ob1_append_thought_event(v_id, 'update', v_new_meta->>'source', v_diff, v_event);
+    IF v_diff <> '{}'::jsonb OR COALESCE(v_decl ?| ARRAY['stance', 'cites', 'valid_from', 'valid_until', 'trust', 'actor_kind'], false) THEN
+      v_ev := ob1_append_thought_event(v_id, 'update', v_new_meta->>'source', v_diff, v_decl);
     END IF;
     IF v_ev IS NOT NULL THEN
       -- The vector rides the projection: kept when none arrives (021), the
@@ -828,12 +845,6 @@ BEGIN
   -- The ACTOR set above stays, as 008 scoped it.
   v_event := validate_write_event(p_event);
   PERFORM set_config('ob1.event', '', true);
-  -- ob1:write-stamps-trust — a CONTRACT SENTINEL, not prose (the 014
-  -- convention); preflight's `edit signature` reads it. 073: the patch's
-  -- metadata.trust is a declaration — folded into the event, so the stamp and
-  -- the append weigh one word (ob1_declared_trust), and a new text is stamped
-  -- with the event's trust (ob1_actor_stamp(jsonb, text)).
-  v_event := ob1_declared_trust(v_event, p_metadata_patch);
 
   -- ob1:supersession-review (032/036): a supersedes write is serialised with
   -- every other on 029's lock, taken BEFORE the row lock — see "Lock order"
@@ -961,6 +972,13 @@ BEGIN
   -- envelope's; the two arms 055 lifted out of ob1_stamp_actor.
   v_same_text   := p_content IS NULL OR p_content IS NOT DISTINCT FROM v_existing.content
                    OR content_fingerprint_of(v_existing.content) IS NOT DISTINCT FROM v_fingerprint;
+  -- ob1:write-stamps-trust — a CONTRACT SENTINEL, not prose (the 014
+  -- convention); preflight's `edit signature` reads it. 073: the patch's
+  -- metadata.trust is a declaration — folded into the event against the
+  -- row's own (an echo of a read is none), so the stamp and the append weigh
+  -- one word (ob1_declared_trust), and a new text is stamped with its trust
+  -- (ob1_actor_stamp(jsonb, text)).
+  v_event       := ob1_declared_trust(v_event, p_metadata_patch, v_existing.metadata);
   v_new_meta    := CASE WHEN p_metadata_patch IS NOT NULL THEN v_existing.metadata || p_metadata_patch ELSE v_existing.metadata END;
   v_new_meta    := CASE WHEN v_same_text THEN ob1_actor_stamp_kept(v_new_meta, v_existing.metadata) ELSE ob1_actor_stamp(v_new_meta, v_event->>'trust') END;
   -- 032: each provenance column moves only when the envelope names its key
@@ -1124,14 +1142,23 @@ BEGIN
    * derives to nothing, and a mark it carries is stripped: nobody vouches
    * for it. A metadata that is not an object has no mark to read or write.
    *
-   * 073: its trust is the append's rule on that same row — ob1_trust_ceiling
-   * of that kind and the write's declaration, read back from the row: the
-   * claim filed under actor_context.claimed when the key could not support
-   * it (046's own backfill reads it so), else a trust that differs from the
-   * kind the row was written under (a lowering, or an unclassified key's
-   * declared ingested), else none — the kind. Live, the stamp and the append
-   * compute the same word from the same two inputs, so a pass after live
-   * writes finds nothing to change unless the registry moved.
+   * 073: its trust is never raised. It is the lowest of three words: the
+   * trust the log recorded for that write (thought_audit.trust — the key's
+   * kind then, or what the write declared below it), or, for a write its key
+   * could not yet support (no trust recorded, the key unclassified then),
+   * the claim it filed under actor_context.claimed, the kind now standing in
+   * for the kind then (046's own backfill reads the claim so); the key's
+   * kind NOW, so a key reclassified down takes its rows down with it; and
+   * the row's own metadata.trust when it is a word on the ladder — what a
+   * writer before 073 set, and a lowering the log cannot see (a raw
+   * multi-row statement under one ob1.event). A reclassification up raises
+   * none of them: the log cannot tell a write that declared its key's kind
+   * from one that declared nothing (first review pass, both readers), and a
+   * ceiling raised after the fact is the one direction a label must not
+   * move. So a key reclassified down and back up leaves its rows down —
+   * the named cost; an edit by the operator restamps one. Live, the stamp,
+   * the append and this read one word from the same inputs, so a pass after
+   * live writes finds nothing to change unless the registry moved.
    *
    * `differs` is where the row and the log disagree — the rows this pass
    * writes; `awaiting` is where the log names a key nobody has classified —
@@ -1140,14 +1167,14 @@ BEGIN
    */
   EXECUTE format($scan$
     CREATE TEMP TABLE %I ON COMMIT DROP AS
-    SELECT d.id, d.updated_at, d.kind, d.name, ob1_trust_ceiling(d.kind, d.declared) AS trust,
+    SELECT d.id, d.updated_at, d.kind, d.name, x.trust,
            -- Differs when the value differs, or when the key is present with
            -- a value that reads as NULL (a JSON null a caller planted — `->>`
            -- says NULL for it as for an absent key; run-it, first review pass).
            (d.kind IS DISTINCT FROM d.present_kind OR (d.kind IS NULL AND d.has_kind)
             OR d.name IS DISTINCT FROM d.present_name OR (d.name IS NULL AND d.has_name)
-            OR ob1_trust_ceiling(d.kind, d.declared) IS DISTINCT FROM d.present_trust
-            OR (ob1_trust_ceiling(d.kind, d.declared) IS NULL AND d.has_trust)) AS differs,
+            OR x.trust IS DISTINCT FROM d.present_trust
+            OR (x.trust IS NULL AND d.has_trust)) AS differs,
            (d.kind IS NULL AND (d.w_name IS NOT NULL OR d.w_agent IS NOT NULL)) AS awaiting
     FROM (
       SELECT t.id, t.updated_at,
@@ -1167,7 +1194,8 @@ BEGIN
              CASE WHEN w.vouched
                   THEN COALESCE(ob1_registry_kind(w.canonical_agent_id, w.name), w.actor_kind) END AS kind,
              CASE WHEN w.vouched THEN w.name END               AS name,
-             CASE WHEN w.vouched THEN w.declared END           AS declared,
+             CASE WHEN w.vouched THEN w.trust END              AS w_trust,
+             CASE WHEN w.vouched THEN w.claimed END            AS w_claimed,
              CASE WHEN w.vouched THEN w.name END               AS w_name,
              CASE WHEN w.vouched THEN w.canonical_agent_id END AS w_agent,
              t.metadata->>'actor_kind' AS present_kind,
@@ -1190,9 +1218,9 @@ BEGIN
         -- two derive one value and a pass after a pass writes nothing
         -- (run-it, first review pass: a padded name flip-flopped every pass).
         SELECT a.actor_kind, NULLIF(btrim(a.actor_name), '') AS name, a.canonical_agent_id,
-               -- 073: the write's declaration, as 046 filed it (above).
-               COALESCE(a.actor_context->'claimed'->>'trust',
-                        CASE WHEN a.trust IS DISTINCT FROM a.actor_kind THEN a.trust END) AS declared,
+               -- 073: the trust the log recorded for the write, and the
+               -- claim filed while its key could not support it (above).
+               a.trust, a.actor_context->'claimed'->>'trust' AS claimed,
                -- Decided from the SET, not from which row sorts first: a
                -- capture stands only when no update ever changed the text
                -- (fourth review pass, planted: a pre-050 seq inverted under a
@@ -1232,6 +1260,15 @@ BEGIN
       ) w ON true
       WHERE t.metadata IS NULL OR jsonb_typeof(t.metadata) = 'object'
     ) d
+    -- 073: the trust, never raised (see the header comment): the log's, or
+    -- the claim's for a write its key could not yet support, under the key's
+    -- kind now — then under the row's own word when it is one on the ladder.
+    CROSS JOIN LATERAL (
+      SELECT ob1_trust_ceiling(
+               CASE WHEN d.w_trust IS NOT NULL THEN ob1_trust_ceiling(d.kind, d.w_trust)
+                    ELSE ob1_trust_ceiling(d.kind, d.w_claimed) END,
+               CASE WHEN d.present_trust IN ('operator', 'agent', 'ingested') THEN d.present_trust END) AS trust
+    ) x
   $scan$, v_tbl);
 
   EXECUTE format('SELECT count(*) FILTER (WHERE differs), count(*) FILTER (WHERE awaiting) FROM %I', v_tbl)

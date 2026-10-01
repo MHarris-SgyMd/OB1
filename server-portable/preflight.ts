@@ -1385,7 +1385,10 @@ if (configFailed) {
           // it — before the "or, if the ledger…" clause, which is the whole
           // re-apply and needs no second step (second review pass).
           const applied = migration === "046" ? `${apply}${THEN_055}` : migration === "055" ? `${apply}${THEN_060}`
-            : migration === "060" || migration === "061" ? `${apply}${THEN_073}` : apply;
+            // Not on a brain whose ledger stops before 073: the migrator applies
+            // 073 after the file named anyway, and 073's guard would refuse a
+            // hand apply ahead of 061 for the wrong reason (first review pass).
+            : (migration === "060" || migration === "061") && !(ledgerRead && !ledger.has("073")) ? `${apply}${THEN_073}` : apply;
           return ledgerRead || !ledgerPresent
             ? applied
             : `${applied} — or, if the ledger already records ${migration} (${whyUnread}): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}${reapplied ? ` ${reapplied}` : ""}`;

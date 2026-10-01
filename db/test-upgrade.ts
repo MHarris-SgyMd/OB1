@@ -3151,22 +3151,27 @@ console.log("\n[20x] Migration 073 on a schema without 061 — refused up front,
   const edited = await cap("[20x] an agent's note", { metadata: {}, actor: BOT });
   await sql`SELECT update_thought(${edited}::uuid, '[20x] the agent''s note, rewritten by the operator', NULL, NULL, NULL, NULL, ${JSON.stringify(OP)}::text::jsonb)`;
   const ghost = await cap("[20x] an unclassified key", { metadata: {}, actor: { name: "ghost-key" } });
+  // A writer before 073 that set metadata.trust below its key: 072 stored the
+  // word as sent, and the backfill, which never raises, keeps it (run-it,
+  // first review pass: the first draft raised it to the key's kind).
+  const lowered = await cap("[20x] a page the operator marked ingested before 073", { metadata: { trust: "ingested" }, actor: OP });
   const rowsOf = async () => (await sql`SELECT id::text AS id, content, embedding IS NULL AS no_vec, updated_at::text AS u, metadata FROM thoughts ORDER BY id`) as { id: string; content: string; no_vec: boolean; u: string; metadata: Record<string, unknown> }[];
   const before = await rowsOf();
   // At 072 a payload's trust is kept as sent — the gap 073 closes.
-  assert(before.find((r) => r.id === planted)?.metadata.trust === "operator" && before.every((r) => r.id === planted || !("trust" in r.metadata)),
+  assert(before.find((r) => r.id === planted)?.metadata.trust === "operator" && before.find((r) => r.id === lowered)?.metadata.trust === "ingested"
+      && before.every((r) => r.id === planted || r.id === lowered || !("trust" in r.metadata)),
     "before 073 no writer stamps trust, and a payload's metadata.trust is stored as the caller said it");
   const audits = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the073 });
   const after = await rowsOf();
   const trustOf = (id: string) => after.find((r) => r.id === id)?.metadata.trust ?? "-";
-  const got = [typed, pasted, clamped, planted, edited, ghost].map(trustOf).join(",");
-  assert(got === "operator,ingested,ingested,ingested,operator,-",
-    `the backfill stamps each thought from the log: the operator's kind, a declared ingested, a clamp to the key, a planted raise lowered to the key, the editor's for a rewritten text, none for an unclassified key (${got})`);
+  const got = [typed, pasted, clamped, planted, edited, ghost, lowered].map(trustOf).join(",");
+  assert(got === "operator,ingested,ingested,ingested,operator,-,ingested",
+    `the backfill stamps each thought from the log: the operator's kind, a declared ingested, a clamp to the key, a planted raise lowered to the key, the editor's for a rewritten text, none for an unclassified key, and a lowering a writer set before 073 kept (${got})`);
   assert(after.length === before.length && after.every((r, i) => r.id === before[i].id && r.content === before[i].content && r.no_vec === before[i].no_vec && r.u === before[i].u),
     "…no text, vector or updated_at moved (a stamp is not an edit)");
   const wrote = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) - audits;
-  assert(wrote === 5, `…and each of the five rows the pass wrote — every one but the unclassified key's — left one audit row under its door (${wrote})`);
+  assert(wrote === 5, `…and each of the five rows the pass wrote — every one but the unclassified key's and the one already carrying its word — left one audit row under its door (${wrote})`);
   const n = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the073 });
   assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === n && JSON.stringify(await rowsOf()) === JSON.stringify(after),

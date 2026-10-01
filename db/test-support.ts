@@ -285,7 +285,7 @@ const FUNCTIONS = [
   // of a payload's metadata.trust into the event; the writers, the stamp
   // trigger, the 1-argument stamp and the backfill it redefines are above.
   "ob1_actor_stamp(jsonb, text)",
-  "ob1_declared_trust(jsonb, jsonb)",
+  "ob1_declared_trust(jsonb, jsonb, jsonb)",
 ];
 
 /**
