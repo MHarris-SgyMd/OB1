@@ -8654,6 +8654,102 @@ console.log("\n[35] Migration 071's gate under two connections: a status move an
   await db.close();
 }
 
+console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress gate (SMD-2239) — under the default deny the synthesized digest is refused before it reaches Telegram and the refusal names the rule; declared by an OB1_EGRESS_ALLOW type:digest term it posts. One stub answers both hops: it records zero Telegram sends under deny (the gate holding), at least one when allowed (not a dead sender). The chat endpoint is declared local so only the Telegram gate varies.");
+{
+  // A connection of this section's own — the shared `sql` has sat idle through
+  // the long prior section and its single pooled connection is closed by now.
+  const wsql = new SQL({ url: URL_!, max: 1 });
+  // No table wipe: the prior section leaves ~20k rows whose per-row delete
+  // triggers would outrun the connection, and the digest needs no clean table —
+  // --min-importance 0 reads whatever is in the window and the stub ignores the
+  // content. These three recent rows are simply the newest in the window.
+  const rows = [
+    { id: recordId("fork", "digest-a"), content: "zqdigest alpha — shipped the egress gate for the weekly digest sink", imp: 8 },
+    { id: recordId("fork", "digest-b"), content: "zqdigest beta — decided the db/ verb home over an n8n template", imp: 7 },
+    { id: recordId("fork", "digest-c"), content: "zqdigest gamma — the sink is opted in by an OB1_EGRESS_ALLOW type:digest term", imp: 6 },
+  ];
+  for (const r of rows) {
+    await wsql`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
+      VALUES (${r.id}::uuid, ${r.content}, ${{ source: "fork", importance: r.imp }}::jsonb, content_fingerprint_of(${r.content}))`;
+  }
+
+  // One stub for both hops: /chat/completions returns a canned digest (chatReqs),
+  // /bot<token>/sendMessage counts the Telegram sends (tgReqs).
+  let tgReqs = 0;
+  let chatReqs = 0;
+  const stub = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch(req) {
+      const p = new URL(req.url).pathname;
+      if (p.endsWith("/chat/completions")) { chatReqs++; return Response.json({ choices: [{ message: { content: "📌 Wins\n- zqdigest shipped the sink gate" } }] }); }
+      if (p.includes("/sendMessage")) { tgReqs++; return Response.json({ ok: true, result: { message_id: tgReqs } }); }
+      return new Response("not found", { status: 404 });
+    },
+  });
+  const stubUrl = `http://127.0.0.1:${stub.port}/v1`;
+  const tgBase = `http://127.0.0.1:${stub.port}`;
+
+  // Start from a clean, refusing egress config (a stray OB1_* in the host's env
+  // would let it through); --no-env-file and OB1_ENV_FILES=off from outside the
+  // checkout keep a .env from declaring anything local. A case opts back in
+  // through extraEnv, exactly as [20]'s tierCli does.
+  const weeklyCli = async (args: string[], extraEnv: Record<string, string> = {}) => {
+    const env: Record<string, string | undefined> = { ...process.env, OB1_ENV_FILES: "off" };
+    for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY", "OB1_DIGEST_MODEL", "OB1_TELEGRAM_LOCAL", "OB1_TELEGRAM_API_BASE", "OB1_WORKER_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]) delete env[k];
+    Object.assign(env, extraEnv);
+    const proc = Bun.spawn(["bun", "--no-env-file", join(HERE, "weekly-digest.ts"), ...args], { stdout: "pipe", stderr: "pipe", env, cwd: tmpdir() });
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    return { code: await proc.exited, out, err };
+  };
+
+  // The chat endpoint declared local (synthesis always passes); the Telegram
+  // endpoint at the stub, NOT local — only its gate changes between the runs.
+  const base = {
+    OB1_LLM_BASE_URL: stubUrl,
+    OB1_LLM_LOCAL: "1",
+    OB1_EMBEDDING_MODEL: EMBEDDING_MODEL,
+    OB1_TELEGRAM_API_BASE: tgBase,
+    TELEGRAM_BOT_TOKEN: "test-token",
+    TELEGRAM_CHAT_ID: "test-chat",
+  };
+  const tgArgs = ["--url", URL_!, "--output", "telegram", "--min-importance", "0", "--no-sensitivity-filter"];
+  try {
+    tgReqs = 0; chatReqs = 0;
+    const denied = await weeklyCli(tgArgs, base);
+    assert(tgReqs === 0 && chatReqs >= 1 && /not .*posted to Telegram/.test(denied.err) && /deny \(the default\)/.test(denied.err),
+      `under the default deny the digest is synthesized but not sent — the stub gets zero Telegram requests and the refusal names the rule (${tgReqs} send(s), ${chatReqs} synthesis; ${denied.err.trim().split("\n").pop()})`);
+
+    tgReqs = 0; chatReqs = 0;
+    const allowed = await weeklyCli(tgArgs, { ...base, OB1_EGRESS_ALLOW: "type:digest" });
+    assert(allowed.code === 0 && tgReqs >= 1 && /posted to Telegram/.test(allowed.out),
+      `OB1_EGRESS_ALLOW=type:digest lets it post — the stub is called, so the deny zero is a gate holding, not a dead sender (exit ${allowed.code}; ${tgReqs} send(s))`);
+
+    // The send allowed but no credentials: it fails fast, before the LLM spend.
+    tgReqs = 0; chatReqs = 0;
+    const { TELEGRAM_BOT_TOKEN: _t, TELEGRAM_CHAT_ID: _c, ...baseNoCreds } = base;
+    const noCreds = await weeklyCli(tgArgs, { ...baseNoCreds, OB1_EGRESS_ALLOW: "type:digest" });
+    assert(noCreds.code === 2 && chatReqs === 0 && tgReqs === 0 && /TELEGRAM_BOT_TOKEN/.test(noCreds.err),
+      `--output telegram with the send allowed but no credentials fails before the synthesis, not after it (exit ${noCreds.code}; ${chatReqs} synthesis, ${tgReqs} send(s))`);
+
+    // The sensitivity fail-closed guard: default (filtered), an install without
+    // the sensitivity_tier column refuses before any read leaves; with the
+    // column it proceeds.
+    const [{ has }] = await wsql`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has`;
+    tgReqs = 0; chatReqs = 0;
+    const filtered = await weeklyCli(["--url", URL_!, "--output", "telegram", "--min-importance", "0"], { ...base, OB1_EGRESS_ALLOW: "type:digest" });
+    if (has) {
+      assert(filtered.code === 0 && tgReqs >= 1, `with a sensitivity_tier column the default filtered run proceeds and posts (exit ${filtered.code}; ${tgReqs} send(s))`);
+    } else {
+      assert(filtered.code === 1 && tgReqs === 0 && chatReqs === 0 && /sensitivity_tier column/.test(filtered.err),
+        `without the sensitivity_tier column the default run fails closed before any read leaves (exit ${filtered.code}; ${tgReqs} send(s), ${chatReqs} synthesis)`);
+    }
+  } finally {
+    stub.stop(true);
+    await wsql.close();
+  }
+}
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
