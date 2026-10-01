@@ -3261,7 +3261,8 @@ config.mjs's own rules (`embeddingContract`), so the key, the checks and the
 vectors name one model. It resolves no worker key, so a caller's `sql` needs
 no `url` beside it. `--retire` and `--accept-failed` write, and stop under an
 aborted signal as a run does; the hard stop abandons the row in hand once its
-embedding returns (the embedder takes no signal).
+call returns (the embedder takes no signal; a database statement waiting on a
+lock has no bound, and a vector already sent lands).
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket

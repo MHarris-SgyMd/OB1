@@ -240,7 +240,9 @@ export function startHeartbeat(opts: {
       }
     } catch (e) {
       hb.consecutiveErrors++;
-      opts.onError?.(e as Error, hb.consecutiveErrors);
+      // Not after stop(): a beat in flight then answers to a pass that has
+      // ended, and an engine's Writer may be its caller's no longer (SMD-2304).
+      if (!stopped) opts.onError?.(e as Error, hb.consecutiveErrors);
     } finally {
       inFlight = false;
     }
@@ -290,8 +292,9 @@ export const MAX_TIMER_MS = 2147483647;
  * null. A call made while the pass is already stopping — a second call, or
  * (extract's and consolidate's) the first after the provider's refusal
  * stopped the workers itself; reembed's halt on the provider's first answer
- * is not a stop, and a call after it is a first — is the hard stop: it returns the release of every worker's leases, after which a worker
- * writes nothing more nor releases the thought in hand (each still returns
+ * is not a stop, and a call after it is a first — is the hard stop: it
+ * returns the release of every worker's leases, after which a worker writes
+ * nothing more nor releases the thought in hand (each still returns
  * its own leases as it ends), and the CLI ends the process when it settles
  * (stopOnSignals). A call after the run has returned does nothing.
  */

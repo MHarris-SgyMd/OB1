@@ -462,9 +462,12 @@ const HINTS = { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", re
  * installs its signal handlers (stopOnSignals) — with the pass's stop
  * (db/lease.ts's PassStop); --status, --dry-run, the maintenance modes and a
  * run with nothing to do have no pass. Its hard stop returns the leases at
- * once, and run() returns 130 once the embedding call in hand does (at most
- * OB1_LLM_TIMEOUT per call), writing and releasing nothing more for the
- * thought in hand; a call after run() has returned does nothing.
+ * once, and run() returns 130 once the call in hand does — an embedding
+ * within OB1_LLM_TIMEOUT, a database statement with no bound (a row lock it
+ * waits on) — writing and releasing nothing more for the thought in hand: a
+ * vector already sent to update_thought lands, the claim back in the pool
+ * unmarked, and the next run re-embeds it. A call after run() has returned
+ * does nothing.
  */
 export interface ReembedOptions {
   url?: string;
@@ -1902,6 +1905,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
             err(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
             return;
           }
+          // The hard stop's release beat this one to the row: not a lapse to
+          // report, the caller's own stop (review pass 3).
+          if (hardStopped) return;
           if (gone) {
             vanished++;
             err(`  ${b.thought_id}: deleted while it was being re-embedded`);
