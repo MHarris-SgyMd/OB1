@@ -2,6 +2,11 @@
 # service. An overlay on compose.yaml. Paths are relative to evals/auth/, the
 # first -f file's directory.
 #
+# The image is the deploy's own (deploy/auth/), so these checks hold the
+# server the stack runs. It reads the POC's layout through the deploy's two
+# settings, OB1_AUTH_TIERS and OB1_AUTH_SERVICES (policy.ts POC_ENV, which
+# stack.ts writes into evals/auth/.env).
+#
 # It joins the mesh as auth.ob1.internal and the `internet` network for the
 # fetches a client's metadata document asks of it (the ADR's egress network),
 # and publishes no port: the proxy is the only way in. NODE_EXTRA_CA_CERTS
@@ -9,13 +14,15 @@
 
 services:
   auth:
-    build: { context: ., dockerfile: Dockerfile }
-    image: ob1-auth-poc:local
+    build: { context: ../../deploy/auth, dockerfile: Dockerfile }
+    image: ob1-auth:poc
     pull_policy: build
     restart: "no"
-    command: ["bun", "oidc-provider.ts"]
+    command: ["bun", "server.ts"]
     environment:
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:?run bun evals/eval-auth.ts --up}
+      OB1_AUTH_TIERS: ${OB1_AUTH_TIERS:?}
+      OB1_AUTH_SERVICES: ${OB1_AUTH_SERVICES:?}
       OB1_AUTH_JWKS: ${OB1_AUTH_JWKS:?}
       OB1_AUTH_COOKIE_KEYS: ${OB1_AUTH_COOKIE_KEYS:?}
       OB1_AUTH_OPERATOR_PASSWORD_HASH: ${OB1_AUTH_OPERATOR_PASSWORD_HASH:?}

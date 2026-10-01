@@ -6379,8 +6379,13 @@ is that proof, for both: the same stack and the same verifier run oidc-provider
 and then Better Auth 1.7.6 ("The runner-up", below).
 
 **The setup.** `eval-auth.ts` runs `auth/compose.yaml` plus
-`auth/compose.<candidate>.yaml` as the project `ob1-auth-<candidate>`, from
-one image built from `auth/`. No brain is needed: the MCP server and REST core
+`auth/compose.<candidate>.yaml` as the project `ob1-auth-<candidate>`. The
+winner's image is the deploy's own, built from `../deploy/auth/`, which reads
+the POC's two tiers and two service clients through the deploy's settings
+(`OB1_AUTH_TIERS`, `OB1_AUTH_SERVICES`; `auth/policy.ts` `POC_ENV`). So these
+checks hold the server the stack runs. Everything else, the runner-up included,
+runs from one image built from `auth/` at the repo root, beside the deploy's
+layout, pages and fetch guard, which it imports. No brain is needed: the MCP server and REST core
 of the ADR do not exist yet (SMD-2287, SMD-2284), so the stack runs
 stand-ins for both.
 - **A stand-in proxy.** The ADR's route table on one origin: `/auth`, the three
@@ -6400,8 +6405,8 @@ stand-ins for both.
 cd evals
 bun eval-auth.ts --up oidc-provider        # or better-auth; one at a time (one port)
 bun eval-auth.ts --verify oidc-provider [--json]
-bun eval-auth.ts --down oidc-provider      # containers, networks and image
-bun eval-auth.ts --self-check              # guard, route table, policy; no stack
+bun eval-auth.ts --down oidc-provider      # containers, networks and images
+bun eval-auth.ts --self-check              # guard, route table, policy, the deploy's settings; no stack
 ```
 
 It needs docker or podman compose and openssl. Under podman on macOS, the host
@@ -6409,9 +6414,11 @@ port sometimes fails to forward after a fresh up, while the proxy answers
 inside its container (1 to 3 of 6 down-then-up cycles, measured with and
 without the internal network). So `--up` restarts the proxy once if the port
 does not answer within 20 s, and says so. It writes `auth/.env` (the
-signing key, the client secrets, and the operator's password beside its
-argon2id hash) and `auth/.poc/` (the certificate), both gitignored, once, and
-reuses them.
+layout settings, the signing key, the client secrets, and the operator's
+password beside its argon2id hash) and `auth/.poc/` (the certificate), both
+gitignored, once, and reuses them. The layout settings alone are reset to
+`auth/policy.ts`'s on every `--up`, `--verify` and `--down`, since the winner's
+container reads them from that file and the verifier from the code.
 
 **The winner's result: 32 of 32, twice on one stack, 1.0 to 5.3 s per run**, over
 repeated down-up-verify-verify cycles (2026-09-29, the dogfood Mac's podman
@@ -6450,7 +6457,7 @@ accepts the bare-path document, whose `issuer` carries `/auth`
   protection for fetch` and then dials whatever the `client_id` names. With the
   kit's guard swapped for the library's own `fetch`, R3 fails, and in the first
   such run the server connected to the bait on the mesh four times. So the
-  service's `fetch` option is `auth/fetch-guard.ts`. It allows https and GET
+  service's `fetch` option is `../deploy/auth/fetch-guard.ts`. It allows https and GET
   only, refuses by name and by every resolved address inside the socket's own
   lookup, and caps the body. Measured on Bun 1.4.0: `node:https` dials the
   address that lookup returns, so the address checked is the address dialled
@@ -6547,7 +6554,7 @@ a rebuilt stack. Each one turned exactly its own checks red:
 | the interaction Origin check removed | G7 |
 | the pages' frame headers removed | G8 |
 
-The consent mutants are in `auth/pages.ts`, which both candidates render.
+The consent mutants are in `../deploy/auth/pages.ts`, which both candidates render.
 
 Two stack faults were also tested, each on a stack that had already passed
 once:
