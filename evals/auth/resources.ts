@@ -66,10 +66,28 @@ function restCore(tier: Tier) {
   });
 }
 
+/**
+ * The token endpoint's path, read once from the server's own metadata across
+ * the mesh: each candidate puts it somewhere else (/auth/token, /auth/oauth2/token).
+ * The metadata's URLs name the public origin, which the mesh cannot reach, so
+ * only the path is kept.
+ */
+let tokenPath: Promise<string> | undefined;
+function tokenEndpoint(): Promise<string> {
+  tokenPath ??= fetch(`${INTERNAL.auth}/auth/.well-known/openid-configuration`)
+    .then((r) => r.json() as Promise<{ token_endpoint: string }>)
+    .then((m) => new URL(m.token_endpoint).pathname)
+    .catch((e) => {
+      tokenPath = undefined;
+      throw e;
+    });
+  return tokenPath.then((path) => `${INTERNAL.auth}${path}`);
+}
+
 async function exchange(tier: Tier, subjectToken: string): Promise<{ status: number; body: Record<string, unknown> }> {
   const id = tier === "" ? "mcp" : "mcp-canary";
   const secret = process.env[`OB1_AUTH_SECRET_${id.toUpperCase().replace(/-/g, "_")}`] ?? "";
-  const r = await fetch(`${INTERNAL.auth}/auth/token`, {
+  const r = await fetch(await tokenEndpoint(), {
     method: "POST",
     headers: { authorization: `Basic ${btoa(`${encodeURIComponent(id)}:${encodeURIComponent(secret)}`)}`, "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ grant_type: TOKEN_EXCHANGE, subject_token: subjectToken, subject_token_type: ACCESS_TOKEN_TYPE, resource: L.api(tier) }),
