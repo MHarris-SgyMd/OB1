@@ -56,6 +56,21 @@ export const DEFAULT_TTL_S = 900;
 export const DEFAULT_HEARTBEAT_S = 60;
 /** The largest lease claim_thoughts and renew_claims take: their p_ttl_seconds is an int. */
 export const MAX_TTL_S = 2147483647;
+/**
+ * The most rows one claim takes: claim_thoughts' p_batch is an int, so a
+ * larger --batch matched no signature and every claim failed, the workers
+ * stopping with the pool untouched — the dry run having accepted it (SMD-2304).
+ */
+export const MAX_BATCH = 2147483647;
+/**
+ * The most workers a run takes: a connection each and the heartbeat's spare is
+ * the pool's max, which Bun's client takes up to 2^31 — past it the client
+ * threw, connect.ts read that as "the database client refused the URL", the
+ * CLI ended in a stack trace and run() threw rather than returned 2, the dry
+ * run included (review pass 1). Far below it a pool that size stalls on its
+ * first query; that is the pool's sizing, not a number refused here.
+ */
+export const MAX_WORKERS = 2147483647;
 /** The longest interval a timer holds: a 32-bit signed millisecond count, whole seconds. */
 export const MAX_HEARTBEAT_S = 2147483;
 
@@ -240,7 +255,9 @@ export function startHeartbeat(opts: {
       }
     } catch (e) {
       hb.consecutiveErrors++;
-      opts.onError?.(e as Error, hb.consecutiveErrors);
+      // Not after stop(): a beat in flight then answers to a pass that has
+      // ended, and an engine's Writer may be its caller's no longer (SMD-2304).
+      if (!stopped) opts.onError?.(e as Error, hb.consecutiveErrors);
     } finally {
       inFlight = false;
     }
@@ -287,10 +304,12 @@ export const MAX_TIMER_MS = 2147483647;
  * A pass's stop, as a claim worker's engine hands it to its caller when the
  * pass begins (SMD-2304). The first call asks every worker to stop after the
  * thought in hand, their unfinished claims going back to the pool, and returns
- * null. A call made while the pass is already stopping — a second call, or the
- * first after the provider's refusal stopped the workers itself — is the hard
- * stop: it returns the release of every worker's leases, after which a worker
- * writes nothing more nor releases the thought in hand (each still returns
+ * null. A call made while the pass is already stopping — a second call, or
+ * (extract's and consolidate's) the first after the provider's refusal
+ * stopped the workers itself; reembed's halt on the provider's first answer
+ * is not a stop, and a call after it is a first — is the hard stop: it
+ * returns the release of every worker's leases, after which a worker writes
+ * nothing more nor releases the thought in hand (each still returns
  * its own leases as it ends), and the CLI ends the process when it settles
  * (stopOnSignals). A call after the run has returned does nothing.
  */

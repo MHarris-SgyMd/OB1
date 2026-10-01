@@ -230,7 +230,7 @@ const entries = sources.filter((f) => {
   const listWord = run("consolidate.ts", "--url", DEAD, "--list", "postgres://u:s3cret@h/db");
   ok(listWord.code === 2 && /--list takes pending, accepted, rejected, stale, lineage or all/.test(listWord.err) && !listWord.err.includes("s3cret"), `consolidate.ts refuses a --list value by the words it takes, not repeating it (exit ${listWord.code})`);
   const hex = run("extract-entities.ts", "--url", DEAD, "--workers", "0x10");
-  ok(hex.code === 2 && /--workers must be a decimal integer >= 1$/m.test(hex.err), `extract-entities.ts refuses a hex --workers, which Number() read as 16 (exit ${hex.code})`);
+  ok(hex.code === 2 && /--workers must be a decimal integer >= 1 and <= 2147483647$/m.test(hex.err), `extract-entities.ts refuses a hex --workers, which Number() read as 16 (exit ${hex.code})`);
   const dump = run("extract-entities.ts", "--dump");
   ok(dump.code === 2 && /^--dump needs a value/m.test(dump.err), `extract-entities.ts refuses a bare --dump, which read as no dump (exit ${dump.code})`);
   // The documented bare forms: --follow [SECONDS] and --stale [DAYS] take their value optionally.

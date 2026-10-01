@@ -40,7 +40,7 @@ function ok(cond: boolean, msg: string): void {
 const HERE = import.meta.dir;
 const MARK = "SECRET-2304";
 /** The engines, one more per SMD-2304 PR. */
-const ENGINES = ["migrate.ts", "extract-entities.ts", "consolidate.ts"] as const;
+const ENGINES = ["migrate.ts", "extract-entities.ts", "consolidate.ts", "reembed.ts"] as const;
 
 /** A child's environment: this one without a database URL, any OB1_* knob or PG* variable; no .env file read. */
 const BASE_ENV: Record<string, string> = {};
@@ -180,6 +180,20 @@ ok(!censusSees(code("/** prints with console.log(line) and exits via process.exi
 ok(censusSees(code(`const g = "migrations/*.sql";\nprocess.exit(2);\n/** doc */\nconst t = \`--url \${g} // bad\`; process.exit(3);\n`)), "…and a /* or a // inside a string hides no code after it");
 ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late() {}\n")?.after.trim() === "function late() {}", "…and code after the CLI block is found, a brace in a string not counted");
 
+/**
+ * The scanner's words for a number past its flag's bound (SMD-2304 PR 5): a
+ * bound case must open with them, not with a later rule both paths fall
+ * through to when a bound is dropped from the CLI and run() at once — the
+ * egress gate, the lease pair (review pass 1: five of six such doubles passed).
+ */
+const BOUND_WORDS: [RegExp, string][] = [
+  [/^--batch past/, "--batch must be a decimal integer >= 1 and <= 2147483647"],
+  [/^--timeout past/, "--timeout must be a decimal integer >= 1 and <= 9007199254740"],
+  [/^--stale past/, "--stale must be a decimal integer >= 1 and <= 2000000"],
+  [/^--workers past/, "--workers must be a decimal integer >= 1 and <= 2147483647"],
+];
+const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re]) => re.test(what))?.[1];
+
 // ---------------------------------------------------------------------------
 // run() refuses in the CLI's words, before connecting.
 // ---------------------------------------------------------------------------
@@ -268,15 +282,27 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["a short lease and --limit 0", { url: AT, ttl: 3, heartbeat: 2, limit: 0 }, ["--url", AT, "--ttl", "3", "--heartbeat", "2", "--limit", "0"], {}],
     ["--timeout 0 and a short lease", { url: AT, timeout: 0, ttl: 1 }, ["--url", AT, "--timeout", "0", "--ttl", "1"], {}],
     ["--follow 0", { url: AT, follow: 0 }, ["--url", AT, "--follow", "0"], {}],
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, Bun's pool max, and AbortSignal.timeout's range.
+    ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
+    ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
+    // …each where the script read its number, before the lease pair the CLI checks after them.
+    ["--batch past its bound and a short lease", { url: AT, batch: 2147483648, ttl: 3, heartbeat: 2 }, ["--url", AT, "--batch", "2147483648", "--ttl", "3", "--heartbeat", "2"], {}],
+    ["--timeout past its bound and a short lease", { url: AT, timeout: 9007199254741, ttl: 3, heartbeat: 2 }, ["--url", AT, "--timeout", "9007199254741", "--ttl", "3", "--heartbeat", "2"], {}],
     ["--decide without the Jev tier", { url: AT, decide: true }, ["--url", AT, "--decide"], {}],
     // The banner on stdout, then the blanket gate (SMD-1903): the default policy with nothing declared local.
     ["an egress policy that refuses every row", { url: AT }, ["--url", AT], {}],
     // …under a model named in the environment run() is given: its banner names it, as the CLI's does.
     ["the gate's refusal under OB1_METADATA_MODEL from env", { url: AT }, ["--url", AT], { OB1_METADATA_MODEL: "env-model" }],
   ];
+  // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
+  const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
+  ok(boundCases === 5, `extract's bound cases all meet BOUND_WORDS (${boundCases} of 5)`);
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["extract-entities.ts", ...argv], env);
+    const words = boundWords(what);
+    if (words) ok(cli.err.startsWith(words) && r.err.startsWith(words), `…refused for its bound, in the scanner's words (${JSON.stringify(cli.err.split("\n")[0].slice(0, 80))})`);
     ok(r.code === 2 && cli.code === 2, `extract run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
     ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
     ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
@@ -350,13 +376,26 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["--force without --accept", { url: AT, force: true }, ["--url", AT, "--force"], {}],
     ["--limit beside --list", { url: AT, limit: 5, list: "pending" }, ["--url", AT, "--limit", "5", "--list"], {}],
     ["--note alone", { url: AT, note: "hm" }, ["--url", AT, "--note", "hm"], {}],
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, Bun's pool max, a call signal's range, and --stale's reach back.
+    ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
+    ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
+    // …each where the script read its number, before the lease pair the CLI checks after them.
+    ["--batch past its bound and a short lease", { url: AT, batch: 2147483648, ttl: 3, heartbeat: 2 }, ["--url", AT, "--batch", "2147483648", "--ttl", "3", "--heartbeat", "2"], {}],
+    ["--timeout past its bound and a short lease", { url: AT, timeout: 9007199254741, ttl: 3, heartbeat: 2 }, ["--url", AT, "--timeout", "9007199254741", "--ttl", "3", "--heartbeat", "2"], {}],
+    ["--stale past the timestamp floor", { url: AT, stale: 2000001 }, ["--url", AT, "--stale", "2000001"], {}],
     ["--note with the pass's marker", { url: AT, reject: ID, note: "settled by the pass: mine" }, ["--url", AT, "--reject", ID, "--note", "settled by the pass: mine"], {}],
     // The banner on stdout, then the blanket gate (SMD-1903), under a judge model named in env.
     ["the egress gate's refusal under OB1_JUDGE_MODEL from env", { url: AT }, ["--url", AT], { OB1_JUDGE_MODEL: "env-judge" }],
   ];
+  // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
+  const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
+  ok(boundCases === 6, `consolidate's bound cases all meet BOUND_WORDS (${boundCases} of 6)`);
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["consolidate.ts", ...argv], env);
+    const words = boundWords(what);
+    if (words) ok(cli.err.startsWith(words) && r.err.startsWith(words), `…refused for its bound, in the scanner's words (${JSON.stringify(cli.err.split("\n")[0].slice(0, 80))})`);
     ok(r.code === 2 && cli.code === 2, `consolidate run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
     ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
     ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
@@ -391,10 +430,189 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   ok(!closed, "…and never closes the caller's client");
 }
 
+// ---------------------------------------------------------------------------
+// reembed.ts: run() refuses in the CLI's words, before connecting; its modes'
+// rule is a pure function the CLI and run() share; its model is the env's.
+// ---------------------------------------------------------------------------
+{
+  const { run, modeProblem } = await import("./reembed.ts");
+  const inProcess = async (opts: Record<string, unknown>) => {
+    seen = 0;
+    const w = capture();
+    const code = await run({ env: BASE_ENV, ...opts, writer: w } as never);
+    await Bun.sleep(50);
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, out: lines(w.outs), err: lines(w.errs), seen };
+  };
+  const ID = "00000000-0000-0000-0000-000000000001";
+  const LOCAL = { OB1_LLM_LOCAL: "1" };
+  const BADDIM = { OB1_EMBEDDING_DIM: "99999" };
+  const cases: [string, Record<string, unknown>, string[], Record<string, string>][] = [
+    ["no URL", {}, [], {}],
+    ["an unparseable URL", { url: `postgres://u:${MARK}/x@127.0.0.1:1/x` }, ["--url", `postgres://u:${MARK}/x@127.0.0.1:1/x`], {}],
+    ["a URL the readers split (?database=)", { url: `${AT}?database=other` }, ["--url", `${AT}?database=other`], {}],
+    ["--workers 0", { url: AT, workers: 0 }, ["--url", AT, "--workers", "0"], {}],
+    ["--batch 1.5", { url: AT, batch: 1.5 }, ["--url", AT, "--batch", "1.5"], {}],
+    // --ttl and --heartbeat are read after the configuration, as the script read them:
+    // a bare key's note and the configuration's own refusal come first, the banner after.
+    ["--ttl not a number (the CLI hands run() NaN)", { url: AT, ttl: NaN }, ["--url", AT, "--ttl", "abc"], LOCAL],
+    ["--heartbeat past 2^53", { url: AT, heartbeat: 2 ** 60 }, ["--url", AT, "--heartbeat", String(2 ** 60)], LOCAL],
+    ["a bare --job key's note, then --ttl 0", { url: AT, job: "bare", ttl: 0 }, ["--url", AT, "--job", "bare", "--ttl", "0"], LOCAL],
+    ["a configuration refused, before --ttl", { url: AT, ttl: NaN }, ["--url", AT, "--ttl", "abc"], BADDIM],
+    ["two modes", { url: AT, status: true, retire: "reembed:x@1024" }, ["--url", AT, "--status", "--retire", "reembed:x@1024"], {}],
+    ["--accept-failed with --retry-failed", { url: AT, acceptFailed: [], retryFailed: true }, ["--url", AT, "--accept-failed", "--retry-failed"], {}],
+    ["--retire with --switch-model", { url: AT, retire: "reembed:x@1024", switchModel: true }, ["--url", AT, "--retire", "reembed:x@1024", "--switch-model"], {}],
+    ["--all alone", { url: AT, all: true }, ["--url", AT, "--all"], {}],
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int and Bun's pool max — read before the modes' rule.
+    ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
+    ["--batch past its bound and two modes", { url: AT, batch: 2147483648, status: true, retire: "k" }, ["--url", AT, "--batch", "2147483648", "--status", "--retire", "k"], {}],
+    // Every number before the modes, the modes before the configuration, as the script judged them.
+    ["--workers 0 and two modes", { url: AT, workers: 0, status: true, acceptFailed: [ID] }, ["--url", AT, "--workers", "0", "--status", "--accept-failed", ID], {}],
+    ["two modes and a configuration refused", { url: AT, status: true, retire: "k" }, ["--url", AT, "--status", "--retire", "k"], BADDIM],
+    // Refused before the client opens, as main refused it: a URL Bun's client rejects meets the modes' rule first.
+    ["two modes beside a URL Bun's client rejects", { url: `${AT}?sslmode=bogus`, status: true, retire: "k" }, ["--url", `${AT}?sslmode=bogus`, "--status", "--retire", "k"], {}],
+    // The banner on stdout, then the blanket gate (SMD-1903): the default policy with nothing declared local.
+    ["an egress policy that refuses every row", { url: AT }, ["--url", AT], {}],
+    // A blank value the scanner refuses, before the URL, refused by run() in its words (review pass 1: run() pooled under the key '').
+    ["--job blank", { job: "" }, ["--job", ""], {}],
+    ["--retire blank", { url: AT, retire: "  " }, ["--url", AT, "--retire", "  "], {}],
+    ["a blank --accept-failed id", { url: AT, acceptFailed: ["", ID] }, ["--url", AT, "--accept-failed", "", ID], {}],
+    // …under a model named in the environment run() is given: its key and banner name it, as the CLI's do.
+    ["the gate's refusal under OB1_EMBEDDING_MODEL from env", { url: AT }, ["--url", AT], { OB1_EMBEDDING_MODEL: "  env-model ", OB1_EMBEDDING_DIM: "768" }],
+  ];
+  // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
+  const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
+  ok(boundCases === 3, `reembed's bound cases all meet BOUND_WORDS (${boundCases} of 3)`);
+  for (const [what, opts, argv, env] of cases) {
+    const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
+    const cli = await counted(["reembed.ts", ...argv], env);
+    const words = boundWords(what);
+    if (words) ok(cli.err.startsWith(words) && r.err.startsWith(words), `…refused for its bound, in the scanner's words (${JSON.stringify(cli.err.split("\n")[0].slice(0, 80))})`);
+    ok(r.code === 2 && cli.code === 2, `reembed run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
+    ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
+    ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
+  }
+  // modeProblem is pure and the rule itself: null for what the CLI admits, null as absent.
+  ok(modeProblem({}) === null && modeProblem({ status: true }) === null && modeProblem({ acceptFailed: [], all: true }) === null && modeProblem({ retire: "k" }) === null && modeProblem({ switchModel: true, retryFailed: true, retryFallbacks: true }) === null && modeProblem({ acceptFailed: null, retire: null, all: null } as never) === null,
+     "reembed's modeProblem admits what the CLI admits, null as absent");
+  ok(modeProblem({ status: true, retryFallbacks: true }) === null && modeProblem({ acceptFailed: [ID], retryFallbacks: true })?.includes("--accept-failed and --retry-fallbacks do not combine") === true,
+     "…--status beside a run flag (the script admitted it), not --accept-failed beside one");
+  // A caller's client: the narrow one and the handles refused; never closed.
+  let closed = false;
+  const stub = (extra: Record<string, unknown> = {}) => Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 3 }, close: async () => { closed = true; }, unsafe: () => { throw new Error("stub queried"); } }, extra);
+  const narrow = await inProcess({ sql: stub({ options: { max: 2 } }) });
+  ok(narrow.code === 2 && /needs a client of at least 3 connections for 2 worker\(s\)/.test(narrow.err), `reembed run() refuses a client narrower than its workers and a spare (exit ${narrow.code})`);
+  const reserved = await inProcess({ sql: stub({ release: () => {} }) });
+  const tx = await inProcess({ sql: stub({ savepoint: async () => {} }) });
+  ok([reserved, tx].every((r) => r.code === 2 && /needs a pool, not a reserved connection or a transaction's handle/.test(r.err)), "…refuses a reserved connection and a transaction's handle");
+  const beside = await inProcess({ sql: stub(), url: "mysql://h/x" });
+  ok(beside.code === 2 && beside.err === `${UNPARSEABLE_DATABASE_URL}\n`, `…and a bad URL beside a caller's client (exit ${beside.code})`);
+  // Nothing needs a URL beside the client: reembed resolves no worker key.
+  const noUrlBeside = await run({ sql: stub(), dryRun: true, env: { ...BASE_ENV, OB1_WORKER_KEY: "k" }, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  ok(noUrlBeside === "stub queried", `…and a client alone is enough, a worker key set or not (${noUrlBeside.slice(0, 30)})`);
+  // A signal aborted before the call: a run, --retire and --accept-failed write, and stop before connecting, each in its own words.
+  const early = await inProcess({ url: AT, signal: AbortSignal.abort() });
+  const earlyRetire = await inProcess({ url: AT, retire: "reembed:x@1024", signal: AbortSignal.abort() });
+  const earlyAccept = await inProcess({ url: AT, acceptFailed: [ID], signal: AbortSignal.abort() });
+  ok(early.code === 130 && /stopped before the pass began: the caller's signal was aborted; nothing was claimed/.test(early.err) && early.out === "" && early.seen === 0, `reembed run() with a signal already aborted returns 130 before connecting (exit ${early.code})`);
+  ok(earlyRetire.code === 130 && earlyRetire.err === "\n  stopped before --retire wrote anything: the caller's signal was aborted\n" && earlyAccept.code === 130 && earlyAccept.err === "\n  stopped before --accept-failed wrote anything: the caller's signal was aborted\n" && earlyRetire.seen + earlyAccept.seen === 0,
+     `…as do --retire and --accept-failed, in words that name no pass (exit ${earlyRetire.code}, ${earlyAccept.code})`);
+  const statusAborted = await run({ sql: stub(), status: true, signal: AbortSignal.abort(), env: BASE_ENV, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  const acceptDryAborted = await run({ sql: stub(), dryRun: true, acceptFailed: [ID], signal: AbortSignal.abort(), env: BASE_ENV, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  ok(statusAborted === "stub queried" && acceptDryAborted === "stub queried", `…while --status and a --dry-run read on under an aborted signal — they only read (${statusAborted.slice(0, 20)}, ${acceptDryAborted.slice(0, 20)})`);
+  // null is absent: no URL, the default workers (so a max-3 client passes the width check and is queried).
+  const nullUrl = await inProcess({ url: null });
+  const nullWorkers = await run({ sql: stub(), workers: null, ttl: null, dryRun: true, env: BASE_ENV, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  ok(nullUrl.code === 2 && nullUrl.err === `${NO_DATABASE_URL}\n` && nullWorkers === "stub queried", `reembed run() reads a null url, workers or ttl as absent (url: exit ${nullUrl.code}; workers: ${nullWorkers.slice(0, 40)})`);
+  ok(!closed, "…and never closes the caller's client");
+  ok(process.listenerCount("SIGINT") === 0 && process.listenerCount("SIGTERM") === 0, "…and leaves no signal listener after its refusals");
+  // Every refusal of the maintenance modes is returned as run()'s code: a
+  // `refuse(…)` not returned would let the mode run on past it (the script exited there).
+  const text = readFileSync(join(HERE, "reembed.ts"), "utf8");
+  const calls = [...text.matchAll(/\brefuse(?:Current)?\(/g)].map((m) => text.slice(0, m.index).trimEnd());
+  // Returned, or an arrow's body (refuseCurrent's own call), which is.
+  const unreturned = calls.filter((before) => !/\breturn$/.test(before) && !/=>$/.test(before));
+  ok(calls.length >= 15 && unreturned.length === 0, `every refuse() call in reembed.ts is returned (${calls.length} calls, ${unreturned.length} not)`);
+}
+
+// config.mjs's embeddingContract: the constants' rule over any record — over
+// the environment config.mjs is imported under, the constants themselves.
+for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768 " }, { OB1_EMBEDDING_MODEL: "", OB1_EMBEDDING_DIM: "" }, { OB1_EMBEDDING_DIM: "abc" }, { OB1_EMBEDDING_MODEL: "qwen3-embedding:4b", OB1_EMBEDDING_DIM: "1024", OB1_EMBEDDING_DIMENSIONS: " off " }] as Record<string, string>[]) {
+  const r = await counted(["-e", `const c = await import("./config.mjs"); console.log(JSON.stringify([[c.EMBEDDING_MODEL, c.EMBEDDING_DIM, c.EMBEDDING_DIMENSIONS], Object.values(c.embeddingContract(process.env))]));`], env);
+  const [constants, contract] = JSON.parse(r.out || "[[],[1]]") as unknown[][];
+  ok(r.code === 0 && JSON.stringify(constants) === JSON.stringify(contract), `embeddingContract(process.env) is config.mjs's constants under ${JSON.stringify(env)} (${JSON.stringify(contract)})`);
+}
+
+// ---------------------------------------------------------------------------
+// server-portable/embed.ts's `log`: the embedder's own lines go where its
+// caller says (reembed's run() passes its Writer), and a throw from it
+// rejects the call with that error — through the blurbs' and the whole
+// content's degrading catches — and stops the call's other lines (SMD-2304
+// review passes 1 and 2). A loopback stub answers: every embedding a unit
+// vector, every blurb empty, the whole content 413 when asked.
+// ---------------------------------------------------------------------------
+{
+  const { createEmbedder, resolveEmbedConfig } = await import("../server-portable/embed.ts");
+  let refuseWhole = false;
+  const doc = Array.from({ length: 1500 }, (_, k) => `word${k}`).join(" ");
+  const stub = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { input?: string; messages?: unknown };
+      if (new URL(req.url).pathname.endsWith("/chat/completions")) return Response.json({ choices: [{ message: { content: "" } }] });
+      if (refuseWhole && body.input === doc) return Response.json({ error: { message: "input too long" } }, { status: 413 });
+      const v = new Array(8).fill(0);
+      v[1] = 1;
+      return Response.json({ data: [{ embedding: v }] });
+    },
+  });
+  const cfgFor = (context: boolean) => resolveEmbedConfig({
+    OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1",
+    OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: "8", OB1_CHUNK_CONTEXT: context ? "on" : "off",
+  } as never);
+  const subject = { kind: "re-embed" as const, content: doc };
+  const lines: string[] = [];
+  const quiet = createEmbedder(() => cfgFor(true), { rememberRefusal: false, log: (l) => lines.push(l) });
+  const embedded = await quiet.embedCapture(doc, subject);
+  const blurbLines = lines.filter((l) => l === "contextualiseChunk: the model returned an empty blurb").length;
+  ok(embedded.chunks.length > 1 && blurbLines === embedded.chunks.length && embedded.contextFailures === embedded.chunks.length,
+     `embed.ts's log receives the embedder's own lines — one empty blurb a window (${blurbLines} lines, ${embedded.chunks.length} windows)`);
+  // A log that throws on the first blurb line: the call rejects with that very
+  // error, not resolved with it as the blurb's reason, and no other line is written.
+  const boom = new Error("log boom");
+  let calls = 0;
+  const throwing = createEmbedder(() => cfgFor(true), { rememberRefusal: false, log: () => { calls++; throw boom; } });
+  const blurbOutcome = await throwing.embedCapture(doc, subject).then(() => "resolved", (e: unknown) => e);
+  ok(blurbOutcome === boom && calls === 1, `…a throw from it on a blurb line rejects embedCapture with that error, and the call's other lines are not written (${blurbOutcome === boom ? "the error" : String(blurbOutcome)}, ${calls} call(s))`);
+  // …and on the whole content's fallback line (a 413), through its degrading catch.
+  refuseWhole = true;
+  calls = 0;
+  const wholeOutcome = await createEmbedder(() => cfgFor(false), { rememberRefusal: false, log: () => { calls++; throw boom; } }).embedCapture(doc, subject).then(() => "resolved", (e: unknown) => e);
+  const fellBack: string[] = [];
+  const fell = await createEmbedder(() => cfgFor(false), { rememberRefusal: false, log: (l) => fellBack.push(l) }).embedCapture(doc, subject);
+  refuseWhole = false;
+  ok(wholeOutcome === boom && calls === 1 && fell.wholeContentRefused && fellBack.some((l) => l.startsWith("embedCapture: stub-embed refused the whole content (413)")),
+     `…and on the whole content's fallback line, where the same call with a quiet log falls back and says so (${wholeOutcome === boom ? "the error" : String(wholeOutcome)})`);
+  stub.stop(true);
+}
+
+// worker-bootstrap.ts's MAX_CALL_TIMEOUT_S is AbortSignal.timeout's edge in
+// seconds: the largest --timeout makes a signal, one more throws (SMD-2304 PR 5).
+{
+  const { MAX_CALL_TIMEOUT_S } = await import("./worker-bootstrap.ts");
+  const atMax = (() => { try { AbortSignal.timeout(MAX_CALL_TIMEOUT_S * 1000); return "made"; } catch (e) { return (e as Error).message; } })();
+  const past = (() => { try { AbortSignal.timeout((MAX_CALL_TIMEOUT_S + 1) * 1000); return "made"; } catch (e) { return (e as Error).message; } })();
+  ok(atMax === "made" && past !== "made", `MAX_CALL_TIMEOUT_S (${MAX_CALL_TIMEOUT_S} s) makes a call's timeout signal and one second more throws (${past.slice(0, 60)})`);
+}
+
 // cli.ts's numberProblem: the scanner's words, judged by value — the engines'
 // in-process numbers — and readNumber's own rule for a digit string.
 {
-  const { numberProblem, readNumber } = await import("./cli.ts");
+  const { numberIn, numberProblem, readNumber } = await import("./cli.ts");
+  ok(Number.isNaN(numberIn("abc")) && Number.isNaN(numberIn("1.5")) && numberIn("1.5", true) === 1.5 && numberIn("007") === 7 && Number.isNaN(numberIn("0x10")) && Number.isNaN(numberIn(" 7")),
+     "numberIn reads readNumber's shapes and nothing else — what reembed's CLI hands run() for --ttl and --heartbeat");
   ok(numberProblem("--min-sim", 1e-7, { min: -1, max: 1, fraction: true }) === null, "numberProblem reads 1e-7 as the decimal number it is (a digit string of it, 0.0000001, passes the scanner too)");
   ok(numberProblem("--workers", 1.5, { min: 1 }) === "--workers must be a decimal integer >= 1" && numberProblem("--k", 51, { min: 1, max: 50 }) === "--k must be a decimal integer >= 1 and <= 50" && numberProblem("--x", 2 ** 60, { min: 1 }) === "--x is too large to read exactly" && numberProblem("--x", NaN, { min: 1 }) !== null,
      "…and refuses a fraction for an integer, out of range, past 2^53 and NaN in the scanner's words");

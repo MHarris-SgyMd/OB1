@@ -79,12 +79,23 @@ export function tierProblem(raw) {
   return `OB1_TIER is ${JSON.stringify(raw)}, which is not a pipeline tier — set it to one of ${PIPELINE_TIERS.join(", ")}, or leave it unset for a plain brain. An unrecognised tier fails migration 045's query_log.tier CHECK, and because the log write is best-effort every query_log row is then silently dropped (SMD-1953).`;
 }
 
+/**
+ * One variable from an environment record by this module's rule: trimmed, an
+ * empty value unset. ENV reads the import-time environment through it, and
+ * embeddingContract a caller's record.
+ *
+ * @param {Record<string, string | undefined>} record
+ * @param {string} key
+ * @returns {string | undefined}
+ */
+function envValue(record, key) {
+  const v = record[key];
+  const t = typeof v === "string" ? v.trim() : v;
+  return t === "" ? undefined : t;
+}
+
 const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
-  get: (_t, k) => {
-    const v = RAW_ENV[/** @type {string} */ (k)];
-    const t = typeof v === "string" ? v.trim() : v;
-    return t === "" ? undefined : t;
-  },
+  get: (_t, k) => envValue(RAW_ENV, /** @type {string} */ (k)),
 });
 
 /**
@@ -772,6 +783,23 @@ export const EMBEDDING_DIMENSIONS = resolveEmbeddingDimensions(
   EMBEDDING_DIM,
   EMBEDDING_MODEL
 );
+
+/**
+ * EMBEDDING_MODEL, EMBEDDING_DIM and EMBEDDING_DIMENSIONS read from any
+ * environment record by the same rules (each value trimmed, an empty one
+ * unset), where the constants read the environment this module was imported
+ * under. db/reembed.ts's run() reads a caller's `env` through this, so its key,
+ * its checks and its vectors all name one model (SMD-2304). Over process.env it
+ * returns the constants; db/test-engines.ts holds the two together.
+ *
+ * @param {Record<string, string | undefined>} record
+ * @returns {{ model: string, dim: number, truncate: boolean }}
+ */
+export function embeddingContract(record) {
+  const model = envValue(record, "OB1_EMBEDDING_MODEL") ?? DEFAULT_EMBEDDING_MODEL;
+  const dim = Number(envValue(record, "OB1_EMBEDDING_DIM") ?? DEFAULT_EMBEDDING_DIM);
+  return { model, dim, truncate: resolveEmbeddingDimensions(envValue(record, "OB1_EMBEDDING_DIMENSIONS"), dim, model) };
+}
 
 /**
  * Whether migration 011 builds the trigram index on `thoughts.content`.
