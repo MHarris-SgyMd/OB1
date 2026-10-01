@@ -36,12 +36,12 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
-import { heartbeatFor, leaseRefusal } from "./lease.ts";
+import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { workerIdentity } from "./worker-bootstrap.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
+import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
@@ -4830,6 +4830,16 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const stale = await consolidate("--stale", "20");
   assert(stale.code === 0 && /1 entity nothing has mentioned in 20 days/.test(stale.out) && /archive/.test(stale.out), `--stale names the quiet subject (${stale.out.split("\n").find((l) => /stale:/.test(l))?.trim()})`);
   assert(/no entity has gone 60 days/.test((await consolidate("--stale", "60")).out), "…and none at a wider window");
+  // The bounds SMD-2304 PR 5 holds the numbers to are the database's own: the
+  // largest --stale lists, one Postgres cannot reach back to is refused there
+  // (now() minus it before 4714 BC), and claim_thoughts takes MAX_BATCH and
+  // no more.
+  const widest = await consolidate("--stale", String(MAX_STALE_DAYS));
+  const pastFloor = await sql`SELECT count(*) FROM stale_entities(make_interval(days => 3000000), 1)`.then(() => "listed", (e: Error) => e.message);
+  const claimMax = await sql`SELECT count(*)::int AS n FROM claim_thoughts('bounds:none', 'w', ${MAX_BATCH}, 1)`.then(() => "claimed", (e: Error) => e.message);
+  const claimPast = await sql`SELECT count(*)::int AS n FROM claim_thoughts('bounds:none', 'w', ${MAX_BATCH + 1}, 1)`.then(() => "claimed", (e: Error) => e.message);
+  assert(widest.code === 0 && /no entity has gone 2000000 days/.test(widest.out) && /timestamp out of range/.test(pastFloor) && claimMax === "claimed" && /does not exist/.test(claimPast),
+    `--stale ${MAX_STALE_DAYS} lists where 3,000,000 days is out of Postgres's range (${pastFloor}), and claim_thoughts takes MAX_BATCH where one more matches no signature (${claimPast.slice(0, 60)})`);
 
   // The worker never wrote thought_audit itself: the three rows under its name
   // are the two acceptances and the rejection's clearing.

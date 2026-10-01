@@ -31,7 +31,7 @@
  *   bun db/reembed.ts --url … --accept-failed --all           # …every failed row under the job — said explicitly, since it hides an outage as well
  *   bun db/reembed.ts --url … --retire reembed:B@1024         # remove the record of a superseded pass (a switch abandoned or reverted)
  *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./reembed.ts" (SMD-2304)
- *   --workers N (2)   --batch N (8)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
+ *   --workers N (2)   --batch N (8; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
  *
  * The model, width and provider come from the same variables the server reads —
  * OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM, OB1_EMBEDDING_DIMENSIONS,
@@ -414,7 +414,7 @@ import { localKnob, mayLeaveBox, ROW_UNITS } from "../server-portable/egress.ts"
 import { blanketGate, egressDescription, egressRefusal } from "./worker-bootstrap.ts";
 import { actorPayload, maskUrl, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
-import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, reportLost, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
@@ -495,9 +495,9 @@ export interface ReembedOptions {
 const stoppedBefore = (flag: string): string => `\n  stopped before ${flag} wrote anything: the caller's signal was aborted`;
 
 /** An option held to its flag's rule, in the scanner's words and with its flag list, or the CLI's default when absent. */
-function readOption(flag: string, v: number | null | undefined, absent: number): number | string {
+function readOption(flag: string, v: number | null | undefined, absent: number, rule: { min: number; max?: number } = { min: 1 }): number | string {
   if (v == null) return absent;
-  const problem = numberProblem(flag, v, { min: 1 });
+  const problem = numberProblem(flag, v, rule);
   return problem === null ? v : `${problem}\n${flagList(FLAGS, HINTS)}`;
 }
 
@@ -505,7 +505,7 @@ function readOption(flag: string, v: number | null | undefined, absent: number):
 function numbers(opts: ReembedOptions): { workers: number; batch: number } | string {
   const workers = readOption("--workers", opts.workers, 2);
   if (typeof workers === "string") return workers;
-  const batch = readOption("--batch", opts.batch, 8);
+  const batch = readOption("--batch", opts.batch, 8, { min: 1, max: MAX_BATCH });
   if (typeof batch === "string") return batch;
   return { workers, batch };
 }
@@ -2050,7 +2050,7 @@ if (import.meta.main) {
   const cli = commandLine("reembed.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
   const workers = cli.int("workers", { absent: 2, min: 1 });
-  const batch = cli.int("batch", { absent: 8, min: 1 });
+  const batch = cli.int("batch", { absent: 8, min: 1, max: MAX_BATCH });
   const modes = {
     status: cli.has("status"),
     switchModel: cli.has("switch-model"),

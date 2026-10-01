@@ -56,6 +56,12 @@ export const DEFAULT_TTL_S = 900;
 export const DEFAULT_HEARTBEAT_S = 60;
 /** The largest lease claim_thoughts and renew_claims take: their p_ttl_seconds is an int. */
 export const MAX_TTL_S = 2147483647;
+/**
+ * The most rows one claim takes: claim_thoughts' p_batch is an int, so a
+ * larger --batch matched no signature and every claim failed, the workers
+ * stopping with the pool untouched — the dry run having accepted it (SMD-2304).
+ */
+export const MAX_BATCH = 2147483647;
 /** The longest interval a timer holds: a 32-bit signed millisecond count, whole seconds. */
 export const MAX_HEARTBEAT_S = 2147483;
 

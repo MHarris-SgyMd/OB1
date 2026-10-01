@@ -268,6 +268,12 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["a short lease and --limit 0", { url: AT, ttl: 3, heartbeat: 2, limit: 0 }, ["--url", AT, "--ttl", "3", "--heartbeat", "2", "--limit", "0"], {}],
     ["--timeout 0 and a short lease", { url: AT, timeout: 0, ttl: 1 }, ["--url", AT, "--timeout", "0", "--ttl", "1"], {}],
     ["--follow 0", { url: AT, follow: 0 }, ["--url", AT, "--follow", "0"], {}],
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, and AbortSignal.timeout's range.
+    ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
+    // …each where the script read its number, before the lease pair the CLI checks after them.
+    ["--batch past its bound and a short lease", { url: AT, batch: 2147483648, ttl: 3, heartbeat: 2 }, ["--url", AT, "--batch", "2147483648", "--ttl", "3", "--heartbeat", "2"], {}],
+    ["--timeout past its bound and a short lease", { url: AT, timeout: 9007199254741, ttl: 3, heartbeat: 2 }, ["--url", AT, "--timeout", "9007199254741", "--ttl", "3", "--heartbeat", "2"], {}],
     ["--decide without the Jev tier", { url: AT, decide: true }, ["--url", AT, "--decide"], {}],
     // The banner on stdout, then the blanket gate (SMD-1903): the default policy with nothing declared local.
     ["an egress policy that refuses every row", { url: AT }, ["--url", AT], {}],
@@ -350,6 +356,13 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["--force without --accept", { url: AT, force: true }, ["--url", AT, "--force"], {}],
     ["--limit beside --list", { url: AT, limit: 5, list: "pending" }, ["--url", AT, "--limit", "5", "--list"], {}],
     ["--note alone", { url: AT, note: "hm" }, ["--url", AT, "--note", "hm"], {}],
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, a call signal's range, and --stale's reach back.
+    ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
+    // …each where the script read its number, before the lease pair the CLI checks after them.
+    ["--batch past its bound and a short lease", { url: AT, batch: 2147483648, ttl: 3, heartbeat: 2 }, ["--url", AT, "--batch", "2147483648", "--ttl", "3", "--heartbeat", "2"], {}],
+    ["--timeout past its bound and a short lease", { url: AT, timeout: 9007199254741, ttl: 3, heartbeat: 2 }, ["--url", AT, "--timeout", "9007199254741", "--ttl", "3", "--heartbeat", "2"], {}],
+    ["--stale past the timestamp floor", { url: AT, stale: 2000001 }, ["--url", AT, "--stale", "2000001"], {}],
     ["--note with the pass's marker", { url: AT, reject: ID, note: "settled by the pass: mine" }, ["--url", AT, "--reject", ID, "--note", "settled by the pass: mine"], {}],
     // The banner on stdout, then the blanket gate (SMD-1903), under a judge model named in env.
     ["the egress gate's refusal under OB1_JUDGE_MODEL from env", { url: AT }, ["--url", AT], { OB1_JUDGE_MODEL: "env-judge" }],
@@ -424,6 +437,9 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["--accept-failed with --retry-failed", { url: AT, acceptFailed: [], retryFailed: true }, ["--url", AT, "--accept-failed", "--retry-failed"], {}],
     ["--retire with --switch-model", { url: AT, retire: "reembed:x@1024", switchModel: true }, ["--url", AT, "--retire", "reembed:x@1024", "--switch-model"], {}],
     ["--all alone", { url: AT, all: true }, ["--url", AT, "--all"], {}],
+    // The bound the CLI never had (SMD-2304 PR 5): claim_thoughts' int — read before the modes' rule.
+    ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--batch past its bound and two modes", { url: AT, batch: 2147483648, status: true, retire: "k" }, ["--url", AT, "--batch", "2147483648", "--status", "--retire", "k"], {}],
     // Every number before the modes, the modes before the configuration, as the script judged them.
     ["--workers 0 and two modes", { url: AT, workers: 0, status: true, acceptFailed: [ID] }, ["--url", AT, "--workers", "0", "--status", "--accept-failed", ID], {}],
     ["two modes and a configuration refused", { url: AT, status: true, retire: "k" }, ["--url", AT, "--status", "--retire", "k"], BADDIM],
@@ -548,6 +564,15 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   ok(wholeOutcome === boom && calls === 1 && fell.wholeContentRefused && fellBack.some((l) => l.startsWith("embedCapture: stub-embed refused the whole content (413)")),
      `…and on the whole content's fallback line, where the same call with a quiet log falls back and says so (${wholeOutcome === boom ? "the error" : String(wholeOutcome)})`);
   stub.stop(true);
+}
+
+// worker-bootstrap.ts's MAX_CALL_TIMEOUT_S is AbortSignal.timeout's edge in
+// seconds: the largest --timeout makes a signal, one more throws (SMD-2304 PR 5).
+{
+  const { MAX_CALL_TIMEOUT_S } = await import("./worker-bootstrap.ts");
+  const atMax = (() => { try { AbortSignal.timeout(MAX_CALL_TIMEOUT_S * 1000); return "made"; } catch (e) { return (e as Error).message; } })();
+  const past = (() => { try { AbortSignal.timeout((MAX_CALL_TIMEOUT_S + 1) * 1000); return "made"; } catch (e) { return (e as Error).message; } })();
+  ok(atMax === "made" && past !== "made", `MAX_CALL_TIMEOUT_S (${MAX_CALL_TIMEOUT_S} s) makes a call's timeout signal and one second more throws (${past.slice(0, 60)})`);
 }
 
 // cli.ts's numberProblem: the scanner's words, judged by value — the engines'

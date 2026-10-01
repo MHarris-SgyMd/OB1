@@ -26,10 +26,10 @@
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, or a lineage pair (070)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
- *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
+ *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90; at most 2000000, inside Postgres's timestamp range)
  *   await run({ url, dryRun: true })                      # a dry run, in-process: import { run } from "./consolidate.ts" (SMD-2304)
  *   --k N (3)   --min-sim F (0.6)   --min-confidence F (0.5)
- *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (120, per model call; this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
+ *   --workers N (2)   --batch N (1; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (120, per model call; this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT; at most 9007199254740, a call signal's range)
  *
  * ── The cost ────────────────────────────────────────────────────────────────
  * One LLM call per candidate PAIR, so up to --k per thought, recurring: every
@@ -119,7 +119,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, egressDescription, egressRefusal, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import {
   actorKindOf, cleanForDisplay, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -127,7 +127,7 @@ import {
 } from "../server-portable/consolidate.ts";
 import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
@@ -148,6 +148,15 @@ const FLAGS = {
 const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "all"];
+/**
+ * The longest --stale: stale_entities is given `make_interval(days => n)`
+ * subtracted from now(), and a timestamp before 4714 BC is out of range — at
+ * about 2.46 million days today, so 3,000,000 ended the listing in a stack
+ * trace, and past an int the function matched no signature. 2,000,000 days
+ * (some 5,475 years) is under that floor and stays so as now() moves on
+ * (SMD-2304).
+ */
+export const MAX_STALE_DAYS = 2_000_000;
 
 /**
  * What one consolidation run is asked to do — the CLI's flags, typed
@@ -241,7 +250,7 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
   // holds fewer rows. (Until migration 031 the lease was stamped once per batch
   // and could not be moved, so a batch of several at a long timeout could
   // outlive it; the heartbeat retires that reason.)
-  const batch = read("--batch", opts.batch, 1);
+  const batch = read("--batch", opts.batch, 1, { min: 1, max: MAX_BATCH });
   if (typeof batch === "string") return batch;
   // The lease is renewed on a heartbeat while the worker holds rows, so it has
   // to outlast a missed beat, not the batch — db/lease.ts holds the rule the
@@ -250,7 +259,7 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
   if (typeof ttl === "string") return ttl;
   const heartbeat = read("--heartbeat", opts.heartbeat, heartbeatFor(ttl));
   if (typeof heartbeat === "string") return heartbeat;
-  const timeout = read("--timeout", opts.timeout, 120);
+  const timeout = read("--timeout", opts.timeout, 120, { min: 1, max: MAX_CALL_TIMEOUT_S });
   if (typeof timeout === "string") return timeout;
   const k = read("--k", opts.k, DEFAULT_CANDIDATES, { min: 1, max: 50 });
   if (typeof k === "string") return k;
@@ -264,7 +273,7 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
   if (typeof limit === "string") return limit;
   const follow = read("--follow", opts.follow, 0);
   if (typeof follow === "string") return follow;
-  const stale = read("--stale", opts.stale, 0);
+  const stale = read("--stale", opts.stale, 0, { min: 1, max: MAX_STALE_DAYS });
   if (typeof stale === "string") return stale;
   return { workers, batch, ttl, heartbeat, timeout, k, minSim, minConfidence, limit, follow, stale };
 }
@@ -1374,10 +1383,10 @@ if (import.meta.main) {
   // between them, as run() checks it — so a command breaking two rules is
   // refused for the same one it always was.
   const workers = cli.int("workers", { absent: 2, min: 1 });
-  const batch = cli.int("batch", { absent: 1, min: 1 });
+  const batch = cli.int("batch", { absent: 1, min: 1, max: MAX_BATCH });
   const ttl = cli.int("ttl", { absent: DEFAULT_TTL_S, min: 1 });
   const heartbeat = cli.has("heartbeat") ? cli.int("heartbeat", { absent: DEFAULT_HEARTBEAT_S, min: 1 }) : undefined;
-  const timeout = cli.int("timeout", { absent: 120, min: 1 });
+  const timeout = cli.int("timeout", { absent: 120, min: 1, max: MAX_CALL_TIMEOUT_S });
   const k = cli.int("k", { absent: DEFAULT_CANDIDATES, min: 1, max: 50 });
   const minSim = cli.number("min-sim", { absent: DEFAULT_MIN_SIMILARITY, min: -1, max: 1, fraction: true });
   const minConfidence = cli.number("min-confidence", { absent: DEFAULT_MIN_CONFIDENCE, min: 0, max: 1, fraction: true });
@@ -1388,7 +1397,7 @@ if (import.meta.main) {
   }
   const limit = cli.has("limit") ? cli.int("limit", { absent: 0, min: 1 }) : undefined;
   const follow = cli.has("follow") ? cli.int("follow", { absent: 0, bare: 15, min: 1 }) : undefined;
-  const stale = cli.has("stale") ? cli.int("stale", { absent: 0, bare: 90, min: 1 }) : undefined;
+  const stale = cli.has("stale") ? cli.int("stale", { absent: 0, bare: 90, min: 1, max: MAX_STALE_DAYS }) : undefined;
   const list = cli.has("list") ? (cli.value("list") ?? "pending") : undefined;
   // The review flags' rules before the client, where the script refused them:
   // a URL Bun's client rejects then still meets a bad --list word first, as on

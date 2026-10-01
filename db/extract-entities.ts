@@ -24,7 +24,7 @@
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
  *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./extract-entities.ts" (SMD-2304)
- *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought)
+ *   --workers N (2)   --batch N (1; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
  *   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
  *
  * ── The cost, and the switch ────────────────────────────────────────────────
@@ -127,12 +127,12 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, egressDescription, egressRefusal, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -222,9 +222,9 @@ type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number;
  * input first.
  */
 function numbers(opts: ExtractOptions): Numbers | string {
-  const read = (flag: string, v: number | null | undefined, absent: number): number | string => {
+  const read = (flag: string, v: number | null | undefined, absent: number, rule: { min: number; max?: number } = { min: 1 }): number | string => {
     if (v == null) return absent;
-    const problem = numberProblem(flag, v, { min: 1 });
+    const problem = numberProblem(flag, v, rule);
     return problem === null ? v : `${problem}\n${flagList(FLAGS, HINTS)}`;
   };
   const workers = read("--workers", opts.workers, 2);
@@ -235,7 +235,7 @@ function numbers(opts: ExtractOptions): Numbers | string {
   // lease was stamped per claim and could not be moved, so a batch of four at a
   // 300 s timeout could outlive a 900 s lease and be extracted twice. The
   // heartbeat retires it.)
-  const batch = read("--batch", opts.batch, 1);
+  const batch = read("--batch", opts.batch, 1, { min: 1, max: MAX_BATCH });
   if (typeof batch === "string") return batch;
   // The lease is renewed on a heartbeat while the worker holds rows, so it has
   // to outlast a missed beat, not the batch — db/lease.ts holds the rule the
@@ -244,7 +244,7 @@ function numbers(opts: ExtractOptions): Numbers | string {
   if (typeof ttl === "string") return ttl;
   const heartbeat = read("--heartbeat", opts.heartbeat, heartbeatFor(ttl));
   if (typeof heartbeat === "string") return heartbeat;
-  const timeout = read("--timeout", opts.timeout, 300);
+  const timeout = read("--timeout", opts.timeout, 300, { min: 1, max: MAX_CALL_TIMEOUT_S });
   if (typeof timeout === "string") return timeout;
   const lease = leaseRefusal(ttl, heartbeat, opts.heartbeat == null);
   if (lease) return lease;
@@ -1229,10 +1229,10 @@ if (import.meta.main) {
   // between them, as run() checks it — so a command breaking two rules is
   // refused for the same one it always was.
   const workers = cli.int("workers", { absent: 2, min: 1 });
-  const batch = cli.int("batch", { absent: 1, min: 1 });
+  const batch = cli.int("batch", { absent: 1, min: 1, max: MAX_BATCH });
   const ttl = cli.int("ttl", { absent: DEFAULT_TTL_S, min: 1 });
   const heartbeat = cli.has("heartbeat") ? cli.int("heartbeat", { absent: DEFAULT_HEARTBEAT_S, min: 1 }) : undefined;
-  const timeout = cli.int("timeout", { absent: 300, min: 1 });
+  const timeout = cli.int("timeout", { absent: 300, min: 1, max: MAX_CALL_TIMEOUT_S });
   const lease = leaseRefusal(ttl, heartbeat ?? heartbeatFor(ttl), heartbeat === undefined);
   if (lease) {
     console.error(lease);
