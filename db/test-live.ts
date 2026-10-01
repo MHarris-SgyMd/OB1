@@ -3292,6 +3292,31 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     const [dupClaim] = nullTwin ? await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${stopKey(11)} AND thought_id = ${nullTwin.id}::uuid` : [];
     assert(nullTwin !== undefined && dupOutcome === "writer boom" && dupClaim !== undefined && dupClaim.last_error !== "writer boom" && dupClaim.status !== "claimed",
       `a Writer that throws inside processRow (a legacy twin's "duplicates" line) rejects run() with its error, not recorded as the row's failure (${dupOutcome}; claim ${JSON.stringify(dupClaim)})`);
+    // The embedder's own lines — the refused long thought's fallback to its
+    // head window — go through the Writer in-process, where the CLI prints
+    // them on stderr, and none reaches the host's console (review pass 1:
+    // embed.ts wrote them with console.error itself). A Writer that throws on
+    // one rejects run() with its error, not recorded as the row's failure.
+    refusing = true;
+    const FELL_BACK = "embedCapture: stub-embed refused the whole content (413); falling back to the head window.";
+    const spawnedFell = await reembedIn({ OB1_LLM_TIMEOUT: "30" }, "--job", stopKey(12));
+    const hostError = console.error;
+    const hostLines: string[] = [];
+    console.error = (...a: unknown[]) => { hostLines.push(a.map(String).join(" ")); };
+    let inFell: { code: number; stdout: string; stderr: string };
+    try {
+      inFell = await reembedInProcess({ job: stopKey(13), env: STOP_ENV });
+    } finally {
+      console.error = hostError;
+    }
+    const [{ id: long3Id }] = await sql`SELECT id::text AS id FROM thoughts WHERE content = ${long3}`;
+    const fellOutcome = await runReembed({ url: URL_!, env: STOP_ENV, job: stopKey(14), workers: 1, writer: { out: () => {}, err: (l) => { if (l.startsWith("embedCapture:")) throw new Error("writer boom"); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+    const [fellClaim] = await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${stopKey(14)} AND thought_id = ${long3Id}::uuid`;
+    refusing = false;
+    assert(spawnedFell.stderr.includes(`${FELL_BACK}\n`) && inFell.stderr.includes(`${FELL_BACK}\n`) && !hostLines.some((l) => l.startsWith("embedCapture:")),
+      `the embedder's fallback line reaches run()'s Writer in-process, as the CLI's stderr, and not the host's console (${hostLines.length} host line(s))`);
+    assert(fellOutcome === "writer boom" && fellClaim !== undefined && fellClaim.last_error !== "writer boom" && fellClaim.status !== "claimed",
+      `…and a Writer that throws on it rejects run() with its error, not recorded on the row's claim (${fellOutcome}; claim ${JSON.stringify(fellClaim)})`);
     await sql`DELETE FROM thought_work_claims WHERE work_type LIKE ${`reembed:stub-embed@${DIM}:stop%`}`;
   }
 

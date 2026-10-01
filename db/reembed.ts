@@ -522,6 +522,20 @@ function leaseNumbers(opts: ReembedOptions): { ttl: number; heartbeat: number } 
 }
 
 /**
+ * A blank value where the CLI's scanner refuses one — `--job ""` reaches no
+ * run — in its words and with its flag list, or null (review pass 1: run()
+ * pooled under the key ''). The scanner refuses before anything else.
+ */
+function blankProblem(opts: Pick<ReembedOptions, "job" | "retire" | "acceptFailed">): string | null {
+  const blank = (v: string | null | undefined) => v != null && v.trim() === "";
+  const problem = blank(opts.job) ? "--job is empty; give it a value"
+    : blank(opts.retire) ? "--retire is empty; give it a value"
+    : (opts.acceptFailed ?? []).some(blank) ? "one of --accept-failed's values is empty"
+    : null;
+  return problem === null ? null : `${problem}\n${flagList(FLAGS, HINTS)}`;
+}
+
+/**
  * The modes' own rule — one thing at a time (see "Saying I know": the two
  * maintenance modes write claim rows, not vectors, and combine with nothing
  * but --dry-run), and --all only with --accept-failed — as the refusal, in the
@@ -550,6 +564,11 @@ export function modeProblem(opts: Pick<ReembedOptions, "status" | "acceptFailed"
  */
 export async function run(opts: ReembedOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
+  const blank = blankProblem(opts);
+  if (blank !== null) {
+    err(blank);
+    return 2;
+  }
   // databaseUrl's two refusals without its exit, then the numbers and the
   // modes' rule. A URL beside a caller's client is held to the rule too.
   const noUrl = opts.url == null || opts.url.trim() === "";
@@ -665,9 +684,28 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   }
   for (const w of embeddingConfigWarnings(EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS)) err(`  ⚠  ${w}`);
 
+  /**
+   * A Writer's throw from inside processRow, the embedder's own lines
+   * included, marked so the worker's catch rethrows it — the Writer's error
+   * rejects run() — rather than recording it as the thought's failure on a
+   * claim whose write may have gone through.
+   */
+  class WriterThrow {
+    constructor(readonly error: unknown) {}
+  }
+  const errInRow = (line: string): void => {
+    try {
+      err(line);
+    } catch (e) {
+      throw new WriterThrow(e);
+    }
+  };
+
   const embedConfig = resolveEmbedConfig(env as EmbedEnv);
   // Not remembering a refusal: see "The head window, recorded" in the header.
-  const embedder = createEmbedder(() => embedConfig, { rememberRefusal: false });
+  // Its own lines (a fallback to the head window, a blurb refused) through
+  // the Writer, as a row's: a throw there is the Writer's (review pass 1).
+  const embedder = createEmbedder(() => embedConfig, { rememberRefusal: false, log: errInRow });
 
   // The lease is renewed on a heartbeat while the worker holds rows — see the
   // header — so it has to outlast a missed beat, not the batch; db/lease.ts
@@ -1641,25 +1679,12 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    */
   type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; error: string } | { outcome: "vanished" } | { outcome: "abandoned" };
 
-  /**
-   * A Writer's throw from inside processRow, marked so the worker's catch
-   * rethrows it — the Writer's error rejects run() — rather than recording it
-   * as the thought's failure on a claim whose write had gone through.
-   */
-  class WriterThrow {
-    constructor(readonly error: unknown) {}
-  }
-  const errInRow = (line: string): void => {
-    try {
-      err(line);
-    } catch (e) {
-      throw new WriterThrow(e);
-    }
-  };
-
   async function processRow(row: Row): Promise<Outcome> {
     let current = row;
     for (let attempt = 0; attempt < 3; attempt++) {
+      // The hard stop came during the re-read below: the row is the pool's
+      // again, and its text is not sent (review pass 1).
+      if (hardStopped) return { outcome: "abandoned" };
       // The row's own metadata is what the gate reads — source, type, topics —
       // and an egress refusal throws out of here as a failed claim (SMD-1903).
       const embedded = await embedder.embedCapture(current.content, { kind: "re-embed", metadata: current.metadata ?? undefined, content: current.content });
@@ -1748,7 +1773,6 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         // if_unchanged_since — and the text this worker holds is then no longer
         // the row's, so 018 judges it as a change into another row's text. The
         // re-read carries the current text and the next call is unchanged.
-        if (hardStopped) return { outcome: "abandoned" };
         const [fresh] = (await sql`SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata FROM thoughts WHERE id = ${current.id}::uuid`) as Row[];
         if (!fresh) return { outcome: "vanished" };
         current = fresh;

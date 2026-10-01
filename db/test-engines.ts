@@ -415,7 +415,7 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["--workers 0", { url: AT, workers: 0 }, ["--url", AT, "--workers", "0"], {}],
     ["--batch 1.5", { url: AT, batch: 1.5 }, ["--url", AT, "--batch", "1.5"], {}],
     // --ttl and --heartbeat are read after the configuration, as the script read them:
-    // the banner's job line and the configuration's own refusal come first.
+    // a bare key's note and the configuration's own refusal come first, the banner after.
     ["--ttl not a number (the CLI hands run() NaN)", { url: AT, ttl: NaN }, ["--url", AT, "--ttl", "abc"], LOCAL],
     ["--heartbeat past 2^53", { url: AT, heartbeat: 2 ** 60 }, ["--url", AT, "--heartbeat", String(2 ** 60)], LOCAL],
     ["a bare --job key's note, then --ttl 0", { url: AT, job: "bare", ttl: 0 }, ["--url", AT, "--job", "bare", "--ttl", "0"], LOCAL],
@@ -431,6 +431,10 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["two modes beside a URL Bun's client rejects", { url: `${AT}?sslmode=bogus`, status: true, retire: "k" }, ["--url", `${AT}?sslmode=bogus`, "--status", "--retire", "k"], {}],
     // The banner on stdout, then the blanket gate (SMD-1903): the default policy with nothing declared local.
     ["an egress policy that refuses every row", { url: AT }, ["--url", AT], {}],
+    // A blank value the scanner refuses, before the URL, refused by run() in its words (review pass 1: run() pooled under the key '').
+    ["--job blank", { job: "" }, ["--job", ""], {}],
+    ["--retire blank", { url: AT, retire: "  " }, ["--url", AT, "--retire", "  "], {}],
+    ["a blank --accept-failed id", { url: AT, acceptFailed: ["", "00000000-0000-0000-0000-000000000001"] }, ["--url", AT, "--accept-failed", "", "00000000-0000-0000-0000-000000000001"], {}],
     // …under a model named in the environment run() is given: its key and banner name it, as the CLI's do.
     ["the gate's refusal under OB1_EMBEDDING_MODEL from env", { url: AT }, ["--url", AT], { OB1_EMBEDDING_MODEL: "  env-model ", OB1_EMBEDDING_DIM: "768" }],
   ];

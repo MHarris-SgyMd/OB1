@@ -641,8 +641,29 @@ export type Embedder = {
  * about, under a reason that was another row's. The cost there is one refused
  * round trip per long row, answered before any embedding is computed.
  */
-export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusal?: boolean } = {}): Embedder {
+export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusal?: boolean; log?: (line: string) => void } = {}): Embedder {
   const rememberRefusal = opts.rememberRefusal ?? true;
+  /**
+   * Where the embedder's own lines go — a fallback to the head window, a blurb
+   * refused: stderr unless the caller names a writer, as db/reembed.ts's run()
+   * does so an in-process caller gets them where the CLI prints them
+   * (SMD-2304). A throw from it rejects the call that logged, with its own
+   * error: marked on the way out (LogThrow) so the catches below that degrade
+   * a provider's failure — a blurb's, the whole content's — pass it on rather
+   * than take it for the provider's and record it as a reason, and unwrapped
+   * where embedCapture returns.
+   */
+  const log = opts.log ?? ((line: string) => console.error(line));
+  class LogThrow {
+    constructor(readonly error: unknown) {}
+  }
+  const say = (line: string): void => {
+    try {
+      log(line);
+    } catch (e) {
+      throw new LogThrow(e);
+    }
+  };
   /**
    * Set when the provider rejects a whole-content embedding outright and
    * `rememberRefusal` is on. One-way: the only thing that flips it is a 400 or
@@ -736,7 +757,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     // document that itself contains the literal `{chunk}`.
     const prompt = applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.chunk, { document, chunk });
     const bare = (error: string) => {
-      console.error(`contextualiseChunk: ${error}`);
+      say(`contextualiseChunk: ${error}`);
       return { text: "", error };
     };
     try {
@@ -759,7 +780,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
       if (!usableChunkContext(out, chunk)) {
         // The lengths go to the log, not the reason: the reasons are deduplicated
         // per capture, and a bulk pass writes them on the claim row.
-        if (out) console.error(`contextualiseChunk: a ${out.length}-char blurb for a ${chunk.length}-char window`);
+        if (out) say(`contextualiseChunk: a ${out.length}-char blurb for a ${chunk.length}-char window`);
         return bare(out ? "the model returned a blurb longer than a blurb should be" : "the model returned an empty blurb");
       }
       return { text: out };
@@ -768,7 +789,9 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
       // the window goes in bare, as for any other failure of this call — and
       // so does an egress refusal of the CHAT endpoint (SMD-1903): the blurb
       // is enrichment, the window is stored bare with the reason, and the
-      // embedding call is judged on its own endpoint.
+      // embedding call is judged on its own endpoint. The log's own throw is
+      // not the model's failure.
+      if (e instanceof LogThrow) throw e;
       return bare((e as Error).message);
     }
   }
@@ -866,7 +889,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
             if (refusesLength(e.status, e.body ?? "")) {
               refused = true;
               if (rememberRefusal) wholeContentRefused = true;
-              console.error(
+              say(
                 `embedCapture: ${cfg.embeddingModel} refused the whole content (${e.status}); ` +
                   `falling back to the head window` +
                   (rememberRefusal ? ` here and skipping the attempt for the rest of this process.` : `.`)
@@ -874,7 +897,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
             } else {
               // Including a 400 whose words do not name the length: not known
               // to be about this input, so not remembered and not final.
-              console.error(`embedCapture: whole-content embedding failed, using the head window: ${e.message}`);
+              say(`embedCapture: whole-content embedding failed, using the head window: ${e.message}`);
             }
             return null;
           }),
@@ -897,5 +920,10 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     };
   }
 
-  return { embedCapture, getEmbedding };
+  return {
+    embedCapture: (content, subject) => embedCapture(content, subject).catch((e: unknown) => {
+      throw e instanceof LogThrow ? e.error : e;
+    }),
+    getEmbedding,
+  };
 }
