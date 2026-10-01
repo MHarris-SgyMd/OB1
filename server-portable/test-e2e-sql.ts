@@ -1820,18 +1820,25 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   const contradict = await result("search_thoughts_keyword", { query: marker, said_by: "agent", filter: { actor_kind: "operator" } });
   assert(contradict.isError && contradict.text === `Error: said_by is "agent" but filter.actor_kind is "operator" — pass one of the two` && contradict.sc?.code === "REFUSED_FILTER" && contradict.sc?.retryable === false,
     `a filter the boundary refuses keeps its words and carries REFUSED_FILTER (${JSON.stringify(contradict.sc)})`);
+  // A client that shows the model structuredContent alone (Claude Code, VS Code,
+  // Codex) reads the same words: a prose tool's value carries its text, and
+  // leaves out the bodies the text already quotes (review pass 2).
+  assert(st.sc?.text === st.text && !("content" in hit) && st.text.includes(`${marker}: the typed answer rides beside the words`),
+    "search_thoughts: the value carries the text, and no hit repeats the body the text quotes");
+  assert(contradict.sc?.text === contradict.text && fm.sc?.text === fm.text, "a refusal's value carries its words too");
   const kw = await result("search_thoughts_keyword", { query: marker });
+  assert(kw.sc?.text === kw.text && kw.sc?.hits?.every((h: object) => !("content" in h)), "search_thoughts_keyword: the text in the value, no bodies");
   assert(!kw.isError && kw.sc?.total >= 1 && kw.sc?.offset === 0 && kw.sc?.hits?.some((h: { id: string; occurrences: number }) => h.id === id && h.occurrences === 1), `search_thoughts_keyword: the page, its total and occurrences (${kw.sc?.total})`);
 
   const lt = await result("list_thoughts", { limit: 3 });
-  assert(!lt.isError && Array.isArray(lt.sc?.thoughts) && lt.sc.thoughts.length === 3 && "supersededBy" in lt.sc.thoughts[0], "list_thoughts: the listed thoughts with their supersession");
+  assert(!lt.isError && Array.isArray(lt.sc?.thoughts) && lt.sc.thoughts.length === 3 && "supersededBy" in lt.sc.thoughts[0] && !("content" in lt.sc.thoughts[0]) && lt.sc.text === lt.text, "list_thoughts: the listed thoughts with their supersession, the text beside them, no bodies");
   const sp = await result("list_supersession_proposals", { status: "all" });
   assert(!sp.isError && sp.sc?.status === "all" && Array.isArray(sp.sc?.proposals), `list_supersession_proposals: the status asked and the proposals (${sp.sc?.proposals?.length})`);
   const ts = await result("thought_stats");
   assert(!ts.isError && typeof ts.sc?.total === "number" && ts.text.startsWith(`Total thoughts: ${ts.sc.total}`), `thought_stats: the counts the text prints (${ts.sc?.total})`);
 
   const ch = await result("thought_changes", { limit: 2 });
-  assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`), "thought_changes: the page, its bound and the cursor the text names");
+  assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`) && ch.sc.text === ch.text && ch.sc.changes.every((c: object) => !("head" in c)), "thought_changes: the page, its bound and the cursor the text names, the text beside them, no heads");
   const chBad = await result("thought_changes", { since: "yesterday" });
   assert(chBad.isError && chBad.text.startsWith("Refused: `since` must be an ISO-8601 time") && chBad.sc?.code === "REFUSED_SINCE" && chBad.sc?.value === "yesterday", `thought_changes refuses a since that is neither, REFUSED_SINCE (${JSON.stringify(chBad.sc)})`);
 
@@ -1845,9 +1852,9 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   assert(lsBad.isError && lsBad.sc?.code === "REFUSED_SINCE" && /^Error: `since` must be an ISO-8601 time/.test(lsBad.text), "list_logged_searches refuses a since that is no time, REFUSED_SINCE");
 
   const ws = await result("worker_status");
-  assert(!ws.isError && Array.isArray(ws.sc?.pools) && JSON.stringify(ws.sc.pools) === ws.text, "worker_status: the text is the bare rows it always was; the value keys them (a result is an object)");
+  assert(!ws.isError && Array.isArray(ws.sc?.pools) && JSON.stringify(ws.sc.pools) === ws.text && !("text" in ws.sc), "worker_status: the text is the bare rows it always was; the value keys them (a result is an object) and, being that JSON, carries no text of its own");
   const bi = await result("brain_info");
-  assert(!bi.isError && typeof bi.sc?.version === "string" && bi.text.includes(bi.sc.version), `brain_info: the record the table renders (${bi.sc?.version})`);
+  assert(!bi.isError && typeof bi.sc?.version === "string" && bi.text.includes(bi.sc.version) && bi.sc.text === bi.text, `brain_info: the record the table renders (${bi.sc?.version})`);
   const js = await result("job_status", { job_id: missing });
   assert(js.isError && js.text.startsWith(`No job "${missing}" for this key`) && js.sc?.code === "NOT_FOUND" && js.sc?.id === missing, "job_status of no job: the same words, NOT_FOUND beside them");
 }

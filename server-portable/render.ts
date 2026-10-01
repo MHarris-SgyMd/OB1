@@ -3,6 +3,15 @@
 // answer itself beside it as `structuredContent`. Nothing here reads the store,
 // calls a model or decides a rule; a sentence that needs a fact gets it from the
 // value or the refusal it is handed.
+//
+// Claude Code, VS Code and Codex hand the model `structuredContent` alone when a
+// result carries it (anthropics/claude-code#55677, microsoft/vscode#290063,
+// openai/codex#10334), so the value must say what the text says: a tool whose
+// text is prose carries that text in its value as `text`, and a refusal or a
+// fault does too. A tool whose text is its value's JSON (the ChatGPT shapes, the
+// pages, the job records) needs nothing more. A prose value leaves out the
+// thought bodies its `text` already quotes, so a reply does not carry three
+// copies of them; the core's value keeps them, for the REST core (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
@@ -15,12 +24,23 @@ import type { ChangesResult, KeywordResult, ListThoughtsResult, ProposalsResult,
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
 export type Reply = { content: { type: "text"; text: string }[]; isError?: true; structuredContent: Record<string, unknown> };
 
-const said = (text: string, structured: object): Reply => ({ content: [{ type: "text", text }], structuredContent: { ...structured } });
-const refused = (text: string, r: Refusal): Reply => ({ content: [{ type: "text", text }], isError: true, structuredContent: { ...r } });
+/** What a value contributes to `structuredContent`, given the text rendered from it. */
+type Structured<T> = (v: T, text: string) => object;
+/** A prose tool's value: its text first, then its fields. */
+const withText = <T extends object>(v: T, text: string): object => ({ text, ...v });
+/** A tool whose text is its value's JSON: the value alone (the spec's structured-plus-serialized shape). */
+const asJson = <T extends object>(v: T): object => v;
+/** A row without the `content` its text already quotes. */
+const bodiless = <R extends { content: string }>({ content: _content, ...row }: R): Omit<R, "content"> => row;
 
-/** An outcome in the tool's words: its value's text, or its refusal's. */
-function render<T extends object>(o: Outcome<T>, value: (v: T) => string, refusal: (r: Refusal) => string): Reply {
-  return o.ok ? said(value(o.value), o.value) : refused(refusal(o.refusal), o.refusal);
+/** An outcome in the tool's words — its value's text, or its refusal's — with the text inside the value either way. */
+function render<T extends object>(o: Outcome<T>, value: (v: T) => string, refusal: (r: Refusal) => string, structured: Structured<T> = withText): Reply {
+  if (!o.ok) {
+    const text = refusal(o.refusal);
+    return { content: [{ type: "text", text }], isError: true, structuredContent: { text, ...o.refusal } };
+  }
+  const text = value(o.value);
+  return { content: [{ type: "text", text }], structuredContent: { ...structured(o.value, text) } };
 }
 
 /** A refusal a tool's renderer has no sentence for — a code it does not return. Not reached; said rather than thrown. */
@@ -29,18 +49,20 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
 /**
  * A fault an operation threw — the store down, a missing migration — as every
  * tool has always said it, `Error: <message>`, with the tool's hint for the
- * message when it has one; FAILED beside it (core/refusal.ts says why final),
- * carrying the hint too, so a program reading the value learns the migration
- * or grant that fixes it. One message for both: a thrown non-Error (a string,
- * undefined) is said as itself rather than `undefined`, and never throws here.
+ * message when it has one; FAILED beside it, transient or final as
+ * core/refusal.ts classifies the fault, carrying the text and the hint too, so
+ * a program reading the value learns the migration or grant that fixes it. One
+ * message for both: a thrown non-Error (a string, undefined) is said as itself
+ * rather than `undefined`, and never throws here.
  */
 export function failed(err: unknown, hint?: (msg: string) => string): Reply {
   const f = failure(err);
   const remedy = hint ? hint(f.message) : "";
+  const text = `Error: ${f.message}${remedy}`;
   return {
-    content: [{ type: "text", text: `Error: ${f.message}${remedy}` }],
+    content: [{ type: "text", text }],
     isError: true,
-    structuredContent: { ...f, ...(remedy ? { hint: remedy.replace(/^ — /, "") } : {}) },
+    structuredContent: { text, ...f, ...(remedy ? { hint: remedy.replace(/^ — /, "") } : {}) },
   };
 }
 
@@ -163,10 +185,10 @@ export function currentSearchHint(msg: string): string {
 // ── The read tools ───────────────────────────────────────────────────────────
 
 /** `search` and `fetch`: ChatGPT reads the text as JSON, so the text is the value. */
-export const renderSearch = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), searchRefusal);
+export const renderSearch = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), searchRefusal, asJson);
 
 export const renderFetch = (o: Outcome<object>): Reply =>
-  render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)));
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)), asJson);
 
 export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
   return render(o, (v) => {
@@ -258,7 +280,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     }
 
     return `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}\n\n${results.join("\n\n")}`;
-  }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined));
+  }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined), (v, text) => ({ text, ...v, hits: v.hits.map(bodiless) }));
 }
 
 export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
@@ -309,7 +331,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         : "";
 
     return `Showing ${shown} thought(s) containing "${query}".${more}\n\n${results.join("\n\n")}`;
-  }, (r) => searchRefusal(r));
+  }, (r) => searchRefusal(r), (v, text) => ({ text, ...v, hits: v.hits.map(bodiless) }));
 }
 
 export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
@@ -334,7 +356,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
       }
     );
     return `${data.length} recent thought(s):\n\n${results.join("\n\n")}`;
-  }, unknownRefusal);
+  }, unknownRefusal, (v, text) => ({ text, thoughts: v.thoughts.map(bodiless) }));
 }
 
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
@@ -377,7 +399,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
     });
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`;
-  }, unknownRefusal);
+  }, unknownRefusal, (v, text) => ({ text, ...v, proposals: v.proposals.map((p) => ({ ...p, older: bodiless(p.older), newer: bodiless(p.newer) })) }));
 }
 
 /**
@@ -523,7 +545,7 @@ export function renderThoughtChanges(o: Outcome<ChangesResult>): Reply {
     return `${head}\n\n${shown.map((c, i) => renderChange(c, i + 1)).join("\n\n")}\n\n${tail}`;
   }, (r) => (r.code === "REFUSED_SINCE"
     ? `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${snipText(r.value, 40)}".`
-    : unknownRefusal(r)));
+    : unknownRefusal(r)), (v, text) => ({ text, ...v, changes: v.changes.map(({ head: _head, ...c }) => c) }));
 }
 
 export const changesHint = (msg: string): string =>
@@ -535,11 +557,11 @@ export const changesHint = (msg: string): string =>
 
 /** list_thought_ids: the page itself is the text, a JSON object a script reads. */
 export const renderThoughtIds = (o: Outcome<object>): Reply =>
-  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_CURSOR" ? "Error: `after` must be a thought id (a uuid) — pass the previous page's `cursor`." : unknownRefusal(r)));
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_CURSOR" ? "Error: `after` must be a thought id (a uuid) — pass the previous page's `cursor`." : unknownRefusal(r)), asJson);
 
 /** list_logged_searches: the page itself is the text. */
 export const renderLoggedSearches = (o: Outcome<object>): Reply =>
-  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_SINCE" ? "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." : unknownRefusal(r)));
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_SINCE" ? "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." : unknownRefusal(r)), asJson);
 
 export const loggedSearchesHint = (msg: string): string =>
   /query_log/.test(msg) && /does not exist|could not find/i.test(msg)
@@ -547,14 +569,14 @@ export const loggedSearchesHint = (msg: string): string =>
     : "";
 
 /** worker_status: the text is the bare array it has always been; the value keys it (a result is an object). */
-export const renderWorkerStatus = (o: Outcome<{ pools: unknown[] }>): Reply => render(o, (v) => JSON.stringify(v.pools), unknownRefusal);
+export const renderWorkerStatus = (o: Outcome<{ pools: unknown[] }>): Reply => render(o, (v) => JSON.stringify(v.pools), unknownRefusal, asJson);
 
 /** job_status: the job record is the text; NOT_FOUND covers an unknown id, another key's job and a pruned one alike. */
 export const renderJobStatus = (o: Outcome<object>): Reply =>
-  render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `No job ${JSON.stringify(r.id)} for this key — an unknown id, another key's job, or one pruned from the registry.` : unknownRefusal(r)));
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `No job ${JSON.stringify(r.id)} for this key — an unknown id, another key's job, or one pruned from the registry.` : unknownRefusal(r)), asJson);
 
 /** brain_info: the short table (brain-info.ts) beside the record the keyed /health body answers as JSON. */
-export const renderBrainInfoReply = (info: BrainInfo): Reply => said(renderBrainInfo(info), info);
+export const renderBrainInfoReply = (info: BrainInfo): Reply => render({ ok: true, value: info }, renderBrainInfo, unknownRefusal);
 
 /** scan_thoughts: the handle is the text. */
-export const renderJobHandle = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal);
+export const renderJobHandle = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, asJson);

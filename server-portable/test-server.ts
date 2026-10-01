@@ -1318,6 +1318,41 @@ console.log("\n[16d] A fault an operation throws is said as it always was, typed
   const undef = failed(undefined);
   assert(str.content[0].text === "Error: boom" && str.structuredContent.message === "boom" && undef.content[0].text === "Error: undefined" && undef.structuredContent.code === "FAILED",
     `a thrown string is said as itself in both; a thrown undefined is said, not a TypeError in the catch (${str.content[0].text} / ${undef.content[0].text})`);
+  // Clients that show the model structuredContent alone (Claude Code, VS Code,
+  // Codex) must read the words too (review pass 2).
+  assert(plain.structuredContent.text === "Error: connection refused" && hinted.structuredContent.text === hinted.content[0].text, "the fault's text rides inside its value");
+
+  // Transient or final, read off the shapes the drivers throw — printed from a
+  // real Postgres for this test (review pass 2), not imagined.
+  const pg = (code: string, errno?: string) => Object.assign(new Error("x"), { name: "PostgresError", code, ...(errno ? { errno } : {}) });
+  const provider = (kind: string, status?: number) => Object.assign(new Error("x"), { name: "ProviderError", kind, status });
+  const retry = (e: unknown) => failed(e).structuredContent.retryable;
+  const transient = [pg("ERR_POSTGRES_SERVER_ERROR", "57P01"), pg("ERR_POSTGRES_SERVER_ERROR", "57014"), pg("ERR_POSTGRES_SERVER_ERROR", "55P03"), pg("ERR_POSTGRES_SERVER_ERROR", "08006"), pg("ERR_POSTGRES_SERVER_ERROR", "53300"), pg("ERR_POSTGRES_SERVER_ERROR", "40001"),
+    pg("ERR_POSTGRES_CONNECTION_CLOSED"), pg("ERR_POSTGRES_CONNECTION_REFUSED"), provider("timeout"), provider("http", 429), provider("http", 503), Object.assign(new Error("x"), { code: "ECONNREFUSED" })];
+  const final = [pg("ERR_POSTGRES_SERVER_ERROR", "42883"), pg("ERR_POSTGRES_SERVER_ERROR", "42501"), pg("ERR_POSTGRES_SERVER_ERROR", "22P02"), provider("http", 400), provider("http", 401), provider("egress"), provider("body", 200), new Error("filter must be an object"), "boom", undefined, null];
+  assert(transient.every((e) => retry(e) === true), `a lost or refused connection, a shutdown, a timeout under load, a serialization failure, a provider timeout, 429 or 5xx is retryable (${transient.map(retry).join(",")})`);
+  assert(final.every((e) => retry(e) === false), `a missing function or grant, a bad value, a provider 4xx or refusal, and anything unrecognised is final (${final.map(retry).join(",")})`);
+}
+
+console.log("\n[16e] Two cores over one store share one brain-info read in flight (SMD-2283, review pass 2)");
+{
+  const { createCore } = await import("./core/index.ts");
+  let reads = 0;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const store = { kind: "sql", databaseFacts: async () => { reads++; await gate; throw new Error("stub: no database"); } };
+  const reader = () => Promise.resolve(store as never);
+  const env = () => ({});
+  const [a, b] = [createCore({ env, store: reader }), createCore({ env, store: reader })];
+  const other = createCore({ env, store: () => Promise.resolve(store as never) });
+  const answers = [a.brainInfo("health"), b.brainInfo("health")];
+  await Bun.sleep(10);
+  const shared = reads;
+  const separate = other.brainInfo("health");
+  await Bun.sleep(10);
+  release();
+  await Promise.all([...answers, separate]);
+  assert(shared === 1 && reads === 2, `two cores over the same store reader run one read; a core over another reader runs its own (${shared} then ${reads})`);
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");

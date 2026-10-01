@@ -422,9 +422,16 @@ function serverFacts(ctx: Ctx): ServerFacts {
  * ceiling (800 ms for health) beside the next caller's, and a read hung on a
  * half-open connection pins nothing. brainInfo never raises: a database that
  * cannot answer is a field of the record.
+ *
+ * Shared per store, not per core (review pass 2): the reads in flight are
+ * keyed by the store reader a core was built over, so a second core in the
+ * same process (the REST core beside the MCP one, SMD-2284) joins the first's
+ * read rather than taking a pool connection of its own.
  */
+const INFLIGHT = new WeakMap<object, Map<BrainInfoSurface, Promise<BrainInfo>>>();
 export function brainInfoReader(ctx: Ctx): (surface: BrainInfoSurface) => Promise<BrainInfo> {
-  const inflight = new Map<BrainInfoSurface, Promise<BrainInfo>>();
+  const inflight = INFLIGHT.get(ctx.store) ?? new Map<BrainInfoSurface, Promise<BrainInfo>>();
+  INFLIGHT.set(ctx.store, inflight);
   return (surface) => {
     const { deadlineMs, opts } = SURFACES[surface];
     const read = () => readBrain(serverFacts(ctx), async (progress) => (await ctx.store()).databaseFacts(opts, progress), deadlineMs);
