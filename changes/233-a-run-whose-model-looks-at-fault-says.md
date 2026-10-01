@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2266]
-migrations: []
----
-
-## Changelog
-
-`db/extract-entities.ts` exits 3, and says on stderr that the model is likely at fault, when more than a fifth of at least 48 of a run's answers were not JSON of the expected shape. A `--follow` process says so as it polls. Partial rows are recorded succeeded, so a model answering many windows in prose used to exit 0; the measurement chose this run-level signal over a per-thought floor (SMD-2266).
-
-## FORK
-
-A run whose model looks at fault says so and exits 3 — a signal on the run's answers, not a floor on a thought's (SMD-2266)
+# 233. A run whose model looks at fault says so and exits 3 — a signal on the run's answers, not a floor on a thought's (SMD-2266)
 
 **What changed.** The extraction worker counts the model's answers: one per window sent, for each thought that returned. It also counts how many were not JSON of the expected shape, whether in a thought failed as malformed or left out of a partial one.
 

@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-2297]
-migrations: ["067"]
----
-
-## Changelog
-
-The consolidation pass settles a stale proposal it no longer finds in conflict — rejected with the pass's own note, its lineage re-recorded at the texts judged — instead of leaving it under `--list stale` for a reviewer for ever; a text move under a pass-settled row sets it stale again, a person's decision stands (migration 067, SMD-2297).
-
-## FORK
-
-The consolidation pass settles a stale proposal it no longer finds in conflict, and a pass-settled row is the pass's to reopen (SMD-2297)
+# 224. The consolidation pass settles a stale proposal it no longer finds in conflict, and a pass-settled row is the pass's to reopen (SMD-2297)
 
 **What changed.** Migration `067_pass_settles_stale.sql` adds `settle_supersession_proposal(id, note, actor, judge_key, older_fingerprint, newer_fingerprint, recipe, agent)` — the pass's rejection of a `stale` row through 036's reject arm (which checks no status and sets `reviewed_at`, as 063's unreviewed CHECK requires of a row leaving stale), with a note beginning **`settled by the pass:`** (the marker: one constant, `PASS_SETTLED_PREFIX` in `server-portable/consolidate.ts`, one literal in the two SQL bodies, held to each other by test-schema) and the proposal's lineage row rewritten at the fingerprints the pass judged, under the pass's key — and redefines `rebuild_derived` on 063's body with the proposal arm alone changed: a rejected row whose note carries the marker is the pass's, so a text move under it sets the row stale again (unreviewed, the note cleared, the pair requeued); a person's rejected or accepted row is kept, as before; and 064's `section` kind (a generated page section), which 063's body could not know and sent to the kept arm, is marked with no pool as the tags are. `db/consolidate.ts` re-pools every stale row's newer thought under its own key at the start of a run (a pair both sides of which have a vector, with no live or failed claim there), judges a stale pair the top-k left out when it still meets the candidate rule, and on each stale pair: a conflict at the floor → 063's replacement in place; agree, unrelated or a conflict under the floor → the settle; a pair the rule no longer admits → the settle with a note naming the term that failed (a side superseded, a lineage pair — 066's rule, one side derived from the other — no shared entity, under this run's similarity floor with the cosine); a side without a vector → left waiting, re-pooled by the run after the vector lands; a call that timed out, was refused by the egress gate or drew a malformed answer → the row stays stale and the thought is recorded failed, for `--retry-failed`. `--status` counts the pass's rejections apart from a person's and places each stale row against this pass's pool (in it, waiting for a vector, failed in this pass, waiting for the next run — a claim under another judge's key named beside it; one read and one rank in `server-portable/consolidate.ts`, which `rebuild.ts --status` reads keyless, naming the keys); `--list stale` tags each row's standing; `--dry-run` counts the re-pool. `db/rebuild.ts --status` places the stale rows the same way. Preflight's `lineage` check warns when 063 is re-applied by hand over 067 (rebuild_derived's reopen sentinel gone where the settle function stands), naming 067. The status column's and 029's table comments are re-issued; `db/README.md` gains the 067 paragraph and a stale-rows paragraph in the consolidation section, and its `--list` usage line gains `stale`, which it had lacked since 063.
 

@@ -1,0 +1,64 @@
+# 242. The authorization server's proof of concept: oidc-provider on Bun proves criteria 1–5. Its outbound fetches go through a guard of our own, because the library's SSRF protection does not load under Bun, and the library's open defaults are closed (SMD-2285)
+
+**What it adds (eval-only; no schema, contract or deploy change).**
+
+- **`evals/auth/`, one image, two compose files.** `compose.yaml` holds four things:
+  - a stand-in proxy carrying the ADR's route table (the product is SMD-1846's choice);
+  - a stable and a canary stand-in for the MCP server (a real SDK v2 server) and the REST core;
+  - a TLS host for client metadata documents, on a subnet outside the special-use ranges, serving every document under a run name;
+  - a bait on the internal mesh that logs any connection it is offered;
+  - both stand-ins answer a token carrying no brain scope with 403 `insufficient_scope`.
+
+  `compose.oidc-provider.yaml` adds the server. Only the proxy publishes a port, on loopback.
+- **`evals/auth/oidc-provider.ts`.** The library under `node:http` on Bun, mounted at `/auth`, plus what the library leaves to the deployment:
+  - the RFC 8693 grant;
+  - `getResourceServerInfo`, a per-client resource allowance;
+  - the fetch guard;
+  - password sign-in against an argon2id hash, and a consent page.
+
+  It also closes these defaults:
+  - a third-party client may register for authorization code and refresh only;
+  - a request that names no resource is refused before any page;
+  - `code` is the only response type;
+  - DPoP, userinfo, RP-initiated logout and PAR are off;
+  - URLs come from the configured origin, never the request's `Host`.
+
+  The consent page names three things: the client, by what the server checked (its id, or its metadata document's host); where the code goes (an http(s) origin, or the app that owns a custom scheme); and the scopes and resources the request names, with a sentence for `offline_access`. For the verifier only, and only while `OB1_AUTH_POC_ERROR_DETAIL=1` (set by the POC's compose file), its error replies carry the library's `error_detail`. The deploy never sets it.
+- **`evals/auth/fetch-guard.ts`.** https and GET only. It refuses `*.ob1.internal`, `localhost` and single-label names by name, and a special-use address as a literal or as any answer of the socket's own DNS lookup. Bun 1.4.0's `node:https` dials the answer that lookup returns, so the address it checks is the address it dials. The body is capped at 64 KiB, and the library's 2.5 s abort ends a hung or dripping response.
+- **`evals/eval-auth.ts`.** 28 checks in five groups (D, R, G, A, X), two manual rows (claude.ai, and Claude Code on the bare path), and `--self-check` (84 probes, in the Portable server job). A refusal is matched by its code, and by its reason or cause wherever the check names one. The guard's ten refusals are each matched to their own rule. Every probed URL carries the run's name, and each run reads only its own log lines, so a second run proves everything afresh. Run one verify at a time.
+- **CI.** The `auth-poc` job brings the stack up, verifies twice and tears it down. It is added to `.github/rulesets/main.json`, and `FORK.md` counts eleven required jobs.
+
+**What it found.**
+
+- **Under Bun 1.4.0, oidc-provider 9.12.2's SSRF protection is off.** Its undici dispatcher does not exist there. It warns and then dials, so a guard of our own is a deploy requirement, not a nicety. With the kit's guard dropped, R3 fails, and the first such run connected to the bait four times.
+- **Open DCR plus client credentials gave anyone a working `/mcp` token with no user.** The review reproduced it. The third-party rule now refuses it by DCR and by metadata document (A6).
+- **Library defaults the brain does not want:**
+  - an audience-less token for a request naming no resource (A7);
+  - implicit and hybrid response types;
+  - DPoP, with which the exchange would downgrade a bound `/mcp` token to a bearer REST-core one;
+  - userinfo, logout and PAR (D1);
+  - endpoints built from the request's `Host` (D6).
+- **The first consent pages trusted a client's own name, showed a custom-scheme redirect by its host, and listed only the scopes a grant still lacked**, hiding `offline_access` and the resource of an `openid`-only request (R1, G5, G6).
+- **A request for `openid` alone gets a token for its resource with an empty scope.** The resource servers must refuse it (A8).
+- **A number in `ttl.AccessToken` overrides every resource's `accessTokenTTL`.** With one set, an exchanged token outlived its subject token by a second. The exchange now sets `exp` itself.
+- **Two smaller library behaviours:** DCR fails with only an ES256 key unless `clientDefaults` sets the ID token's algorithm. And oidc-provider answers `invalid_request` where RFC 6749 names `unauthorized_client`.
+
+**Held by.** Twenty-six drop-the-mechanism mutants, each run on a rebuilt stack, each turning exactly its checks red. They cover:
+- the guard, its mesh name rule, the resource allowance, and the REST core's audience and scope checks;
+- the exchange's audience, `act`, scope and expiry rules;
+- PKCE and the proxy's bare path;
+- the third-party rule and its type guard;
+- the no-resource refusal;
+- the response types, DPoP, userinfo, logout and PAR;
+- the pinned origin;
+- the consent page's naming of the client, of a custom-scheme redirect and of the resource, and its listing and explanation of `offline_access`;
+- the `error_detail` switch.
+
+Two stack faults were tested as well. With the metadata host stopped, a second verify fails instead of passing on the first run's evidence. With the bait stopped, R3's control connection fails.
+
+**Not proven, and recorded for Work step 3.**
+- The guard's 64 KiB cap is not exercised live.
+- Access tokens cannot be revoked (they are JWTs), so a `/mcp` token outlives a revoked refresh token or grant by up to 10 minutes.
+- A refresh refused after rotation spends the refresh token, and the retry then revokes the grant.
+
+**Tidied after the three review passes, while the files were open** (no behaviour change): client policies are looked up with `Object.hasOwn`; the consent page lists two requested resources separately instead of comma-joined; `publicCode` lost its unused no-resource branch; `Browser.trail`, recorded and never read, is gone; and the exchange handler says why its client check stays though the library pre-empts it.

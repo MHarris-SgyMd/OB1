@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-2292]
-migrations: ["066"]
----
-
-## Changelog
-
-Migration 066: the consolidation judge is never asked whether a thought supersedes one of the thoughts it was derived from — `consolidation_candidates` leaves out, from either side, every thought a thought's `derived_from` names (a page and its evidence, a digest and its sources); an unrelated near-duplicate is still judged (SMD-2292).
-
-## FORK
-
-A derivation and its inputs are never paired for judgement — consolidation_candidates leaves out every thought a thought's derived_from names, from either side (SMD-2292)
+# 223. A derivation and its inputs are never paired for judgement — consolidation_candidates leaves out every thought a thought's derived_from names, from either side (SMD-2292)
 
 **What changed.** Migration 066 redefines 029's `consolidation_candidates` on 063's body plus two NULL-safe conditions: a candidate `o` is left out when the judged thought's `derived_from` names it, and when `o`'s `derived_from` names the judged thought. The body carries the sentinel `ob1:lineage-excludes-the-pair`; preflight's `lineage` check reads it and warns, naming 066 as the remedy, when 063 is re-applied by hand over it (029 re-applied is caught earlier by the producer-count arm, and the remedies run 061, 063, 066 in turn). The fifth restriction beside 029's four is stated in 066's header and in `db/README.md`'s consolidation paragraph, not in 029's — that file is frozen by release 1.0.0, comments included (the checker hashes a released migration) — and `evals/README.md`'s rule sentence names it (the eval's table stands as measured under 029's rule alone). Direct members only: the array is one level, and a deeper read belongs to the lineage table once every derived thought has a row there (SMD-1731) — expect the transitive shape from SMD-2143's writers (a page citing an earlier page or a digest is judged against that page's evidence; SMD-2314 is the deeper read, and until then a reviewer reads `trace_provenance(newer)`). Siblings, two pages from one evidence, are still judged. A proposal already standing on a lineage pair is left as it is and is not marked — the listing reads nothing of `derived_from`, the pass never replaces it, the recorder has no lineage guard; SMD-2313 counts and flags such rows, no verdict is written at apply time.
 

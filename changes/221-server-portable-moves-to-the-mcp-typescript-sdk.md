@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-2278]
-migrations: []
----
-
-## Changelog
-
-server-portable migrates to the MCP TypeScript SDK v2: `@modelcontextprotocol/core` and `@modelcontextprotocol/server` 2.1.0 replace the v1 `@modelcontextprotocol/sdk` and the third-party `@hono/mcp`, and the transport becomes `WebStandardStreamableHTTPServerTransport` (SMD-2278). No migration.
-
-## FORK
-
-server-portable moves to the MCP TypeScript SDK v2 — the v2 scoped packages replace the v1 single package and the third-party @hono/mcp, and the transport swaps to WebStandardStreamableHTTPServerTransport (SMD-2278)
+# 221. server-portable moves to the MCP TypeScript SDK v2 — the v2 scoped packages replace the v1 single package and the third-party @hono/mcp, and the transport swaps to WebStandardStreamableHTTPServerTransport (SMD-2278)
 
 **What changed.** `server-portable/package.json` drops `@modelcontextprotocol/sdk` 1.30.0 and `@hono/mcp` 0.3.2 and adds `@modelcontextprotocol/core` 2.1.0 + `@modelcontextprotocol/server` 2.1.0 — the SDK repackaged for the 2026-07-28 spec (docs/mcp-sdk-v2-migration.md, SMD-2275, decided GO, staged, server-portable first). `server-portable/index.ts` collapses its two MCP imports to `{ McpServer, WebStandardStreamableHTTPServerTransport }` from `@modelcontextprotocol/server`, and the per-request MCP handler builds a `WebStandardStreamableHTTPServerTransport` and calls `handleRequest(request)` with a Web `Request`, where @hono/mcp's `StreamableHTTPTransport.handleRequest(c)` took the Hono `Context`. The request body, already drained once for the request label (`requestLabel`, SMD-1864), is cached and a fresh `Request` reconstructed for the transport — v2 reads the raw request stream where @hono/mcp read Hono's cached body, so without the reconstruction every call returned `-32700 Parse error`. `McpServer` (`{ name, version }`), `registerTool(name, config, cb)` (three-arg, handler last) and `connect` are unchanged, so `buildServer`'s `registerTool` monkey-patch and every tool are untouched — no tool code and no zod input schema moved. server-portable needs no framework middleware package: it owns its Hono app and only wants the transport (`@modelcontextprotocol/hono` was available and declined). `withSseKeepalive` (SMD-1864), the `mcp-session-id` strip, the CORS header copy and the GET → 405 guard (SMD-1259) all stay.
 

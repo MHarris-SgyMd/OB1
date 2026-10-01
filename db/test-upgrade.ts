@@ -596,10 +596,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 001's thoughts, and redefines 053's source_thought, 058's
   // node_dependencies and node_state and 068's drift on their own signatures,
   // refusing by name without 053 or 068
-  // ([20w]) — all recorded by the baseline with their prerequisites present,
-  // so none becomes the plain-run failure point above).
+  // ([20w]); 072 upserts ob1_config.schema_version for the 1.4.0 cut, needing
+  // only 006's table — all recorded by the baseline with their prerequisites
+  // present, so none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 42, `030 is among the last forty-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 43, `030 is among the last forty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&

@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2321]
-migrations: []
----
-
-## Changelog
-
-`extract-entities.ts --decide` re-types the generative extractor's entities with the Jev decider: the model still proposes the candidate names, an identifier-shaped name is typed by rule without a decide call, and every other candidate gets the decider's validity gate + type choice, with the decider's calibrated `p_true` stored as the entity confidence. Opt-in and off by default; it needs the tier configured (`OB1_JEV_BASE_URL`). A name absent from the text keeps the model's type (no window to decide on), and a decider outage falls back to the model's entities rather than failing the thought (SMD-2321).
-
-## FORK
-
-Hybrid entity extraction — `--decide`: the generative model proposes names, the Jev decider decides validity and type, its p_true the confidence (SMD-2321)
+# 229. Hybrid entity extraction — `--decide`: the generative model proposes names, the Jev decider decides validity and type, its p_true the confidence (SMD-2321)
 
 **What it adds (opt-in; no schema, contract or default change).**
 

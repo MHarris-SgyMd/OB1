@@ -1,0 +1,129 @@
+# 240. migrate.ts and extract-entities.ts are engines: import one and call run() — nothing runs at import any more, PRs 1–2 of 5 (SMD-2304 / 2134)
+
+**What changed.** SMD-2134's fourth cut, in five PRs. This one lays the
+pieces the other engines use and turns the migrator into the first:
+- `db/migrate.ts` exports `run(opts): Promise<number>` and `MigrateOptions`.
+  The flags are typed options (`dryRun`, `baseline`, `reapply`, `force`,
+  `grant`); run() refuses what the CLI refuses, in its words and with its exit
+  code, and returns the code the CLI exits with. The migration files are read
+  and hashed per call, not at import. A client passed as `sql` is used in
+  place of the URL and never closed, and must be one connection — the `max: 1`
+  option; a wider one is refused — because the run sets session state that
+  must hold where its statements run, and leaves it: `lock_timeout`,
+  pgvector's schema on `search_path` when it is off the path, the `ob1.acl_*`
+  settings several migrations set. So a caller passes a client dedicated to
+  the run, not a pooled connection someone else gets next. Given a `url`
+  instead, run() opens one connection and closes it. A database error outside
+  a migration's own transaction rejects, as the CLI's stack dump showed. The CLI is a thin
+  `if (import.meta.main)`: it scans the flags, resolves the URL, opens the
+  client lazily and exits through `closeThenExit` with run()'s code.
+- `cli.ts`: a `Writer` (`out`/`err`, a line a call) and `consoleWriter`, which
+  is console.log and console.error — the CLI's output is byte for byte what it
+  was.
+- `connect.ts` unchanged: run() refuses a missing URL (absent, null or blank)
+  with its NO_DATABASE_URL and any other with SMD-2317's `databaseUrlProblem`
+  — databaseUrl's two refusals without its exit, in the same words.
+
+Behaviour that moved, all of it in how the process ends: the migrator now
+exits through the door, which flushes stdout and stderr before exiting, where
+it closed the pool and exited; the summary line prints before the client
+closes rather than after. The statements and connections are main's, measured
+(`--grant` shares the run's one client in the code, but main's second pool was
+never reached on that path, so neither opens more than one), up to whitespace:
+the ledger's CREATE TABLE is indented further, so an error's `position` in it
+reads two more. The embedding model, width, trigram choice and chunk-context
+flag are still config.mjs's, read from the environment when it is first
+imported — an in-process caller gets that process's.
+
+**Why.** Four db/ scripts were top-level programs: importing one ran it —
+scanned argv, resolved a URL, connected, and called process.exit at about
+fifteen sites. So nothing could drive a pass without spawning the CLI:
+SMD-2272's `run_worker` has no pass to call (its option B), SMD-1930's runner
+contract no engine to wrap, and test-live spawns each worker about eight
+times. The migrator goes first because it has no signals, timers or worker
+identity to separate — the pattern without the hard parts.
+
+**Held.**
+- `db/test-engines.ts` (new, no database, CI beside test-connect), for each
+  engine: importing it with DATABASE_URL pointed at a counting listener opens
+  no connection, prints nothing and exports `run` (the same import run does
+  connect — the control); an in-process import installs no process listener;
+  its code — the whole file but its CLI block, which must come last, read as
+  Bun's transpiler emits it (comments gone, strings intact) — holds none of
+  the listed spellings of an exit (`process["exit"]`, `process?.exit`, a
+  destructured `exit`, `exitCode`, `kill`, `abort`, `Bun.exit`), a process
+  listener (bracket, optional and prepend forms), an argv read (`Bun.argv`,
+  `node:process` imports), `databaseUrl`, the door, a console call, a write
+  past the Writer, or a stream or fd write (the census's teeth shown on
+  thirty-six spellings; the listener shapes PRs 2-4 need, a comment and a
+  string's `/*` or `//` not mistaken);
+  and run() refuses five inputs — no URL, an unparseable one, `--reapply`
+  with `--baseline`, `--force` alone, `--grant` with `--baseline` — with exit
+  2 and exactly the spawned CLI's stdout and stderr, before connecting and
+  without the password on either; a client wider than one connection is
+  refused, and a caller's client is not closed.
+- test-live [1] and [2] run the engine in-process beside the spawned
+  migrator: the dry run (and the connection it opened closed after), the
+  no-op re-run on a caller's client with a dead URL beside it (the client
+  used, and still open after) and the drift after an edit
+  made post-import each print what the spawned CLI prints, byte for byte,
+  with its exit code.
+- test-cli (the refusals and `--help` through the scanner) and test-connect
+  (the door's census, now over migrate.ts too) unchanged.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | a caller's client came back with the run's session lock_timeout (0 → 10 s, measured) and any search_path it added; the stated reason for one connection named 021's temp view, which is transaction-local | cold read, run-it | both read before the first change and put back in run()'s finally (removed in pass 2); the reason corrected |
+| 1 | the engine census missed `process["exit"]`, a destructured exit, `Bun.stdout`, `prependListener`, `consoleWriter.` calls past the Writer, and any code after the CLI block; the parity check read one stderr line | run-it, cold read, mutant | test-connect's exit shapes, the prepend forms, the console past the Writer, comments out, the CLI block last; both whole streams compared |
+| 1 | nothing held run() closing its own connection or using the caller's client (the test passed a URL beside it) | mutant | a backend count around a URL run; the caller's run given a dead URL beside its client |
+| 2 | pass 1's restore had four seams: the docs and the refusal offered a reserved connection that the `max` check refuses (it reports its pool's); after a lost connection the restore reconnected and held the exit ~30 s (main ~40 ms); the CLI paid its two queries on every run; it put back two settings while migrations leave the `ob1.acl_*` ones | cold read, run-it | the restore removed: a caller's client keeps the run's session state, and the contract says pass one dedicated to the run; "reserved" dropped |
+| 2 | the census's regex comment strip let a string's `/*` or ` //` hide code; it missed `process.kill`, `abort`, `process?.`/`["on"]`, `Bun.argv`, `node:process` imports, fd writes and a destructured console | run-it, cold read | Bun's transpiler strips comments; the spellings added, with teeth and false-positive checks |
+| 2 | the backend count could pass vacuously or flake on a backend still closing from the spawned run; run() throwing on an error outside a migration was undocumented | cold read, run-it | new backends by pid against the set before; the rejection documented |
+| 3 | nothing above low; a writer that throws after a migration commits made run() report that applied, recorded file as FAILED; the census missed `process?.["exit"]` and three fd writes; the pid check excluded its own backend, which holds only while the suite's pool has one connection | run-it, cold read | the applied line written after the migration's catch; the forms added; the filter dropped |
+| 4 | nothing above low, on the tree merged with main: SMD-2247's hand-applied path step matches main's and its behaviour; 46 CLI scenarios identical to main. the drift report's warning moved to stdout passed every suite (test-live compared two runs of the same code, streams joined); `grant: null` turned --grant on and `url: null` threw; the docs left out the chunk-context flag, a transaction handle and whitespace in "the same statements"; the census cannot see aliases | run-it, cold read, mutant | the drift report's streams pinned as main's, the comparisons stream by stream; null is absent; documented |
+| 5 | nothing above low, on the tree merged with SMD-2303 and SMD-2317: main's CLIs and this branch's print the same on 132 empty-URL and refused-URL cases, run() refuses 19 URLs as the CLI does with no connection; the merge's null-or-blank case in connect.ts turned a blank openSql's refusal into "No database URL"; nothing held run() inheriting SMD-2317's rule, nor `sql: null` | cold read, run-it, mutant | connect.ts left as main's, run() checks the missing URL itself; a split-URL case and a null client in test-engines |
+
+**PR 2: extract-entities.ts.** `run(opts)` and `ExtractOptions`: the flags
+typed, a number left out the CLI's default and one given held to its flag's
+rule, refused in the CLI's words (the flag list included) and in the CLI's
+order, the lease pair between the numbers; `env` for the model, endpoints,
+egress policy and worker key (process.env when absent). A caller's client is
+never closed and needs workers + 1 connections (the heartbeat's spare); the
+worker key resolves on a connection of its own, so a keyed run on a caller's
+client needs `url` beside it. The script's body moved into `extractWith`
+unchanged but for its output (the Writer), its exits (returns) and
+`reportLost`'s line (`lease.ts`, now given the writer). Stopping: `onPass` is
+called once where the script called `process.on`, with the pass's stop
+(`lease.ts`'s `PassStop`) — the first call stops after the thought in hand;
+one while already stopping, a second or the first after the provider's
+refusal, returns the release of every worker's leases. The CLI installs
+`lease.ts`'s `stopOnSignals` there (exit 130 once the release settles, or
+after 3 s), so a signal before the pass still ends the process at once. A
+caller's AbortSignal is a first stop, its listener gone when run() returns.
+A stop wakes a follower's sleep, so its first SIGINT exits 0 at once rather
+than after the sleep; a signal after run() settles ends the process by it.
+The CLI opens its client before run(), so a URL Bun's client rejects
+(`?sslmode=bogus`) exits 1 with connect.ts's refusal and no banner, where
+main printed the banner first and then exited 1 on that refusal — or 2, on
+the egress gate or `--decide`, when one of those came first; main's CLI and
+this one print the same on the other 31 of 33 pre-connection cases. Held: test-engines
+(extract's fourteen refusals against the spawned CLI, stream by stream, before
+connecting; the narrow client, the keyed client without a URL, a bad URL
+beside one, null as absent; `stopOnSignals` with a fake exit); test-live
+[10] (run() in-process beside the spawned dry run, no-op run, `--status` on a
+caller's client and the other-model refusal, byte for byte per stream; an
+AbortSignal's stop and its listener gone after, the hard stop's release
+before the thought in hand ends, the first stop after the provider's refusal
+already the hard one, and the CLI's one and two SIGINTs).
+
+| PR 2 pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | nothing above low on the CLI (main's and this one alike across a stub-model run's every scenario, signals and races included); in-process, an early abort still registered the agent, set the key and ran the --retry-* statements before returning 130; the hard stop left the thought in hand to be written into a row no longer held; one worker's throw rejected run() while the other ran on; a reserved or transaction handle passed the width check; the stop stayed live after run() | cold read, run-it | a checkpoint before each write ahead of the pass and before connecting; nothing written or released after the hard stop; the workers settled, the rest stopped, before run() rejects; both handles refused; the stop inert after run(); a Writer's throw on a timer dropped |
+| 2 | nothing above low on the CLI; the one CLI change measured an improvement: in the hard stop's 3 s grace, with a release held by a lock, main wrote the thoughts in hand into rows back in the pool (4-6 mentions); this branch writes none. In-process, the hard stop let a worker pausing on a provider error (5-45 s) wake and send the thought again; a follower hard-stopped returned 0, after its sleep; a stale write could requeue a row another worker held; an aborted signal made --status return 130; a throwing Writer read as a failed release or an unresolved identity; the CLI's handlers outlived run() | cold read, run-it | the hard stop wakes the pause and the sleep (a first stop the sleep too) and returns 130; no requeue after it; --status and --dry-run read on; those lines written outside their try (worker-bootstrap's agent line too); the CLI takes its handlers off when run() settles |
+| 3 | nothing above low on the CLI (26 scenarios alike; consolidate's identity end to end); pass 2's wake kept a promise reaction per sleep until a stop — ~430 bytes a poll, ~36 MB a day at `--follow 1`, measured on run() | cold read, run-it | lease.ts's `sleepUnless` on AbortSignals, the listener removed on the timer: 20,000 sleeps keep nothing (test-engines, heap) |
+| 4 | nothing above low: the leak gone (flat over 182k polls), every stop waking in ms, the CLI main's but for the two improvements; pass 2's timer fired after 1 ms past its 32-bit ceiling, so a `--follow` of 25 days or more polled in a hot loop where main slept | cold read, run-it | the wait re-armed in steps past `MAX_TIMER_MS`; the heap test's sleeps concurrent (29 s → 4 s) on a settled baseline |
+
+**Next.** PR 3 `consolidate.ts`; PR 4 `reembed.ts`; PR 5 the int4 bounds the
+CLIs never had.

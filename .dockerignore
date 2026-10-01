@@ -60,6 +60,7 @@ db/*.ts
 # and the two files outside db/ it reaches.
 !db/ingest-*.ts
 !db/reembed.ts
+!db/weekly-digest.ts
 !db/worker-bootstrap.ts
 !db/lease.ts
 !evals/linear-corpus.ts
