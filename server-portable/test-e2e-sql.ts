@@ -1193,7 +1193,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
 {
   // The raw envelope, not call(): this section reads errors as answers. One
   // helper per key (fifth review pass: three hand-rolled copies).
-  type Envelope = { error?: { code?: number; message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[]; structuredContent?: { code?: string; retryable?: boolean; positions?: number[] } } };
+  type Envelope = { error?: { code?: number; message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[]; structuredContent?: { code?: string; retryable?: boolean; positions?: number[]; text?: string } } };
   const sc = (e: Envelope) => e.result?.structuredContent;
   const rpcAs = (key: string) => async (method: string, params: Record<string, unknown>): Promise<Envelope> => {
     const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }) });
@@ -1246,6 +1246,8 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // supersedes through a capture key (first review pass): only what it wrote.
   const steal = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — a later ending — claims to replace eta", source: "claude-code", supersedes: retrieved } });
   assert(steal.result?.isError === true && /only a thought it captured itself/.test(textOf(steal)) && sc(steal)?.code === "REFUSED_SUPERSEDES_OWNERSHIP" && sc(steal)?.retryable === false, `a capture key may not supersede another key's thought — refused, code and all (${sc(steal)?.code})`);
+  // The words ride the value too: a client that shows the model structuredContent alone still reads which pointer to drop (SMD-2283 review pass 3).
+  assert(sc(steal)?.text === textOf(steal), "a coded capture refusal carries its words in the value");
   const [[untouched]] = [await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE 'Session summary — a later ending%'`];
   assert(untouched?.n === 0, "…and nothing was written");
   // A reader/write key naming a ghost supersedes reaches the write (it skips the
@@ -1823,7 +1825,7 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   // A client that shows the model structuredContent alone (Claude Code, VS Code,
   // Codex) reads the same words: a prose tool's value carries its text, and
   // leaves out the bodies the text already quotes (review pass 2).
-  assert(st.sc?.text === st.text && !("content" in hit) && st.text.includes(`${marker}: the typed answer rides beside the words`),
+  assert(st.sc?.text === st.text && hit !== undefined && !("content" in hit) && st.text.includes(`${marker}: the typed answer rides beside the words`),
     "search_thoughts: the value carries the text, and no hit repeats the body the text quotes");
   assert(contradict.sc?.text === contradict.text && fm.sc?.text === fm.text, "a refusal's value carries its words too");
   const kw = await result("search_thoughts_keyword", { query: marker });
@@ -1834,11 +1836,26 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   assert(!lt.isError && Array.isArray(lt.sc?.thoughts) && lt.sc.thoughts.length === 3 && "supersededBy" in lt.sc.thoughts[0] && !("content" in lt.sc.thoughts[0]) && lt.sc.text === lt.text, "list_thoughts: the listed thoughts with their supersession, the text beside them, no bodies");
   const sp = await result("list_supersession_proposals", { status: "all" });
   assert(!sp.isError && sp.sc?.status === "all" && Array.isArray(sp.sc?.proposals), `list_supersession_proposals: the status asked and the proposals (${sp.sc?.proposals?.length})`);
+  // The sides stay whole in the value: the text quotes them snipped to 200
+  // characters (review pass 3). One proposal seeded as [9] seeds them, its
+  // newer side past the snip, and removed again.
+  {
+    const sql = new SQL({ url: URL_, max: 1 });
+    const long = `${marker} newer side: ${"a sentence the listing snips. ".repeat(12)}the end`;
+    const newer = /id ([0-9a-f-]{36})/.exec(await call("capture_thought", { content: long }))![1];
+    const [{ id: pid }] = await sql`SELECT record_supersession_proposal(${id}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.8, 'stub', 0.9, 'consolidate:stub@p2', NULL) AS id`;
+    const sp1 = await result("list_supersession_proposals", {});
+    const p = sp1.sc?.proposals?.find((x: { id: string }) => x.id === pid);
+    assert(p?.newer?.content === long && !sp1.text.includes(long) && sp1.text.includes(long.slice(0, 120)),
+      `list_supersession_proposals: the text snips a long side, the value keeps it whole (${long.length} chars)`);
+    await sql`DELETE FROM supersession_proposals WHERE id = ${pid}::uuid`;
+    await sql.close();
+  }
   const ts = await result("thought_stats");
   assert(!ts.isError && typeof ts.sc?.total === "number" && ts.text.startsWith(`Total thoughts: ${ts.sc.total}`), `thought_stats: the counts the text prints (${ts.sc?.total})`);
 
   const ch = await result("thought_changes", { limit: 2 });
-  assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`) && ch.sc.text === ch.text && ch.sc.changes.every((c: object) => !("head" in c)), "thought_changes: the page, its bound and the cursor the text names, the text beside them, no heads");
+  assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`) && ch.sc.text === ch.text && ch.sc.changes.every((c: object) => "head" in c), "thought_changes: the page, its bound and the cursor the text names, the text beside them, and each head whole (the text only snips it: review pass 3)");
   const chBad = await result("thought_changes", { since: "yesterday" });
   assert(chBad.isError && chBad.text.startsWith("Refused: `since` must be an ISO-8601 time") && chBad.sc?.code === "REFUSED_SINCE" && chBad.sc?.value === "yesterday", `thought_changes refuses a since that is neither, REFUSED_SINCE (${JSON.stringify(chBad.sc)})`);
 

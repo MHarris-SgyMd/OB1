@@ -10,15 +10,17 @@
 // text is prose carries that text in its value as `text`, and a refusal or a
 // fault does too. A tool whose text is its value's JSON (the ChatGPT shapes, the
 // pages, the job records) needs nothing more. A prose value leaves out the
-// thought bodies its `text` already quotes, so a reply does not carry three
-// copies of them; the core's value keeps them, for the REST core (SMD-2284).
+// thought bodies its `text` quotes in full (search hits, listed thoughts), so
+// a reply does not carry three copies of them; a body the text only snips (a
+// proposal's sides, a change's head) stays, and the core's value keeps every
+// one, for the REST core (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
 import type { AuditChange, ThoughtHybridMatch, ThoughtStats } from "./store.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY } from "./core/filter.ts";
-import { failure, type Outcome, type Refusal } from "./core/refusal.ts";
+import { failure, ok, type Outcome, type Refusal } from "./core/refusal.ts";
 import type { ChangesResult, KeywordResult, ListThoughtsResult, ProposalsResult, SearchThoughtsResult } from "./core/reads.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
@@ -30,8 +32,10 @@ type Structured<T> = (v: T, text: string) => object;
 const withText = <T extends object>(v: T, text: string): object => ({ text, ...v });
 /** A tool whose text is its value's JSON: the value alone (the spec's structured-plus-serialized shape). */
 const asJson = <T extends object>(v: T): object => v;
-/** A row without the `content` its text already quotes. */
+/** A row without the `content` its text quotes in full. Only for a row the text quotes whole: a snipped quote (a proposal's sides, a change's head) keeps its field. */
 const bodiless = <R extends { content: string }>({ content: _content, ...row }: R): Omit<R, "content"> => row;
+/** The two search tools' value: the text, then the hits without the bodies the text quotes whole. */
+const hitsWithoutBodies = <V extends { hits: { content: string }[] }>(v: V, text: string): object => ({ text, ...v, hits: v.hits.map(bodiless) });
 
 /** An outcome in the tool's words — its value's text, or its refusal's — with the text inside the value either way. */
 function render<T extends object>(o: Outcome<T>, value: (v: T) => string, refusal: (r: Refusal) => string, structured: Structured<T> = withText): Reply {
@@ -49,8 +53,8 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
 /**
  * A fault an operation threw — the store down, a missing migration — as every
  * tool has always said it, `Error: <message>`, with the tool's hint for the
- * message when it has one; FAILED beside it, transient or final as
- * core/refusal.ts classifies the fault, carrying the text and the hint too, so
+ * message when it has one; FAILED beside it, final (core/refusal.ts says why;
+ * SMD-2461 classifies), carrying the text and the hint too, so
  * a program reading the value learns the migration or grant that fixes it. One
  * message for both: a thrown non-Error (a string, undefined) is said as itself
  * rather than `undefined`, and never throws here.
@@ -280,7 +284,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     }
 
     return `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}\n\n${results.join("\n\n")}`;
-  }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined), (v, text) => ({ text, ...v, hits: v.hits.map(bodiless) }));
+  }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined), hitsWithoutBodies);
 }
 
 export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
@@ -331,7 +335,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         : "";
 
     return `Showing ${shown} thought(s) containing "${query}".${more}\n\n${results.join("\n\n")}`;
-  }, (r) => searchRefusal(r), (v, text) => ({ text, ...v, hits: v.hits.map(bodiless) }));
+  }, (r) => searchRefusal(r), hitsWithoutBodies);
 }
 
 export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
@@ -399,7 +403,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
     });
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`;
-  }, unknownRefusal, (v, text) => ({ text, ...v, proposals: v.proposals.map((p) => ({ ...p, older: bodiless(p.older), newer: bodiless(p.newer) })) }));
+  }, unknownRefusal);
 }
 
 /**
@@ -545,7 +549,7 @@ export function renderThoughtChanges(o: Outcome<ChangesResult>): Reply {
     return `${head}\n\n${shown.map((c, i) => renderChange(c, i + 1)).join("\n\n")}\n\n${tail}`;
   }, (r) => (r.code === "REFUSED_SINCE"
     ? `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${snipText(r.value, 40)}".`
-    : unknownRefusal(r)), (v, text) => ({ text, ...v, changes: v.changes.map(({ head: _head, ...c }) => c) }));
+    : unknownRefusal(r)));
 }
 
 export const changesHint = (msg: string): string =>
@@ -576,7 +580,7 @@ export const renderJobStatus = (o: Outcome<object>): Reply =>
   render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `No job ${JSON.stringify(r.id)} for this key — an unknown id, another key's job, or one pruned from the registry.` : unknownRefusal(r)), asJson);
 
 /** brain_info: the short table (brain-info.ts) beside the record the keyed /health body answers as JSON. */
-export const renderBrainInfoReply = (info: BrainInfo): Reply => render({ ok: true, value: info }, renderBrainInfo, unknownRefusal);
+export const renderBrainInfoReply = (info: BrainInfo): Reply => render(ok(info), renderBrainInfo, unknownRefusal);
 
 /** scan_thoughts: the handle is the text. */
 export const renderJobHandle = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, asJson);

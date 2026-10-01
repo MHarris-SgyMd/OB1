@@ -515,13 +515,13 @@ MCP tools do rather than a copy of it:
 Every read tool's reply carries its typed answer as `structuredContent` beside the
 text — the value on success, `{ code, retryable, … }` on a refusal (`NOT_FOUND`,
 `REFUSED_FILTER`, `REFUSED_EGRESS`, `REFUSED_SINCE`, `REFUSED_CURSOR`), and `FAILED`
-with the message for a fault (retryable when the fault is transient: a lost
-connection, a shutdown, a timeout under load, a provider 429 or 5xx). A value is
-always an object, so `worker_status`'s rows ride under `pools` while its text stays
-the bare array. Claude Code, VS Code and Codex show the model `structuredContent`
-alone when it is present, so a tool whose text is prose carries that text in its
-value as `text` (as every refusal and fault does), leaving out the thought bodies
-the text already quotes; a tool whose text is its value's JSON needs nothing more. The write tools move into
+with the message for a fault (final for now; classifying faults is SMD-2461). A
+value is always an object, so `worker_status`'s rows ride under `pools` while its
+text stays the bare array. Claude Code, VS Code and Codex show the model
+`structuredContent` alone when it is present, so a tool whose text is prose carries
+that text in its value as `text` (as every refusal and fault does), leaving out the
+thought bodies the text quotes in full (search hits, listed thoughts) and keeping
+those it only snips; a tool whose text is its value's JSON needs nothing more. The write tools move into
 `core/` in SMD-2283's next two pull requests; until then they keep SMD-1978's codes.
 
 ## Expected outcome

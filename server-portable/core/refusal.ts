@@ -28,37 +28,10 @@ export const refuse = <T = never>(refusal: Refusal): Outcome<T> => ({ ok: false,
 
 /**
  * A fault an operation threw, typed for a caller that wants a code: FAILED,
- * with the thrown message, and `retryable` when the fault is one a second
- * call can outlast (isTransient). A missing migration or grant is final, as
- * is anything unrecognised: telling a client to retry a fault that cannot heal
- * is the worse error.
+ * final, with the thrown message. Final because the fault is unclassified — a
+ * missing migration and a dropped connection read alike here, and telling a
+ * client to retry a fault that cannot heal is the worse error. One classifier
+ * for every fault, capture's STORE_UNAVAILABLE included, is SMD-2461.
  */
-export type Failure = { code: "FAILED"; retryable: boolean; message: string; hint?: string };
-export const failure = (err: unknown): Failure => ({ code: "FAILED", retryable: isTransient(err), message: (err as Error)?.message ?? String(err) });
-
-/**
- * SQLSTATEs a retry can outlast: a lost connection (class 08), the server
- * shutting down or not yet up (57P01–57P03), out of resources (class 53, e.g.
- * too many connections), a statement or lock timeout under load (57014,
- * 55P03), and a serialization failure or deadlock (40001, 40P01).
- */
-const TRANSIENT_SQLSTATE = /^(08...|57P0[123]|53...|57014|55P03|40001|40P01)$/;
-/** Socket-level codes a fetch (the provider, PostgREST) rejects with when the far end is away. */
-const TRANSIENT_SOCKET = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE", "ConnectionRefused", "ConnectionClosed"]);
-
-/**
- * Whether a thrown fault is transient. Read off the shapes the drivers throw,
- * measured (SMD-2283 review pass 2): Bun's PostgresError keeps the SQLSTATE in
- * `errno` with `code` ERR_POSTGRES_SERVER_ERROR, and names a connection that
- * closed or was refused in `code` (ERR_POSTGRES_CONNECTION_CLOSED,
- * ERR_POSTGRES_CONNECTION_REFUSED); embed.ts's ProviderError says `timeout`, or
- * `http` with the status (429 and 5xx heal, the rest of 4xx do not).
- */
-export function isTransient(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const e = err as { name?: unknown; code?: unknown; errno?: unknown; kind?: unknown; status?: unknown };
-  if (typeof e.errno === "string" && TRANSIENT_SQLSTATE.test(e.errno)) return true;
-  if (typeof e.code === "string" && (/^ERR_POSTGRES_CONNECTION_/.test(e.code) || /^ERR_POSTGRES_.*TIMEOUT$/.test(e.code) || TRANSIENT_SOCKET.has(e.code))) return true;
-  if (e.name === "ProviderError") return e.kind === "timeout" || (e.kind === "http" && typeof e.status === "number" && (e.status === 429 || e.status >= 500));
-  return false;
-}
+export type Failure = { code: "FAILED"; retryable: false; message: string; hint?: string };
+export const failure = (err: unknown): Failure => ({ code: "FAILED", retryable: false, message: (err as Error)?.message ?? String(err) });

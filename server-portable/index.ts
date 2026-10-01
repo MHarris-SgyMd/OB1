@@ -339,9 +339,15 @@ type ToolErrorCode =
   | "STORE_UNAVAILABLE";           // the store did not answer; retry
 type ToolErrorInfo = { code: ToolErrorCode; retryable: boolean; positions?: number[] };
 
-/** The `{ isError: true }` envelope the other tools return, in one place; with a code, its machine-readable verdict rides `structuredContent` (SMD-1978). */
+/**
+ * The `{ isError: true }` envelope the write tools return, in one place; with a
+ * code, its machine-readable verdict rides `structuredContent` (SMD-1978), the
+ * words beside it as `text` — Claude Code, VS Code and Codex show the model the
+ * value alone when there is one (render.ts), and a refusal's words name which
+ * pointer or position to drop (SMD-2283 review pass 3).
+ */
 function toolError(text: string, info?: ToolErrorInfo) {
-  return { content: [{ type: "text" as const, text }], isError: true as const, ...(info ? { structuredContent: { ...info } } : {}) };
+  return { content: [{ type: "text" as const, text }], isError: true as const, ...(info ? { structuredContent: { text, ...info } } : {}) };
 }
 
 /**

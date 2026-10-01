@@ -423,21 +423,27 @@ function serverFacts(ctx: Ctx): ServerFacts {
  * half-open connection pins nothing. brainInfo never raises: a database that
  * cannot answer is a field of the record.
  *
- * Shared per store, not per core (review pass 2): the reads in flight are
- * keyed by the store reader a core was built over, so a second core in the
- * same process (the REST core beside the MCP one, SMD-2284) joins the first's
- * read rather than taking a pool connection of its own.
+ * Shared per store instance, not per core (review passes 2–3): the reads in
+ * flight are keyed by the store a core's reader resolves to, so a second core
+ * in the same process (the REST core beside the MCP one, SMD-2284) joins the
+ * first's read whatever reader it was handed — `db`, `() => db()` — rather
+ * than taking a pool connection of its own. A process has one environment, so
+ * the joined read's server facts are the joiner's too. A store that cannot be
+ * built has no instance to key on; its read runs alone, and the record says
+ * why the database could not answer.
  */
 const INFLIGHT = new WeakMap<object, Map<BrainInfoSurface, Promise<BrainInfo>>>();
 export function brainInfoReader(ctx: Ctx): (surface: BrainInfoSurface) => Promise<BrainInfo> {
-  const inflight = INFLIGHT.get(ctx.store) ?? new Map<BrainInfoSurface, Promise<BrainInfo>>();
-  INFLIGHT.set(ctx.store, inflight);
-  return (surface) => {
+  return async (surface) => {
     const { deadlineMs, opts } = SURFACES[surface];
     const read = () => readBrain(serverFacts(ctx), async (progress) => (await ctx.store()).databaseFacts(opts, progress), deadlineMs);
     // Not shared on Workers (the PostgREST store): its read is a refusal with no
     // I/O to share, and a promise from one request is not another's to await.
     if (storeKind(ctx.env()) !== "sql") return read();
+    const store = await ctx.store().catch(() => null);
+    if (!store) return read();
+    const inflight = INFLIGHT.get(store) ?? new Map<BrainInfoSurface, Promise<BrainInfo>>();
+    INFLIGHT.set(store, inflight);
     const shared = inflight.get(surface);
     if (shared) return shared;
     const answer = read().finally(() => { if (inflight.get(surface) === answer) inflight.delete(surface); });
