@@ -295,6 +295,9 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     // …under a model named in the environment run() is given: its banner names it, as the CLI's does.
     ["the gate's refusal under OB1_METADATA_MODEL from env", { url: AT }, ["--url", AT], { OB1_METADATA_MODEL: "env-model" }],
   ];
+  // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
+  const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
+  ok(boundCases === 5, `extract's bound cases all meet BOUND_WORDS (${boundCases} of 5)`);
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["extract-entities.ts", ...argv], env);
@@ -385,6 +388,9 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     // The banner on stdout, then the blanket gate (SMD-1903), under a judge model named in env.
     ["the egress gate's refusal under OB1_JUDGE_MODEL from env", { url: AT }, ["--url", AT], { OB1_JUDGE_MODEL: "env-judge" }],
   ];
+  // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
+  const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
+  ok(boundCases === 6, `consolidate's bound cases all meet BOUND_WORDS (${boundCases} of 6)`);
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["consolidate.ts", ...argv], env);
@@ -475,6 +481,9 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     // …under a model named in the environment run() is given: its key and banner name it, as the CLI's do.
     ["the gate's refusal under OB1_EMBEDDING_MODEL from env", { url: AT }, ["--url", AT], { OB1_EMBEDDING_MODEL: "  env-model ", OB1_EMBEDDING_DIM: "768" }],
   ];
+  // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
+  const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
+  ok(boundCases === 3, `reembed's bound cases all meet BOUND_WORDS (${boundCases} of 3)`);
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["reembed.ts", ...argv], env);

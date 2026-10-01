@@ -1287,7 +1287,7 @@ bun reembed.ts --url … --dry-run             # what a run would do; writes not
 bun reembed.ts --url … --job reembed:x@1024:ctx   # a backfill under the same model (keep the reembed: prefix — preflight reports by it)
 bun reembed.ts --url … --retry-failed        # failed rows back into the pool first
 bun reembed.ts --url … --retry-fallbacks     # …and the rows stored with a head window (below)
-#   --workers N (2; at most 2147483647, the pool's max)   --batch N (8; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
+#   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (8; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
 ```
 
 It reads the same variables the server does — model, width, provider URL and
@@ -1589,7 +1589,7 @@ bun extract-entities.ts --url … --retry-failed          # failed rows back int
 bun extract-entities.ts --url … --retry-partial         # rows extracted in part back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
 bun extract-entities.ts --url … --retry-left-out        # …only those with windows left out as malformed — after a change of model, kept to this pool with --job (below)
 OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
-#   --workers N (2; at most 2147483647, the pool's max)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
+#   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 #   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
 ```
@@ -2066,7 +2066,7 @@ bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "�
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
 #   --k N (3)  --min-sim F (0.6)  --min-confidence F (0.5)
-#   --workers N (2; at most 2147483647, the pool's max)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT; at most 9007199254740, a call signal's range)
+#   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT; at most 9007199254740, a call signal's range)
 bun consolidate.ts --url … --accept <id> --force            # a thought edited since judged, a stale row, or a lineage pair (070)
 ```
 

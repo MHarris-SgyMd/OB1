@@ -31,7 +31,7 @@
  *   bun db/reembed.ts --url … --accept-failed --all           # …every failed row under the job — said explicitly, since it hides an outage as well
  *   bun db/reembed.ts --url … --retire reembed:B@1024         # remove the record of a superseded pass (a switch abandoned or reverted)
  *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./reembed.ts" (SMD-2304)
- *   --workers N (2; at most 2147483647, the pool's max)   --batch N (8; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
+ *   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (8; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
  *
  * The model, width and provider come from the same variables the server reads —
  * OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM, OB1_EMBEDDING_DIMENSIONS,
