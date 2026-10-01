@@ -10689,7 +10689,11 @@ console.log("[63] the durable async job registry: jobs + prune_jobs (069, SMD-23
   // Seed one live row, one terminal aged past an hour, one terminal fresh.
   await db.query(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'running')`, [OWNER]);
   const [old] = await q<{ id: string }>(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'succeeded', now() - interval '2 hours') RETURNING id::text AS id`, [OWNER]);
-  const [fresh] = await q<{ id: string }>(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'failed', now()) RETURNING id::text AS id`, [OWNER]);
+  // ended_at a second in the past, not now(): prune_jobs' compare is a strict `ended_at < now()`, and PGlite's
+  // WASM clock is millisecond-resolution, so a `fresh` seeded at now() and pruned by prune_jobs(0) in the same
+  // millisecond read equal now() and deleted nothing (flaked 2 of 6 runs). A second back keeps prune_jobs(60)
+  // (within its window) and makes prune_jobs(0) delete it every time; a real terminal row ends before the scheduler's now() (SMD-2377).
+  const [fresh] = await q<{ id: string }>(`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan', $1, 'a', 'failed', now() - interval '1 second') RETURNING id::text AS id`, [OWNER]);
 
   // prune_jobs(60) drops the aged terminal row, keeps the fresh terminal and the live one.
   const [{ n: pruned }] = await q<{ n: number }>(`SELECT prune_jobs(60) AS n`);

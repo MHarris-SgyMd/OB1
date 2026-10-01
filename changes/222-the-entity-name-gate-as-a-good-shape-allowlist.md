@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2300]
-migrations: ["065"]
----
-
-## Changelog
-
-Migration 065 widens the entity name gate (migration 056's `entity_type_gate`) from a person/place shape-corrector into a good-shape allowlist: a high-precision identifier shape now overrides whatever type the model gave, for any type. A three-or-more-digit ticket id becomes a `project`, a package or path (`db/x.ts`, `origin/main`) or a host:port a `tool`, and snake_case a `tool` for every type but a person (whose handle takes it). The looser ticket id, the URL and the dotted host keep the earlier person/place scope, so a `GPT-4` or a `Nature.com` the model called a tool or an organization is left as typed. The migration re-runs `apply_entity_type_gate()` over the rows already written, re-typing the identifiers the extractor had stored as `topic` or `project`. `server-portable/entity-gate.ts` is the twin, held to the SQL by test-schema [52] (SMD-2300).
-
-## FORK
-
-The entity name gate as a good-shape allowlist: a high-precision identifier shape (migration 065) overrides the model's type for any type, not just a person or place (SMD-2300)
+# 222. The entity name gate as a good-shape allowlist: a high-precision identifier shape (migration 065) overrides the model's type for any type, not just a person or place (SMD-2300)
 
 **Why.** The 2026-09-27 decider-vs-live-graph run measured the cost of SMD-1935's narrow scope. The generative extractor typed `SMD-1549` and `worker_status` a `topic`, not a `person` or `place`, so the gate never reached them; and a Jev-class typed-decision model is a coin-flip on those shapes (it rejected eight `SMD-####` and accepted ten of the same shape). An identifier is a shape a regex recognises with certainty, so it should not depend on either model getting the type right.
 

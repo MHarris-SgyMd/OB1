@@ -1,18 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-2285]
-migrations: []
----
-
-## Changelog
-
-Added the authorization server's proof-of-concept kit, `evals/eval-auth.ts` over `evals/auth/`: oidc-provider 9.12.2 on Bun behind a stand-in proxy with its issuer at `/auth`, beside stand-in MCP servers and REST cores for two tiers, verified against the ticket's criteria 1–5 (discovery on the routed paths and Claude Code's bare one, registration from the MCP SDK v2 client by metadata document and by DCR, PKCE, client credentials and refresh, one audience per token, and token exchange that keeps the subject and names the MCP service as `act`) — 28 of 28 checks, twice on one stack, held by a new CI job.
-The kit found that oidc-provider's own SSRF protection does not load under Bun (it connected to a mesh host four times), so the server fetches through a guard of its own that refuses mesh, private and loopback addresses before connecting; and that the library's defaults and a first consent page opened more than the brain needs — anyone could self-register for a working `/mcp` token with no user, a request naming no resource got a token with no audience, implicit, DPoP, userinfo, logout and PAR were on, endpoints followed the request's `Host`, a token for `openid` alone reached a resource with no scope, and consent named a client by its self-chosen name and a custom-scheme redirect by its host — each now closed. Eval-only: nothing in `deploy/` changes (SMD-2285).
-
-## FORK
-
-The authorization server's proof of concept: oidc-provider on Bun proves criteria 1–5. Its outbound fetches go through a guard of our own, because the library's SSRF protection does not load under Bun, and the library's open defaults are closed (SMD-2285)
+# 242. The authorization server's proof of concept: oidc-provider on Bun proves criteria 1–5. Its outbound fetches go through a guard of our own, because the library's SSRF protection does not load under Bun, and the library's open defaults are closed (SMD-2285)
 
 **What it adds (eval-only; no schema, contract or deploy change).**
 

@@ -1,17 +1,4 @@
----
-type: security
-bump: minor
-tickets: [SMD-2289]
-migrations: []
----
-
-## Changelog
-
-The import runner's emitters get no network. Rules keyed on the emitter uids, set as the runner's container starts and then beyond its reach, refuse every packet an emitter sends: DNS, loopback, the host's Ollama, Postgres, n8n, the internet. A live-API pipeline names its hosts in `pipelines.json` (`network`), and its emitter connects to those alone, through a proxy the runner keeps for it that tunnels TLS naming them (the ClientHello's server name, no encrypted inner hello) and refuses anything else; the run's report lists what it refused. The runner refuses to start if an emitter uid can reach a port of its on loopback, asked before it listens, or while it holds the capability to change the rules (SMD-2289). The runner also reaches Postgres as a role of its own, `ob1_orchestration_runner`, not the superuser: a LOGIN role that owns nothing and holds the grant groups its ingester and reembed run (capture, worker, structure, extraction), made on every start by a one-shot (`db/login-role.ts`, then `migrate.ts --grant --groups --exact`) from `OB1_RUNNER_DB_PASSWORD`, which `provision.ts --init` writes. Its environment holds only the knobs those two read. `migrate.ts --grant` gains `--groups`, and the worker group gains `SELECT` on the migrator's ledger, which reembed reads on every start and without which no `--grant` role could run it.
-
-## FORK
-
-The import runner's hardening — an emitter has no network unless its pipeline names a host, and then only that host through the runner's proxy; and the runner writes as a database role of its own (SMD-2289)
+# 237. The import runner's hardening — an emitter has no network unless its pipeline names a host, and then only that host through the runner's proxy; and the runner writes as a database role of its own (SMD-2289)
 
 **What changed.** SMD-2212's review pass 7 measured an emitter reaching the
 host's Ollama (admin API and all), Postgres, n8n, every `/health` and a VPS's

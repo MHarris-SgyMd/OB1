@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2315 assertions: 2315 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy-one (71) migrations applied, and
+`bun test-schema.ts` prints `2317 assertions: 2317 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-two (72) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -222,7 +222,8 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.0.0+upstream.9543c29`, the first release (`001..048`), and 051 writes
 `1.1.0+upstream.9543c29`, the second (`049..051`), and 057 writes
 `1.2.0+upstream.9543c29`, the third (`052..057`), and 062 writes
-`1.3.0+upstream.9543c29`, the fourth (`058..062`). `preflight` prints the
+`1.3.0+upstream.9543c29`, the fourth (`058..062`), and 072 writes
+`1.4.0+upstream.9543c29`, the fifth (`063..072`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -3136,12 +3137,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2315 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1002 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2317 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1019 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
-bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts) import with no side effect, refuse through run() — no database
+bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
@@ -3191,9 +3192,9 @@ server's address is not compared with loopback, because through a container's
 published port it is the container's. `hnsw-graph.ts`,
 `graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
 after connecting and return it from `closeThenExit`, which closes the pool and
-flushes their output first, as `migrate.ts` and `extract-entities.ts` do with
-their `run()`'s code (consolidate.ts and reembed.ts still close before each
-exit themselves until they are engines, SMD-2304).
+flushes their output first, as `migrate.ts`, `extract-entities.ts` and
+`consolidate.ts` do with their `run()`'s code (reembed.ts still closes before
+each exit itself until it is an engine, SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks
 that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.
@@ -3235,7 +3236,21 @@ and the thought in hand is abandoned — nothing written or released for it.
 The CLI installs `lease.ts`'s `stopOnSignals` there, which exits 130 when that
 release settles or after 3 s, and takes it off when run() settles — a signal
 after that ends the process as one before the pass does.
-Consolidation and re-embedding become engines next, one PR each.
+`consolidate.ts` is the third (SMD-2304 PR 3), on the same shape: `run({ url,
+sql, env, workers, batch, ttl, heartbeat, timeout, k, minSim, minConfidence,
+limit, follow, stale, dump, list, accept, reject, direction, note, force,
+status, dryRun, retryFailed, writer, signal, onPass })`, the numbers held to
+the CLI's rules and order (`cli.ts`'s `numberProblem` judges an in-process
+number by value, in the scanner's words), and the review flags' own rules
+— which combine, a --list word, a proposal id, the pass's note marker — in
+`reviewProblem`, an exported pure function the CLI and run() both refuse
+through. `list` and `stale` only read, and read on under an aborted signal,
+as `--status` does; a decision (`accept`, `reject`) writes, and stops under
+one as a run does. A decision, like a run, resolves the worker key, so with
+OB1_WORKER_KEY set it needs `url` beside a caller's `sql`. The judge
+takes an AbortSignal, so the hard stop also aborts the call in hand: run()
+returns at once in-process, where extract's waits for its call. Re-embedding
+becomes an engine next.
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket
@@ -3254,7 +3269,7 @@ classifies a provider error into thought / transient / fatal for both workers
 `reembed.ts` and `ingest-records.ts` build their audit actors through
 `actorPayload` rather than by hand. The module returns its outcome rather than
 exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s
-now, `consolidate.ts`'s and `reembed.ts`'s once they are engines (SMD-2304).
+and `consolidate.ts`'s now, `reembed.ts`'s once it is an engine (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
 the `classifyError` rules and the identity cases that refuse before connecting;
 `test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that

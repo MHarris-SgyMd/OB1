@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2323]
-migrations: []
----
-
-## Changelog
-
-Every capture is now stamped with a `metadata.genre` — the KIND of content the thought is (research-paper, project-issue, technical-doc, work-log, blog-article, recipe, or other), beside the `source` (capture channel) and `type` (capture-kind) it already carried. A deterministic pre-signal reads it off the metadata for free (a `source:linear` row is a project-issue; an arXiv id or an author list is a research paper), and, only when the typed-decision tier is configured (`OB1_JEV_BASE_URL`), a `jevChoose` over the genre vocabulary decides the rest from the content. With the tier unset the classifier is pre-signal-only and falls back to `other`, so a capture pays nothing for it. Linear-synced rows carry the genre as a facet; a sync patches it onto each ticket's row the next time that ticket is re-processed, and a full sync backfills them all at once. Filter on it with the existing `search_thoughts` metadata filter (`{"genre": "..."}`, jsonb containment) — no schema change (SMD-2323).
-
-## FORK
-
-Thought genre at capture — a `metadata.genre` facet: a deterministic pre-signal, then the decider (SMD-2323)
+# 234. Thought genre at capture — a `metadata.genre` facet: a deterministic pre-signal, then the decider (SMD-2323)
 
 **What it adds (no schema, contract or default change; the metadata is additive jsonb).**
 
