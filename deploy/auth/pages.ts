@@ -1,10 +1,11 @@
 /**
- * pages.ts — the sign-in and consent pages both candidates render (SMD-2285).
+ * pages.ts — the authorization server's sign-in and consent pages (SMD-2285).
  *
- * Neither library ships pages; each hands its server an interaction to show.
- * The two servers render the same HTML from here, so the verifier's Browser
- * (flows.ts) drives either with the same forms, and a check on what the
- * operator is shown means the same thing for both.
+ * oidc-provider ships no pages; it hands the server an interaction to show.
+ * The proof of concept's runner-up (evals/auth/better-auth.ts) renders the
+ * same HTML from here, so the verifier's Browser (evals/auth/flows.ts) drives
+ * either candidate with the same forms, and a check on what the operator is
+ * shown means the same thing for both.
  *
  * The page names what the server checked, not what the client calls itself:
  * the `client_id` (for a metadata document, its host), where the code goes (an

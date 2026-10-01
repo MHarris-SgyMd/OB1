@@ -9,7 +9,7 @@
 
 services:
   auth:
-    build: { context: ., dockerfile: Dockerfile }
+    build: { context: ../.., dockerfile: evals/auth/Dockerfile }
     image: ob1-auth-poc:local
     pull_policy: build
     restart: "no"

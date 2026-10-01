@@ -64,6 +64,12 @@ db/*.ts
 !db/worker-bootstrap.ts
 !db/lease.ts
 !evals/linear-corpus.ts
+# The authorization server's proof of concept (evals/auth/Dockerfile, SMD-2285)
+# builds from this root too, so its image holds the deploy's modules beside its
+# own (deploy/ is in the context already).
+!evals/auth/*.ts
+!evals/auth/package.json
+!evals/auth/bun.lock
 db/*.sh
 db/package.json
 db/bun.lock

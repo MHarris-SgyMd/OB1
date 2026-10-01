@@ -4,8 +4,8 @@
  *
  *   bun eval-auth.ts --up <candidate>       # the stack, built from this checkout
  *   bun eval-auth.ts --verify <candidate> [--json]
- *   bun eval-auth.ts --down <candidate>     # removes the project's containers, networks and image
- *   bun eval-auth.ts --self-check           # the fetch guard, route table and policy; no stack (CI)
+ *   bun eval-auth.ts --down <candidate>     # removes the project's containers, networks and images
+ *   bun eval-auth.ts --self-check           # the fetch guard, route table, policy and the deploy's settings; no stack (CI)
  *
  * <candidate> is `oidc-provider` (the winner) or `better-auth` (the runner-up),
  * one at a time: both publish the same port. The stack is evals/auth/:
@@ -86,13 +86,14 @@
  * Needs docker (or podman) compose and openssl.
  */
 import { generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { discoverAuthorizationServerMetadata, discoverOAuthProtectedResourceMetadata } from "@modelcontextprotocol/client";
 import { parseEnv } from "../db/env.ts";
+import { layoutFromEnv } from "../deploy/auth/layout.ts";
 import { guardProbes } from "./auth/fetch-guard-probes.ts";
 import { Browser, claimsOf, pkce, tampered, tokenRequest, type Claims, type TokenReply } from "./auth/flows.ts";
-import { ACCESS_TOKEN_TYPE, INTERNAL, layout, NATIVE_REDIRECT, TOKEN_EXCHANGE, type Layout } from "./auth/policy.ts";
+import { ACCESS_TOKEN_TYPE, INTERNAL, layout, NATIVE_REDIRECT, TIERS, TOKEN_EXCHANGE, type Layout } from "./auth/policy.ts";
 import { route } from "./auth/proxy.ts";
 import { sdkFlow, type SdkRun } from "./auth/sdk-client.ts";
 import { CANDIDATES, compose, docker, ENV_FILE, ensureCert, ensureEnv, logsFromNow, type Candidate } from "./auth/stack.ts";
@@ -135,8 +136,21 @@ async function up(candidate: Candidate) {
   for (const s of steps) console.log(`  ${s}`);
 }
 
-function down(candidate: Candidate) {
-  // `--rmi all`: the image carries a custom tag, which `--rmi local` leaves behind.
+/**
+ * The env file, brought up to date before a verb that reads it through compose:
+ * an evals/auth/.env written before the layout settings existed fails the
+ * winner's overlay (`${OB1_AUTH_TIERS:?}`), so `--down` and `--verify` would
+ * fail until an `--up`. Without a file there is no stack: say so, rather than
+ * write fresh secrets nothing runs with.
+ */
+async function currentEnv(): Promise<Record<string, string>> {
+  if (!existsSync(ENV_FILE)) throw new Error(`${ENV_FILE} does not exist: run --up first`);
+  return ensureEnv();
+}
+
+async function down(candidate: Candidate) {
+  await currentEnv();
+  // `--rmi all`: the images carry custom tags, which `--rmi local` leaves behind.
   const r = compose(candidate, ["down", "-v", "--rmi", "all", "--remove-orphans"]);
   if (r.code !== 0) throw new Error(`compose down failed:\n${r.err.trim()}`);
   console.log(`  removed ob1-auth-${candidate} (evals/auth/.env and .poc/ kept; delete them for new secrets)`);
@@ -887,7 +901,7 @@ async function exchange(c: Ctx, cimd: SdkRun | undefined, guiToken: string | und
 }
 
 async function verify(candidate: Candidate, json: boolean): Promise<number> {
-  const env = parseEnv(readFileSync(ENV_FILE, "utf8"));
+  const env = await currentEnv();
   const L = layout(env.OB1_PUBLIC_ORIGIN);
   const t0 = Date.now();
   const runLog = logsFromNow(candidate, ["auth", "cimd", "bait"]);
@@ -943,6 +957,73 @@ function selfCheck(): number {
   expect("the MCP service asks for nothing directly", L.allowedResources("mcp").length === 0);
   expect("the GUI asks for the stable REST core only", JSON.stringify(L.allowedResources("gui")) === JSON.stringify([L.api("")]));
   expect("every resource is distinct", new Set(L.resources).size === L.resources.length && L.resources.length === 4);
+  // TIERS (the stand-ins' and the proxy's list) and POC_ENV (the server's) name the same tiers.
+  expect("the POC's tier list is the layout's", JSON.stringify(L.resources) === JSON.stringify([...TIERS.map(L.mcp), ...TIERS.map(L.api)]));
+
+  // The deploy's two settings (deploy/auth/layout.ts): unset or blank is the
+  // stable tier alone, any whitespace separates, and each bad entry stops the
+  // server with its own reason (matched, so another check's throw is no pass).
+  const O = "https://brain.example";
+  const keys = (l: Layout | undefined) => JSON.stringify(Object.keys(l?.clients ?? {}));
+  // A layout the settings should give; a refusal is a named failure, not a crash.
+  const accepted = (what: string, env: Record<string, string>): Layout | undefined => {
+    try {
+      return layoutFromEnv({ OB1_PUBLIC_ORIGIN: O, ...env });
+    } catch (e) {
+      expect(`the deploy's settings accept ${what} (refused: ${(e as Error).message})`, false);
+      return undefined;
+    }
+  };
+  const D = accepted("no settings", {});
+  expect("unset settings: the stable tier's two resources, the GUI and one exchange client", JSON.stringify(D?.resources) === JSON.stringify([`${O}/mcp`, `${O}/api`]) && keys(D) === JSON.stringify(["gui", "mcp"]));
+  const B = accepted("blank settings", { OB1_AUTH_TIERS: " ", OB1_AUTH_SERVICES: "" });
+  expect("blank settings (compose's unset ${X:-}) are the unset ones", !!B && JSON.stringify(B.resources) === JSON.stringify(D?.resources) && keys(B) === keys(D));
+  const W = accepted("spaced tiers and whitespace-separated services", { OB1_AUTH_TIERS: " stable , working ", OB1_AUTH_SERVICES: "\n digest=brain:read+brain:capture@stable,working\trunner=brain:capture@stable\n" });
+  expect("tier names are trimmed, and services split on any whitespace", keys(W) === JSON.stringify(["gui", "mcp", "mcp-working", "digest", "runner"]));
+  const ex = W?.clients["mcp-working"];
+  expect("a tier's exchange client trades its own /mcp for its own REST core", ex?.kind === "exchange" && ex.from === `${O}/working/mcp` && ex.to === `${O}/working/api`);
+  const svc = W?.clients.digest;
+  expect("a service gets its scopes and its tiers' REST cores", svc?.kind === "service" && svc.scope === "brain:read brain:capture" && JSON.stringify(svc.resources) === JSON.stringify([`${O}/api`, `${O}/working/api`]));
+  expect("the GUI stays the GUI beside services", W?.clients.gui?.kind === "gui");
+  const id64 = `r${"0-9".repeat(20)}abz`;
+  const E = accepted("the id rule's edges", { OB1_AUTH_SERVICES: `${id64}=brain:read@stable a1=brain:read@stable q=brain:read@stable` });
+  expect("a 64-character id, an id ending in a digit and a one-letter id are accepted", id64.length === 64 && !!E && Object.hasOwn(E.clients, id64) && Object.hasOwn(E.clients, "a1") && Object.hasOwn(E.clients, "q"));
+  const refused: [string, Record<string, string>, RegExp][] = [
+    ["an unknown tier", { OB1_AUTH_TIERS: "stable,staging" }, /names no such tier: staging/],
+    ["tiers without stable", { OB1_AUTH_TIERS: "canary" }, /must include stable/],
+    ["an empty tier", { OB1_AUTH_TIERS: "stable," }, /OB1_AUTH_TIERS has an empty entry/],
+    ["a repeated tier", { OB1_AUTH_TIERS: "stable,canary,canary" }, /OB1_AUTH_TIERS lists canary twice/],
+    ["a malformed service", { OB1_AUTH_SERVICES: "runner:brain:capture" }, /is not <id>=<scope>/],
+    ["a malformed id", { OB1_AUTH_SERVICES: "Runner_1=brain:read@stable" }, /"Runner_1" is not a service id/],
+    ["an id ending in a hyphen", { OB1_AUTH_SERVICES: "runner-=brain:read@stable" }, /"runner-" is not a service id/],
+    ["an id over 64 characters", { OB1_AUTH_SERVICES: `${"r".repeat(65)}=brain:read@stable` }, /is not a service id/],
+    ["the GUI's id", { OB1_AUTH_SERVICES: "gui=brain:write@stable" }, /"gui" is a reserved client id/],
+    ["the stable MCP server's id", { OB1_AUTH_SERVICES: "mcp=brain:write@stable" }, /"mcp" is a reserved client id/],
+    ["a tier MCP server's id", { OB1_AUTH_SERVICES: "mcp-x=brain:read@stable" }, /"mcp-x" is a reserved client id/],
+    ["a repeated id", { OB1_AUTH_SERVICES: "runner=brain:read@stable runner=brain:capture@stable" }, /"runner" is listed twice/],
+    ["an unknown scope", { OB1_AUTH_SERVICES: "runner=brain:admin@stable" }, /asks for unknown scope brain:admin/],
+    ["an empty scope", { OB1_AUTH_SERVICES: "runner=brain:read+@stable" }, /"runner"'s scopes has an empty entry/],
+    ["a repeated scope", { OB1_AUTH_SERVICES: "runner=brain:read+brain:read@stable" }, /"runner"'s scopes lists brain:read twice/],
+    ["a tier the tiers do not list", { OB1_AUTH_SERVICES: "runner=brain:capture@canary" }, /names a tier OB1_AUTH_TIERS does not: canary/],
+    ["an empty service tier", { OB1_AUTH_SERVICES: "runner=brain:capture@stable," }, /"runner"'s tiers has an empty entry/],
+    ["a repeated service tier", { OB1_AUTH_SERVICES: "runner=brain:capture@stable,stable" }, /"runner"'s tiers lists stable twice/],
+  ];
+  for (const [what, env, why] of refused) {
+    let said = "(accepted)";
+    try {
+      layoutFromEnv({ OB1_PUBLIC_ORIGIN: O, ...env });
+    } catch (e) {
+      said = (e as Error).message;
+    }
+    expect(`the deploy's settings refuse ${what} (${said})`, why.test(said));
+  }
+  let noOrigin = "(accepted)";
+  try {
+    layoutFromEnv({});
+  } catch (e) {
+    noOrigin = (e as Error).message;
+  }
+  expect(`the deploy's settings refuse a missing origin (${noOrigin})`, /OB1_PUBLIC_ORIGIN is not set/.test(noOrigin));
 
   if (failures.length) {
     for (const f of failures) console.error(`FAIL ${f}`);
@@ -961,5 +1042,5 @@ const candidate = args[1] as Candidate;
 if (!["--up", "--verify", "--down"].includes(verb)) usage("unknown verb");
 if (!CANDIDATES.includes(candidate)) usage(`unknown candidate ${candidate ?? "(none)"}`);
 if (verb === "--up") await up(candidate);
-else if (verb === "--down") down(candidate);
+else if (verb === "--down") await down(candidate);
 else process.exit(await verify(candidate, args.includes("--json")));

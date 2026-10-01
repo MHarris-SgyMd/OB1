@@ -1,17 +1,20 @@
 /**
- * oidc-provider.ts — the winning candidate (SMD-2285 decision 1), as its own
- * small Bun service: oidc-provider 9.12.2 served through node:http, with its
- * issuer at `<origin>/auth` (criterion 5).
+ * server.ts — the brain's authorization server (SMD-2285, ADR decision 13): a
+ * small Bun service of our own around oidc-provider 9.12.2, served through
+ * node:http, with its issuer at `<origin>/auth`. Its resources and clients
+ * come from layout.ts, read from the environment (OB1_PUBLIC_ORIGIN,
+ * OB1_AUTH_TIERS, OB1_AUTH_SERVICES). It won the proof of concept, which runs
+ * this file's image: `bun evals/eval-auth.ts --verify oidc-provider`.
  *
  * What is ours, beside the library's configuration:
- * - the token-exchange grant (RFC 8693, criterion 1). Only an `exchange` client
- *   from policy.ts may use it. The subject token must be an access token this
+ * - the token-exchange grant (RFC 8693). Only an `exchange` client from
+ *   layout.ts may use it. The subject token must be an access token this
  *   server signed for that client's MCP resource (so never an exchanged one,
  *   whose audience is a REST core); the result is a token for the same tier's
  *   REST core with the same subject,
  *   no wider scope, no later expiry, and `act: { sub: <the MCP client> }`;
- * - `getResourceServerInfo`, which the library says MUST be replaced (criterion
- *   2): a resource outside the layout, or outside the client's allowance, is
+ * - `getResourceServerInfo`, which the library says MUST be replaced: a
+ *   resource outside the layout, or outside the client's allowance, is
  *   `invalid_target`. A request that names no resource is refused before
  *   anything is issued (`defaultResource`), so every access token the server
  *   hands out is a JWT for exactly one audience;
@@ -22,9 +25,10 @@
  *   spoofed `Host` cannot move the endpoints the metadata names;
  * - the `fetch` option (fetch-guard.ts): the library's own SSRF protection
  *   does not load under Bun;
- * - sign-in and consent pages. The POC signs the operator in by password,
- *   checked against an argon2id hash from the environment (decision 15's
- *   fallback). Passkeys and the loopback break-glass belong to the deploy.
+ * - sign-in and consent pages. The operator signs in by password, checked
+ *   against an argon2id hash from the environment (decision 15's fallback);
+ *   passkeys wait for the public origin (SMD-2382), and the loopback
+ *   break-glass is the GUI's (SMD-2286).
  *   Consent is asked of every client, first-party ones included, and names
  *   what the server has checked, not what the client calls itself: the
  *   `client_id` (for a metadata document, its host); where the code goes (an
@@ -49,15 +53,15 @@
  *   OpenID document, whose `issuer` is `<origin>/auth`;
  * - `/healthz`, for compose.
  *
- * State is the library's in-memory adapter: the POC proves the protocol, and
- * storage in its own `ob1_auth` database is the deploy's (Work step 3).
+ * State is the library's in-memory adapter, so a restart forgets every grant,
+ * session and registered client; a store that survives one is next.
  */
 import http from "node:http";
 import Provider, { errors, type KoaContextWithOIDC } from "oidc-provider";
 import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
-import { ACCESS_TOKEN_TYPE, layout, originFromEnv, SCOPES, TOKEN_EXCHANGE } from "./policy.ts";
+import { ACCESS_TOKEN_TYPE, layoutFromEnv, SCOPES, secretName, TOKEN_EXCHANGE } from "./layout.ts";
 
 function need(name: string): string {
   const v = process.env[name];
@@ -65,7 +69,7 @@ function need(name: string): string {
   return v;
 }
 
-const L = layout(originFromEnv());
+const L = layoutFromEnv();
 const OPERATOR = "operator";
 const ACCESS_TTL = 600;
 const PASSWORD_HASH = need("OB1_AUTH_OPERATOR_PASSWORD_HASH");
@@ -73,13 +77,11 @@ const jwks = JSON.parse(need("OB1_AUTH_JWKS")) as { keys: JWK[] };
 /** The public half of the signing keys, to verify a subject token without a network hop. */
 const ownKeys = createLocalJWKSet({ keys: jwks.keys.map(({ d, p, q, dp, dq, qi, ...pub }) => pub) });
 
-const secretOf = (id: string) => need(`OB1_AUTH_SECRET_${id.toUpperCase().replace(/-/g, "_")}`);
-
 /** The only grant types a client without a policy entry (DCR, CIMD) may register. */
 const THIRD_PARTY_GRANTS = new Set(["authorization_code", "refresh_token"]);
 
 const clients = Object.entries(L.clients).map(([client_id, p]) => {
-  const base = { client_id, client_secret: secretOf(client_id), token_endpoint_auth_method: "client_secret_basic" };
+  const base = { client_id, client_secret: need(secretName(client_id)), token_endpoint_auth_method: "client_secret_basic" };
   if (p.kind === "gui") return { ...base, grant_types: ["authorization_code"], response_types: ["code"], redirect_uris: [p.redirect] };
   if (p.kind === "service") return { ...base, grant_types: ["client_credentials"], response_types: [], redirect_uris: [], scope: p.scope };
   return { ...base, grant_types: [TOKEN_EXCHANGE], response_types: [], redirect_uris: [] };

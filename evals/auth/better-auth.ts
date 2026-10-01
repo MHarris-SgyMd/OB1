@@ -74,9 +74,9 @@ import { jwt } from "better-auth/plugins";
 import { oauthProvider, extendOAuthProvider, oauthProviderOpenIdConfigMetadata, type OAuthExtensionGrantHandler } from "@better-auth/oauth-provider";
 import { cimd } from "@better-auth/cimd";
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import { guardedFetch } from "./fetch-guard.ts";
-import { consentPage, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
-import { ACCESS_TOKEN_TYPE, layout, originFromEnv, SCOPES, TOKEN_EXCHANGE } from "./policy.ts";
+import { guardedFetch } from "../../deploy/auth/fetch-guard.ts";
+import { consentPage, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "../../deploy/auth/pages.ts";
+import { ACCESS_TOKEN_TYPE, layout, originFromEnv, SCOPES, secretName, TOKEN_EXCHANGE } from "./policy.ts";
 
 function need(name: string): string {
   const v = process.env[name];
@@ -103,7 +103,7 @@ function thirdPartyRefusal(meta: Record<string, unknown>): string | null {
   if (meta.backchannel_logout_uri !== undefined) return "backchannel_logout_uri is not accepted: the server would fetch it";
   return null;
 }
-const secretOf = (id: string) => need(`OB1_AUTH_SECRET_${id.toUpperCase().replace(/-/g, "_")}`);
+const secretOf = (id: string) => need(secretName(id));
 
 /** A refusal, with the POC's detail when the switch is on. */
 function refuse(error: string, description: string, detail?: string): never {

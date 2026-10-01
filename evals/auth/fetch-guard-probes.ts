@@ -7,10 +7,11 @@
  * `localhost`, the IPv6 loopback and the rest as inputs to refuse. That is not
  * db/connect.ts's question (is this database host on this machine), which
  * db/test-connect.ts holds to one spelling across db/ and evals/'s top level;
- * the guard and these probes live in evals/auth/ for that reason.
+ * the guard (deploy/auth/) and these probes (evals/auth/) sit outside that
+ * census for that reason.
  */
 import type { LookupAddress } from "node:dns";
-import { guardedLookup, refusedName, refusedUrl, specialUse } from "./fetch-guard.ts";
+import { guardedLookup, refusedName, refusedUrl, specialUse } from "../../deploy/auth/fetch-guard.ts";
 
 export function guardProbes(expect: (what: string, ok: boolean) => void): void {
   const special = ["0.1.2.3", "10.0.0.1", "100.64.0.1", "100.127.255.254", "127.0.0.1", "169.254.169.254", "172.16.0.1", "172.31.255.255", "192.168.1.1", "192.0.2.1", "198.18.0.1", "224.0.0.1", "255.255.255.255",

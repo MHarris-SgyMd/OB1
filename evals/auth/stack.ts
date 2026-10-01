@@ -3,16 +3,20 @@
  *
  * One compose project per candidate, `ob1-auth-<candidate>`: compose.yaml plus
  * compose.<candidate>.yaml, so `--down` removes its containers, networks and
- * image and nothing else. compose runs with the orchestration kit's
- * allowlisted environment (evals/orchestration/stack.ts `run`), so a dogfood
- * deploy/.env on the search path reaches nothing here.
+ * images (the kit's, and for the winner the deploy's image under its POC tag)
+ * and nothing else. compose runs with the orchestration kit's allowlisted
+ * environment (evals/orchestration/stack.ts `run`), so a dogfood deploy/.env
+ * on the search path reaches nothing here.
  *
  * evals/auth/.env (gitignored, `.env` at any depth) is written once and reused:
- * the origin and its port, the signing key (one P-256 JWK), the cookie keys,
- * each static client's secret, and the operator's password beside its argon2id
- * hash. The verifier reads the password; the server sees only the hash. JSON
- * and hash values are single-quoted, so compose does not read their `$`s as
- * variables. The certificate cimd.test serves is written to evals/auth/.poc/
+ * the origin and its port, the deploy's layout settings (policy.ts POC_ENV),
+ * the signing key (one P-256 JWK), the cookie keys, each static client's
+ * secret, and the operator's password beside its argon2id hash. The verifier
+ * reads the password; the server sees only the hash. The layout settings are
+ * rewritten to POC_ENV on every `--up`: the winner's container reads them from
+ * this file, while the verifier and the stand-ins read policy.ts, and the two
+ * must not disagree. JSON, hash and setting values are single-quoted, so
+ * compose does not read their `$`s as variables. The certificate cimd.test serves is written to evals/auth/.poc/
  * (gitignored) and trusted by the server alone.
  */
 import { generateKeyPairSync, randomBytes } from "node:crypto";
@@ -21,7 +25,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "../../db/env.ts";
 import { run, type Run } from "../orchestration/stack.ts";
-import { layout } from "./policy.ts";
+import { layout, POC_ENV, secretName } from "./policy.ts";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 export const ENV_FILE = join(HERE, ".env");
@@ -34,23 +38,40 @@ const DEFAULT_PORT = "8020";
 export async function ensureEnv(): Promise<Record<string, string>> {
   const hex = (n: number) => randomBytes(n).toString("hex");
   if (existsSync(ENV_FILE)) {
-    // A client added to policy.ts since the file was written gets its secret appended; nothing else is rewritten.
-    const env = parseEnv(readFileSync(ENV_FILE, "utf8"));
-    const missing = Object.keys(layout(env.OB1_PUBLIC_ORIGIN ?? `http://localhost:${DEFAULT_PORT}`).clients)
-      .map((id) => `OB1_AUTH_SECRET_${id.toUpperCase().replace(/-/g, "_")}`)
-      .filter((k) => !env[k]);
-    if (missing.length) writeFileSync(ENV_FILE, readFileSync(ENV_FILE, "utf8") + missing.map((k) => `${k}=${hex(24)}\n`).join(""), { mode: 0o600 });
+    // The layout settings are set to POC_ENV's values, whatever the file held:
+    // every line parseEnv would read as one of them goes, however it is spelled
+    // (`export `, spaces around `=`). A client added to policy.ts since the file
+    // was written gets its secret appended. Nothing else is rewritten.
+    const text = readFileSync(ENV_FILE, "utf8");
+    const env = parseEnv(text);
+    const stale = Object.entries(POC_ENV).some(([k, v]) => env[k] !== v);
+    const keyOf = (raw: string) => {
+      const line = raw.trim();
+      const body = line.startsWith("export ") ? line.slice(7).trim() : line;
+      const eq = body.indexOf("=");
+      return eq > 0 ? body.slice(0, eq).trim() : "";
+    };
+    const body = stale ? text.split(/\r?\n/).filter((line) => !Object.hasOwn(POC_ENV, keyOf(line))).join("\n") : text;
+    // Whatever is appended starts on a line of its own.
+    const kept = body.replace(/(\r?\n)*$/, "\n");
+    const settings = stale ? Object.entries(POC_ENV).map(([k, v]) => `${k}='${v}'\n`) : [];
+    const secrets = Object.keys(layout(env.OB1_PUBLIC_ORIGIN ?? `http://localhost:${DEFAULT_PORT}`).clients)
+      .map(secretName)
+      .filter((k) => !env[k])
+      .map((k) => `${k}=${hex(24)}\n`);
+    if (settings.length || secrets.length) writeFileSync(ENV_FILE, kept + [...settings, ...secrets].join(""), { mode: 0o600 });
     return parseEnv(readFileSync(ENV_FILE, "utf8"));
   }
   const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const jwk = { ...privateKey.export({ format: "jwk" }), kid: `poc-${hex(4)}`, alg: "ES256", use: "sig" };
   const password = `Poc-${hex(12)}`;
   const L = layout(`http://localhost:${DEFAULT_PORT}`);
-  const secrets = Object.keys(L.clients).map((id) => `OB1_AUTH_SECRET_${id.toUpperCase().replace(/-/g, "_")}=${hex(24)}`);
+  const secrets = Object.keys(L.clients).map((id) => `${secretName(id)}=${hex(24)}`);
   const lines = [
     "# SMD-2285 authorization-server POC. Generated by eval-auth.ts --up; gitignored.",
     `AUTH_POC_PORT=${DEFAULT_PORT}`,
     `OB1_PUBLIC_ORIGIN=${L.origin}`,
+    ...Object.entries(POC_ENV).map(([k, v]) => `${k}='${v}'`),
     `OB1_AUTH_JWKS='${JSON.stringify({ keys: [jwk] })}'`,
     `OB1_AUTH_COOKIE_KEYS=${hex(32)},${hex(32)}`,
     `OB1_AUTH_OPERATOR_PASSWORD=${password}`,
