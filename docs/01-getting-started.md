@@ -24,6 +24,8 @@ You'll generate a password, an access key, and a few URLs, and you'll need them 
 > [!CAUTION]
 > Open a text file now and keep it open. Every time this guide says **save this**, paste the value there. The access key in particular **cannot be recovered** once it scrolls off your screen — the server keeps only its hash.
 
+Copy the block below into that file. It is the whole tracker; there is no spreadsheet version to download.
+
 ```text
 OPEN BRAIN -- CREDENTIAL TRACKER
 --------------------------------------
