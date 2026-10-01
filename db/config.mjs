@@ -774,6 +774,28 @@ export const EMBEDDING_DIMENSIONS = resolveEmbeddingDimensions(
 );
 
 /**
+ * EMBEDDING_MODEL, EMBEDDING_DIM and EMBEDDING_DIMENSIONS read from any
+ * environment record by the same rules (each value trimmed, an empty one
+ * unset), where the constants read the environment this module was imported
+ * under. db/reembed.ts's run() reads a caller's `env` through this, so its key,
+ * its checks and its vectors all name one model (SMD-2304). Over process.env it
+ * returns the constants; db/test-engines.ts holds the two together.
+ *
+ * @param {Record<string, string | undefined>} record
+ * @returns {{ model: string, dim: number, truncate: boolean }}
+ */
+export function embeddingContract(record) {
+  const read = (/** @type {string} */ k) => {
+    const v = record[k];
+    const t = typeof v === "string" ? v.trim() : v;
+    return t === "" ? undefined : t;
+  };
+  const model = read("OB1_EMBEDDING_MODEL") ?? DEFAULT_EMBEDDING_MODEL;
+  const dim = Number(read("OB1_EMBEDDING_DIM") ?? DEFAULT_EMBEDDING_DIM);
+  return { model, dim, truncate: resolveEmbeddingDimensions(read("OB1_EMBEDDING_DIMENSIONS"), dim, model) };
+}
+
+/**
  * Whether migration 011 builds the trigram index on `thoughts.content`.
  *
  * ON by default as of SMD-944, and it was off before that. The reason for off

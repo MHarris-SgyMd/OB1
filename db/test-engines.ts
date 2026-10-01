@@ -40,7 +40,7 @@ function ok(cond: boolean, msg: string): void {
 const HERE = import.meta.dir;
 const MARK = "SECRET-2304";
 /** The engines, one more per SMD-2304 PR. */
-const ENGINES = ["migrate.ts", "extract-entities.ts", "consolidate.ts"] as const;
+const ENGINES = ["migrate.ts", "extract-entities.ts", "consolidate.ts", "reembed.ts"] as const;
 
 /** A child's environment: this one without a database URL, any OB1_* knob or PG* variable; no .env file read. */
 const BASE_ENV: Record<string, string> = {};
@@ -391,10 +391,113 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
   ok(!closed, "…and never closes the caller's client");
 }
 
+// ---------------------------------------------------------------------------
+// reembed.ts: run() refuses in the CLI's words, before connecting; its modes'
+// rule is a pure function the CLI and run() share; its model is the env's.
+// ---------------------------------------------------------------------------
+{
+  const { run, modeProblem } = await import("./reembed.ts");
+  const inProcess = async (opts: Record<string, unknown>) => {
+    seen = 0;
+    const w = capture();
+    const code = await run({ env: BASE_ENV, ...opts, writer: w } as never);
+    await Bun.sleep(50);
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, out: lines(w.outs), err: lines(w.errs), seen };
+  };
+  const ID = "00000000-0000-0000-0000-000000000001";
+  const LOCAL = { OB1_LLM_LOCAL: "1" };
+  const BADDIM = { OB1_EMBEDDING_DIM: "99999" };
+  const cases: [string, Record<string, unknown>, string[], Record<string, string>][] = [
+    ["no URL", {}, [], {}],
+    ["an unparseable URL", { url: `postgres://u:${MARK}/x@127.0.0.1:1/x` }, ["--url", `postgres://u:${MARK}/x@127.0.0.1:1/x`], {}],
+    ["a URL the readers split (?database=)", { url: `${AT}?database=other` }, ["--url", `${AT}?database=other`], {}],
+    ["--workers 0", { url: AT, workers: 0 }, ["--url", AT, "--workers", "0"], {}],
+    ["--batch 1.5", { url: AT, batch: 1.5 }, ["--url", AT, "--batch", "1.5"], {}],
+    // --ttl and --heartbeat are read after the configuration, as the script read them:
+    // the banner's job line and the configuration's own refusal come first.
+    ["--ttl not a number (the CLI hands run() NaN)", { url: AT, ttl: NaN }, ["--url", AT, "--ttl", "abc"], LOCAL],
+    ["--heartbeat past 2^53", { url: AT, heartbeat: 2 ** 60 }, ["--url", AT, "--heartbeat", String(2 ** 60)], LOCAL],
+    ["a bare --job key's note, then --ttl 0", { url: AT, job: "bare", ttl: 0 }, ["--url", AT, "--job", "bare", "--ttl", "0"], LOCAL],
+    ["a configuration refused, before --ttl", { url: AT, ttl: NaN }, ["--url", AT, "--ttl", "abc"], BADDIM],
+    ["two modes", { url: AT, status: true, retire: "reembed:x@1024" }, ["--url", AT, "--status", "--retire", "reembed:x@1024"], {}],
+    ["--accept-failed with --retry-failed", { url: AT, acceptFailed: [], retryFailed: true }, ["--url", AT, "--accept-failed", "--retry-failed"], {}],
+    ["--retire with --switch-model", { url: AT, retire: "reembed:x@1024", switchModel: true }, ["--url", AT, "--retire", "reembed:x@1024", "--switch-model"], {}],
+    ["--all alone", { url: AT, all: true }, ["--url", AT, "--all"], {}],
+    // Every number before the modes, the modes before the configuration, as the script judged them.
+    ["--workers 0 and two modes", { url: AT, workers: 0, status: true, acceptFailed: [ID] }, ["--url", AT, "--workers", "0", "--status", "--accept-failed", ID], {}],
+    ["two modes and a configuration refused", { url: AT, status: true, retire: "k" }, ["--url", AT, "--status", "--retire", "k"], BADDIM],
+    // Refused before the client opens, as main refused it: a URL Bun's client rejects meets the modes' rule first.
+    ["two modes beside a URL Bun's client rejects", { url: `${AT}?sslmode=bogus`, status: true, retire: "k" }, ["--url", `${AT}?sslmode=bogus`, "--status", "--retire", "k"], {}],
+    // The banner on stdout, then the blanket gate (SMD-1903): the default policy with nothing declared local.
+    ["an egress policy that refuses every row", { url: AT }, ["--url", AT], {}],
+    // …under a model named in the environment run() is given: its key and banner name it, as the CLI's do.
+    ["the gate's refusal under OB1_EMBEDDING_MODEL from env", { url: AT }, ["--url", AT], { OB1_EMBEDDING_MODEL: "  env-model ", OB1_EMBEDDING_DIM: "768" }],
+  ];
+  for (const [what, opts, argv, env] of cases) {
+    const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
+    const cli = await counted(["reembed.ts", ...argv], env);
+    ok(r.code === 2 && cli.code === 2, `reembed run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
+    ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
+    ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
+  }
+  // modeProblem is pure and the rule itself: null for what the CLI admits, null as absent.
+  ok(modeProblem({}) === null && modeProblem({ status: true }) === null && modeProblem({ acceptFailed: [], all: true }) === null && modeProblem({ retire: "k" }) === null && modeProblem({ switchModel: true, retryFailed: true, retryFallbacks: true }) === null && modeProblem({ acceptFailed: null, retire: null, all: null } as never) === null,
+     "reembed's modeProblem admits what the CLI admits, null as absent");
+  ok(modeProblem({ status: true, retryFallbacks: true }) === null && modeProblem({ acceptFailed: [ID], retryFallbacks: true })?.includes("--accept-failed and --retry-fallbacks do not combine") === true,
+     "…--status beside a run flag (the script admitted it), not --accept-failed beside one");
+  // A caller's client: the narrow one and the handles refused; never closed.
+  let closed = false;
+  const stub = (extra: Record<string, unknown> = {}) => Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 3 }, close: async () => { closed = true; }, unsafe: () => { throw new Error("stub queried"); } }, extra);
+  const narrow = await inProcess({ sql: stub({ options: { max: 2 } }) });
+  ok(narrow.code === 2 && /needs a client of at least 3 connections for 2 worker\(s\)/.test(narrow.err), `reembed run() refuses a client narrower than its workers and a spare (exit ${narrow.code})`);
+  const reserved = await inProcess({ sql: stub({ release: () => {} }) });
+  const tx = await inProcess({ sql: stub({ savepoint: async () => {} }) });
+  ok([reserved, tx].every((r) => r.code === 2 && /needs a pool, not a reserved connection or a transaction's handle/.test(r.err)), "…refuses a reserved connection and a transaction's handle");
+  const beside = await inProcess({ sql: stub(), url: "mysql://h/x" });
+  ok(beside.code === 2 && beside.err === `${UNPARSEABLE_DATABASE_URL}\n`, `…and a bad URL beside a caller's client (exit ${beside.code})`);
+  // Nothing needs a URL beside the client: reembed resolves no worker key.
+  const noUrlBeside = await run({ sql: stub(), dryRun: true, env: { ...BASE_ENV, OB1_WORKER_KEY: "k" }, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  ok(noUrlBeside === "stub queried", `…and a client alone is enough, a worker key set or not (${noUrlBeside.slice(0, 30)})`);
+  // A signal aborted before the call: a run, --retire and --accept-failed write, and stop before connecting, each in its own words.
+  const early = await inProcess({ url: AT, signal: AbortSignal.abort() });
+  const earlyRetire = await inProcess({ url: AT, retire: "reembed:x@1024", signal: AbortSignal.abort() });
+  const earlyAccept = await inProcess({ url: AT, acceptFailed: [ID], signal: AbortSignal.abort() });
+  ok(early.code === 130 && /stopped before the pass began: the caller's signal was aborted; nothing was claimed/.test(early.err) && early.out === "" && early.seen === 0, `reembed run() with a signal already aborted returns 130 before connecting (exit ${early.code})`);
+  ok(earlyRetire.code === 130 && earlyRetire.err === "\n  stopped before --retire wrote anything: the caller's signal was aborted\n" && earlyAccept.code === 130 && earlyAccept.err === "\n  stopped before --accept-failed wrote anything: the caller's signal was aborted\n" && earlyRetire.seen + earlyAccept.seen === 0,
+     `…as do --retire and --accept-failed, in words that name no pass (exit ${earlyRetire.code}, ${earlyAccept.code})`);
+  const statusAborted = await run({ sql: stub(), status: true, signal: AbortSignal.abort(), env: BASE_ENV, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  const acceptDryAborted = await run({ sql: stub(), dryRun: true, acceptFailed: [ID], signal: AbortSignal.abort(), env: BASE_ENV, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  ok(statusAborted === "stub queried" && acceptDryAborted === "stub queried", `…while --status and a --dry-run read on under an aborted signal — they only read (${statusAborted.slice(0, 20)}, ${acceptDryAborted.slice(0, 20)})`);
+  // null is absent: no URL, the default workers (so a max-3 client passes the width check and is queried).
+  const nullUrl = await inProcess({ url: null });
+  const nullWorkers = await run({ sql: stub(), workers: null, ttl: null, dryRun: true, env: BASE_ENV, writer: capture() } as never).then((c) => String(c), (e: Error) => e.message);
+  ok(nullUrl.code === 2 && nullUrl.err === `${NO_DATABASE_URL}\n` && nullWorkers === "stub queried", `reembed run() reads a null url, workers or ttl as absent (url: exit ${nullUrl.code}; workers: ${nullWorkers.slice(0, 40)})`);
+  ok(!closed, "…and never closes the caller's client");
+  ok(process.listenerCount("SIGINT") === 0 && process.listenerCount("SIGTERM") === 0, "…and leaves no signal listener after its refusals");
+  // Every refusal of the maintenance modes is returned as run()'s code: a
+  // `refuse(…)` not returned would let the mode run on past it (the script exited there).
+  const text = readFileSync(join(HERE, "reembed.ts"), "utf8");
+  const calls = [...text.matchAll(/\brefuse(?:Current)?\(/g)].map((m) => text.slice(0, m.index).trimEnd());
+  // Returned, or an arrow's body (refuseCurrent's own call), which is.
+  const unreturned = calls.filter((before) => !/\breturn$/.test(before) && !/=>$/.test(before));
+  ok(calls.length >= 15 && unreturned.length === 0, `every refuse() call in reembed.ts is returned (${calls.length} calls, ${unreturned.length} not)`);
+}
+
+// config.mjs's embeddingContract: the constants' rule over any record — over
+// the environment config.mjs is imported under, the constants themselves.
+for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768 " }, { OB1_EMBEDDING_MODEL: "", OB1_EMBEDDING_DIM: "" }, { OB1_EMBEDDING_DIM: "abc" }, { OB1_EMBEDDING_MODEL: "qwen3-embedding:4b", OB1_EMBEDDING_DIM: "1024", OB1_EMBEDDING_DIMENSIONS: " off " }] as Record<string, string>[]) {
+  const r = await counted(["-e", `const c = await import("./config.mjs"); console.log(JSON.stringify([[c.EMBEDDING_MODEL, c.EMBEDDING_DIM, c.EMBEDDING_DIMENSIONS], Object.values(c.embeddingContract(process.env))]));`], env);
+  const [constants, contract] = JSON.parse(r.out || "[[],[1]]") as unknown[][];
+  ok(r.code === 0 && JSON.stringify(constants) === JSON.stringify(contract), `embeddingContract(process.env) is config.mjs's constants under ${JSON.stringify(env)} (${JSON.stringify(contract)})`);
+}
+
 // cli.ts's numberProblem: the scanner's words, judged by value — the engines'
 // in-process numbers — and readNumber's own rule for a digit string.
 {
-  const { numberProblem, readNumber } = await import("./cli.ts");
+  const { numberIn, numberProblem, readNumber } = await import("./cli.ts");
+  ok(Number.isNaN(numberIn("abc")) && Number.isNaN(numberIn("1.5")) && numberIn("1.5", true) === 1.5 && numberIn("007") === 7 && Number.isNaN(numberIn("0x10")) && Number.isNaN(numberIn(" 7")),
+     "numberIn reads readNumber's shapes and nothing else — what reembed's CLI hands run() for --ttl and --heartbeat");
   ok(numberProblem("--min-sim", 1e-7, { min: -1, max: 1, fraction: true }) === null, "numberProblem reads 1e-7 as the decimal number it is (a digit string of it, 0.0000001, passes the scanner too)");
   ok(numberProblem("--workers", 1.5, { min: 1 }) === "--workers must be a decimal integer >= 1" && numberProblem("--k", 51, { min: 1, max: 50 }) === "--k must be a decimal integer >= 1 and <= 50" && numberProblem("--x", 2 ** 60, { min: 1 }) === "--x is too large to read exactly" && numberProblem("--x", NaN, { min: 1 }) !== null,
      "…and refuses a fraction for an integer, out of range, past 2^53 and NaN in the scanner's words");

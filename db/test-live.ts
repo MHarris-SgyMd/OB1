@@ -42,6 +42,7 @@ import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
+import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
@@ -2271,6 +2272,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // the heartbeat and thief runs at the end. Read when a request starts, so a
   // request already asleep keeps its delay when it is cleared.
   let slowMs = 0;
+  /** Embedding calls but the probe, and an axis shift that makes a vector written while it is set differ from the one it replaces (SMD-2304's stop cases). */
+  let embedCalls = 0;
+  let shift = 0;
   const modelsSeen = new Set<string>();
   const axisFor = (text: string) => {
     let h = 0;
@@ -2290,6 +2294,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
       const body = (await req.json()) as { input?: string; model?: string };
       modelsSeen.add(String(body.model));
       const input = String(body.input ?? "");
+      if (input !== "reembed.ts provider probe") embedCalls++;
       if (frozen && input !== "reembed.ts provider probe") await neverAnswers();
       if (poison && input.includes("hemlock")) {
         return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
@@ -2308,7 +2313,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
       if (slowMs > 0 && input !== "reembed.ts provider probe") await Bun.sleep(slowMs);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
-      v[axisFor(input)] = 1;
+      v[1 + ((axisFor(input) - 1 + shift) % (DIM - 1))] = 1;
       return Response.json({ data: [{ embedding: v }] });
     },
   });
@@ -2350,12 +2355,19 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   delete env.OB1_EMBEDDING_DIMENSIONS;
   delete env.OB1_CHUNK_CONTEXT;
   delete env.OB1_LLM_API_KEY;
-  const reembedIn = (extraEnv: Record<string, string>, ...extra: string[]): Promise<{ code: number; out: string }> => {
+  const reembedIn = (extraEnv: Record<string, string>, ...extra: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> => {
     // The suite's key unless the call names its own (flag() reads the first --job).
     const job = extra.includes("--job") ? [] : ["--job", REEMBED_JOB];
     return runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_!, ...job, ...extra], { env: { ...env, ...extraEnv } as Record<string, string>, cwd: HERE });
   };
   const reembed = (...extra: string[]) => reembedIn({}, ...extra);
+  /** reembed.ts's run() in this process (SMD-2304) under the spawned run's environment and key, its lines per stream as a child's are. */
+  const reembedInProcess = async (opts: Omit<ReembedOptions, "writer"> = {}): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const outs: string[] = [], errs: string[] = [];
+    const code = await runReembed({ url: URL_!, env, job: REEMBED_JOB, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, stdout: lines(outs), stderr: lines(errs) };
+  };
   const claimCounts = async () =>
     Object.fromEntries(
       (await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} GROUP BY status`)
@@ -2420,6 +2432,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(wrongKey.code === 2 && /names a pass to other-model @ \d+, but this shell is configured for stub-embed/.test(wrongKey.out),
     `a --job naming another model is refused with exit 2 (exit ${wrongKey.code})`);
   assert(Object.keys(await claimCounts()).length === 0 && (await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type LIKE 'reembed:other-model%'`)[0].c === 0, "…before anything is written");
+  const wrongKeyIn = await reembedInProcess({ job: `reembed:other-model@${DIM}` });
+  assert(same(wrongKeyIn, wrongKey), `reembed run() in-process refuses that key as the spawned run does, byte for byte on each stream (exit ${wrongKeyIn.code}) (SMD-2304)`);
   const wrongKeyDry = await reembed("--dry-run", "--job", `reembed:other-model@${DIM}`);
   assert(wrongKeyDry.code === 2 && /would: refuse\. --job reembed:other-model@\d+ names a pass to other-model/.test(wrongKeyDry.out), `…--dry-run reports that refusal (exit ${wrongKeyDry.code})`);
   const wrongKeyStatus = await reembed("--status", "--job", `reembed:other-model@${DIM}`);
@@ -2431,12 +2445,24 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   const dry = await reembed("--dry-run");
   assert(dry.code === 0 && /Nothing was written/.test(dry.out), `--dry-run exits 0 and says it wrote nothing (exit ${dry.code})`);
+  // The same dry run through run() in this process (SMD-2304).
+  const dryIn = await reembedInProcess({ dryRun: true });
+  assert(same(dryIn, dry), `reembed run() in-process prints the spawned --dry-run's stdout and stderr byte for byte, with its exit code (${dryIn.code})`);
+  // With no --job the key is the model's own — the model of the environment
+  // run() is given, by config.mjs's rules, not the one this suite imported
+  // config.mjs under (embeddingContract).
+  const ownKeyStatus = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_!, "--status"], { env: env as Record<string, string>, cwd: HERE });
+  const ownKeyStatusIn = await reembedInProcess({ job: undefined, status: true });
+  assert(ownKeyStatus.code === 0 && ownKeyStatus.stdout.includes(`job:       reembed:stub-embed@${DIM}`) && same(ownKeyStatusIn, ownKeyStatus),
+    `…and with no --job names the env's model's own key, --status byte for byte as the spawned one (exit ${ownKeyStatusIn.code})`);
   assert(/model change/.test(dry.out) && /would: refuse without --switch-model; with it: record stub-embed/.test(dry.out),
     "…names the model change it would make, and that the run itself would refuse without the flag");
   assert(Object.keys(await claimCounts()).length === 0, "…and pooled nothing");
 
   const refused = await reembed();
   assert(refused.code === 2 && /--switch-model/.test(refused.out), `a model change without --switch-model is refused with exit 2 (exit ${refused.code})`);
+  const refusedIn = await reembedInProcess();
+  assert(same(refusedIn, refused), `…and run() in-process refuses it in the same words, on the same streams (exit ${refusedIn.code})`);
   const [{ model: stillRecorded }] = await sql`SELECT value AS model FROM ob1_config WHERE key = 'embedding_model'`;
   assert(stillRecorded === recordedModel && Object.keys(await claimCounts()).length === 0, "…touching neither ob1_config nor the pool");
   // A lease under two heartbeats is refused before anything is touched: since
@@ -2581,6 +2607,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   const status = await reembed("--status");
   assert(status.code === 0 && /35 succeeded \(1 with a caveat\), 3 failed/.test(status.out), "--status reports the pass, caveat included");
+  const statusIn = await reembedInProcess({ status: true });
+  assert(same(statusIn, status), `reembed run() in-process reports --status as the spawned one does, failures and caveats listed, byte for byte (exit ${statusIn.code})`);
   assert(status.out.includes(`preflight will warn until this finishes: reembed:test — ${FIRST_COUNTS}`), "…and what preflight will say meanwhile");
   assert(/1 succeeded row\(s\) carry a caveat/.test(status.out) && /--retry-fallbacks/.test(status.out), "…lists the refused long thought and names the flag that revisits it");
   assert(/1 group\(s\) of thoughts share one normalised text/.test(status.out) && /delete_thought/.test(status.out), "…and lists the legacy pair as a dedup task, with what to do about it");
@@ -2611,6 +2639,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const noIds = await reembed("--accept-failed");
   assert(noIds.code === 2 && /needs the rows to accept, by id/.test(noIds.out) && /--all/.test(noIds.out) && noIds.out.includes(poisonId) && /3 failed row\(s\) under reembed:test/.test(noIds.out),
     `--accept-failed with no ids refuses, listing the failed rows and both forms (exit ${noIds.code})`);
+  const noIdsIn = await reembedInProcess({ acceptFailed: [] });
+  assert(same(noIdsIn, noIds), `…and run() in-process, given --accept-failed's ids as [], refuses the same, byte for byte (exit ${noIdsIn.code})`);
   // The egress gate (SMD-1903): with the stub not declared local under the
   // default, a run stops before claiming; --accept-failed and --retire write
   // claim rows and dial nothing, so the gate has no say and each reaches its
@@ -2680,6 +2710,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const acceptDry = await reembed("--dry-run", "--accept-failed", poisonId);
   assert(acceptDry.code === 0 && /would: accept 1 failed row\(s\) under reembed:test/.test(acceptDry.out) && /Nothing was written/.test(acceptDry.out) && (await claimCounts()).failed === 3,
     `--dry-run --accept-failed says what it would accept and writes nothing (exit ${acceptDry.code})`);
+  const acceptDryIn = await reembedInProcess({ dryRun: true, acceptFailed: [poisonId] });
+  assert(same(acceptDryIn, acceptDry), `…and run() in-process says the same, byte for byte (exit ${acceptDryIn.code})`);
   const accepted = await reembed("--accept-failed", poisonId);
   assert(accepted.code === 0 && /1 failed row\(s\) accepted under reembed:test/.test(accepted.out) && /kept the vector it had; accepted by the operator: .*stub: refused this text/.test(accepted.out),
     `--accept-failed marks the poisoned row succeeded with the caveat naming the failure (exit ${accepted.code})`);
@@ -2915,6 +2947,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(retireForeign.code === 2 && /another tool's pass/.test(retireForeign.out), "…a key without the reembed: prefix, which is another tool's");
   const retireEmpty = await reembed("--retire", `reembed:nobody@${DIM}`);
   assert(retireEmpty.code === 2 && /nothing to retire/.test(retireEmpty.out), "…and a key with no rows — a typo is the likelier cause");
+  const retireEmptyIn = await reembedInProcess({ retire: `reembed:nobody@${DIM}` });
+  assert(same(retireEmptyIn, retireEmpty), `…which run() in-process refuses in the same words, on the same streams (exit ${retireEmptyIn.code})`);
   // No width recorded (a hand-applied schema): the column's width stands in,
   // in both tools, so a key at another width has a remedy that runs.
   const WIDE_KEY = `reembed:stub-embed@${DIM + 1}`;
@@ -2943,6 +2977,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const retireDry = await reembed("--dry-run", "--retire", REEMBED_JOB);
   assert(retireDry.code === 0 && /would: retire reembed:test — remove its \d+ row\(s\) \(\d+ succeeded\)/.test(retireDry.out) && (await claimCounts()).succeeded > 0,
     `--dry-run --retire says what it would remove — a key naming no model is retireable — and removes nothing (exit ${retireDry.code})`);
+  const retireDryIn = await reembedInProcess({ dryRun: true, retire: REEMBED_JOB });
+  assert(same(retireDryIn, retireDry), `…and run() in-process says the same, byte for byte (exit ${retireDryIn.code})`);
   await sql`SELECT claim_thoughts(${OTHER_KEY}, 'other-worker', 1)`;
   const retireLive = await reembed("--retire", OTHER_KEY);
   assert(retireLive.code === 2 && /leased right now/.test(retireLive.out), `…and a key with a live lease: a pass under it is running (exit ${retireLive.code})`);
@@ -3090,6 +3126,174 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(Number(thiefRows) === stolen.length, `…whose rows stay claimed under its name, untouched by the worker's finally (${thiefRows})`);
   await sql`SELECT release_claims_for_worker(${THIEF_KEY}, 'thief')`;
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${THIEF_KEY}`;
+
+  // run() in-process for a run (SMD-2304): a pass with nothing left to do,
+  // beside the spawned one, and on a caller's client — the client open after.
+  {
+    const NOOP_KEY = `reembed:stub-embed@${DIM}:noop`;
+    await reembed("--job", NOOP_KEY);
+    const noop = await reembed("--job", NOOP_KEY);
+    const noopIn = await reembedInProcess({ job: NOOP_KEY });
+    const client = new SQL({ url: URL_!, max: 3 });
+    const noopClient = await reembedInProcess({ job: NOOP_KEY, url: undefined, sql: client });
+    const open = (await client`SELECT 1 AS one`)[0].one === 1;
+    await client.close();
+    assert(noop.code === 0 && /Nothing to do/.test(noop.stdout) && same(noopIn, noop) && same(noopClient, noop) && open,
+      `reembed run() in-process runs the same no-op pass as the spawned one, byte for byte on each stream, on a URL and on a caller's client left open (exit ${noopIn.code}, ${noopClient.code})`);
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${NOOP_KEY}`;
+  }
+
+  // Stopping a pass (SMD-2304). Each case a fresh backfill key, so its pool
+  // is every thought; one worker, one row a claim, and slow embeddings, so a
+  // stop lands while a row is in hand. OB1_LLM_TIMEOUT is raised past the
+  // slow calls.
+  {
+    const STOP_ENV = { ...env, OB1_LLM_TIMEOUT: "30" };
+    const stopKey = (n: number) => `reembed:stub-embed@${DIM}:stop${n}`;
+    const keyClaims = async (key: string) =>
+      Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${key} GROUP BY status`)
+        .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
+    // In hand: a claim held and an embedding call at the stub since `from`.
+    const inHand = async (key: string, from: number) => { for (let i = 0; i < 100 && !(((await keyClaims(key)).claimed ?? 0) >= 1 && embedCalls > from); i++) await Bun.sleep(50); };
+    const [{ n: thoughtCount }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
+    const vectors = async () => new Map(((await sql`SELECT id::text AS id, embedding::text AS e FROM thoughts`) as { id: string; e: string | null }[]).map((r) => [r.id, r.e]));
+
+    // A caller's AbortSignal: the worker after the row in hand, run() 130.
+    slowMs = 600;
+    const ac = new AbortController();
+    const softFrom = embedCalls;
+    const softRun = reembedInProcess({ job: stopKey(1), env: STOP_ENV, workers: 1, batch: 1, signal: ac.signal });
+    await inHand(stopKey(1), softFrom);
+    const softDone = (await keyClaims(stopKey(1))).succeeded ?? 0;
+    ac.abort();
+    const soft = await softRun;
+    const afterSoft = await keyClaims(stopKey(1));
+    assert(soft.code === 130 && soft.stderr.includes("\n  stopping after the current thought; unfinished claims go back to the pool\n") && !afterSoft.claimed && (afterSoft.succeeded ?? 0) === softDone + 1,
+      `a caller's AbortSignal stops reembed's pass after the row in hand, and run() returns 130 (exit ${soft.code}, claims ${JSON.stringify(afterSoft)})`);
+
+    // The hard stop: the leases returned at once, the row in hand abandoned —
+    // its vector not written, its claim not released by the worker — and run()
+    // 130 once the embedding in hand returns. The stub shifts every vector, so
+    // a write shows.
+    slowMs = 1500;
+    shift = 1;
+    const vecBefore = await vectors();
+    let hardStop: PassStop | undefined;
+    const hardFrom = embedCalls;
+    const hardRun = reembedInProcess({ job: stopKey(2), env: STOP_ENV, workers: 1, batch: 1, onPass: (x) => { hardStop = x; } });
+    await inHand(stopKey(2), hardFrom);
+    hardStop?.();
+    await hardStop?.();
+    const hard = await hardRun;
+    const hardClaims = await keyClaims(stopKey(2));
+    const moved = [...(await vectors())].filter(([id, e]) => vecBefore.get(id) !== e).length;
+    shift = 0;
+    assert(hard.code === 130 && hard.stderr.includes("second signal — exiting now") && !hardClaims.claimed && !hardClaims.failed && moved === (hardClaims.succeeded ?? 0) && !/no longer this worker's/.test(hard.stderr) && hardStop?.() === null,
+      `the hard stop abandons reembed's row in hand: run() returns 130, every vector written is a succeeded row's, none released after the leases went, and the stop inert after (exit ${hard.code}, ${moved} written, claims ${JSON.stringify(hardClaims)})`);
+
+    // The CLI's signals: one SIGINT after the row in hand, two at once.
+    const cliRun = (key: string) => Bun.spawn(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_!, "--job", key, "--workers", "1", "--batch", "1"], { env: STOP_ENV as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    slowMs = 600;
+    const onceFrom = embedCalls;
+    const once = cliRun(stopKey(3));
+    await inHand(stopKey(3), onceFrom);
+    const onceDone = (await keyClaims(stopKey(3))).succeeded ?? 0;
+    once.kill("SIGINT");
+    const [, onceErr] = await Promise.all([new Response(once.stdout).text(), new Response(once.stderr).text()]);
+    const onceCode = await once.exited;
+    const afterOnce = await keyClaims(stopKey(3));
+    assert(onceCode === 130 && onceErr.includes("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)\n") && (afterOnce.succeeded ?? 0) === onceDone + 1 && !afterOnce.claimed,
+      `one SIGINT stops reembed's CLI after the row in hand and exits 130 (exit ${onceCode}, claims ${JSON.stringify(afterOnce)})`);
+    slowMs = 5000;
+    const twiceFrom = embedCalls;
+    const twice = cliRun(stopKey(4));
+    await inHand(stopKey(4), twiceFrom);
+    twice.kill("SIGINT");
+    await Bun.sleep(100);
+    const twiceAt = Date.now();
+    twice.kill("SIGINT");
+    const [, twiceErr] = await Promise.all([new Response(twice.stdout).text(), new Response(twice.stderr).text()]);
+    const twiceCode = await twice.exited;
+    const twiceMs = Date.now() - twiceAt;
+    assert(twiceCode === 130 && twiceErr.includes("second signal — exiting now") && twiceMs < 2500 && !(await keyClaims(stopKey(4))).claimed,
+      `a second SIGINT exits reembed's CLI 130 at once, its lease returned (exit ${twiceCode} after ${twiceMs} ms)`);
+    slowMs = 0;
+
+    // A signal aborted during start-up: at the chunks line the record and the
+    // pool are never written; at the pool line they are, and nothing is claimed.
+    const startUp = async (key: string, at: string) => {
+      const ac2 = new AbortController();
+      const errs: string[] = [];
+      const code = await runReembed({ url: URL_!, env: STOP_ENV, job: key, workers: 1, signal: ac2.signal, writer: { out: (l) => { if (l.startsWith(at)) ac2.abort(); }, err: (l) => errs.push(l) } });
+      return { code, claims: await keyClaims(key), said: errs.some((l) => l.includes("stopped before the pass began")) };
+    };
+    const atChunks = await startUp(stopKey(5), "  chunks:");
+    const atPool = await startUp(stopKey(6), "  pool:");
+    assert(atChunks.code === 130 && atChunks.said && Object.keys(atChunks.claims).length === 0 && atPool.code === 130 && atPool.said && atPool.claims.pending === Number(thoughtCount) && Object.keys(atPool.claims).length === 1,
+      `a signal aborted during reembed's start-up stops it before the record and the pool (${JSON.stringify(atChunks)}) and, after them, before a row is claimed (${JSON.stringify(atPool)})`);
+
+    // --accept-failed and --retire write too: a signal aborted as each starts
+    // stops it before its write, in words that name no pass.
+    const [{ id: plantedId }] = await sql`SELECT id::text AS id FROM thoughts WHERE embedding IS NOT NULL ORDER BY created_at LIMIT 1`;
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, last_error, claimed_at, finished_at) VALUES (${plantedId}::uuid, ${stopKey(7)}, 'failed', 'planted', now(), now())`;
+    const GONE_KEY = `reembed:gone-model@${DIM}`;
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, finished_at) VALUES (${plantedId}::uuid, ${GONE_KEY}, 'succeeded', now())`;
+    const maintenance = async (opts: Partial<ReembedOptions>) => {
+      const ac2 = new AbortController();
+      const errs: string[] = [];
+      const code = await runReembed({ url: URL_!, env: STOP_ENV, signal: ac2.signal, ...opts, writer: { out: (l) => { if (l.startsWith("  chunks:")) ac2.abort(); }, err: (l) => errs.push(l) } });
+      return { code, said: errs.join("\n") };
+    };
+    const acceptStopped = await maintenance({ job: stopKey(7), acceptFailed: [plantedId] });
+    const retireStopped = await maintenance({ retire: GONE_KEY });
+    const [{ status: plantedStatus }] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${stopKey(7)} AND thought_id = ${plantedId}::uuid`;
+    const [{ c: goneRows }] = await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${GONE_KEY}`;
+    assert(acceptStopped.code === 130 && acceptStopped.said.includes("stopped before --accept-failed wrote anything") && plantedStatus === "failed" && retireStopped.code === 130 && retireStopped.said.includes("stopped before --retire wrote anything") && Number(goneRows) === 1,
+      `--accept-failed and --retire under a signal aborted as they start stop before their write, returning 130 (accept ${acceptStopped.code}: ${plantedStatus}; retire ${retireStopped.code}: ${goneRows} row left)`);
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${stopKey(7)}, ${GONE_KEY})`;
+
+    // run() takes its listener off a caller's signal when it returns: an abort
+    // after the run writes nothing more.
+    const afterRun = new AbortController();
+    const afterErrs: string[] = [];
+    const afterCode = await runReembed({ url: URL_!, env: STOP_ENV, job: stopKey(8), workers: 1, signal: afterRun.signal, writer: { out: () => {}, err: (l) => afterErrs.push(l) } });
+    const afterBefore = afterErrs.length;
+    afterRun.abort();
+    assert(afterCode !== 130 && afterErrs.length === afterBefore, `…and an abort after reembed's run() has returned writes nothing: its listener went with it (exit ${afterCode}, ${afterErrs.length - afterBefore} line(s) after)`);
+
+    // A Writer that throws on the line naming the rows a worker returned is the
+    // Writer's error, not a lease left unreturned: run() rejects with it, and
+    // the rows are back in the pool. Four a claim, a call in hand and others held.
+    slowMs = 600;
+    const freedAc = new AbortController();
+    const freedErrs: string[] = [];
+    const freedFrom = embedCalls;
+    const freedRun = runReembed({ url: URL_!, env: STOP_ENV, job: stopKey(9), workers: 1, batch: 4, signal: freedAc.signal, writer: { out: () => {}, err: (l) => { if (/returned \d+ unfinished row\(s\)/.test(l)) throw new Error("writer boom"); freedErrs.push(l); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+    for (let i = 0; i < 100 && !(((await keyClaims(stopKey(9))).claimed ?? 0) >= 2 && embedCalls > freedFrom); i++) await Bun.sleep(50);
+    freedAc.abort();
+    const freedOutcome = await freedRun;
+    assert(freedOutcome === "writer boom" && !freedErrs.some((l) => l.includes("could not return its leases")) && !(await keyClaims(stopKey(9))).claimed,
+      `a Writer that throws on a reembed worker's "returned N unfinished" line rejects run() with its error, not "could not return its leases" (${freedOutcome})`);
+    // It throws once, so the other worker stops only if the rest are stopped.
+    slowMs = 300;
+    let threwOnce = false;
+    const thrown = await runReembed({ url: URL_!, env: STOP_ENV, job: stopKey(10), workers: 2, batch: 1, writer: { out: (l) => { if (!threwOnce && /^  \d+\/\d+  /.test(l)) { threwOnce = true; throw new Error("writer boom"); } }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+    const rightAfter = await keyClaims(stopKey(10));
+    await Bun.sleep(1200);
+    const later = await keyClaims(stopKey(10));
+    slowMs = 0;
+    assert(thrown === "writer boom" && !rightAfter.claimed && (rightAfter.pending ?? 0) > 0 && JSON.stringify(rightAfter) === JSON.stringify(later),
+      `a Writer that throws in one of reembed's workers stops the other and rejects run(), nothing claimed or going on after (${thrown}; ${JSON.stringify(rightAfter)} → ${JSON.stringify(later)})`);
+    // A Writer that throws inside processRow — on the line naming a legacy
+    // twin's other row, after its write — is the Writer's error: run() rejects
+    // with it, and the claim does not record it as the row's failure.
+    const [nullTwin] = (await sql`SELECT id::text AS id FROM thoughts WHERE content = ANY(${sql.array(twins, "TEXT")}) AND content_fingerprint IS NULL`) as { id: string }[];
+    const dupOutcome = await runReembed({ url: URL_!, env: STOP_ENV, job: stopKey(11), workers: 1, writer: { out: () => {}, err: (l) => { if (/: duplicates /.test(l)) throw new Error("writer boom"); } } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+    const [dupClaim] = nullTwin ? await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${stopKey(11)} AND thought_id = ${nullTwin.id}::uuid` : [];
+    assert(nullTwin !== undefined && dupOutcome === "writer boom" && dupClaim !== undefined && dupClaim.last_error !== "writer boom" && dupClaim.status !== "claimed",
+      `a Writer that throws inside processRow (a legacy twin's "duplicates" line) rejects run() with its error, not recorded as the row's failure (${dupOutcome}; claim ${JSON.stringify(dupClaim)})`);
+    await sql`DELETE FROM thought_work_claims WHERE work_type LIKE ${`reembed:stub-embed@${DIM}:stop%`}`;
+  }
 
   provider.stop(true);
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
