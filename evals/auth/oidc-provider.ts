@@ -56,6 +56,7 @@ import http from "node:http";
 import Provider, { errors, type KoaContextWithOIDC } from "oidc-provider";
 import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
+import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
 import { ACCESS_TOKEN_TYPE, layout, originFromEnv, SCOPES, TOKEN_EXCHANGE } from "./policy.ts";
 
 function need(name: string): string {
@@ -227,12 +228,11 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
 
 // --- sign-in and consent --------------------------------------------------
 
-const esc = (s: unknown) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-
-function page(res: http.ServerResponse, status: number, prompt: string, body: string) {
-  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-  res.end(`<!doctype html><title>Open Brain sign-in</title><main data-prompt="${esc(prompt)}">${body}</main>`);
+function send(res: http.ServerResponse, status: number, html: string) {
+  res.writeHead(status, PAGE_HEADERS);
+  res.end(html);
 }
+const page = (res: http.ServerResponse, status: number, prompt: string, body: string) => send(res, status, pageHtml(prompt, body));
 
 async function readForm(req: http.IncomingMessage): Promise<URLSearchParams> {
   const chunks: Buffer[] = [];
@@ -253,42 +253,31 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
   const { prompt, params, session } = details;
   const client = await provider.Client.find(String(params.client_id));
 
-  if (req.method === "GET" && !action) {
-    // Name the client by what the server checked. Its client_name is its own
-    // claim, so it is shown only as that.
-    const clientId = String(params.client_id);
-    const checked = /^https:\/\//i.test(clientId) ? `the client published at ${new URL(clientId).host}` : `client ${clientId}`;
-    // Where the code goes: an http(s) redirect's origin; any other scheme is an
-    // app on the device, whichever owns that scheme, so its host means nothing.
-    const destination = (() => {
-      try {
-        const u = new URL(String(params.redirect_uri));
-        return u.protocol === "http:" || u.protocol === "https:" ? `returning to ${u.origin}` : `returning to the app registered for ${u.protocol} (${u.href})`;
-      } catch {
-        return `returning to ${String(params.redirect_uri)}`;
-      }
-    })();
-    const said = client?.clientName ? ` (it calls itself &ldquo;${esc(client.clientName)}&rdquo;)` : "";
-    const who = `<strong>${esc(checked)}</strong>${said}, <strong>${esc(destination)}</strong>`;
-    if (prompt.name === "login") {
-      return page(res, 200, "login", `<p>Sign in to let ${who} reach your brain.</p><form method="post" action="/auth/interaction/${esc(uid)}/login"><input type="password" name="password" autocomplete="current-password"><button>Sign in</button></form>`);
-    }
+  const asking: Asking = {
+    clientId: String(params.client_id),
+    clientName: client?.clientName as string | undefined,
+    redirectUri: String(params.redirect_uri),
     // What the request names, validated by the library before this page: the
     // token can carry no scope or resource beyond these. (prompt.details lists
     // only what the grant still lacks, which is empty on a repeat consent.)
-    const asked = String(params.scope ?? "").split(" ").filter(Boolean);
-    const resources = [params.resource ?? []].flat().map(String).filter(Boolean);
-    const offline = asked.includes("offline_access") ? " It may keep access after you close it (<code>offline_access</code>)." : "";
-    return page(res, 200, "consent", `<p>${who}, asks for <code>${esc(asked.join(" "))}</code> on <code>${esc(resources.join(" "))}</code>.${offline}</p><form method="post" action="/auth/interaction/${esc(uid)}/confirm"><button>Allow</button></form><form method="post" action="/auth/interaction/${esc(uid)}/abort"><button>Deny</button></form>`);
+    scope: String(params.scope ?? ""),
+    resources: [params.resource ?? []].flat().map(String).filter(Boolean),
+  };
+  const base = `/auth/interaction/${encodeURIComponent(uid)}`;
+  if (req.method === "GET" && !action) {
+    if (prompt.name === "login") return send(res, 200, loginPage(asking, `${base}/login`));
+    return send(res, 200, consentPage(asking, `${base}/confirm`, `${base}/abort`));
   }
   if (req.method !== "POST") return page(res, 405, "none", "method not allowed");
+  // The interaction is bound to this browser's cookie already; a POST from another origin is refused as well (both candidates do).
+  if (req.headers.origin !== L.origin) return page(res, 403, "none", "this form must be posted from the brain's own origin");
 
   if (action === "abort") return provider.interactionFinished(req, res, { error: "access_denied", error_description: "the operator denied the request" }, { mergeWithLastSubmission: false });
   if (action === "login") {
     if (prompt.name !== "login") return page(res, 400, "none", "not a sign-in step");
     const form = await readForm(req);
     if (!(await Bun.password.verify(form.get("password") ?? "", PASSWORD_HASH).catch(() => false))) {
-      return page(res, 401, "login", `<p>Wrong password.</p><form method="post" action="/auth/interaction/${esc(uid)}/login"><input type="password" name="password"><button>Sign in</button></form>`);
+      return send(res, 401, loginPage(asking, `${base}/login`, true));
     }
     return provider.interactionFinished(req, res, { login: { accountId: OPERATOR, amr: ["pwd"] } }, { mergeWithLastSubmission: false });
   }

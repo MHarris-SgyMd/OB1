@@ -54,6 +54,8 @@ export function layout(origin: string) {
   const clients: Record<string, ClientPolicy> = {
     gui: { kind: "gui", resources: [api("")], redirect: `${origin}/dashboard/auth/callback` },
     runner: { kind: "service", resources: [api("")], scope: "brain:capture" },
+    // A service linked to both tiers' REST cores, as a deploy might link the runner: it must still get one audience per token (A4).
+    "runner-tiers": { kind: "service", resources: [api(""), api("/canary")], scope: "brain:capture" },
     mcp: { kind: "exchange", from: mcp(""), to: api("") },
     "mcp-canary": { kind: "exchange", from: mcp("/canary"), to: api("/canary") },
   };

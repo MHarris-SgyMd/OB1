@@ -26,14 +26,22 @@ import { layout } from "./policy.ts";
 export const HERE = dirname(fileURLToPath(import.meta.url));
 export const ENV_FILE = join(HERE, ".env");
 const POC_DIR = join(HERE, ".poc");
-export const CANDIDATES = ["oidc-provider"] as const;
+export const CANDIDATES = ["oidc-provider", "better-auth"] as const;
 export type Candidate = (typeof CANDIDATES)[number];
 
 const DEFAULT_PORT = "8020";
 
 export async function ensureEnv(): Promise<Record<string, string>> {
-  if (existsSync(ENV_FILE)) return parseEnv(readFileSync(ENV_FILE, "utf8"));
   const hex = (n: number) => randomBytes(n).toString("hex");
+  if (existsSync(ENV_FILE)) {
+    // A client added to policy.ts since the file was written gets its secret appended; nothing else is rewritten.
+    const env = parseEnv(readFileSync(ENV_FILE, "utf8"));
+    const missing = Object.keys(layout(env.OB1_PUBLIC_ORIGIN ?? `http://localhost:${DEFAULT_PORT}`).clients)
+      .map((id) => `OB1_AUTH_SECRET_${id.toUpperCase().replace(/-/g, "_")}`)
+      .filter((k) => !env[k]);
+    if (missing.length) writeFileSync(ENV_FILE, readFileSync(ENV_FILE, "utf8") + missing.map((k) => `${k}=${hex(24)}\n`).join(""), { mode: 0o600 });
+    return parseEnv(readFileSync(ENV_FILE, "utf8"));
+  }
   const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const jwk = { ...privateKey.export({ format: "jwk" }), kid: `poc-${hex(4)}`, alg: "ES256", use: "sig" };
   const password = `Poc-${hex(12)}`;

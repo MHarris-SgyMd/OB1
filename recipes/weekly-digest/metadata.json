@@ -1,30 +1,25 @@
 {
   "name": "Weekly Digest",
-  "description": "Scheduled importance-ranked synthesis of recent thoughts, delivered to Telegram",
+  "description": "Retired on this fork (SMD-2239): the importance-ranked weekly synthesis to Telegram now lives in db/weekly-digest.ts, a db/ verb behind the egress gate. This directory is a pointer; the weekly-digest.mjs PostgREST script is gone.",
   "category": "recipes",
   "author": {
     "name": "Alan Shurafa",
     "github": "alanshurafa"
   },
-  "version": "1.0.0",
+  "version": "2.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["Telegram Bot API (optional)", "Anthropic API or OpenRouter"],
-    "tools": ["Node.js 18+"],
+    "services": ["Telegram Bot API (optional)", "the brain's configured chat provider — see db/weekly-digest.ts"],
+    "tools": ["Bun"],
     "env": {
-      "required": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
-      "llm_one_of": ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"],
-      "optional": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DIGEST_MODEL"],
-      "legacy_aliases": {
-        "OPEN_BRAIN_URL": "SUPABASE_URL",
-        "OPEN_BRAIN_SERVICE_KEY": "SUPABASE_SERVICE_ROLE_KEY"
-      }
+      "required": [],
+      "optional": ["OB1_EGRESS_ALLOW", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "OB1_DIGEST_MODEL"]
     }
   },
-  "tags": ["consumption-formats", "digest", "telegram", "synthesis", "scheduled"],
+  "tags": ["consumption-formats", "digest", "telegram", "synthesis", "scheduled", "retired"],
   "connectors": ["telegram"],
   "difficulty": "intermediate",
-  "estimated_time": "30 minutes",
+  "estimated_time": "5 minutes",
   "created": "2026-04-17",
-  "updated": "2026-04-17"
+  "updated": "2026-10-01"
 }
