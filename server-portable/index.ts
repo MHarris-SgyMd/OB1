@@ -1,23 +1,29 @@
 
-import { displayDate, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
-import { cleanForDisplay } from "./consolidate.ts";
-import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
+import { type EmbeddedCapture } from "./embed.ts";
 import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
 import { captureLineage } from "./lineage.ts";
 import { classifyGenre } from "./genre.ts";
 import { resolveJevConfig } from "./jev.ts";
-import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
+import { decideCalls, type EgressSubject } from "./egress.ts";
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
-import { z } from "zod";
-import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type AuditChange, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
+import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
 import { queryLogEnabled, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
-import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
-import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
+import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
-import { startJob, readJob, subscribe as subscribeJob, markRunningLost, setJobSink } from "./jobs.ts";
+import { subscribe as subscribeJob, markRunningLost, setJobSink } from "./jobs.ts";
+import { createCore, SPECS } from "./core/index.ts";
+import { citeRows } from "./core/context.ts";
+import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
+import * as say from "./render.ts";
+
+// What the suites import from the module they drive; each now lives beside the
+// core or the renderer it belongs to (SMD-2283).
+export { parseFilter, withActorFilter } from "./core/filter.ts";
+export { actorLine, demotedLine, currentNote, currentSearchHint } from "./render.ts";
+export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";
 
 /**
  * Runtime-portable env access.
@@ -261,53 +267,6 @@ function db(): Promise<ThoughtStore> {
   return _store;
 }
 
-// What this brain is (SMD-2041): the server's own facts beside the database's,
-// one read under the brain_info tool and the keyed /health body.
-function serverFacts(): ServerFacts {
-  const cfg = embedConfig();
-  return {
-    version: FORK_VERSION,
-    releaseRange: RELEASE_RANGE,
-    latestMigration: LATEST_MIGRATION,
-    commit: env().OB1_GIT_SHA || "unknown",
-    store: storeKind(env()),
-    tier: env().OB1_TIER || null,
-    embedding: { model: cfg.embeddingModel, dim: cfg.embeddingDim },
-  };
-}
-// Bounded (review pass 1: a keyed probe at an unreachable database waited out
-// the driver's 30-second connect and got no reply). The health body answers
-// within a probe's usual timeout — its statements capped to fit, so a few
-// locked tables cost their lock waits and not the whole record (review pass
-// 2); the tool, kept alive by its stream (SMD-1864), waits longer for a large
-// brain's counts, at brain-info.ts's default ceilings.
-export const HEALTH_DEADLINE_MS = 2_500;
-export const BRAIN_INFO_TOOL_DEADLINE_MS = 15_000;
-type Surface = "health" | "tool";
-const SURFACES: Record<Surface, { deadlineMs: number; opts: ReadOptions }> = {
-  health: { deadlineMs: HEALTH_DEADLINE_MS, opts: { statementTimeoutMs: 800, lockTimeoutMs: 300 } },
-  tool: { deadlineMs: BRAIN_INFO_TOOL_DEADLINE_MS, opts: {} },
-};
-// One read in flight per surface, so concurrent callers share one pool
-// connection rather than taking one each (forty probes against a locked table
-// once held the pool). Keyed by surface, so a probe never gets the tool's
-// deadline and ceilings. Released when the answer settles: an abandoned read
-// finishes its last statement within its ceiling (800 ms for health) beside the
-// next caller's, and a read hung on a half-open connection pins nothing.
-const inflight = new Map<Surface, Promise<BrainInfo>>();
-function readBrainInfo(surface: Surface): Promise<BrainInfo> {
-  const { deadlineMs, opts } = SURFACES[surface];
-  const read = () => brainInfo(serverFacts(), async (progress) => (await db()).databaseFacts(opts, progress), deadlineMs);
-  // Not shared on Workers (the PostgREST store): its read is a refusal with no
-  // I/O to share, and a promise from one request is not another's to await.
-  if (storeKind(env()) !== "sql") return read();
-  const shared = inflight.get(surface);
-  if (shared) return shared;
-  const answer = read().finally(() => { if (inflight.get(surface) === answer) inflight.delete(surface); });
-  inflight.set(surface, answer);
-  return answer;
-}
-
 // Built on first use, for the same reason as the store: reading env() at module
 // scope runs before initEnv() has seeded it.
 let _agents: AgentResolver | null = null;
@@ -318,19 +277,16 @@ function agents(): AgentResolver {
   return _agents;
 }
 
-// The model provider. Anything speaking the OpenAI /embeddings and
-// /chat/completions shapes works, which includes OpenRouter, OpenAI itself, and
-// Ollama's compatibility layer — so a fully local brain is a URL change, not a
-// code change.
-//
-// How each provider-side setting is resolved from the environment lives in
-// embed.ts (resolveEmbedConfig), because db/reembed.ts must resolve them the
-// same way; these are the server's lazy readers over it, lazy so Cloudflare
-// Workers bindings — which arrive per request — still apply.
-
-function embedConfig(): EmbedConfig {
-  return resolveEmbedConfig(env());
-}
+// The core (SMD-2283): every tool's logic over the store and the model
+// provider, as functions of a principal and a typed input (core/index.ts). Built
+// once, at import; it reads the environment and the store through the two
+// lazy readers above, so Cloudflare Workers bindings — which arrive per
+// request — still apply. The model provider is anything speaking the OpenAI
+// /embeddings and /chat/completions shapes, which includes OpenRouter, OpenAI
+// itself, and Ollama's compatibility layer — so a fully local brain is a URL
+// change, not a code change.
+const core = createCore({ env, store: db });
+const { embedConfig, embedder } = core.ctx;
 // The tag extraction is metadata.ts (shared with db/sync-linear.ts); this is
 // the server's reader over it, lazy like embedConfig for the same reason.
 const extractMetadata = (text: string, subject: EgressSubject) => extractMetadataWith(text, subject, embedConfig());
@@ -343,18 +299,7 @@ const jevConfig = () => resolveJevConfig(env());
 const classifyThoughtGenre = (content: string, metadata: Record<string, unknown>, subject: EgressSubject) =>
   classifyGenre(content, metadata, jevConfig(), subject);
 
-function citationBase(): string {
-  return env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
-}
-
-// How a capture becomes vectors — chunking, the blurb rule, the prompt
-// template, the whole-content-then-head-window fallback, the width check — is
-// embed.ts, shared with db/reembed.ts so a re-embed produces exactly what a
-// capture would. The embedder remembers one thing across calls: whether the
-// provider refused a whole-content embedding, which is a property of the model.
-const embedder = createEmbedder(embedConfig);
 const embedCapture = (content: string, subject: EgressSubject) => embedder.embedCapture(content, subject);
-const getEmbedding = (text: string, subject: EgressSubject, kind: EmbedKind = "document") => embedder.getEmbedding(text, subject, kind);
 
 /**
  * What a capture or an edit reply says when the whole-content vector could
@@ -371,40 +316,6 @@ function explainHeadWindow(e: EmbeddedCapture | undefined): string {
     `the head window's vector stands in for it. The thought is stored and searchable, and every search chunk ` +
     `has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
   );
-}
-
-/**
- * A search the egress gate refused (SMD-1903): the query text would leave for
- * its embedding, and the policy says it may not. The caller's way through is
- * the keyword tool, which makes no model call; the operator's are named.
- */
-function refuseQuery(gate: EgressDecision, actor: string): string {
-  // The remedy follows the rule that refused (first review pass): under
-  // `allow` a deny term matched, and adding an allow term would change
-  // nothing; a second opinion is the operator's hook to read.
-  const remedy = gate.rule === "deny-term"
-    ? "or removes the OB1_EGRESS_DENY term the reason names"
-    : gate.rule === "second-opinion"
-      ? "or reads what the second opinion refused"
-      : `or allows this key (OB1_EGRESS_ALLOW=actor:${actor})`;
-  return (
-    `Refused: the query text would be sent for its embedding, and ${gate.reason}. ` +
-    `Use search_thoughts_keyword (exact text, no model call). To allow semantic search here, the operator declares the endpoint local ` +
-    `(OB1_LLM_LOCAL=1) when it is, ${remedy}.`
-  );
-}
-
-/**
- * The question both search tools ask before embedding a query (SMD-1903): the
- * subject the embedding will be judged and sent under, and the refusal text
- * when it may not leave. One helper, since the two tools had the four lines
- * each (boyscout).
- */
-function gateQuery(query: string, principal: Principal): { subject: EgressSubject; refused?: string } {
-  const cfg = embedConfig();
-  const subject: EgressSubject = { kind: "query", actor: principal.name, content: query };
-  const gate = mayLeaveBox(subject, cfg.embeddings, cfg.egress);
-  return gate.allowed ? { subject } : { subject, refused: refuseQuery(gate, principal.name) };
 }
 
 // --- MCP Server Setup ---
@@ -459,7 +370,7 @@ function explainRefusal(
     // Migration 042: statements in other thoughts rest on this one. The rows
     // are the function's sample (ten, newest first); the count is the whole.
     case "CITED": {
-      const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${snipText(c.text, 120)}`);
+      const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${say.snipText(c.text, 120)}`);
       const total = r.citedBy ?? rows.length;
       const more = total - rows.length;
       // One subject, one way through, three shapes: the number and its grammar
@@ -481,14 +392,6 @@ function explainRefusal(
       return `Refused: ${r.error}`;
   }
 }
-
-/**
- * The shape of a `source` label a capture may carry (SMD-1298): what the egress
- * policy's `source:` term and a per-source weight can key on — lower-case, no
- * spaces, bounded. Not a vocabulary: the hook says `claude-code` or `codex`,
- * an importer says what it imports from, and the default stays `mcp`.
- */
-const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 
 // A caller-set metadata key (SMD-2014): lower-case, starts with a letter, 2-40
 // characters — the shape a reader can filter on. The server owns some keys of
@@ -516,120 +419,6 @@ function refuseMetadataShape(metadata: Record<string, unknown> | undefined): str
     if (typeof v === "string" && v.length > META_VALUE_MAX) return `Refused: \`metadata.${k}\` is ${v.length} characters — at most ${META_VALUE_MAX}.`;
   }
   return null;
-}
-
-/**
- * Untrusted text — a thought's, a citation's, a judge's reason — on one line
- * of a reply: the same cleaner the CLI renders through
- * (server-portable/consolidate.ts), whitespace collapsed, cut with an ellipsis
- * past `max` characters. One spelling for every place a reply quotes a thought.
- */
-function snipText(text: string, max: number): string {
-  const t = cleanForDisplay(text).replace(/\s+/g, " ").trim();
-  return t.length > max ? t.slice(0, max) + "…" : t;
-}
-
-/**
- * thought_changes's `since` (SMD-1296): a uuid is a cursor — the audit row a
- * previous page ended with — and anything else must read as an ISO-8601 time
- * (a date at least, so a bare number is not a year), normalised so the reply
- * echoes one spelling. Neither is a refusal naming both forms, before any call.
- */
-function parseSince(raw: string | undefined): { since: string | null; after: string | null } | { refused: string } {
-  const v = (raw ?? "").trim();
-  if (v === "") return { since: null, after: null };
-  if (UUID_RE.test(v)) return { since: null, after: v.toLowerCase() };
-  const refused = { refused: `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${snipText(v, 40)}".` };
-  // A date, or a date with a clock that names its zone — a clock with no Z or
-  // offset would be read in the server's zone (13:00Z for 08:00 on a Chicago
-  // laptop, 08:00Z in the container). Any ISO-8601 fraction (Python's
-  // isoformat gives six digits) and an hour-only offset (psql prints `+00`)
-  // are normalised to what Date parses: a T, three fraction digits, a colon in
-  // the offset — completed only when the shape has one, since a bare date's
-  // own `-01` is a day, not a zone.
-  const shape = /^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}(?::?\d{2})?))?$/i.exec(v);
-  if (!shape) return refused;
-  // Upper-cased: the shape is matched case-blind, and a lowercase t or z is
-  // ISO-8601 to JSC (Bun) but not to every Date parser the server runs on.
-  let iso = v.toUpperCase().replace(" ", "T").replace(/(\.\d{3})\d+/, "$1");
-  if (shape[2] && !/^z$/i.test(shape[2])) iso = iso.replace(/([+-]\d{2})(\d{2})$/, "$1:$2").replace(/([+-]\d{2})$/, "$1:00");
-  const d = new Date(iso);
-  // The date part round-trips on its own, whatever the clock or zone beside it
-  // (2026-02-30 would otherwise slide to March, at any hour), and the year
-  // stays where timestamptz has room: a late time with an offset rolls past
-  // 9999, an early one below 1, and either would come back as Postgres's raw
-  // error (review passes 1–3).
-  const day = new Date(`${shape[1]}T00:00:00Z`);
-  if (Number.isNaN(d.getTime()) || Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== shape[1]) return refused;
-  if (d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) return refused;
-  return { since: d.toISOString(), after: null };
-}
-
-/** The two metadata keys 050's trigger owns (SMD-1726): the writer's kind and name, stamped as the content moves. */
-const ACTOR_MARKS: ReadonlySet<string> = new Set(["actor_kind", "actor_name"]);
-
-/**
- * One change as a client reads it: when, what and who on the first line with
- * the thought's `ID:` (the label every read tool prints, SMD-1248, so fetch and
- * update_thought can reach what the line names); then what moved, bounded;
- * then the supersedes pointer, because "X now replaces Y" is the change a
- * resuming agent most needs. Untrusted text — a head, a metadata key — goes
- * through snipText, the one cleaner every reply quotes a thought through.
- */
-function renderChange(c: AuditChange, n: number): string {
-  // The full ISO form — the one spelling the header's `since` echoes, so a
-  // client that checkpoints on a line's time re-reads nothing it need not.
-  const when = c.createdAt;
-  // Name and door are untrusted text (a writer sets its own envelope; a raw
-  // INSERT sets either column), so both go through snipText: one line, and no
-  // forged entry or Cursor line in a feed agents act on. No key but a door is
-  // a worker that names itself alone — 050's backfill_thought_actors — and
-  // reads by its door rather than as an anonymous edit.
-  const who = c.actorName !== null ? `by ${snipText(c.actorName, 80)}${c.actorKind ? ` (${c.actorKind})` : ""}`
-    : c.origin !== null ? `by ${snipText(c.origin, 80)} (no key)`
-    : "from outside the server";
-  // 050's stamp is not an edit (it holds the updated_at trigger): a row whose
-  // only change is the two marks is "marked" — the backfill's row above all.
-  const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every((k) => ACTOR_MARKS.has(k));
-  const verb = c.action === "capture" ? "captured" : c.action === "update" ? (marksOnly ? "marked" : "edited") : "deleted";
-  const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
-  const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
-  const text = c.head === null ? null : snipText(c.head, 200);
-  // A capture row carries no text of its own (008's capture diff is the
-  // metadata), so the head is the thought's CURRENT text — say so, since an edit
-  // since would otherwise read as what was captured; a deleted thought's text
-  // is in its delete row, not gone (both caught: cold-read, pass 1).
-  if (c.action === "capture") lines.push(text === null ? "   (the text is in its delete row)" : `   now: "${text}"`);
-  if (c.action === "delete" && text !== null) lines.push(`   was: "${text}"`);
-  if (c.action === "update") {
-    const parts: string[] = [];
-    if (c.changed.includes("content")) parts.push(text === null ? "content" : `content → "${text}"`);
-    // 050 stamps the two marks into metadata whenever the content moves under
-    // another key: the first line already says who, so beside a content change
-    // they are not listed as keys the editor touched (a pre-050 row whose
-    // caller wrote a mark of its own loses it the same way — the row cannot
-    // tell the two apart; the raw diff stays reachable by the audit id). Alone
-    // — the backfill's row — they are the whole change and stay. A side that is
-    // not an object has no keys to name and still says "metadata".
-    const keys = c.changed.includes("content") ? c.metadataKeys.filter((k) => !ACTOR_MARKS.has(k)) : c.metadataKeys;
-    const bare = c.metadataKeys.length === 0;
-    if (c.changed.includes("metadata") && (keys.length || bare)) parts.push(bare ? "metadata" : `metadata: ${keys.map((k) => snipText(k, 40)).join(", ")}`);
-    if (c.changed.includes("embedding_present")) parts.push("embedding");
-    if (parts.length) lines.push(`   ${parts.join("; ")}`);
-    // 046: an unchanged edit that declared a stance, cites or a window is an
-    // event with an empty diff — say so rather than print a bare header.
-    else if (!c.changed.some((k) => k === "supersedes" || k === "derived_from")) lines.push("   restated — no field changed");
-  }
-  if (c.action === "capture" && c.supersedesAfter) lines.push(`   supersedes ${c.supersedesAfter}`);
-  if (c.action === "update") {
-    if (c.supersedesAfter) lines.push(`   now supersedes ${c.supersedesAfter}${c.supersedesBefore ? ` (was ${c.supersedesBefore})` : ""}`);
-    else if (c.supersedesBefore) lines.push(`   no longer supersedes ${c.supersedesBefore} (pointer cleared)`);
-  }
-  // A point-in-time record: whether the superseded thought is current again
-  // depends on what happened to it since, which this row cannot know.
-  if (c.action === "delete" && c.supersedesBefore) lines.push(`   it superseded ${c.supersedesBefore}`);
-  if (c.derivation) lines.push(c.action === "capture" ? "   captured with sources (derived_from)" : "   sources (derived_from) changed");
-  return lines.join("\n");
 }
 
 /**
@@ -677,163 +466,6 @@ function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): s
  */
 const SERVER_NAME = "open-brain";
 
-// SMD-1490: the metadata filter a search tool exposes. Shallow by design —
-// top-level keys to a scalar or an array of scalars — so `metadata @> filter`
-// stays GIN-indexable and the row-level-security cost of exposing it (SMD-1625)
-// is bounded, not open-ended. A nested object, or more than the caps below, is
-// refused at the tool boundary rather than handed to jsonb.
-const FILTER_MAX_KEYS = 20;
-const FILTER_MAX_BYTES = 4096;
-const filterScalar = z.union([z.string(), z.number(), z.boolean()]);
-/** The zod surface of the filter argument; the caps and normalisation are parseFilter's. */
-const filterInput = z
-  .record(z.string(), z.union([filterScalar, z.array(filterScalar)]))
-  .optional()
-  .describe(
-    'Optional metadata filter: an object whose top-level keys a thought\'s metadata must contain (jsonb containment). A value is a scalar or an array of scalars — {"type":"project"} keeps thoughts whose metadata.type is "project"; {"topics":["ob1"]} keeps those whose topics array contains "ob1". Nested objects are not accepted. Omit for an unfiltered search.',
-  );
-
-/**
- * Normalise and bound a metadata filter from a search tool (SMD-1490). Absent,
- * null or empty is `{}` (unfiltered). Throws on a shape the boundary should
- * refuse — a non-object, a nested object, a non-scalar value, or a filter over
- * the key/size caps — so the handler's catch turns it into a tool error rather
- * than a jsonb the store would run. Exported for the unit test.
- */
-export function parseFilter(raw: unknown): Record<string, unknown> {
-  if (raw === undefined || raw === null) return {};
-  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("filter must be an object of metadata keys");
-  const isScalar = (v: unknown) => typeof v === "string" || typeof v === "number" || typeof v === "boolean";
-  const entries = Object.entries(raw as Record<string, unknown>);
-  if (entries.length > FILTER_MAX_KEYS) throw new Error(`filter has too many keys (max ${FILTER_MAX_KEYS})`);
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of entries) {
-    if (Array.isArray(v)) {
-      if (!v.every(isScalar)) throw new Error(`filter.${k} must be an array of strings, numbers or booleans`);
-    } else if (!isScalar(v)) {
-      throw new Error(`filter.${k} must be a scalar or an array of scalars — nested objects are not accepted`);
-    }
-    out[k] = v;
-  }
-  // UTF-8 bytes, not JSON.stringify().length (UTF-16 code units) — multibyte
-  // content (CJK, accents) is ~2x its code-unit count, so the code-unit check let
-  // a filter past ~2x the byte bound the error names. TextEncoder is Workers-safe
-  // where Buffer is not (SMD-1953).
-  if (new TextEncoder().encode(JSON.stringify(out)).length > FILTER_MAX_BYTES) throw new Error(`filter is too large (max ${FILTER_MAX_BYTES} bytes)`);
-  return out;
-}
-
-// SMD-1726: who wrote a thought's current text, on the read path. Migration 050
-// stamps two reserved metadata keys from the write's key — `actor_kind`
-// (ob1_agents.kind: operator | agent | ingested) and `actor_name` (the key's
-// name) — so "only what the operator said" is the same jsonb containment every
-// other filter key takes, on 014's route, and the hit can say who wrote it.
-/** The three words the key registry holds (migration 046, `ob1_agents.kind`); `said_by` takes one. */
-const SAID_BY = ["operator", "agent", "ingested"] as const;
-const saidByInput = z.enum(SAID_BY).optional()
-  .describe("Only thoughts whose current text was written through a key of this kind: operator (typed by the operator), agent (an agent's own output — a summary, a conclusion), or ingested (an importer copying outside text). Decided by the key that made the write, never by the thought's text. Omit for every writer.");
-const actorInput = z.string().trim().min(1).max(200).optional()
-  .describe("Only thoughts whose current text was written through the access key with this name — the name on a hit's `By:` line. Omit for every key.");
-
-/**
- * `said_by` and `actor` folded into the metadata filter (SMD-1726): the two
- * are the keys migration 050 stamps, so the store, the query log and the plan
- * see one filter and the arguments are sugar over it. A `filter` that names
- * the same key with another value is a caller contradicting itself, refused
- * at the boundary as parseFilter refuses a nested object. Exported for the
- * unit test.
- */
-export function withActorFilter(filter: Record<string, unknown>, saidBy: string | undefined, actor: string | undefined): Record<string, unknown> {
-  const out = { ...filter };
-  // The stamp trims the key's name (050), so the argument is trimmed here too —
-  // a pasted "op-key " must find the rows op-key wrote (second review pass).
-  for (const [key, value, arg] of [["actor_kind", saidBy, "said_by"], ["actor_name", actor?.trim() || undefined, "actor"]] as const) {
-    if (value === undefined) continue;
-    if (key in out && out[key] !== value) throw new Error(`${arg} is "${value}" but filter.${key} is ${JSON.stringify(out[key])} — pass one of the two`);
-    out[key] = value;
-  }
-  // The caps are the filter's, so they hold over the folded object too (first
-  // review pass: a 20-key filter plus the two was 22 keys the store ran).
-  return parseFilter(out);
-}
-
-/**
- * The `By:` line under a hit — who wrote its current text, from the two keys
- * migration 050 stamps. Absent when the row carries neither (a write from
- * outside the server, or a brain whose backfill has not run), as `Captured:`
- * is absent for an undated row. A name with no kind is a key nobody has
- * classified yet (set_agent_kind), said so rather than guessed. The name is
- * the key's — the server's word, not the thought's — and is rendered through
- * the same cleaner every quoted text takes all the same. Exported for the
- * unit test.
- */
-export function actorLine(m: Record<string, unknown>): string | null {
-  const name = typeof m.actor_name === "string" && m.actor_name.trim() ? snipText(m.actor_name, 80) : null;
-  const kind = typeof m.actor_kind === "string" && (SAID_BY as readonly string[]).includes(m.actor_kind) ? m.actor_kind : null;
-  if (!name && !kind) return null;
-  return `By: ${name ?? "an unnamed key"} (${kind ?? "kind not classified"})`;
-}
-
-/**
- * The line under a hit prefer_current demoted (059, SMD-2255): the weight it
- * took and why. The weight is read off the row — score over fused, exact since
- * 0.25 is a power of two — so this file holds no copy of it. Null for a row
- * nothing demoted, which is every row without the flag. Exported for the unit
- * test.
- */
-export function demotedLine(t: Pick<ThoughtHybridMatch, "demoted" | "score" | "fused">): string | null {
-  if (t.demoted.length === 0) return null;
-  const weight = t.fused > 0 ? `×${Number((t.score / t.fused).toFixed(4))}` : "below current thoughts";
-  return `↓ Ranked ${weight} — ${t.demoted.join(", ")}`;
-}
-
-/**
- * The header note under prefer_current: what the window held — how many rows
- * were demoted, how many carry a lifecycle and the latest sync among them —
- * and, when the window held fewer current rows than asked for and may not be
- * the whole list, that the rows after them are demoted ones and a current
- * match past the window may have been missed. The window is min(100, 4 ×
- * limit), so a larger limit reads more only below 100 rows (first review
- * pass: the note told a caller at 100 to raise it). Null without the flag (no
- * window on the rows). Exported for the unit test.
- */
-export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">[]): string | null {
-  const w = rows[0]?.window;
-  if (!w) return null;
-  const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${w.syncedAt})` : ""}`;
-  // A demoted exact hit keeps a quarter of its literal bonus (1/61 per literal
-  // it holds), so one can still rank above current rows — on a query of
-  // literals only, or holding several literals. Rather than state when (the
-  // third and fourth review passes each found the rule wrong for some case),
-  // the note counts the returned demoted rows that do sit above a current one.
-  const isDemoted = (r: Pick<ThoughtHybridMatch, "demoted">) => (r.demoted?.length ?? 0) > 0;
-  const above = rows.filter((r, i) => isDemoted(r) && rows.slice(i + 1).some((x) => !isDemoted(x))).length;
-  const exception = above === 0 ? ""
-    : ` — ${above} of the demoted, holding the query's literal, still rank${above === 1 ? "s" : ""} above a current one here`;
-  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones${exception}; ${lifecycle}.`;
-  if (w.exact) return note;
-  const current = w.rows - w.demoted;
-  const held = current === 0 ? `No current match was in the top ${w.rows}, so every row here is a demoted one`
-    : `Only ${current} current match${current === 1 ? " was" : "es were"} in the top ${w.rows}, so the rows after ${current === 1 ? "it" : "them"} are demoted ones`;
-  // Not exact means the window was full (its size is W = min(100, 4 × the
-  // limit the function clamped)), so the window's own size says whether a
-  // larger limit reads further — not the limit as sent, which the SQL rounds
-  // and clamps (second review pass: 24.6 binds as 25, a window of 100).
-  const advice = w.rows < 100 ? " — raise limit to read further" : ` — the window is capped at ${w.rows}`;
-  return `${note} ${held}, and a current match past the window may have been missed${advice}.`;
-}
-
-/** The hint an error from prefer_current's path carries: the migration or the grant it needs. */
-export function currentSearchHint(msg: string): string {
-  return /search_thoughts_current/.test(msg) && /does not exist|could not find/i.test(msg)
-    ? " — migration 059 (db/migrations/059_search_prefers_current.sql) is not applied, or PostgREST has not reloaded its schema cache; search without prefer_current meanwhile"
-    : /permission denied for table ob1_(ticket_head|superseded_by)\b/i.test(msg)
-    ? " — prefer_current reads node_state's projection (migration 068), and the server's role needs the capture group's grants on ob1_ticket_head and ob1_superseded_by (db/README.md, Grants for a capturing role; migrate.ts --grant issues them); search without prefer_current meanwhile"
-    : /permission denied for table thought_sources/i.test(msg)
-    ? " — prefer_current reads node_state; before migration 068, and after it wherever PostgreSQL checks a removed join's tables, the server's role needs SELECT on thought_sources (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues); search without prefer_current meanwhile"
-    : "";
-}
-
 /**
  * The tool calls running, counted for the stop (SMD-2250, review pass 3): a
  * call runs on after its client has gone, and a stop that waited only on the
@@ -842,11 +474,6 @@ export function currentSearchHint(msg: string): string {
 const toolCalls = createCallCount();
 /** How many tool calls are running now, for test-server [13d]. */
 export const toolCallsRunning = (): number => toolCalls.running;
-
-/** The reference async job (scan_thoughts, SMD-2273): how many thoughts a scan walks by default and at most. Bounded so the demo job is finite; a larger corpus job is a follow-up. */
-const SCAN_DEFAULT = 1_000;
-const SCAN_MAX = 100_000;
-
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
@@ -862,248 +489,40 @@ function buildServer(principal: Principal): McpServer {
     return registerTool(...args.slice(0, -1), (...call: unknown[]) => toolCalls.track(() => handler(...call)));
   };
 
-  // The opt-in query log (migration 034, SMD-1295). Off unless OB1_QUERY_LOG=on,
-  // and best-effort either way: a log write is never allowed to fail a search, a
-  // fetch or a capture, so every call is guarded and every rejection swallowed.
-  // The flag is read from the boot-time env snapshot (initEnv freezes it on the
-  // first request), so it is set at start-up, not toggled per request. Nothing
-  // here reads the log back — the export tool does, offline.
-  //   The write is awaited on the request's hot path, deliberately (SMD-1492).
-  // Fire-and-forget or an in-process queue would shave a local INSERT off the
-  // latency, but either can drop a row when the isolate is torn down or the
-  // process dies — and SMD-1806 replays this log to build the canary, where a
-  // dropped row is a lost replay. The added cost is measured in db/bench-querylog.ts
-  // and kept; a cheaper insert path (a BRIN prune index in place of 047's btree)
-  // is the follow-up (SMD-1950), not a durability trade here. On Workers, executionCtx
-  // .waitUntil would keep the write durable and off the response path, but it is
-  // not plumbed to the handlers today and the dogfood runs Bun, which has no
-  // equivalent (deferred).
-  // The pipeline tier this server runs as (SMD-1806), stamped on every query_log
-  // row so the canary — which replays stable's log — can tell a stable-written
-  // row from its own. Unset is a plain brain (the row's tier is NULL).
-  const serverTier = (): string | undefined => env().OB1_TIER?.trim() || undefined;
-  const logSearchCall = async (
-    tool: string,
-    args: { query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; arm: string },
-    data: { id: string; score?: number | null }[],
-  ): Promise<void> => {
-    if (!queryLogEnabled(env())) return;
-    try {
-      await (await db()).logSearch({
-        tool,
-        agentId: principal.agentId,
-        query: args.query,
-        matchCount: args.limit,
-        threshold: args.threshold,
-        recencyWeight: args.recencyWeight,
-        filter: args.filter,
-        resultIds: data.map((t) => t.id),
-        resultScores: data.map((t) => t.score ?? null),
-        arm: args.arm,
-        tier: serverTier(),
-      });
-    } catch {
-      // best-effort: a log failure must never reach the caller.
-    }
-  };
-  // `tool` is the action's kind as well as its writer. A plain tool name —
-  // `fetch`, `update_thought`, `delete_thought` — says the caller opened or
-  // touched the target (034's click-through). `<writer>/<pointer>` —
-  // `capture_thought/derived_from`, `capture_thought/supersedes`,
-  // `update_thought/supersedes` — says the writer named the target as a source
-  // and the database accepted the pointer (SMD-1719's cite). evals/utilization.ts
-  // splits cited from opened on the `/` alone, so a new writer that cites names
-  // itself the same way and is counted without a code change there.
-  const logActionCalls = async (rows: { tool: string; targetId: string }[]): Promise<void> => {
-    if (!queryLogEnabled(env()) || rows.length === 0) return;
-    try {
-      // One round trip and one writer for the batch, whatever its size: a
-      // synthesis citing forty sources is forty rows in one INSERT, not forty
-      // on the pool, and there is one INSERT shape per store to keep right,
-      // no single-row twin to drift from it. Best-effort as a whole: a
-      // failure drops the batch, never the write it followed.
-      await (await db()).logActions(rows.map((r) => ({ tool: r.tool, agentId: principal.agentId, targetId: r.targetId, tier: serverTier() })));
-    } catch {
-      // best-effort.
-    }
-  };
+  // The action log of a write (034's click-through, SMD-1719's cites), stamped
+  // with this caller's agent id — core/context.ts owns the write and its rules.
+  const logActionCalls = (rows: { tool: string; targetId: string }[]): Promise<void> => core.ctx.logActions(principal, rows);
   const logActionCall = (tool: string, targetId: string): Promise<void> => logActionCalls([{ tool, targetId }]);
-  // The cite rows of one write: one per distinct id it named as a source,
-  // lower-cased before the dedup (UUID_RE admits either case, and two spellings
-  // of one id are one cite), tool `<writer>/<pointer>`, first pointer wins for
-  // an id named twice. Returns the rows so a caller can batch them with its own.
-  const citeRows = (writer: string, pointers: { derived_from?: string[]; supersedes?: string }): { tool: string; targetId: string }[] => {
-    const rows = new Map<string, string>();
-    for (const id of pointers.derived_from ?? []) rows.set(id.toLowerCase(), `${writer}/derived_from`);
-    if (pointers.supersedes) {
-      const id = pointers.supersedes.toLowerCase();
-      if (!rows.has(id)) rows.set(id, `${writer}/supersedes`);
-    }
-    return [...rows].map(([targetId, tool]) => ({ tool, targetId }));
-  };
 
-  // The one search operation the three search tools share (SMD-1490). It owns
-  // the policy that was copy-pasted across the handlers — and dropped the filter
-  // in three places, and never logged keyword at all: the egress gate before a
-  // query leaves for its embedding (hybrid only — a keyword search embeds
-  // nothing, so nothing leaves the box), the arm dispatch, and the query-log
-  // write with the filter, the arm and the tier on it. Each tool is a thin
-  // adapter that maps its external interface in and renders its own output; the
-  // rows come back typed per arm, so search_thoughts still gets its needle facts
-  // and keyword its occurrence counts. A refusal (the egress gate) comes back as
-  // a ready tool result for the adapter to return.
-  type Refused = { refused: ReturnType<typeof toolError>; rows?: undefined; embedding?: undefined };
-  interface RunSearch {
-    // The hybrid arm hands back the query embedding it computed, so a caller
-    // (search_thoughts's zero-result probe) reuses it without a second gate or
-    // provider call.
-    (opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean }):
-      Promise<Refused | { refused?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] }>;
-    (opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown> }):
-      Promise<{ refused?: undefined; rows: ThoughtKeywordMatch[] }>;
-  }
-  const runSearch: RunSearch = (async (opts: {
-    tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
-    threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean;
-  }): Promise<{ refused?: ReturnType<typeof toolError>; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] }> => {
-    if (opts.arm === "keyword") {
-      const rows = await (await db()).keywordThoughts({ query: opts.query, limit: opts.limit, offset: opts.offset ?? 0, filter: opts.filter });
-      // A keyword search takes no threshold or recency weight; log them as the
-      // compat `search` does its fixed zeros, so the column is a number not a NULL.
-      await logSearchCall(opts.tool, { query: opts.query, limit: opts.limit, threshold: 0, recencyWeight: 0, filter: opts.filter, arm: "keyword" }, rows);
-      return { rows };
-    }
-    // The query text leaves for its embedding as a thought's does (SMD-1903).
-    const q = gateQuery(opts.query, principal);
-    if (q.refused) return { refused: toolError(q.refused), rows: [] };
-    const embedding = await getEmbedding(opts.query, q.subject, "query");
-    // prefer_current (059, SMD-2255) is the same arm through another function,
-    // logged as arm `current` so a replay takes the same one.
-    const preferCurrent = opts.preferCurrent === true;
-    const rows = await (await db()).hybridThoughts({
-      query: opts.query, embedding, threshold: opts.threshold ?? 0, limit: opts.limit,
-      filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0, preferCurrent,
-    });
-    await logSearchCall(opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: preferCurrent ? "current" : "hybrid" }, rows);
-    return { rows, embedding };
-  }) as RunSearch;
+  // The read tools (SMD-2283): each is its operation in core/reads.ts — the
+  // search op with its egress gate and query log, the store reads, the probes —
+  // and its words in render.ts. The handler validates (the SDK runs SPECS' zod
+  // schema), calls the operation and renders the outcome; a fault the operation
+  // throws is `Error: <message>`, with the tool's hint where it has one.
 
-  // ChatGPT compatibility: restricted connector surfaces, company knowledge, and deep
-  // research look for exact read-only `search` and `fetch` tool shapes.
-  //
-  // Hybrid (migration 017, SMD-958), not vector-only: this tool cannot grow a
-  // `mode` parameter without breaking the shape ChatGPT matches on, so it is the
-  // one surface that could never reach search_thoughts_keyword. For an
-  // identifier it got what 012 measured — the containing thought outside the
-  // top ten 37 times in 60. The fused function returns exactly what
-  // match_thoughts returned for any query without an identifier in it.
-  //
-  // Nor can it grow `recency_weight` (migration 020, SMD-945), so it sends a
-  // fixed one — 0, by measurement: on the 486-issue corpus a weight lowered
-  // MRR at every setting tried (0.899 → 0.894 at 0.1 over 365 days, 0.811 at
-  // 0.2 over 90; evals/eval-recency.ts), and this surface has no caller who
-  // can turn it off. An operator whose brain is a working log rather than a
-  // reference can ask search_thoughts for a weight; this tool stays where
-  // every result is the one the query names.
-  //
-  // Nor can it grow `prefer_current` (migration 059, SMD-2255), so it never
-  // demotes: on the topical task the demotion only costs (eval-supersession.ts:
-  // TOPICAL -0.127, a note under a Done ticket -0.292 and -0.524 once the
-  // window fills, a settled ticket looked up by its key -0.750 to -1.000), and
-  // this surface has no caller who can ask for it.
-  const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
-  const SEARCH_COMPAT_PREFER_CURRENT = false;
+  // ChatGPT compatibility: restricted connector surfaces, company knowledge, and
+  // deep research look for exact read-only `search` and `fetch` tool shapes. Why
+  // the shape pins hybrid, no recency weight and no prefer_current: core/reads.ts.
   if (canRead(principal)) server.registerTool(
     "search",
-    {
-      title: "Search Open Brain",
-      description:
-        "Search Open Brain memories by meaning and by exact text — identifier-shaped tokens and \"quoted\" spans in the query are also matched literally. " +
-        "Use this read-only compatibility tool when ChatGPT needs search/fetch-style access to stored thoughts.",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {
-        query: z.string().describe("The search query to run against Open Brain thoughts"),
-      },
-    },
-    async ({ query }) => {
+    SPECS.search,
+    async (input) => {
       try {
-        // The one search op, hybrid arm (SMD-1490); this surface is fixed, so it
-        // pins every knob and exposes none — no filter (filter: {}), no caller
-        // threshold (0, not 0.5, SMD-1300: admission is relative to the top match
-        // since 027, so a low absolute floor lets it govern), and the fixed
-        // recency weight above. runSearch gates the query (SMD-1903) and logs.
-        const r = await runSearch({ tool: "search", arm: "hybrid", query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: {} });
-        if (r.refused) return r.refused;
-        const data = r.rows;
-
-        const results = data.map((t) => ({
-          id: t.id,
-          title: thoughtTitle(t.content, t.created_at),
-          url: thoughtUrl(citationBase(), t.id),
-        }));
-
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ results }) }],
-        };
+        return say.renderSearch(await core.search(principal, input));
       } catch (err: unknown) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
+        return say.failed(err);
       }
     }
   );
 
   if (canRead(principal)) server.registerTool(
     "fetch",
-    {
-      title: "Fetch Open Brain Thought",
-      description:
-        "Fetch one Open Brain thought by ID after using search. Use this read-only compatibility tool to retrieve the full text and metadata for citation.",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {
-        id: z.string().describe("The Open Brain thought ID returned by the search tool"),
-      },
-    },
-    async ({ id }) => {
+    SPECS.fetch,
+    async (input) => {
       try {
-        const thought = await (await db()).getThought(id);
-
-        if (!thought) {
-          return {
-            content: [{ type: "text" as const, text: `Fetch error: no thought with id ${id}` }],
-            isError: true,
-          };
-        }
-
-        // Click-through relevance (034): the caller opened this id after a
-        // search. Only on a hit — a fetch of a missing id labels nothing.
-        await logActionCall("fetch", id);
-
-        const document = {
-          id: thought.id,
-          title: thoughtTitle(thought.content, thought.created_at),
-          text: thought.content,
-          url: thoughtUrl(citationBase(), thought.id),
-          metadata: {
-            ...thought.metadata,
-            created_at: thought.created_at,
-            updated_at: thought.updated_at,
-          },
-        };
-
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(document) }],
-        };
+        return say.renderFetch(await core.fetch(principal, input));
       } catch (err: unknown) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
+        return say.failed(err);
       }
     }
   );
@@ -1117,189 +536,12 @@ function buildServer(principal: Principal): McpServer {
   // pick out of a sentence on its own.
   if (canRead(principal)) server.registerTool(
     "search_thoughts",
-    {
-      title: "Search Thoughts",
-      description:
-        "Search captured thoughts by meaning, with exact matching for identifier-shaped tokens in the query (SMD-944, upsert_thought, db/config.mjs, getUserById) and for \"quoted\" spans. " +
-        "Use this when the user asks about a topic, person, or idea they've previously captured, including one named by an error code or a ticket key. " +
-        "A thought containing one of those literals is ranked with the strongest results found by meaning, never below them, whatever its own similarity — provided the literal is rare enough to match exactly (found in no more than one keyword page of thoughts) and the result fits within the limit (and prefer_current does not demote it). " +
-        "Returns a fixed top-N; to page through every thought containing an exact string, or to match a literal that is too common here, use search_thoughts_keyword. " +
-        "Every hit says who wrote it (`By: <key> (operator|agent|ingested)`); `said_by` keeps only what the operator typed, or only agents' output, and `actor` only one key's. " +
-        "`prefer_current` ranks finished and replaced work below live work: off by default.",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {
-        query: z.string().describe("What to search for"),
-        // Clamped, not rejected: any number a client sends lands in 1–100, so an
-        // existing connector that always asked for 200, or 7.5, keeps working.
-        // match_thoughts clamps too, to its own ceiling of 500 (migration 014);
-        // this one is about what to hand a model, and keeps a non-integer from
-        // ever reaching the function's int parameter.
-        limit: z.number().optional().default(10).describe("Results to return, clamped to 1-100.")
-          .transform((n) => Math.min(Math.max(Math.trunc(n), 1), 100)),
-        // Default 0, not 0.5 (SMD-1300): admission is now RELATIVE to the top
-        // match (migration 027 keeps every row within half of the best result's
-        // similarity), because an absolute floor drops the right answer on a
-        // long capture — it scores low cosine against a short question. This
-        // value is an OPTIONAL absolute minimum layered on top; 0 lets the
-        // relative cutoff govern. An exact hit on an identifier or quoted span
-        // is exempt either way (017).
-        threshold: z.number().optional().default(0)
-          .describe("Optional absolute minimum similarity, 0-1, on top of the relative cutoff (results are kept within half of the best match's similarity). 0 (default) lets the relative cutoff decide. An exact hit on an identifier or quoted span from the query is exempt."),
-        // Migration 020 (SMD-945): age blended into the order, after the
-        // candidate scan, with the threshold still on raw similarity — so a
-        // weight reorders relevant thoughts and cannot surface irrelevant recent
-        // ones. 0 is the ranking by meaning alone. Clamped, as limit is; the
-        // half-life stays the function's 90 days for this tool.
-        recency_weight: z.number().optional().default(0)
-          .describe("How much a thought's age counts against its similarity, 0-1. 0 (default) ranks by meaning alone; 0.2 is a gentle preference for recent captures; 1 ranks the relevant thoughts newest first. A thought's recency halves every 90 days.")
-          .transform((w) => Math.min(Math.max(w, 0), 1)),
-        // SMD-1490: the metadata filter, populated end to end (query_log.filter,
-        // eval-replay's filtered path). Absent is unfiltered. The store applies
-        // `metadata @> filter` inside the scan (014); parseFilter bounds it.
-        filter: filterInput,
-        // SMD-1726: who wrote it, as two more keys of the same filter.
-        said_by: saidByInput,
-        actor: actorInput,
-        // Migration 059 (SMD-2255, SMD-2074's second consumer): the hybrid with
-        // settled and superseded thoughts ranked below current ones, through
-        // 058's node_state. Off by default — 025's label, not a demotion, is
-        // every other caller's — and priced in eval-supersession.ts: the
-        // current version and the live ticket found higher (MRR +0.052,
-        // +0.194), the topical answer, a note under a finished ticket and a
-        // finished ticket looked up by its key found lower. The 0.25 below is
-        // held to search_demote_weight() by test-e2e-sql.
-        prefer_current: z.boolean().optional().default(false)
-          .describe("Rank settled and superseded thoughts below current ones. Off (default): by meaning alone. On: a thought whose ticket is completed or canceled (a note filed under such a ticket included), or that a newer thought supersedes, has its score multiplied by 0.25 — in practice every current match among the top candidates comes first, then the rest in their own order, each marked with why, so a demoted thought usually leaves the top results. A blocked or unknown status does not demote a thought (superseded still does). An exact identifier hit on a settled thought is demoted too: to look a finished ticket up by its key, leave this off. Each candidate's lifecycle is a lookup in a table kept current on write (migration 068): about half a millisecond over an ordinary search at 10,000 thoughts, about one at 100,000, most of it the wider window it reads; before 068 it read every thought's lifecycle per search (over 100 ms at 100,000)."),
-      },
-    },
-    async ({ query, limit, threshold, recency_weight, filter, said_by, actor, prefer_current }) => {
+    SPECS.search_thoughts,
+    async (input) => {
       try {
-        // The one search op, hybrid arm (SMD-1490): it gates the query
-        // (SMD-1903), embeds it, runs the filter and logs. parseFilter refuses a
-        // shape jsonb should not run; a bad filter falls to the catch below.
-        const r = await runSearch({ tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: withActorFilter(parseFilter(filter), said_by, actor), preferCurrent: prefer_current });
-        if (r.refused) return r.refused;
-        const data = r.rows;
-
-        if (data.length === 0) {
-          // Nothing cleared the threshold and no literal matched — but WHY is
-          // worth saying, and the function reports it only on rows. One more
-          // call with no threshold and one row returns the query-level facts
-          // whenever the brain has any embedded thought at all (review pass:
-          // the first version said "no thoughts found" about a literal that
-          // 150 thoughts contained, because it was too common to match). Reuses
-          // the arm's embedding, and stays unfiltered so the facts are the
-          // query's, not the filtered scope's.
-          const probe = await (await db()).hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} });
-          const facts = probe[0];
-          const why: string[] = [];
-          if (facts) {
-            const absent = facts.needles.filter((_, i) => facts.needleCounts[i] === 0);
-            if (absent.length) why.push(`No thought contains: ${absent.join(", ")}.`);
-            if (facts.commonNeedles.length) why.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${facts.commonNeedles.join(", ")} — use search_thoughts_keyword to page through them.`);
-          }
-          return {
-            content: [{ type: "text" as const, text: `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}` }],
-          };
-        }
-
-        // 025 (SMD-1253): which of these hits a newer thought has superseded,
-        // and by which. One extra query; the labelling half of the retrieval
-        // decision — the ranking half is prefer_current, opt-in (059,
-        // SMD-2255), priced by eval-supersession.ts. A hit ranked beside the
-        // version that replaced it is the failure this ticket is about — say so
-        // on the row rather than let it pass as current.
-        const superseded = await (await db()).supersededAmong(data.map((t) => t.id));
-
-        const results = data.map(
-          (t, i) => {
-            const m = t.metadata || {};
-            // A keyword hit with no vector has no similarity to report; it is
-            // here because it contains the literal, and the header says which.
-            const match = t.similarity == null ? "exact match, no vector" : `${(t.similarity * 100).toFixed(1)}% match`;
-            const parts = [
-              `--- Result ${i + 1} (${match}) ---`,
-              // The id, so update_thought and delete_thought can be aimed at a hit
-              // the caller never captured — without it those two tools reach only
-              // what capture_thought just returned. In the header group and cased
-              // `ID:` to match search_thoughts_keyword, which prints the id the
-              // same way for the same block format. SMD-1248.
-              `ID: ${t.id}`,
-            ];
-            // 025: mark a hit a newer thought replaces, and name the replacement,
-            // so the reader is not left ranking a superseded version as current.
-            if (superseded[t.id]) parts.push(`⚠ Superseded by a newer thought — ID ${superseded[t.id]}`);
-            // 059: a row prefer_current demoted says by what and why.
-            const demotion = demotedLine(t);
-            if (demotion) parts.push(demotion);
-            // SMD-1328: an undated row shows no Captured line rather than a
-            // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
-            const captured = displayDate(t.created_at);
-            parts.push(
-              ...(captured ? [`Captured: ${captured}`] : []),
-              `Type: ${m.type || "unknown"}`,
-            );
-            // SMD-1726: who wrote the current text, from the key (050); its own
-            // line, as every field of this block is — nothing parses `ID:`
-            // past the id, and nothing should start to.
-            const by = actorLine(m);
-            if (by) parts.push(by);
-            if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
-            if (Array.isArray(m.topics) && m.topics.length)
-              parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
-            if (Array.isArray(m.people) && m.people.length)
-              parts.push(`People: ${(m.people as string[]).join(", ")}`);
-            if (Array.isArray(m.action_items) && m.action_items.length)
-              parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
-            parts.push(`\n${t.content}`);
-            return parts.join("\n");
-          }
-        );
-
-        // What the query was taken to mean, from the first row (every row
-        // carries the same three): which literals were searched for exactly —
-        // and, separately, which of those no thought contains, because
-        // `needles` lists every literal that was asked for and a literal with
-        // zero hits is asked for too (review pass) — which were too common to
-        // use, and whether there was anything to embed.
-        const head = data[0];
-        const matchedAny = new Set(data.flatMap((t) => t.matchedNeedles));
-        // Absent and truncated are different facts, and only the count tells
-        // them apart: a literal with hits that all fell outside the limit was
-        // once reported as "no thought contains" (review pass).
-        const absent = head.needles.filter((n, i) => head.needleCounts[i] === 0);
-        const truncated = head.needles.filter((n, i) => head.needleCounts[i] > 0 && !matchedAny.has(n));
-        const notes: string[] = [];
-        if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
-        if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
-        if (truncated.length) notes.push(`Outside the top ${data.length}${prefer_current ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
-        if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
-        const current = currentNote(data);
-        if (current) notes.push(current);
-        if (head.literalOnly) {
-          notes.push(matchedAny.size
-            ? "The query is only literals, so exact matches are ranked first and the rest by similarity."
-            : head.commonNeedles.length
-              ? `The query is only literals, and too common to match exactly, so these results are by similarity alone${prefer_current ? ", current ones first" : ""}.`
-              : `The query is only literals and no thought contains them, so these results are by similarity alone${prefer_current ? ", current ones first" : ""}.`);
-        }
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}\n\n${results.join("\n\n")}`,
-            },
-          ],
-        };
+        return say.renderSearchThoughts(await core.searchThoughts(principal, input), input.prefer_current);
       } catch (err: unknown) {
-        const msg = (err as Error).message;
-        return {
-          content: [{ type: "text" as const, text: `Error: ${msg}${prefer_current ? currentSearchHint(msg) : ""}` }],
-          isError: true,
-        };
+        return say.failed(err, input.prefer_current ? say.currentSearchHint : undefined);
       }
     }
   );
@@ -1315,112 +557,12 @@ function buildServer(principal: Principal): McpServer {
    */
   if (canRead(principal)) server.registerTool(
     "search_thoughts_keyword",
-    {
-      title: "Search Thoughts by Exact Text",
-      description:
-        "Find thoughts containing an exact string — an error code, a ticket key, a commit SHA, a function name, a rare proper noun. " +
-        "Case-insensitive substring match, not semantic: it will not find paraphrases, and it has no boolean operators. " +
-        "Use search_thoughts when you know the meaning; use this when you know the literal text.",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {
-        query: z.string().describe("The literal text to find. Matched as a substring; % and _ are literal, not wildcards."),
-        // Bounded in the schema, not merely clamped in SQL. The function clamps
-        // too, because the store is callable directly — but a bound here is
-        // enforced where the caller can see it, and it keeps `offset` sane for
-        // the result numbering below, which is plain arithmetic on it. Without
-        // it, offset: -5 renders "Result -4".
-        limit: z.number().int().min(1).max(100).optional().default(10).describe("Results per page, 1-100."),
-        offset: z.number().int().min(0).optional().default(0).describe("Skip this many results, for paging."),
-        // SMD-1490: the same metadata filter as search_thoughts, applied inside
-        // the keyword scan (`metadata @> filter`). Absent is unfiltered.
-        filter: filterInput,
-        // SMD-1726: who wrote it, as two more keys of the same filter.
-        said_by: saidByInput,
-        actor: actorInput,
-      },
-    },
-    async ({ query, limit, offset, filter, said_by, actor }) => {
+    SPECS.search_thoughts_keyword,
+    async (input) => {
       try {
-        // The one search op, keyword arm (SMD-1490): no gate (a keyword search
-        // embeds nothing, so nothing leaves the box), the filter applied inside
-        // the scan, and — new since SMD-1490 — a query_log row written with
-        // arm='keyword' (034 logged only the semantic path).
-        const r = await runSearch({ tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: withActorFilter(parseFilter(filter), said_by, actor) });
-        const data = r.rows;
-
-        if (data.length === 0) {
-          // Two different nothings, and the difference is actionable: an empty
-          // needle is a caller bug, no matches is an answer. Saying "no thoughts
-          // found" for the first sends the model looking for different words.
-          if (query.trim() === "") {
-            return {
-              content: [{ type: "text" as const, text: "Empty query — pass the literal text to search for." }],
-            };
-          }
-          // The needle is matched exactly as given, whitespace included, because
-          // trimming it would silently widen "SMD-944 " into "SMD-944". That is
-          // the right trade, but it makes a pasted string with a stray space
-          // fail for a reason the caller cannot see — so say it.
-          const padded = query !== query.trim();
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text:
-                  `No thoughts contain "${query}". This is an exact substring match — ` +
-                  (padded
-                    ? `note the leading or trailing whitespace in your query, which is matched literally. Try "${query.trim()}", or `
-                    : `try `) +
-                  `search_thoughts for a match by meaning, or a shorter fragment of the same string.`,
-              },
-            ],
-          };
-        }
-
-        const total = data[0].totalCount;
-        const results = data.map((t, i) => {
-          const m = t.metadata || {};
-          // SMD-1328: as the search block above — absent, not a fake 1970.
-          const captured = displayDate(t.created_at);
-          const parts = [
-            `--- Result ${offset + i + 1} (${t.occurrences} occurrence${t.occurrences === 1 ? "" : "s"}) ---`,
-            `ID: ${t.id}`,
-            ...(captured ? [`Captured: ${captured}`] : []),
-            `Type: ${m.type || "unknown"}`,
-          ];
-          // SMD-1726: who wrote it, the line search_thoughts prints.
-          const by = actorLine(m);
-          if (by) parts.push(by);
-          if (Array.isArray(m.topics) && m.topics.length)
-            parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
-          parts.push(`\n${t.content}`);
-          return parts.join("\n");
-        });
-
-        // The header states the whole match set, not the page. Without it a
-        // model that gets ten results cannot tell "these are all of them" from
-        // "there are four hundred more", and will not page.
-        const shown = `${offset + 1}-${offset + data.length} of ${total}`;
-        const more =
-          offset + data.length < total
-            ? ` Call again with offset=${offset + data.length} for the next page.`
-            : "";
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Showing ${shown} thought(s) containing "${query}".${more}\n\n${results.join("\n\n")}`,
-            },
-          ],
-        };
+        return say.renderSearchThoughtsKeyword(await core.searchThoughtsKeyword(principal, input));
       } catch (err: unknown) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
+        return say.failed(err);
       }
     }
   );
@@ -1428,71 +570,12 @@ function buildServer(principal: Principal): McpServer {
   // Tool 2: List Recent
   if (canRead(principal)) server.registerTool(
     "list_thoughts",
-    {
-      title: "List Recent Thoughts",
-      description:
-        "List recently captured thoughts with optional filters by type, topic, person, time range, or who wrote them (`said_by`: operator | agent | ingested; `actor`: a key's name). Each item says who wrote it on a `By:` line.",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {
-        limit: z.number().optional().default(10),
-        type: z.string().optional().describe("Filter by type: observation, task, idea, reference, person_note"),
-        topic: z.string().optional().describe("Filter by topic tag"),
-        person: z.string().optional().describe("Filter by person mentioned"),
-        days: z.number().optional().describe("Only thoughts from the last N days"),
-        // SMD-1726: who wrote it — the two keys 050 stamps, as containment
-        // clauses beside type, topic and person.
-        said_by: saidByInput,
-        actor: actorInput,
-      },
-    },
-    async ({ limit, type, topic, person, days, said_by, actor }) => {
+    SPECS.list_thoughts,
+    async (input) => {
       try {
-        const data = await (await db()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor });
-
-        if (!data.length) {
-          return { content: [{ type: "text" as const, text: "No thoughts found." }] };
-        }
-
-        // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,
-        // and name the replacement — the same label search_thoughts prints.
-        const superseded = await (await db()).supersededAmong(data.map((t) => t.id));
-
-        const results = data.map(
-          (t, i) => {
-            // `data` is ThoughtListItem[] — id, content, metadata, created_at all
-            // inferred, as the search_thoughts map is written.
-            const m = t.metadata || {};
-            const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-            // An `ID:` line, the same label the two search tools print — it is what
-            // update_thought and delete_thought take. This compact format has no
-            // header group, so it trails the content. SMD-1248.
-            const mark = superseded[t.id] ? `\n   ⚠ Superseded by a newer thought — ID ${superseded[t.id]}` : "";
-            // SMD-1726: who wrote it, AFTER the id line, indented as the block
-            // is — the content-then-ID adjacency stays, which this repo's own
-            // e2e suite ([8]) matched on and a client may too.
-            const by = actorLine(m);
-            const who = by ? `\n   ${by}` : "";
-            // SMD-1328: the date bracket is structural here, so an undated row
-            // reads `[undated]` (never `[1/1/1970]`); a sentinel shows its text.
-            return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${who}${mark}`;
-          }
-        );
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `${data.length} recent thought(s):\n\n${results.join("\n\n")}`,
-            },
-          ],
-        };
+        return say.renderListThoughts(await core.listThoughts(principal, input));
       } catch (err: unknown) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
+        return say.failed(err);
       }
     }
   );
@@ -1500,79 +583,12 @@ function buildServer(principal: Principal): McpServer {
   // Tool 2b: the supersession review queue (migration 029, SMD-1294)
   if (canRead(principal)) server.registerTool(
     "list_supersession_proposals",
-    {
-      title: "List Supersession Proposals",
-      description:
-        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070).",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {
-        status: z.enum(["pending", "accepted", "rejected", "stale", "all"]).optional().default("pending"),
-        limit: z.number().int().min(1).max(200).optional().default(10),
-        lineage: z.boolean().optional().describe("true: only proposals standing on a lineage pair (one side's derived_from names the other); false: only the rest; absent: every pair (migration 070)"),
-      },
-    },
-    async ({ status, limit, lineage }) => {
+    SPECS.list_supersession_proposals,
+    async (input) => {
       try {
-        const data = await (await db()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }) });
-        const onLineage = lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "";
-        if (!data.length) {
-          // A lineage pair is never proposed since 066, so an empty lineage
-          // selection is not the pass's to fill (maintainer read, third pass).
-          return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}.${lineage === true ? "" : " The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by)."}` }] };
-        }
-        // SMD-1803: through displayDate, never new Date() on a raw column — an
-        // undated thought reads "undated", an infinity/BC one its own text, not
-        // a fabricated 12/31/1969 or "Invalid Date". (older/newer.created_at are
-        // string | null now; judgedAt/reviewedAt are non-null where rendered.)
-        const day = (d: string | null) => displayDate(d) ?? "undated";
-        // Thought content and the judge's reason are untrusted text; snipText
-        // is the one cleaner every reply quotes a thought through.
-        const snip = (c: string) => snipText(c, 200);
-        const phrase = (v: string) =>
-          v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
-          : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
-          : "conflict, direction not stated — accepting needs --direction newer or older";
-        const results = data.map((p, i) => {
-          const edited = p.older.edited || p.newer.edited;
-          const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
-          // 070: the CLI refuses an accept on a lineage pair without --force.
-          const review = p.status === "pending"
-            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited || p.lineage ? " --force" : ""}   reject: … --reject ${p.id}` +
-              (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
-            : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${p.reviewNote ? `: ${cleanForDisplay(p.reviewNote)}` : ""}`;
-          // 070 (SMD-2313): a lineage pair — one side derived from the other
-          // — is never proposed since 066; a row standing on one is the
-          // reviewer's to reject, said with the command while it is theirs.
-          const lineageLine = p.lineage
-            ? `\n   LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066${p.status === "pending" || p.status === "stale" ? `; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} --note "lineage pair (066)"` : p.status === "accepted" ? `; accepted while the derivation names its input — cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} clears the pointer (029)` : ""}`
-            : "";
-          return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${p.reason ? `\n   ${cleanForDisplay(p.reason)}` : ""}${lineageLine}` +
-            `\n   newer [${day(p.newer.created_at)}]${p.newer.edited ? " (edited since judged)" : ""}: ${snip(p.newer.content)}\n      ID: ${p.newer.id}` +
-            `\n   older [${day(p.older.created_at)}]${p.older.edited ? " (edited since judged)" : ""}: ${snip(p.older.content)}\n      ID: ${p.older.id}` +
-            `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
-        });
-        return {
-          content: [{
-            type: "text" as const,
-            text: `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`,
-          }],
-        };
+        return say.renderSupersessionProposals(await core.listSupersessionProposals(principal, input));
       } catch (err: unknown) {
-        const msg = (err as Error).message;
-        // 070 (SMD-2313): both stores call the three-argument form, so a brain
-        // short of 070 — or of 029, whose queue the listing reads — fails
-        // naming that form (PostgREST names p_lineage); the driver's message
-        // is the same either way, so one hint names both files (cold read,
-        // first and fourth review passes).
-        const hint = /list_supersession_proposals|supersession_proposals|p_lineage/.test(msg)
-          ? " — the migrations through 070 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 070, db/migrations/070_listing_flags_lineage_pair.sql, its current listing), or PostgREST has not reloaded its schema cache"
-          : "";
-        return {
-          content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],
-          isError: true,
-        };
+        return say.failed(err, say.proposalsHint);
       }
     }
   );
@@ -1580,71 +596,12 @@ function buildServer(principal: Principal): McpServer {
   // Tool 3: Stats
   if (canRead(principal)) server.registerTool(
     "thought_stats",
-    {
-      title: "Thought Statistics",
-      description: "Get a summary of all captured thoughts: totals, types, top topics, and people.",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {},
-    },
-    async () => {
+    SPECS.thought_stats,
+    async (input) => {
       try {
-        const store = await db();
-
-        // The store aggregates. On the SQL path that is migration 024's
-        // thought_stats_summary() over the whole corpus in one statement; on
-        // PostgREST it is the capped page walk. Either way we get the total, the
-        // date range, and the count maps, plus how many rows the breakdowns
-        // actually cover — this tool only renders them. (See store.ts:ThoughtStats.)
-        const { total, oldest, newest, types, topics, people, aggregated } =
-          await store.statsSummary();
-
-        const sort = (o: Record<string, number>): [string, number][] =>
-          Object.entries(o)
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 10);
-
-        const lines: string[] = [
-          `Total thoughts: ${total}`,
-          `Date range: ${
-            // SMD-1328: min/max already skip NULLs (024), so a real range here
-            // is two real dates; displayDate keeps an infinity edge legible.
-            newest && oldest
-              ? `${displayDate(oldest)} → ${displayDate(newest)}`
-              : "N/A"
-          }`,
-        ];
-
-        // Never report aggregates as corpus-wide when they are not. The SQL path
-        // covers the whole corpus (aggregated === total) and this never fires; a
-        // capped PostgREST walk that stopped short says so rather than quietly
-        // under-reporting.
-        if (aggregated < total) {
-          lines.push(
-            `Note: breakdowns below cover the ${aggregated.toLocaleString()} most recent thoughts, ` +
-              `not all ${total.toLocaleString()}.`
-          );
-        }
-
-        lines.push("", "Types:", ...sort(types).map(([k, v]) => `  ${k}: ${v}`));
-
-        if (Object.keys(topics).length) {
-          lines.push("", "Top topics:");
-          for (const [k, v] of sort(topics)) lines.push(`  ${k}: ${v}`);
-        }
-
-        if (Object.keys(people).length) {
-          lines.push("", "People mentioned:");
-          for (const [k, v] of sort(people)) lines.push(`  ${k}: ${v}`);
-        }
-
-        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+        return say.renderThoughtStats(await core.thoughtStats(principal, input));
       } catch (err: unknown) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
+        return say.failed(err);
       }
     }
   );
@@ -1653,84 +610,16 @@ function buildServer(principal: Principal): McpServer {
   // time or a cursor, for an agent that returns after a break. Gated like the
   // other read tools (canRead: a read or a write key sees it, a capture-only
   // key does not). The store calls one SQL function that chooses the page
-  // and bounds the rendering; this decides `since` and lays the rows out.
+  // and bounds the rendering; the operation decides `since`, render.ts lays the
+  // rows out.
   if (canRead(principal)) server.registerTool(
     "thought_changes",
-    {
-      title: "What Changed",
-      description:
-        "List what changed in Open Brain — every capture, edit and deletion, oldest first, with who made it (by access-key name), the thought's ID, what moved, and whether it now supersedes another thought. " +
-        "Start from `since`: an ISO-8601 time with Z or an offset (2026-09-22T08:00:00Z), a date (read as UTC midnight), or the cursor a previous call ended with (its last line) to continue where you left off with no repeats; leave it out for the most recent changes. " +
-        "`others_only` leaves out this key's own writes — what everyone else did while you were away.",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {
-        since: z.string().optional().describe("An ISO-8601 time with its zone (changes at or after it; a clock with no Z or offset is refused), a date (UTC midnight), or the cursor the previous page ended with (changes after that row). Omit for the most recent changes."),
-        others_only: z.boolean().optional().default(false).describe("Leave out this key's own writes"),
-        agent: z.string().optional().describe("Only this writer's changes, by access-key name"),
-        actions: z.array(z.enum(["capture", "update", "delete"])).optional().describe("Only these kinds of change"),
-        limit: z.number().int().min(1).max(200).optional().default(50).describe("Changes per page, 1–200 (default 50); the reply's last line says whether more follow"),
-      },
-    },
-    async ({ since, others_only, agent, actions, limit }) => {
-      // `since` is decided here, before any call: a uuid is a cursor, anything
-      // else must read as a time, and a word that is neither is refused naming
-      // both forms rather than surfacing as a Postgres cast error.
-      const start = parseSince(since);
-      if ("refused" in start) return { content: [{ type: "text" as const, text: start.refused }], isError: true };
-      // Both filters name themselves in the header, so `agent` set to the
-      // caller's own key beside others_only reads as the empty set it is
-      // (caught: cold-read, pass 1).
-      // A name that cleans to nothing (all control characters) still names
-      // itself in the header, as its JSON.
-      const name = agent?.trim() || null;
-      const named = name ? ` by ${snipText(name, 80) || JSON.stringify(name)}` : "";
-      const who = named && others_only ? `${named} but not ${principal.name}` : others_only ? ` by everyone but ${principal.name}` : named;
-      const kinds = actions?.length ? [...new Set(actions)] : null;
-      const what = kinds ? `${kinds.join("/")} change(s)` : "change(s)";
-      // Bounded — from a time or a cursor — the function pages forward; with
-      // no bound it returns the newest rows. The two read differently below.
-      const bounded = start.since !== null || start.after !== null;
-      const where = start.after ? "after the cursor" : start.since ? `since ${start.since}` : "recorded yet";
+    SPECS.thought_changes,
+    async (input) => {
       try {
-        // One more than shown, so the reply can say whether more follow
-        // without a count query; the function caps at 201.
-        const rows = await (await db()).listChanges({
-          since: start.since,
-          after: start.after,
-          agent: name,
-          notAgent: others_only ? principal.name : null,
-          actions: kinds,
-          limit: limit + 1,
-        });
-        const more = rows.length > limit;
-        // Forward from a bound the extra row is the NEWEST, past the page; with
-        // no bound the function returns the newest limit+1 oldest first, so the
-        // extra row is the OLDEST — slicing the same end would drop the latest
-        // change, the one a resumer most needs (caught: cold-read, pass 1).
-        const shown = !more ? rows : bounded ? rows.slice(0, limit) : rows.slice(1);
-        if (shown.length === 0) {
-          return { content: [{ type: "text" as const, text: `No ${what}${who} ${where}.${start.after ? " Keep the cursor." : ""}` }] };
-        }
-        const head = bounded ? `${shown.length} ${what}${who} ${where}, oldest first:` : `The ${shown.length} most recent ${what}${who}, oldest first:`;
-        const cursor = shown[shown.length - 1].id;
-        const onward = !more ? "" : bounded ? " More changes follow." : " Older changes exist — pass a time before the first entry above as `since` to read them.";
-        const tail = `Cursor: ${cursor} — pass it as \`since\` to continue from here.${onward}`;
-        return {
-          content: [{ type: "text" as const, text: `${head}\n\n${shown.map((c, i) => renderChange(c, i + 1)).join("\n\n")}\n\n${tail}` }],
-        };
+        return say.renderThoughtChanges(await core.thoughtChanges(principal, input));
       } catch (err: unknown) {
-        const msg = (err as Error).message;
-        const hint = /thought_changes/.test(msg) && /does not exist|could not find/i.test(msg)
-          ? " — migration 052 (db/migrations/052_thought_changes.sql) is not applied, or PostgREST has not reloaded its schema cache"
-          : /permission denied for table thought_audit/i.test(msg)
-          ? " — the server's role needs SELECT on thought_audit (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues)"
-          : "";
-        return {
-          content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],
-          isError: true,
-        };
+        return say.failed(err, say.changesHint);
       }
     }
   );
@@ -1745,28 +634,12 @@ function buildServer(principal: Principal): McpServer {
   // never sees it.
   if (canRead(principal)) server.registerTool(
     "list_thought_ids",
-    {
-      title: "List Thought IDs",
-      description:
-        "List the brain's thought IDs — ids only, no content — in id order, for comparing one brain's corpus against another's cheaply. " +
-        "Returns a JSON object {total, digest, ids, cursor}: on the first page `total` is the whole corpus and `digest` is an md5 of every id (null where the store cannot compute it); page on by passing `after` = the previous page's `cursor` until `cursor` is null.",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {
-        limit: z.number().int().min(1).max(10000).optional().default(1000).describe("IDs per page, 1–10000 (default 1000); ids are small, so pages are large to keep an enumeration to few round-trips"),
-        after: z.string().optional().describe("Keyset cursor — the previous page's `cursor` (a thought id); omit for the first page"),
-      },
-    },
-    async ({ limit, after }) => {
-      if (after !== undefined && !UUID_RE.test(after)) {
-        return { content: [{ type: "text" as const, text: "Error: `after` must be a thought id (a uuid) — pass the previous page's `cursor`." }], isError: true };
-      }
+    SPECS.list_thought_ids,
+    async (input) => {
       try {
-        const page = await (await db()).listThoughtIds({ limit, after: after ?? null });
-        return { content: [{ type: "text" as const, text: JSON.stringify(page) }] };
+        return say.renderThoughtIds(await core.listThoughtIds(principal, input));
       } catch (err: unknown) {
-        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+        return say.failed(err);
       }
     }
   );
@@ -1780,32 +653,12 @@ function buildServer(principal: Principal): McpServer {
   // whole log). Empty when OB1_QUERY_LOG was never on.
   if (canRead(principal)) server.registerTool(
     "list_logged_searches",
-    {
-      title: "List Logged Searches",
-      description:
-        "List the brain's logged searches from query_log — the query text, which arm ran it, and its arguments — for replaying what a brain actually searched against another brain. " +
-        "query_log is opt-in (OB1_QUERY_LOG); this is empty when it was never on. Returns a JSON object {searches, truncated}: the most recent searches at or after `since`, up to `limit`; `truncated` is whether more matched. No thought content.",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {
-        since: z.string().optional().describe("An ISO-8601 time (searches logged after it); omit for the most recent"),
-        limit: z.number().int().min(1).max(1000).optional().default(200).describe("Searches to return, 1–1000 (default 200), most recent first"),
-      },
-    },
-    async ({ since, limit }) => {
-      if (since !== undefined && Number.isNaN(Date.parse(since))) {
-        return { content: [{ type: "text" as const, text: "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." }], isError: true };
-      }
+    SPECS.list_logged_searches,
+    async (input) => {
       try {
-        const page = await (await db()).listLoggedSearches({ since: since ?? null, limit });
-        return { content: [{ type: "text" as const, text: JSON.stringify(page) }] };
+        return say.renderLoggedSearches(await core.listLoggedSearches(principal, input));
       } catch (err: unknown) {
-        const msg = (err as Error).message;
-        const hint = /query_log/.test(msg) && /does not exist|could not find/i.test(msg)
-          ? " — migration 034 (db/migrations/034_query_log.sql) is not applied, or PostgREST has not reloaded its schema cache"
-          : "";
-        return { content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }], isError: true };
+        return say.failed(err, say.loggedSearchesHint);
       }
     }
   );
@@ -1817,22 +670,12 @@ function buildServer(principal: Principal): McpServer {
   // backend only (the table is not on PostgREST). Gated like the other read tools.
   if (canRead(principal)) server.registerTool(
     "worker_status",
-    {
-      title: "Worker Queue Status",
-      description:
-        "Report the background-work pools (entity extraction, consolidation, re-embed) — one row per work_type that has any claim rows, with pending / claimed (in flight, INCLUDING stale) / succeeded / failed counts, how many thoughts are unpooled (not yet queued), the corpus total, how many claimed leases are STALE (a dead worker's lease past its ttl — healthy in-flight is claimed − stale), and whether the pool is the brain's active one. " +
-        "Read-only. Returns a JSON array; empty when nothing has been queued (a pool appears once it has a claim row).",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {},
-    },
-    async () => {
+    SPECS.worker_status,
+    async (input) => {
       try {
-        const rows = await (await db()).workerStatus();
-        return { content: [{ type: "text" as const, text: JSON.stringify(rows) }] };
+        return say.renderWorkerStatus(await core.workerStatus(principal, input));
       } catch (err: unknown) {
-        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+        return say.failed(err);
       }
     }
   );
@@ -1844,23 +687,12 @@ function buildServer(principal: Principal): McpServer {
   // answer is a line in the table, not a tool error.
   if (canRead(principal)) server.registerTool(
     "brain_info",
-    {
-      title: "Brain Info",
-      description:
-        "Say what this Open Brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
-        "the Postgres and pgvector versions, the schema version and highest migration applied (and whether that is this server's last), " +
-        "row counts, database size and vector-index parameters. Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
-        "(it compares the highest number applied; a skipped or edited migration is what `migrate.ts --dry-run` lists).",
-      annotations: {
-        readOnlyHint: true,
-      },
-      inputSchema: {},
-    },
+    SPECS.brain_info,
     async () => {
       try {
-        return { content: [{ type: "text" as const, text: renderBrainInfo(await readBrainInfo("tool")) }] };
+        return say.renderBrainInfoReply(await core.brainInfo("tool"));
       } catch (err: unknown) {
-        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+        return say.failed(err);
       }
     }
   );
@@ -1875,43 +707,7 @@ function buildServer(principal: Principal): McpServer {
   // tools above are gated the same way for a capture key: absent, not refused.
   if (canCapture(principal)) server.registerTool(
     "capture_thought",
-    {
-      title: "Capture Thought",
-      description:
-        "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client — notes, insights, decisions, or migrated content from other systems.",
-      annotations: {
-        readOnlyHint: false,
-        openWorldHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-      },
-      inputSchema: {
-        content: z.string().describe("The thought to capture — a clear, standalone statement that will make sense when retrieved later by any AI"),
-        // Migration 025 (SMD-1253). Both optional; a first-hand capture sets
-        // neither. Validated at the write — an id that is not an existing thought
-        // is refused, so a synthesis cannot claim a source it does not have.
-        derived_from: z.array(z.string()).optional()
-          .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result). Recorded when the thought is new; if this text was already captured, the existing thought's provenance is left as it is."),
-        supersedes: z.string().optional()
-          .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead."),
-        // SMD-1298. Where the capture comes from, for metadata.source — "mcp"
-        // when absent, as every capture before it. A session-end hook says
-        // `claude-code` or `codex`; a per-source weight (SMD-1297) and the
-        // egress policy's `source:` term key on the value. The shape is held
-        // here so a label reaches the row, the audit trail and the policy as
-        // one spelling.
-        source: z.string().regex(SOURCE_RE, "lower-case letters, digits and hyphens, 2–40 characters, starting with a letter or digit").optional()
-          .describe("Where this capture comes from, recorded as metadata.source — e.g. `claude-code` or `codex` for a session-end hook, `mcp` (the default) for an agent capturing in conversation. Lower-case letters, digits and hyphens, 2–40 characters. A label the caller gives; the audit row's actor says which key wrote."),
-        // SMD-2014. Extra metadata keys the caller controls, merged UNDER the
-        // server's own (source, the extractor's tags, the actor columns), so a
-        // reserved name is refused, never silently overruled. The session hook
-        // sets `summary_model` when a local model wrote the summary, so a reader
-        // and a per-source weight (SMD-1297) can tell a model summary from the
-        // derived one.
-        metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
-          .describe("Extra metadata keys to store on the thought (e.g. `{\"summary_model\": \"llama3.1:8b\"}`). Lower-case keys, string/number/boolean values; at most 8 keys. Keys the server owns — `source` (use the `source` argument), `type`, `topics`, `people` and the like — are refused. Returned to readers alongside the server's own metadata."),
-      },
-    },
+    SPECS.capture_thought,
     async ({ content, derived_from, supersedes, source, metadata: clientMetadata }) => {
       // What a key that cannot read is told and allowed — decided once here
       // and read below, in the catch too (fifth review pass: six scattered
@@ -2290,36 +1086,7 @@ function buildServer(principal: Principal): McpServer {
    */
   if (canWrite(principal)) server.registerTool(
     "update_thought",
-    {
-      title: "Update Thought",
-      description:
-        "Correct or amend an existing thought by id. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves — so a thought found by search can be edited without re-capturing it. Provide `content` to replace the text — the embedding and its search chunks are regenerated to match. Provide `metadata_patch` to shallow-merge keys into the existing metadata, leaving unmentioned keys alone. Provide `supersedes` to record that this thought REPLACES an older one (search will label the older as superseded), or `null` to clear a pointer set wrongly. Pass `if_unchanged_since` with the `updated_at` you last read to avoid overwriting a concurrent edit.",
-      annotations: {
-        readOnlyHint: false,
-        openWorldHint: false,
-        // Not destructive: an update is recoverable from the audit trail, which
-        // records the previous content.
-        destructiveHint: false,
-        idempotentHint: true,
-      },
-      inputSchema: {
-        id: z.string().describe("UUID of the thought to update — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved"),
-        content: z.string().min(1).optional()
-          .describe("Replacement text. Omit to leave the text, embedding and chunks untouched"),
-        metadata_patch: z.record(z.string(), z.unknown()).optional()
-          .describe("Keys to merge into the existing metadata. Unmentioned keys are left alone"),
-        if_unchanged_since: z.string().optional()
-          .describe("The updated_at from your last read. The update is refused as STALE_READ if the thought changed since"),
-        // Migration 032 (SMD-1323): the visible half of the provenance
-        // envelope. Tri-state: absent leaves the pointer, null clears it, an
-        // id sets it — validated at the write (an id no thought has, or a
-        // pointer that would close a loop, is refused by name). derived_from
-        // is not offered here: an edit to a synthesis's source list is a
-        // store-level operation with no client asking for it yet.
-        supersedes: z.string().nullable().optional()
-          .describe("The id of a prior thought this one REPLACES (a corrected or updated version), as capture_thought's `supersedes`; search will label the older thought as superseded. Pass null to clear a pointer recorded wrongly. Omit to leave it as it is."),
-      },
-    },
+    SPECS.update_thought,
     async ({ id, content, metadata_patch, if_unchanged_since, supersedes }) => {
       try {
         if (content === undefined && metadata_patch === undefined && supersedes === undefined) {
@@ -2410,23 +1177,7 @@ function buildServer(principal: Principal): McpServer {
 
   if (canWrite(principal)) server.registerTool(
     "delete_thought",
-    {
-      title: "Delete Thought",
-      description:
-        "Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error. Refused while statements in other thoughts cite this one as their source — the reply names them — unless `detach_citations` is true.",
-      annotations: {
-        readOnlyHint: false,
-        openWorldHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-      },
-      inputSchema: {
-        id: z.string().describe("UUID of the thought to delete — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved"),
-        detach_citations: z.boolean().optional().describe(
-          "When statements in other thoughts cite this one as their source, the delete is refused and the reply names them. Pass true to delete anyway: each citation keeps its text and stance, loses its source, and records this id and the time as the deleted source. Default false.",
-        ),
-      },
-    },
+    SPECS.delete_thought,
     async ({ id, detach_citations }) => {
       try {
         const result = await (await db()).deleteThought({
@@ -2463,20 +1214,7 @@ function buildServer(principal: Principal): McpServer {
   // UUID it needs). The keyed REST mirror is the app.post guard below.
   if (canWrite(principal)) server.registerTool(
     "retry_failed",
-    {
-      title: "Retry Failed Work",
-      description:
-        "Requeue a background-work pool's FAILED claim rows back to pending, so the next worker pass reprocesses them (the `--retry-failed` path over a tool). Read `worker_status` first for the `workType` and its `failed` count — pass that exact work_type (e.g. \"extract:qwen2.5:7b@p2\" or \"reembed:<model>@<dim>\"). Acts on this one pool only; a fresh attempt clears the recorded error and the attempt count. Requires a write key.",
-      annotations: {
-        readOnlyHint: false,
-        openWorldHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-      },
-      inputSchema: {
-        work_type: z.string().describe("The exact work_type whose failed rows to requeue — a `workType` from worker_status (e.g. \"extract:qwen2.5:7b@p2\"). Acts on this pool alone."),
-      },
-    },
+    SPECS.retry_failed,
     async ({ work_type }) => {
       try {
         if (work_type.trim() === "") return toolError("Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to retry.", { code: "REFUSED_EMPTY_WORK_TYPE", retryable: false });
@@ -2495,22 +1233,7 @@ function buildServer(principal: Principal): McpServer {
 
   if (canWrite(principal)) server.registerTool(
     "release_stale_leases",
-    {
-      title: "Release Stale Leases",
-      description:
-        "Return CLAIMED work rows whose lease has lapsed (a dead worker's, past its ttl) to the pending pool, so they can be reclaimed — the manual form of the lazy reaper. By default only STALE leases are released (worker_status reports `stale`, `staleWorkerId` and `oldestStaleClaimedAt`); a live lease is left for its holder. Pass `work_type` to scope to one pool, `worker_id` to scope to one holder. To release a lease that has NOT lapsed you must set `include_live` AND name the `worker_id` — releasing a live lease risks the holder double-processing. Requires a write key.",
-      annotations: {
-        readOnlyHint: false,
-        openWorldHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-      },
-      inputSchema: {
-        work_type: z.string().optional().describe("Restrict to one pool's leases (a `workType` from worker_status). Omit to reap stale leases across every pool."),
-        worker_id: z.string().optional().describe("Restrict to one holder's leases (a `staleWorkerId` from worker_status). Required when include_live is true."),
-        include_live: z.boolean().optional().describe("Release a holder's leases even if the ttl has NOT lapsed. Off by default (only stale leases are touched). Requires worker_id — releasing a live lease risks double-processing."),
-      },
-    },
+    SPECS.release_stale_leases,
     async ({ work_type, worker_id, include_live }) => {
       try {
         if (work_type !== undefined && work_type.trim() === "") return toolError("Refused: work_type was given but blank — omit it to reap across all pools, or pass a real `workType`.", { code: "REFUSED_EMPTY_WORK_TYPE", retryable: false });
@@ -2540,22 +1263,7 @@ function buildServer(principal: Principal): McpServer {
   // not change when the drain lands.
   if (canWrite(principal)) server.registerTool(
     "run_worker",
-    {
-      title: "Run Worker (drain a pool)",
-      description:
-        "Drain a background-work pool for a `work_type` — the operator form of a `bun db/<worker>.ts` pass over MCP/REST. Currently the PREVIEW half only: call with `dry_run: true` to report, without claiming anything, what a pass would process now — the same pool `worker_status` shows (pending / claimed / stale / unpooled) plus `backlog` and, if you pass `limit`, `wouldClaim`. `backlog` = pending + stale + unpooled (a pass reaps expired stale leases back to the pool before it claims, so they drain too; a live claimed lease is skipped). It is exact for an extraction pool but an UPPER BOUND for reembed/consolidate, whose eligibility is model-aware (they count every un-pooled thought, not only the ones those pools would enqueue). The executing drain is not yet available (a call without `dry_run: true` is refused): the server does not run the bulk LLM passes, so it will land on a callable worker core. Read `worker_status` first for the exact `workType`. Requires a write key.",
-      annotations: {
-        readOnlyHint: false,
-        openWorldHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-      },
-      inputSchema: {
-        work_type: z.string().describe("The exact work_type to preview — a `workType` from worker_status (e.g. \"extract:qwen2.5:7b@p2\" or \"reembed:<model>@<dim>\")."),
-        dry_run: z.boolean().optional().describe("Must be true — report what a pass would claim without claiming it. The executing drain is not yet available; any other value is refused."),
-        limit: z.number().int().positive().optional().describe("Bound the previewed backlog — `wouldClaim` is the drainable backlog capped at this. Omit to preview the whole backlog."),
-      },
-    },
+    SPECS.run_worker,
     async ({ work_type, dry_run, limit }) => {
       try {
         if (work_type.trim() === "") return toolError("Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain.", { code: "REFUSED_EMPTY_WORK_TYPE", retryable: false });
@@ -2579,23 +1287,11 @@ function buildServer(principal: Principal): McpServer {
   // Claude Desktop / claude.ai client fetches the result of a job it started.
   // Ownership-scoped: a job is visible only to the key that started it (the
   // handle inherits that call's scope), so a wrong id or another key's job reads
-  // as not found. Read-only.
+  // as not found. Read-only. No catch, as before: a registry fault is the SDK's to report.
   if (canRead(principal)) server.registerTool(
     "job_status",
-    {
-      title: "Async Job Status",
-      description:
-        "Fetch the status and result of an async job by the `job_id` a long-running tool handed back (SMD-2273). Returns { jobId, kind, status: pending|running|succeeded|failed|lost, progress?, result?, error? }. A succeeded job carries its result; a failed one the error; `lost` means the server stopped before it finished — re-run it. Only the key that started the job can read it. Read-only.",
-      annotations: { readOnlyHint: true },
-      inputSchema: {
-        job_id: z.string().describe("The jobId from a long-running tool's handle (a uuid). Only the key that started the job can read it."),
-      },
-    },
-    async ({ job_id }) => {
-      const job = await readJob(principal, job_id);
-      if (!job) return toolError(`No job ${JSON.stringify(job_id)} for this key — an unknown id, another key's job, or one pruned from the registry.`);
-      return { content: [{ type: "text" as const, text: JSON.stringify(job) }], structuredContent: job as unknown as Record<string, unknown> };
-    }
+    SPECS.job_status,
+    async (input) => say.renderJobStatus(await core.jobStatus(principal, input)),
   );
 
   // Tool 3b-vi: the first async-job-backed tool (SMD-2273) — a bounded, paged
@@ -2603,45 +1299,12 @@ function buildServer(principal: Principal): McpServer {
   // exercising the handle/poll/stream pattern end to end. Real and safe
   // (read-only) and long-capable on a large brain; the heavier consumers (a
   // re-embed backfill, the run_worker drain SMD-2272) build on the same
-  // startJob. The work walks pageThoughtMeta in pages up to `limit`, tallying
-  // metadata coverage and a breakdown by type, reporting progress per page.
-  // Read-only, but it starts background work, so it is gated like the reads.
+  // startJob. Read-only, but it starts background work, so it is gated like the
+  // reads; the detached run is tracked, so the stop waits for it.
   if (canRead(principal)) server.registerTool(
     "scan_thoughts",
-    {
-      title: "Scan Thoughts (async)",
-      description:
-        "Start a background scan of the corpus and return a job HANDLE immediately (SMD-2273) — the caller does not wait for it. Walks the thoughts in pages (newest first) up to `limit`, tallying how many carry a created_at and a breakdown by metadata type, reporting progress as it goes. Returns { jobId, status: \"accepted\", poll, stream }: fetch the result with the job_status tool (an MCP client) or GET /jobs/<id> (curl), or subscribe to GET /jobs/<id>/stream. The reference consumer for the async-job pattern; the result is a small summary, not the thoughts themselves.",
-      annotations: { readOnlyHint: true },
-      inputSchema: {
-        limit: z.number().int().positive().max(SCAN_MAX).optional().describe(`How many thoughts to scan at most (newest first). Default ${SCAN_DEFAULT}, max ${SCAN_MAX}.`),
-      },
-    },
-    async ({ limit }) => {
-      const cap = Math.min(limit ?? SCAN_DEFAULT, SCAN_MAX);
-      const handle = startJob(principal, "scan_thoughts", async (ctx) => {
-        const store = await db();
-        const total = Math.min(await store.countThoughts(), cap);
-        let scanned = 0;
-        let withCreatedAt = 0;
-        const byType: Record<string, number> = {};
-        const PAGE = 200;
-        for (let offset = 0; offset < total; offset += PAGE) {
-          if (ctx.signal.aborted) break;
-          const page = await store.pageThoughtMeta(offset, Math.min(PAGE, total - offset));
-          if (page.length === 0) break;
-          for (const row of page) {
-            scanned++;
-            if (row.created_at !== null) withCreatedAt++;
-            const type = typeof row.metadata.type === "string" ? row.metadata.type : "(none)";
-            byType[type] = (byType[type] ?? 0) + 1;
-          }
-          ctx.progress(scanned, total);
-        }
-        return { scanned, total, withCreatedAt, byType };
-      }, { track: toolCalls.track });
-      return { content: [{ type: "text" as const, text: JSON.stringify(handle) }], structuredContent: handle as unknown as Record<string, unknown> };
-    }
+    SPECS.scan_thoughts,
+    async (input) => say.renderJobHandle(await core.scanThoughts(principal, input, { track: toolCalls.track })),
   );
 
   return server;
@@ -2931,7 +1594,7 @@ app.get("*", async (c, next) => {
   // through with the database's error. A registry whose lock outlasts the
   // lookup's retries answers `busy` for the same reason (agents.ts), and so is
   // `ok` here too.
-  const info = readBrainInfo("health");
+  const info = core.brainInfo("health");
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([
     agents().resolve(db(), principal), // one lookup in flight per key (agents.ts)
@@ -2965,7 +1628,9 @@ app.get("*", async (c, next) => {
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
   try {
-    return c.json(await (await db()).workerStatus(), 200, corsHeaders);
+    // The operation answers an object (a tool result is one); this route has always answered the bare rows.
+    const status = await core.workerStatus(principal, {});
+    return c.json(status.ok ? status.value.pools : [], 200, corsHeaders);
   } catch (e) {
     // SQL-only: a PostgREST (Workers) deployment cannot serve this — a reason, not a bare 500.
     return c.json({ error: (e as Error).message }, 200, corsHeaders);
@@ -3090,9 +1755,9 @@ app.get("*", async (c, next) => {
     // events may be minutes apart, and a silent stream is reaped otherwise.
     return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream` });
   }
-  const job = await readJob(principal, id);
-  if (!job) return c.json({ error: "not found" }, 404, corsHeaders);
-  return c.json(job, 200, corsHeaders);
+  const job = await core.jobStatus(principal, { job_id: id });
+  if (!job.ok) return c.json({ error: "not found" }, 404, corsHeaders);
+  return c.json(job.value, 200, corsHeaders);
 });
 
 // ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────

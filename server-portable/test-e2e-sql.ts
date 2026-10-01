@@ -1787,6 +1787,71 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   await sql.close();
 }
 
+console.log("\n[15] Every read tool answers its typed result beside the text, and each refusal its code (SMD-2283)");
+{
+  // The whole result, not call()'s joined text: structuredContent is the point.
+  const result = async (name: string, args: Record<string, unknown> = {}) => {
+    const r = await fetch(BASE, {
+      method: "POST",
+      headers: H,
+      body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const t = await r.text();
+    const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+    if (b.error) throw new Error(`JSON-RPC error: ${JSON.stringify(b.error)}`);
+    const res = b.result as { content: { text: string }[]; isError?: boolean; structuredContent?: Record<string, any> };
+    return { text: res.content.map((c) => c.text).join("\n"), isError: res.isError === true, sc: res.structuredContent };
+  };
+  const marker = "smd2283-typed-marker";
+  const id = /id ([0-9a-f-]{36})/.exec(await call("capture_thought", { content: `${marker}: the typed answer rides beside the words` }))![1];
+
+  const s = await result("search", { query: marker });
+  assert(!s.isError && Array.isArray(s.sc?.results) && JSON.stringify(s.sc) === s.text, `search: the value is the JSON its text has always been (${s.text.slice(0, 60)})`);
+  const f = await result("fetch", { id });
+  assert(!f.isError && f.sc?.id === id && typeof f.sc?.text === "string" && JSON.stringify(f.sc) === f.text, "fetch: the document, as value and as text");
+  const missing = "00000000-0000-4000-8000-000000000000";
+  const fm = await result("fetch", { id: missing });
+  assert(fm.isError && fm.text === `Fetch error: no thought with id ${missing}` && fm.sc?.code === "NOT_FOUND" && fm.sc?.retryable === false && fm.sc?.id === missing, `fetch of no thought: the same words, NOT_FOUND beside them (${JSON.stringify(fm.sc)})`);
+
+  const st = await result("search_thoughts", { query: marker });
+  const hit = st.sc?.hits?.find((h: { id: string }) => h.id === id);
+  assert(!st.isError && /^Found \d+ thought\(s\)/.test(st.text) && hit && hit.supersededBy === null && Array.isArray(hit.demoted) && st.sc?.preferCurrent === false && st.sc?.facts && Array.isArray(st.sc.facts.needles),
+    `search_thoughts: the hits with their facts and pointers (${JSON.stringify(st.sc?.facts)})`);
+  const contradict = await result("search_thoughts_keyword", { query: marker, said_by: "agent", filter: { actor_kind: "operator" } });
+  assert(contradict.isError && contradict.text === `Error: said_by is "agent" but filter.actor_kind is "operator" — pass one of the two` && contradict.sc?.code === "REFUSED_FILTER" && contradict.sc?.retryable === false,
+    `a filter the boundary refuses keeps its words and carries REFUSED_FILTER (${JSON.stringify(contradict.sc)})`);
+  const kw = await result("search_thoughts_keyword", { query: marker });
+  assert(!kw.isError && kw.sc?.total >= 1 && kw.sc?.offset === 0 && kw.sc?.hits?.some((h: { id: string; occurrences: number }) => h.id === id && h.occurrences === 1), `search_thoughts_keyword: the page, its total and occurrences (${kw.sc?.total})`);
+
+  const lt = await result("list_thoughts", { limit: 3 });
+  assert(!lt.isError && Array.isArray(lt.sc?.thoughts) && lt.sc.thoughts.length === 3 && "supersededBy" in lt.sc.thoughts[0], "list_thoughts: the listed thoughts with their supersession");
+  const sp = await result("list_supersession_proposals", { status: "all" });
+  assert(!sp.isError && sp.sc?.status === "all" && Array.isArray(sp.sc?.proposals), `list_supersession_proposals: the status asked and the proposals (${sp.sc?.proposals?.length})`);
+  const ts = await result("thought_stats");
+  assert(!ts.isError && typeof ts.sc?.total === "number" && ts.text.startsWith(`Total thoughts: ${ts.sc.total}`), `thought_stats: the counts the text prints (${ts.sc?.total})`);
+
+  const ch = await result("thought_changes", { limit: 2 });
+  assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`), "thought_changes: the page, its bound and the cursor the text names");
+  const chBad = await result("thought_changes", { since: "yesterday" });
+  assert(chBad.isError && chBad.text.startsWith("Refused: `since` must be an ISO-8601 time") && chBad.sc?.code === "REFUSED_SINCE" && chBad.sc?.value === "yesterday", `thought_changes refuses a since that is neither, REFUSED_SINCE (${JSON.stringify(chBad.sc)})`);
+
+  const ids = await result("list_thought_ids", { limit: 5 });
+  assert(!ids.isError && Array.isArray(ids.sc?.ids) && JSON.stringify(ids.sc) === ids.text, "list_thought_ids: the page, as value and as text");
+  const idsBad = await result("list_thought_ids", { after: "not-a-uuid" });
+  assert(idsBad.isError && idsBad.sc?.code === "REFUSED_CURSOR" && idsBad.sc?.value === "not-a-uuid", `list_thought_ids refuses a cursor that is not an id, REFUSED_CURSOR (${JSON.stringify(idsBad.sc)})`);
+  const ls = await result("list_logged_searches", { limit: 5 });
+  assert(!ls.isError && Array.isArray(ls.sc?.searches) && typeof ls.sc?.truncated === "boolean", "list_logged_searches: the page");
+  const lsBad = await result("list_logged_searches", { since: "never" });
+  assert(lsBad.isError && lsBad.sc?.code === "REFUSED_SINCE" && /^Error: `since` must be an ISO-8601 time/.test(lsBad.text), "list_logged_searches refuses a since that is no time, REFUSED_SINCE");
+
+  const ws = await result("worker_status");
+  assert(!ws.isError && Array.isArray(ws.sc?.pools) && JSON.stringify(ws.sc.pools) === ws.text, "worker_status: the text is the bare rows it always was; the value keys them (a result is an object)");
+  const bi = await result("brain_info");
+  assert(!bi.isError && typeof bi.sc?.version === "string" && bi.text.includes(bi.sc.version), `brain_info: the record the table renders (${bi.sc?.version})`);
+  const js = await result("job_status", { job_id: missing });
+  assert(js.isError && js.text.startsWith(`No job "${missing}" for this key`) && js.sc?.code === "NOT_FOUND" && js.sc?.id === missing, "job_status of no job: the same words, NOT_FOUND beside them");
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 

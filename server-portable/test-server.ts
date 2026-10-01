@@ -1303,6 +1303,17 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
     "an error on prefer_current's path names 059 (missing, or the schema cache), 068's projection grants, or before 068 the server group's grant; any other error gets no hint");
 }
 
+console.log("\n[16d] A fault an operation throws is said as it always was, typed FAILED beside it (SMD-2283)");
+{
+  const { failed } = await import("./render.ts");
+  const plain = failed(new Error("connection refused"));
+  assert(plain.isError === true && plain.content[0].text === "Error: connection refused" && plain.structuredContent.code === "FAILED" && plain.structuredContent.retryable === false && plain.structuredContent.message === "connection refused",
+    `the text is \`Error: <message>\`; the value is FAILED, final, with the message (${JSON.stringify(plain.structuredContent)})`);
+  const hinted = failed(new Error("function search_thoughts_current(vector) does not exist"), (m) => (m.includes("search_thoughts_current") ? " — a hint" : ""));
+  assert(hinted.content[0].text === "Error: function search_thoughts_current(vector) does not exist — a hint" && hinted.structuredContent.message === "function search_thoughts_current(vector) does not exist",
+    "a tool's hint follows the message in the text and stays out of the value");
+}
+
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
   const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {

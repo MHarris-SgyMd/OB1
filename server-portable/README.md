@@ -493,6 +493,32 @@ gated by a **write** key (stricter than the read routes; a read/capture/no key g
 bodiless `ok`). Like `worker_status`, all are SQL-backend only — the PostgREST shim
 answers that it needs the SQL store.
 
+## Where a tool's logic lives (SMD-2283)
+
+A tool is three pieces, so that the REST core (SMD-2284) calls the same logic the
+MCP tools do rather than a copy of it:
+
+- **`core/`** — what the tool does, with no MCP types and no prose. `core/schemas.ts`
+  holds every tool's title, description, behaviour hints and zod input schema, keyed by
+  the manifest's names (`tools.ts`). `core/reads.ts` holds the read operations, each a
+  function of the caller's principal and its typed input: the search operation with its
+  egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
+  Each returns its typed value or a typed refusal (`core/refusal.ts`: a `code`, whether
+  it is `retryable`, and the facts to say it with), and throws a fault.
+  `core/context.ts` is what they run against: the store, the provider settings and the
+  one embedder, the query log.
+- **`render.ts`** — the words: each read tool's reply rendered from that value, the
+  text the tools have always said.
+- **`index.ts`** — the Hono app, authentication, and the registration that joins the
+  two: validate (the SDK runs the spec's schema), call the operation, render.
+
+Every read tool's reply carries its typed answer as `structuredContent` beside the
+text — the value on success, `{ code, retryable, … }` on a refusal (`NOT_FOUND`,
+`REFUSED_FILTER`, `REFUSED_EGRESS`, `REFUSED_SINCE`, `REFUSED_CURSOR`), and `FAILED`
+with the message for a fault. A value is always an object, so `worker_status`'s
+rows ride under `pools` while its text stays the bare array. The write tools move into
+`core/` in SMD-2283's next two pull requests; until then they keep SMD-1978's codes.
+
 ## Expected outcome
 
 ```bash
