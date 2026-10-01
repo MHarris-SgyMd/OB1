@@ -71,7 +71,7 @@ import { betterAuth } from "better-auth";
 import { createAuthMiddleware, APIError } from "better-auth/api";
 import { getMigrations } from "better-auth/db/migration";
 import { jwt } from "better-auth/plugins";
-import { oauthProvider, extendOAuthProvider, oauthProviderOpenIdConfigMetadata } from "@better-auth/oauth-provider";
+import { oauthProvider, extendOAuthProvider, oauthProviderOpenIdConfigMetadata, type OAuthExtensionGrantHandler } from "@better-auth/oauth-provider";
 import { cimd } from "@better-auth/cimd";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
@@ -118,8 +118,9 @@ const tokenExchange = () => ({
   init(ctx: unknown) {
     extendOAuthProvider(ctx as never, {
       grants: {
-        [TOKEN_EXCHANGE]: async ({ ctx, provider }: { ctx: { body: Record<string, string | undefined>; context: { internalAdapter: { findUserById(id: string): Promise<unknown> } } }; provider: { authenticateClient(o: { requireCredentials: boolean }): Promise<{ client: { clientId: string } }>; issueTokens(p: unknown): Promise<unknown> } }) => {
-          const b = ctx.body;
+        // Typed by the library's own OAuthExtensionGrantHandler: authenticateClient answers { clientId, client, … }.
+        [TOKEN_EXCHANGE]: (async ({ ctx, provider }) => {
+          const b = ctx.body as Record<string, string | undefined>;
           const { client } = await provider.authenticateClient({ requireCredentials: true });
           const policy = Object.hasOwn(L.clients, client.clientId) ? L.clients[client.clientId] : undefined;
           if (policy?.kind !== "exchange") refuse("unauthorized_client", "this client may not exchange tokens");
@@ -144,7 +145,7 @@ const tokenExchange = () => ({
           if (wider.length) refuse("invalid_scope", `scope wider than the subject token's: ${wider.join(" ")}`);
           // The library strips a contributed `exp`: bound the exchanged token by its resource's TTL instead.
           if ((claims.exp ?? 0) - Math.floor(Date.now() / 1000) < EXCHANGED_TTL) refuse("invalid_grant", "grant request is invalid", `subject_token has less than ${EXCHANGED_TTL} s left`);
-          const user = await ctx.context.internalAdapter.findUserById(claims.sub);
+          const user = (await ctx.context.internalAdapter.findUserById(claims.sub)) ?? undefined;
           return provider.issueTokens({
             client,
             user,
@@ -153,7 +154,7 @@ const tokenExchange = () => ({
             accessTokenClaims: { act: { sub: client.clientId } },
             tokenResponse: { issued_token_type: ACCESS_TOKEN_TYPE },
           });
-        },
+        }) satisfies OAuthExtensionGrantHandler,
       },
     });
   },
@@ -303,7 +304,8 @@ async function askingFrom(query: URLSearchParams): Promise<Asking> {
   return { clientId, clientName: row?.name, redirectUri: query.get("redirect_uri") ?? "", scope: query.get("scope") ?? "", resources: query.getAll("resource") };
 }
 
-const html = (status: number, body: string, headers: Record<string, string> = {}) => new Response(body, { status, headers: { ...PAGE_HEADERS, ...headers } });
+// The page headers last, so no caller can override the framing rule.
+const html = (status: number, body: string, headers: Record<string, string> = {}) => new Response(body, { status, headers: { ...headers, ...PAGE_HEADERS } });
 const inner = (path: string, init: RequestInit = {}) => auth.handler(new Request(`${L.origin}/auth${path}`, { ...init, headers: { "content-type": "application/json", origin: L.origin, ...(init.headers as Record<string, string>) } }));
 
 /** Follow the library's `{ redirect, url }` answer as a browser redirect, carrying its cookies. */

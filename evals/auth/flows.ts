@@ -26,8 +26,6 @@ export class Browser {
   readonly pages: string[] = [];
   /** The headers of each page it answered, in the same order. */
   readonly pageHeaders: Headers[] = [];
-  /** The URL of each page it answered, in the same order. */
-  readonly pageUrls: URL[] = [];
 
   constructor(private password: string) {}
 
@@ -82,7 +80,6 @@ export class Browser {
       }
       this.prompts.push(prompt);
       this.pageHeaders.push(res.headers);
-      this.pageUrls.push(url);
       this.pages.push(body.replace(/<[^>]+>/g, " ").replace(/&ldquo;|&rdquo;/g, '"').replace(/\s+/g, " ").trim());
       const forms = [...body.matchAll(/<form method="post" action="([^"]+)"/g)].map((m) => m[1].replace(/&#(\d+);/g, (_, c) => String.fromCharCode(Number(c))));
       // By path: a form's action may carry the interaction's own query (Better Auth's signed one).
