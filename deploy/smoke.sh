@@ -68,11 +68,30 @@ status() { curl -sL --max-redirs 5 --max-time 20 -o /dev/null -w '%{http_code}' 
 echo "▸ $BASE"
 
 # 1. Auth failures must stay inside the protocol. A bare 4xx makes strict MCP hosts
-#    tear the connection down instead of surfacing the error.
-code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' "$BASE/")
-[ "$code" = "200" ] && ok "unauthenticated request → HTTP 200 with a JSON-RPC envelope" \
-                    || bad "unauthenticated request → HTTP $code (expected 200)"
+#    tear the connection down instead of surfacing the error. The 200 alone proves
+#    nothing: a server with no key check answers initialize with a result. So the
+#    body must be the Unauthorized error (-32001, JSON_RPC_UNAUTHORIZED_CODE in
+#    server-portable/index.ts), asked twice: with no key, and with a key that is
+#    not one of the server's, which is the comparison and not only the presence
+#    check (SMD-2103, from recipes/brain-smoke-test's Auth category).
+# Prints the JSON-RPC error code of an initialize sent with these curl arguments,
+# or what came back instead.
+refusal() {
+  local out code
+  out=$(curl -s --max-time 20 -w '\n%{http_code}' -H 'Content-Type: application/json' "$@" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' "$BASE/")
+  code=${out##*$'\n'}
+  [ "$code" = "200" ] || { echo "HTTP $code"; return; }
+  printf '%s\n' "${out%$'\n'*}" | unwrap \
+    | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["error"]["code"] if "error" in d else "a result, not an error")' 2>/dev/null \
+    || echo "HTTP 200 with no JSON-RPC envelope"
+}
+r=$(refusal)
+[ "$r" = "-32001" ] && ok "no key → HTTP 200 with JSON-RPC error -32001" \
+                   || bad "no key → $r (expected HTTP 200 with JSON-RPC error -32001)"
+r=$(refusal -H 'x-brain-key: ob1-smoke-not-a-configured-key')
+[ "$r" = "-32001" ] && ok "a wrong key → HTTP 200 with JSON-RPC error -32001" \
+                   || bad "a wrong key → $r (expected HTTP 200 with JSON-RPC error -32001)"
 
 # 2. OAuth discovery: claude.ai fetches this at the ORIGIN root (server path as a
 #    suffix) before opening a connector, and proceeds on the key only on a 404.
