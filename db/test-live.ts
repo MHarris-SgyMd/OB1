@@ -8458,7 +8458,7 @@ console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress
   // through extraEnv, exactly as [20]'s tierCli does.
   const weeklyCli = async (args: string[], extraEnv: Record<string, string> = {}) => {
     const env: Record<string, string | undefined> = { ...process.env, OB1_ENV_FILES: "off" };
-    for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY", "OB1_DIGEST_MODEL", "OB1_TELEGRAM_LOCAL", "OB1_WORKER_KEY"]) delete env[k];
+    for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY", "OB1_DIGEST_MODEL", "OB1_TELEGRAM_LOCAL", "OB1_TELEGRAM_API_BASE", "OB1_WORKER_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]) delete env[k];
     Object.assign(env, extraEnv);
     const proc = Bun.spawn(["bun", "--no-env-file", join(HERE, "weekly-digest.ts"), ...args], { stdout: "pipe", stderr: "pipe", env, cwd: tmpdir() });
     const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
@@ -8479,13 +8479,20 @@ console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress
   try {
     tgReqs = 0; chatReqs = 0;
     const denied = await weeklyCli(tgArgs, base);
-    assert(tgReqs === 0 && chatReqs >= 1 && /not posted to Telegram/.test(denied.err) && /deny \(the default\)/.test(denied.err),
+    assert(tgReqs === 0 && chatReqs >= 1 && /not .*posted to Telegram/.test(denied.err) && /deny \(the default\)/.test(denied.err),
       `under the default deny the digest is synthesized but not sent — the stub gets zero Telegram requests and the refusal names the rule (${tgReqs} send(s), ${chatReqs} synthesis; ${denied.err.trim().split("\n").pop()})`);
 
     tgReqs = 0; chatReqs = 0;
     const allowed = await weeklyCli(tgArgs, { ...base, OB1_EGRESS_ALLOW: "type:digest" });
     assert(allowed.code === 0 && tgReqs >= 1 && /posted to Telegram/.test(allowed.out),
       `OB1_EGRESS_ALLOW=type:digest lets it post — the stub is called, so the deny zero is a gate holding, not a dead sender (exit ${allowed.code}; ${tgReqs} send(s))`);
+
+    // The send allowed but no credentials: it fails fast, before the LLM spend.
+    tgReqs = 0; chatReqs = 0;
+    const { TELEGRAM_BOT_TOKEN: _t, TELEGRAM_CHAT_ID: _c, ...baseNoCreds } = base;
+    const noCreds = await weeklyCli(tgArgs, { ...baseNoCreds, OB1_EGRESS_ALLOW: "type:digest" });
+    assert(noCreds.code === 2 && chatReqs === 0 && tgReqs === 0 && /TELEGRAM_BOT_TOKEN/.test(noCreds.err),
+      `--output telegram with the send allowed but no credentials fails before the synthesis, not after it (exit ${noCreds.code}; ${chatReqs} synthesis, ${tgReqs} send(s))`);
 
     // The sensitivity fail-closed guard: default (filtered), an install without
     // the sensitivity_tier column refuses before any read leaves; with the

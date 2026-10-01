@@ -383,7 +383,24 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   console.log(`  synthesis egress: ${egressDescription(cfg.chat, cfg.egress, cfg.chat.declaredBy ?? "OB1_LLM_LOCAL")}`);
   const telegram = telegramEndpoint(process.env);
   const wantTelegram = args.output === "telegram" && !args.dryRun;
-  if (wantTelegram) console.log(`  Telegram egress: ${egressDescription(telegram, cfg.egress, OB1_TELEGRAM_LOCAL)}`);
+  // The blanket gate, up front, before the read and the LLM spend: when the
+  // policy would refuse the digest whatever its text (no allow term names a unit
+  // it carries), say so now — the digest still prints to stdout, but it will not
+  // post. Null here means the policy MIGHT let it through, so the send is still
+  // decided per the digest's own text at delivery (a marker: term). When it will
+  // post, the credentials are required now, not after a synthesis that is then
+  // wasted (SMD-2239 review).
+  let telegramBlanket: string | null = null;
+  if (wantTelegram) {
+    console.log(`  Telegram egress: ${egressDescription(telegram, cfg.egress, OB1_TELEGRAM_LOCAL)}`);
+    telegramBlanket = egressRefusal(telegram, cfg.egress, digestUnits(keyName));
+    if (telegramBlanket) {
+      console.error(`  the digest will not be posted to Telegram: ${telegramBlanket}. Name it in OB1_EGRESS_ALLOW (type:digest, source:weekly-digest${keyName ? `, or actor:${keyName}` : ""}), or set OB1_EGRESS_POLICY — it is printed to stdout below instead.`);
+    } else if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
+      console.error("  --output telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (or use --output stdout|file, or --dry-run).");
+      return 2;
+    }
+  }
 
   const read = await readThoughts(sql, args);
   if (read.failClosed) {
@@ -440,8 +457,11 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
     return 0;
   }
 
-  // Telegram — the sink hop, gated. Refused → the digest (already on stdout)
-  // does not reach Telegram, and the refusal names the rule.
+  // Telegram — the sink hop. The blanket gate already refused it up front (the
+  // digest is on stdout); nothing reaches Telegram.
+  if (telegramBlanket) return 0;
+  // The per-send gate decides on the digest's own text — the backstop for a
+  // marker: term the blanket (units only) could not judge.
   const gate = mayLeaveBox(digestSubject(digest, keyName), telegram, cfg.egress);
   if (!gate.allowed) {
     console.error(`  not posted to Telegram: ${gate.reason}`);
@@ -450,12 +470,9 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
     );
     return 0;
   }
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) {
-    console.error("  --output telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (or use --output stdout|file, or --dry-run).");
-    return 2;
-  }
+  // Credentials were required up front when the send was not blanket-refused.
+  const token = process.env.TELEGRAM_BOT_TOKEN!;
+  const chatId = process.env.TELEGRAM_CHAT_ID!;
   try {
     const ids = await deliverTelegram(telegram.base, token, chatId, digest);
     console.log(`  posted to Telegram (${ids.length} message${ids.length === 1 ? "" : "s"})`);
