@@ -8,7 +8,7 @@ import { decideCalls, type EgressSubject } from "./egress.ts";
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
 import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
-import { queryLogEnabled, tierProblem, trimmedEnv } from "../db/config.mjs";
+import { tierProblem, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION } from "./version.ts";
@@ -1293,11 +1293,19 @@ function buildServer(principal: Principal): McpServer {
   // Claude Desktop / claude.ai client fetches the result of a job it started.
   // Ownership-scoped: a job is visible only to the key that started it (the
   // handle inherits that call's scope), so a wrong id or another key's job reads
-  // as not found. Read-only. No catch, as before: a registry fault is the SDK's to report.
+  // as not found. Read-only. A registry fault (the durable jobs table away,
+  // SMD-2318) is FAILED like every read tool's (review pass 4: it reached the
+  // SDK's default error result, with no code).
   if (canRead(principal)) server.registerTool(
     "job_status",
     SPECS.job_status,
-    async (input) => say.renderJobStatus(await core.jobStatus(principal, input)),
+    async (input) => {
+      try {
+        return say.renderJobStatus(await core.jobStatus(principal, input));
+      } catch (err: unknown) {
+        return say.failed(err);
+      }
+    }
   );
 
   // Tool 3b-vi: the first async-job-backed tool (SMD-2273) — a bounded, paged
@@ -1310,7 +1318,13 @@ function buildServer(principal: Principal): McpServer {
   if (canRead(principal)) server.registerTool(
     "scan_thoughts",
     SPECS.scan_thoughts,
-    async (input) => say.renderJobHandle(await core.scanThoughts(principal, input, { track: toolCalls.track })),
+    async (input) => {
+      try {
+        return say.renderJobHandle(await core.scanThoughts(principal, input, { track: toolCalls.track }));
+      } catch (err: unknown) {
+        return say.failed(err);
+      }
+    }
   );
 
   return server;
@@ -1677,13 +1691,10 @@ app.post("*", async (c, next) => {
   const body = await c.req.json().catch(() => null);
   const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
   // Actor audit, one action-log row per affected thought (SMD-2132): the resolved
-  // agent id, tier and tool name, exactly as the MCP tools' logActionCalls does.
-  const audit = async (tool: string, ids: string[]): Promise<void> => {
-    if (!queryLogEnabled(env()) || ids.length === 0) return;
-    try {
-      await (await db()).logActions(ids.map((id) => ({ tool, agentId: identity.agentId, targetId: id, tier: env().OB1_TIER?.trim() || undefined })));
-    } catch { /* best-effort, as on the MCP path */ }
-  };
+  // agent id, tier and tool name, through the MCP tools' one writer (core/context.ts;
+  // review pass 4 — a copy of its rules lived here).
+  const audit = (tool: string, ids: string[]): Promise<void> =>
+    core.ctx.logActions({ agentId: identity.agentId }, ids.map((id) => ({ tool, targetId: id })));
   try {
     if (isRetry) {
       const workType = typeof args.work_type === "string" ? args.work_type : "";

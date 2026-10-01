@@ -1836,26 +1836,44 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   assert(!lt.isError && Array.isArray(lt.sc?.thoughts) && lt.sc.thoughts.length === 3 && "supersededBy" in lt.sc.thoughts[0] && !("content" in lt.sc.thoughts[0]) && lt.sc.text === lt.text, "list_thoughts: the listed thoughts with their supersession, the text beside them, no bodies");
   const sp = await result("list_supersession_proposals", { status: "all" });
   assert(!sp.isError && sp.sc?.status === "all" && Array.isArray(sp.sc?.proposals), `list_supersession_proposals: the status asked and the proposals (${sp.sc?.proposals?.length})`);
-  // The sides stay whole in the value: the text quotes them snipped to 200
-  // characters (review pass 3). One proposal seeded as [9] seeds them, its
-  // newer side past the snip, and removed again.
+  // A side the text snips is snipped in the value too, and an escape sequence
+  // in the judge's reason is cleaned there as in the text: a model reading the
+  // value alone sees no more than the listing shows (review pass 4 — pass 3
+  // kept the sides whole, unbounded at limit 200). One proposal seeded as [9]
+  // seeds them, its newer side past the snip; it and its thought are removed
+  // again whatever the assertions do.
   {
     const sql = new SQL({ url: URL_, max: 1 });
     const long = `${marker} newer side: ${"a sentence the listing snips. ".repeat(12)}the end`;
-    const newer = /id ([0-9a-f-]{36})/.exec(await call("capture_thought", { content: long }))![1];
-    const [{ id: pid }] = await sql`SELECT record_supersession_proposal(${id}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.8, 'stub', 0.9, 'consolidate:stub@p2', NULL) AS id`;
-    const sp1 = await result("list_supersession_proposals", {});
-    const p = sp1.sc?.proposals?.find((x: { id: string }) => x.id === pid);
-    assert(p?.newer?.content === long && !sp1.text.includes(long) && sp1.text.includes(long.slice(0, 120)),
-      `list_supersession_proposals: the text snips a long side, the value keeps it whole (${long.length} chars)`);
-    await sql`DELETE FROM supersession_proposals WHERE id = ${pid}::uuid`;
-    await sql.close();
+    let newer: string | undefined;
+    let pid: string | undefined;
+    try {
+      newer = /id ([0-9a-f-]{36})/.exec(await call("capture_thought", { content: long }))?.[1];
+      [{ id: pid }] = await sql`SELECT record_supersession_proposal(${id}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.8, ${"judged \x1b[31mred"}, 0.9, 'consolidate:stub@p2', NULL) AS id`;
+      const sp1 = await result("list_supersession_proposals", {});
+      const p = sp1.sc?.proposals?.find((x: { id: string }) => x.id === pid);
+      const shown = p?.newer?.content as string | undefined;
+      assert(shown !== undefined && shown.length <= 201 && shown.endsWith("…") && long.startsWith(shown.slice(0, -1)) && !sp1.text.includes(long) && sp1.text.includes(shown),
+        `list_supersession_proposals: a long side is snipped in the value as in the text (${shown?.length} of ${long.length} chars)`);
+      assert(typeof p?.reason === "string" && !p.reason.includes("\x1b") && p.reason.startsWith("judged"), `…and the judge's reason is cleaned in the value (${JSON.stringify(p?.reason)})`);
+    } finally {
+      if (pid) await sql`DELETE FROM supersession_proposals WHERE id = ${pid}::uuid`;
+      if (newer) await call("delete_thought", { id: newer }).catch(() => {});
+      await sql.close();
+    }
   }
   const ts = await result("thought_stats");
   assert(!ts.isError && typeof ts.sc?.total === "number" && ts.text.startsWith(`Total thoughts: ${ts.sc.total}`), `thought_stats: the counts the text prints (${ts.sc?.total})`);
 
   const ch = await result("thought_changes", { limit: 2 });
-  assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`) && ch.sc.text === ch.text && ch.sc.changes.every((c: object) => "head" in c), "thought_changes: the page, its bound and the cursor the text names, the text beside them, and each head whole (the text only snips it: review pass 3)");
+  assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`) && ch.sc.text === ch.text, "thought_changes: the page, its bound and the cursor the text names, the text beside them");
+  // The two newest changes are the long side's capture and its delete above
+  // (a capture row of a deleted thought has no head: its text is in the delete
+  // row): each head snipped in the value as the text quotes it, never the whole
+  // body with whatever it carries — a forged `Cursor:` line among it (review pass 4).
+  const heads = (ch.sc?.changes ?? []).map((c: { head: string | null }) => c.head).filter((h: string | null): h is string => h !== null);
+  assert(heads.length >= 1 && heads.some((h: string) => h.endsWith("…")) && heads.every((h: string) => h.length <= 201 && ch.text.includes(h)),
+    `thought_changes: each head is the snipped, cleaned line the text shows (${heads.map((h: string) => h.length).join(", ")} chars)`);
   const chBad = await result("thought_changes", { since: "yesterday" });
   assert(chBad.isError && chBad.text.startsWith("Refused: `since` must be an ISO-8601 time") && chBad.sc?.code === "REFUSED_SINCE" && chBad.sc?.value === "yesterday", `thought_changes refuses a since that is neither, REFUSED_SINCE (${JSON.stringify(chBad.sc)})`);
 

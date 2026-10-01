@@ -9,11 +9,13 @@
 // openai/codex#10334), so the value must say what the text says: a tool whose
 // text is prose carries that text in its value as `text`, and a refusal or a
 // fault does too. A tool whose text is its value's JSON (the ChatGPT shapes, the
-// pages, the job records) needs nothing more. A prose value leaves out the
-// thought bodies its `text` quotes in full (search hits, listed thoughts), so
-// a reply does not carry three copies of them; a body the text only snips (a
-// proposal's sides, a change's head) stays, and the core's value keeps every
-// one, for the REST core (SMD-2284).
+// pages, the job records) needs nothing more. A prose value says no more than
+// its text, and nothing less clean: it leaves out the thought bodies the text
+// quotes in full (search hits, listed thoughts), so a reply does not carry
+// three copies of them, and carries a field the text snips or cleans (a
+// proposal's sides and reason, a change's head and writer) snipped and cleaned
+// the same way. The core's value keeps everything whole, for the REST core
+// (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
@@ -32,7 +34,7 @@ type Structured<T> = (v: T, text: string) => object;
 const withText = <T extends object>(v: T, text: string): object => ({ text, ...v });
 /** A tool whose text is its value's JSON: the value alone (the spec's structured-plus-serialized shape). */
 const asJson = <T extends object>(v: T): object => v;
-/** A row without the `content` its text quotes in full. Only for a row the text quotes whole: a snipped quote (a proposal's sides, a change's head) keeps its field. */
+/** A row without the `content` its text quotes in full. Only for a row the text quotes whole; a field the text snips is snipped in the value instead (proposalsAsShown, changesAsShown). */
 const bodiless = <R extends { content: string }>({ content: _content, ...row }: R): Omit<R, "content"> => row;
 /** The two search tools' value: the text, then the hits without the bodies the text quotes whole. */
 const hitsWithoutBodies = <V extends { hits: { content: string }[] }>(v: V, text: string): object => ({ text, ...v, hits: v.hits.map(bodiless) });
@@ -53,7 +55,7 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
 /**
  * A fault an operation threw — the store down, a missing migration — as every
  * tool has always said it, `Error: <message>`, with the tool's hint for the
- * message when it has one; FAILED beside it, final (core/refusal.ts says why;
+ * message when it has one; FAILED beside it, unclassified (core/refusal.ts says why;
  * SMD-2461 classifies), carrying the text and the hint too, so
  * a program reading the value learns the migration or grant that fixes it. One
  * message for both: a thrown non-Error (a string, undefined) is said as itself
@@ -363,6 +365,25 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
   }, unknownRefusal, (v, text) => ({ text, thoughts: v.thoughts.map(bodiless) }));
 }
 
+/**
+ * The proposals as their text shows them (review pass 4): each side snipped
+ * and cleaned as the listing quotes it, the judge's reason and the review note
+ * cleaned. A value says no more than its text — the sides are whole thoughts,
+ * up to 400 of them at limit 200, and a page is a thought (SMD-1812); the full
+ * text is one `fetch` away.
+ */
+const proposalsAsShown = (v: ProposalsResult, text: string): object => ({
+  text,
+  ...v,
+  proposals: v.proposals.map((p) => ({
+    ...p,
+    reason: p.reason === null ? null : cleanForDisplay(p.reason),
+    reviewNote: p.reviewNote === null ? null : cleanForDisplay(p.reviewNote),
+    older: { ...p.older, content: snipText(p.older.content, 200) },
+    newer: { ...p.newer, content: snipText(p.newer.content, 200) },
+  })),
+});
+
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
   return render(o, ({ status, lineage, proposals: data }) => {
     const onLineage = lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "";
@@ -403,7 +424,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
     });
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`;
-  }, unknownRefusal);
+  }, unknownRefusal, proposalsAsShown);
 }
 
 /**
@@ -530,6 +551,30 @@ function renderChange(c: AuditChange, n: number): string {
   return lines.join("\n");
 }
 
+/**
+ * The changes as their text shows them (review pass 4): every untrusted field
+ * — the head, the writer's name and door, the row's source, the metadata keys,
+ * the writer filter echoed — through snipText at the bound renderChange gives
+ * it, so a forged `Cursor:` line in a thought's text cannot reach a model that
+ * reads the value alone (renderChange says why the text is cleaned).
+ */
+const changesAsShown = (v: ChangesResult, text: string): object => {
+  const clean = (s: string | null, max: number) => (s === null ? null : snipText(s, max));
+  return {
+    text,
+    ...v,
+    agent: clean(v.agent, 80),
+    changes: v.changes.map((c) => ({
+      ...c,
+      head: clean(c.head, 200),
+      actorName: clean(c.actorName, 80),
+      origin: clean(c.origin, 80),
+      source: clean(c.source, 80),
+      metadataKeys: c.metadataKeys.map((k) => snipText(k, 40)),
+    })),
+  };
+};
+
 export function renderThoughtChanges(o: Outcome<ChangesResult>): Reply {
   return render(o, (v) => {
     // Both filters name themselves in the header, so `agent` set to the
@@ -549,7 +594,7 @@ export function renderThoughtChanges(o: Outcome<ChangesResult>): Reply {
     return `${head}\n\n${shown.map((c, i) => renderChange(c, i + 1)).join("\n\n")}\n\n${tail}`;
   }, (r) => (r.code === "REFUSED_SINCE"
     ? `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${snipText(r.value, 40)}".`
-    : unknownRefusal(r)));
+    : unknownRefusal(r)), changesAsShown);
 }
 
 export const changesHint = (msg: string): string =>

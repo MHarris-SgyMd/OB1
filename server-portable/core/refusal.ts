@@ -28,10 +28,12 @@ export const refuse = <T = never>(refusal: Refusal): Outcome<T> => ({ ok: false,
 
 /**
  * A fault an operation threw, typed for a caller that wants a code: FAILED,
- * final, with the thrown message. Final because the fault is unclassified — a
- * missing migration and a dropped connection read alike here, and telling a
- * client to retry a fault that cannot heal is the worse error. One classifier
- * for every fault, capture's STORE_UNAVAILABLE included, is SMD-2461.
+ * with the thrown message, and no `retryable`. The fault is unclassified — a
+ * missing migration and a dropped connection read alike here — so the server
+ * states neither verdict rather than one it does not know (review pass 4:
+ * `retryable: false` called a restarting database final while capture called
+ * it retryable). One classifier for every fault, capture's STORE_UNAVAILABLE
+ * included, is SMD-2461, which adds the field back.
  */
-export type Failure = { code: "FAILED"; retryable: false; message: string; hint?: string };
-export const failure = (err: unknown): Failure => ({ code: "FAILED", retryable: false, message: (err as Error)?.message ?? String(err) });
+export type Failure = { code: "FAILED"; message: string; hint?: string };
+export const failure = (err: unknown): Failure => ({ code: "FAILED", message: (err as Error)?.message ?? String(err) });

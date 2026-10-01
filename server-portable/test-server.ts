@@ -1307,8 +1307,8 @@ console.log("\n[16d] A fault an operation throws is said as it always was, typed
 {
   const { failed } = await import("./render.ts");
   const plain = failed(new Error("connection refused"));
-  assert(plain.isError === true && plain.content[0].text === "Error: connection refused" && plain.structuredContent.code === "FAILED" && plain.structuredContent.retryable === false && plain.structuredContent.message === "connection refused",
-    `the text is \`Error: <message>\`; the value is FAILED, final, with the message (${JSON.stringify(plain.structuredContent)})`);
+  assert(plain.isError === true && plain.content[0].text === "Error: connection refused" && plain.structuredContent.code === "FAILED" && !("retryable" in plain.structuredContent) && plain.structuredContent.message === "connection refused",
+    `the text is \`Error: <message>\`; the value is FAILED with the message, no verdict (${JSON.stringify(plain.structuredContent)})`);
   const hinted = failed(new Error("function search_thoughts_current(vector) does not exist"), (m) => (m.includes("search_thoughts_current") ? " — a hint" : ""));
   assert(hinted.content[0].text === "Error: function search_thoughts_current(vector) does not exist — a hint" && hinted.structuredContent.message === "function search_thoughts_current(vector) does not exist" && hinted.structuredContent.hint === "a hint",
     "a tool's hint follows the message in the text, and rides the value as its own field (review pass 1)");
@@ -1322,12 +1322,13 @@ console.log("\n[16d] A fault an operation throws is said as it always was, typed
   // Codex) must read the words too (review pass 2).
   assert(plain.structuredContent.text === "Error: connection refused" && hinted.structuredContent.text === hinted.content[0].text, "the fault's text rides inside its value");
 
-  // Final, every one: the fault is unclassified until SMD-2461's one
+  // No verdict, every one: the fault is unclassified until SMD-2461's one
   // classifier (review pass 3 cut pass 2's — a third list, whole SQLSTATE
-  // classes, blind on the PostgREST store).
+  // classes, blind on the PostgREST store; pass 4 took back the `false` that
+  // called a restarting database final).
   const pg = (errno: string) => Object.assign(new Error("x"), { name: "PostgresError", code: "ERR_POSTGRES_SERVER_ERROR", errno });
   const faults = [pg("57P01"), pg("42883"), Object.assign(new Error("x"), { name: "PostgresError", code: "ERR_POSTGRES_CONNECTION_CLOSED" }), "boom", null];
-  assert(faults.every((e) => failed(e).structuredContent.retryable === false), "a fault is FAILED and final, whatever its shape");
+  assert(faults.every((e) => failed(e).structuredContent.code === "FAILED" && !("retryable" in failed(e).structuredContent)), "a fault is FAILED and states no verdict, whatever its shape — neither final nor retryable until SMD-2461 classifies it (review pass 4)");
 }
 
 console.log("\n[16e] Two cores over one store share one brain-info read in flight (SMD-2283, review pass 2)");
