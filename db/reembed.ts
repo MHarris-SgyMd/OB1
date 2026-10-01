@@ -694,6 +694,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     constructor(readonly error: unknown) {}
   }
   const errInRow = (line: string): void => {
+    // A row's sibling calls still in flight when run() returned — a blurb
+    // answering after a Writer's throw rejected it — say nothing more
+    // (review pass 2).
+    if (detach.aborted) return;
     try {
       err(line);
     } catch (e) {
@@ -1937,8 +1941,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       } catch (e) {
         err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s`);
+      } finally {
+        // Whatever the Writer does with the line above (review pass 2).
+        activeWorkers.delete(workerId);
       }
-      activeWorkers.delete(workerId);
       // Outside the release's try: a Writer's throw here is the Writer's, not a
       // lease left unreturned.
       if (freed > 0) err(`  ${workerId}: returned ${freed} unfinished row(s) to the pool`);

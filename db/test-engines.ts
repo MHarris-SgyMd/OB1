@@ -496,6 +496,60 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   ok(r.code === 0 && JSON.stringify(constants) === JSON.stringify(contract), `embeddingContract(process.env) is config.mjs's constants under ${JSON.stringify(env)} (${JSON.stringify(contract)})`);
 }
 
+// ---------------------------------------------------------------------------
+// server-portable/embed.ts's `log`: the embedder's own lines go where its
+// caller says (reembed's run() passes its Writer), and a throw from it
+// rejects the call with that error — through the blurbs' and the whole
+// content's degrading catches — and stops the call's other lines (SMD-2304
+// review passes 1 and 2). A loopback stub answers: every embedding a unit
+// vector, every blurb empty, the whole content 413 when asked.
+// ---------------------------------------------------------------------------
+{
+  const { createEmbedder, resolveEmbedConfig } = await import("../server-portable/embed.ts");
+  let refuseWhole = false;
+  const doc = Array.from({ length: 1500 }, (_, k) => `word${k}`).join(" ");
+  const stub = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { input?: string; messages?: unknown };
+      if (new URL(req.url).pathname.endsWith("/chat/completions")) return Response.json({ choices: [{ message: { content: "" } }] });
+      if (refuseWhole && body.input === doc) return Response.json({ error: { message: "input too long" } }, { status: 413 });
+      const v = new Array(8).fill(0);
+      v[1] = 1;
+      return Response.json({ data: [{ embedding: v }] });
+    },
+  });
+  const cfgFor = (context: boolean) => resolveEmbedConfig({
+    OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1",
+    OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: "8", OB1_CHUNK_CONTEXT: context ? "on" : "off",
+  } as never);
+  const subject = { kind: "re-embed" as const, content: doc };
+  const lines: string[] = [];
+  const quiet = createEmbedder(() => cfgFor(true), { rememberRefusal: false, log: (l) => lines.push(l) });
+  const embedded = await quiet.embedCapture(doc, subject);
+  const blurbLines = lines.filter((l) => l === "contextualiseChunk: the model returned an empty blurb").length;
+  ok(embedded.chunks.length > 1 && blurbLines === embedded.chunks.length && embedded.contextFailures === embedded.chunks.length,
+     `embed.ts's log receives the embedder's own lines — one empty blurb a window (${blurbLines} lines, ${embedded.chunks.length} windows)`);
+  // A log that throws on the first blurb line: the call rejects with that very
+  // error, not resolved with it as the blurb's reason, and no other line is written.
+  const boom = new Error("log boom");
+  let calls = 0;
+  const throwing = createEmbedder(() => cfgFor(true), { rememberRefusal: false, log: () => { calls++; throw boom; } });
+  const blurbOutcome = await throwing.embedCapture(doc, subject).then(() => "resolved", (e: unknown) => e);
+  ok(blurbOutcome === boom && calls === 1, `…a throw from it on a blurb line rejects embedCapture with that error, and the call's other lines are not written (${blurbOutcome === boom ? "the error" : String(blurbOutcome)}, ${calls} call(s))`);
+  // …and on the whole content's fallback line (a 413), through its degrading catch.
+  refuseWhole = true;
+  calls = 0;
+  const wholeOutcome = await createEmbedder(() => cfgFor(false), { rememberRefusal: false, log: () => { calls++; throw boom; } }).embedCapture(doc, subject).then(() => "resolved", (e: unknown) => e);
+  const fellBack: string[] = [];
+  const fell = await createEmbedder(() => cfgFor(false), { rememberRefusal: false, log: (l) => fellBack.push(l) }).embedCapture(doc, subject);
+  refuseWhole = false;
+  ok(wholeOutcome === boom && calls === 1 && fell.wholeContentRefused && fellBack.some((l) => l.startsWith("embedCapture: stub-embed refused the whole content (413)")),
+     `…and on the whole content's fallback line, where the same call with a quiet log falls back and says so (${wholeOutcome === boom ? "the error" : String(wholeOutcome)})`);
+  stub.stop(true);
+}
+
 // cli.ts's numberProblem: the scanner's words, judged by value — the engines'
 // in-process numbers — and readNumber's own rule for a digit string.
 {

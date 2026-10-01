@@ -2275,6 +2275,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   /** Embedding calls but the probe, and an axis shift that makes a vector written while it is set differ from the one it replaces (SMD-2304's stop cases). */
   let embedCalls = 0;
   let shift = 0;
+  /** Awaited before each embedding is answered, when set (review pass 2: a row lock taken while the worker waits for its vector). */
+  let onEmbed: ((input: string) => Promise<void>) | null = null;
   const modelsSeen = new Set<string>();
   const axisFor = (text: string) => {
     let h = 0;
@@ -2311,6 +2313,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
         await neverAnswers();
       }
       if (slowMs > 0 && input !== "reembed.ts provider probe") await Bun.sleep(slowMs);
+      if (onEmbed) await onEmbed(input);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
       v[1 + ((axisFor(input) - 1 + shift) % (DIM - 1))] = 1;
@@ -3317,6 +3320,37 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
       `the embedder's fallback line reaches run()'s Writer in-process, as the CLI's stderr, and not the host's console (${hostLines.length} host line(s))`);
     assert(fellOutcome === "writer boom" && fellClaim !== undefined && fellClaim.last_error !== "writer boom" && fellClaim.status !== "claimed",
       `…and a Writer that throws on it rejects run() with its error, not recorded on the row's claim (${fellOutcome}; claim ${JSON.stringify(fellClaim)})`);
+
+    // The hard stop during a stale-read re-read (review pass 2's recipe): the
+    // stub, answering one thought's embedding, first edits that thought in a
+    // transaction it leaves open, so the worker's update_thought waits on the
+    // row; the hard stop lands, the edit commits, update_thought answers
+    // STALE_READ, and the re-read's next attempt must not send the text again.
+    const [{ id: lockedId, content: lockedText }] = await sql`SELECT id::text AS id, content FROM thoughts WHERE content = ${shorts[5]}`;
+    const locker = await sql.reserve();
+    let lockStarted = false;
+    let lockTaken = false;
+    onEmbed = async (input) => {
+      if (input !== lockedText || lockStarted) return;
+      lockStarted = true;
+      await locker`BEGIN`;
+      await locker`UPDATE thoughts SET content = content || ' (edited mid-pass)', updated_at = now() WHERE id = ${lockedId}::uuid`;
+      lockTaken = true;
+    };
+    let reStop: PassStop | undefined;
+    const reRun = reembedInProcess({ job: stopKey(15), env: STOP_ENV, workers: 1, batch: 1, onPass: (x) => { reStop = x; } });
+    for (let i = 0; i < 200 && !lockTaken; i++) await Bun.sleep(50);
+    // The vector answered, the worker's update_thought now waits on the row.
+    await Bun.sleep(400);
+    reStop?.();
+    await reStop?.();
+    const callsAtStop = embedCalls;
+    await locker`COMMIT`;
+    locker.release();
+    const reStopped = await reRun;
+    onEmbed = null;
+    assert(lockTaken && reStopped.code === 130 && embedCalls === callsAtStop && !(await keyClaims(stopKey(15))).claimed,
+      `a hard stop while update_thought waits on an edit's lock: the re-read after its STALE_READ sends nothing more, and run() returns 130 (exit ${reStopped.code}, ${embedCalls - callsAtStop} call(s) after the stop)`);
     await sql`DELETE FROM thought_work_claims WHERE work_type LIKE ${`reembed:stub-embed@${DIM}:stop%`}`;
   }
 

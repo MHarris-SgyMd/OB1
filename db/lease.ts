@@ -287,9 +287,10 @@ export const MAX_TIMER_MS = 2147483647;
  * A pass's stop, as a claim worker's engine hands it to its caller when the
  * pass begins (SMD-2304). The first call asks every worker to stop after the
  * thought in hand, their unfinished claims going back to the pool, and returns
- * null. A call made while the pass is already stopping — a second call, or the
- * first after the provider's refusal stopped the workers itself — is the hard
- * stop: it returns the release of every worker's leases, after which a worker
+ * null. A call made while the pass is already stopping — a second call, or
+ * (extract's and consolidate's) the first after the provider's refusal
+ * stopped the workers itself; reembed's halt on the provider's first answer
+ * is not a stop, and a call after it is a first — is the hard stop: it returns the release of every worker's leases, after which a worker
  * writes nothing more nor releases the thought in hand (each still returns
  * its own leases as it ends), and the CLI ends the process when it settles
  * (stopOnSignals). A call after the run has returned does nothing.
