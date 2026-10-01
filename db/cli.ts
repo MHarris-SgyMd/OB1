@@ -220,10 +220,20 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
  * the flag and the rule, not the value.
  */
 export function readNumber(flag: string, raw: string, rule: { min: number; max?: number; fraction?: boolean }): number | { error: string } {
-  const shape = rule.fraction ? /^-?(\d+(\.\d*)?|\.\d+)$/ : /^-?\d+$/;
-  const n = shape.test(raw) ? Number(raw) : NaN;
+  const n = numberIn(raw, rule.fraction);
   const problem = numberProblem(flag, n, rule);
   return problem === null ? n : { error: problem };
+}
+
+/**
+ * The number readNumber reads a value as, before its rule: NaN for a value not
+ * of its shape. For a CLI that hands a flag's value to an engine to judge
+ * where its script judged it (db/reembed.ts's --ttl, SMD-2304): numberProblem
+ * over this refuses in readNumber's words.
+ */
+export function numberIn(raw: string, fraction = false): number {
+  const shape = fraction ? /^-?(\d+(\.\d*)?|\.\d+)$/ : /^-?\d+$/;
+  return shape.test(raw) ? Number(raw) : NaN;
 }
 
 /**

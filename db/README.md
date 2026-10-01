@@ -3138,11 +3138,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2317 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1019 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1042 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
-bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts) import with no side effect, refuse through run() — no database
+bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
@@ -3192,9 +3192,8 @@ server's address is not compared with loopback, because through a container's
 published port it is the container's. `hnsw-graph.ts`,
 `graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
 after connecting and return it from `closeThenExit`, which closes the pool and
-flushes their output first, as `migrate.ts`, `extract-entities.ts` and
-`consolidate.ts` do with their `run()`'s code (reembed.ts still closes before
-each exit itself until it is an engine, SMD-2304).
+flushes their output first, as `migrate.ts`, `extract-entities.ts`,
+`consolidate.ts` and `reembed.ts` do with their `run()`'s code (SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks
 that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.
@@ -3249,8 +3248,22 @@ as `--status` does; a decision (`accept`, `reject`) writes, and stops under
 one as a run does. A decision, like a run, resolves the worker key, so with
 OB1_WORKER_KEY set it needs `url` beside a caller's `sql`. The judge
 takes an AbortSignal, so the hard stop also aborts the call in hand: run()
-returns at once in-process, where extract's waits for its call. Re-embedding
-becomes an engine next.
+returns at once in-process, where extract's waits for its call.
+`reembed.ts` is the fourth (SMD-2304 PR 4): `run({ url, sql, env, workers,
+batch, ttl, heartbeat, job, retire, acceptFailed, all, status, dryRun,
+switchModel, retryFailed, retryFallbacks, writer, signal, onPass })`, with
+`acceptFailed` the ids (`[]` for the flag alone). The numbers are held where
+the CLI holds them — `--workers` and `--batch` first, `--ttl` and
+`--heartbeat` after the embedding configuration, the CLI handing run() the
+number it read (`cli.ts`'s `numberIn`) — and the modes' rule (one thing at a
+time, `--all` only with `--accept-failed`) is `modeProblem`, a pure function
+the CLI and run() share. The model and width are read from `env` by
+config.mjs's own rules (`embeddingContract`), so the key, the checks and the
+vectors name one model. It resolves no worker key, so a caller's `sql` needs
+no `url` beside it. `--retire` and `--accept-failed` write, and stop under an
+aborted signal as a run does; the hard stop abandons the row in hand once its
+call returns (the embedder takes no signal; a database statement waiting on a
+lock has no bound, and a vector already sent lands).
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket
@@ -3268,8 +3281,8 @@ classifies a provider error into thought / transient / fatal for both workers
 (extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
 `actorPayload` rather than by hand. The module returns its outcome rather than
-exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s
-and `consolidate.ts`'s now, `reembed.ts`'s once it is an engine (SMD-2304).
+exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s,
+`consolidate.ts`'s and `reembed.ts`'s (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
 the `classifyError` rules and the identity cases that refuse before connecting;
 `test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that
