@@ -1149,7 +1149,8 @@ console.log("\n[10d] What the content is, over MCP: a capture through an ingeste
     `the ingested capture is returned with its label and the notice, before its text (${poisonBlock.replace(/\n/g, " ⏎ ").slice(0, 300)})`);
   const opBlock = blockOf(kw, /operator wrote/);
   assert(opBlock.includes("By: op-key (operator) · trust operator\n") && !opBlock.includes("⚠ Ingested"), "…the same words through the operator's key carry its label and no notice");
-  assert(blockOf(kw, /operator pasted/).includes(`By: op-key (operator) · trust ingested\n${INGESTED_NOTICE}`) && blockOf(kw, /no key wrote/).includes("trust not recorded") === false && !blockOf(kw, /no key wrote/).includes("⚠ Ingested"),
+  const keyless = blockOf(kw, /no key wrote/);
+  assert(blockOf(kw, /operator pasted/).includes(`By: op-key (operator) · trust ingested\n${INGESTED_NOTICE}`) && keyless.includes("iota a row no key wrote") && !keyless.includes("By: ") && !keyless.includes("⚠ Ingested"),
     "…the operator's declared outside text is labelled ingested with the notice; the keyless row has no By: line and no notice");
   const hy = await call("search_thoughts", { query: POISON, limit: 10, threshold: -1 });
   const hyBlock = poisonOf(hy) ?? "";

@@ -328,8 +328,8 @@ export function currentSearchHint(msg: string): string {
  * `search` and `fetch`: ChatGPT reads the text as JSON, so the text is the
  * value — its shape, exactly. An ingested row is marked IN it (SMD-1724, the
  * maintainer's call): the shape has no field every ChatGPT surface hands the
- * model but the title and the text, so a search title starts `[ingested]` and
- * a fetched text starts with the notice. metadata.trust rides fetch's
+ * model but the title and the text, so a title starts `[ingested]` (search's
+ * and fetch's, first review pass) and a fetched text starts with the notice. metadata.trust rides fetch's
  * metadata, as every key does.
  */
 export const renderSearch = (o: Outcome<SearchResult>): Reply =>
@@ -337,7 +337,7 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
 export const renderFetch = (o: Outcome<FetchedThought>): Reply =>
-  render(o.ok && ingestedNotice(o.value.metadata) ? ok({ ...o.value, text: `${INGESTED_NOTICE}\n\n${o.value.text}` }) : o,
+  render(o.ok && ingestedNotice(o.value.metadata) ? ok({ ...o.value, title: `[ingested] ${o.value.title}`, text: `${INGESTED_NOTICE}\n\n${o.value.text}` }) : o,
     (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)), AS_JSON);
 
 export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
