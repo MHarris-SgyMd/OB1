@@ -522,6 +522,19 @@ console.log("\n[6e] retry_failed and release_stale_leases over HTTP — tools, k
     const rfPost = await post("/worker-retry-failed", { work_type: WT });
     const rfPostBody = await rfPost.json() as { retried: number };
     assert(rfPost.status === 200 && rfPostBody.retried === 0, `POST /worker-retry-failed returns JSON, 0 now (${JSON.stringify(rfPostBody)})`);
+    // The row names the key that acted, through either door: a named write key's
+    // registry id, the tool's from its principal, the POST's from the identity
+    // the route resolved (SMD-2283 PR 3 review pass 1: nothing held the REST one).
+    await qlog`DELETE FROM query_log WHERE kind = 'action' AND tool = 'retry_failed'`;
+    const refail = (id: string) => sql`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'boom' WHERE work_type = ${WT} AND thought_id = ${id}::uuid`;
+    await refail(ids[0]);
+    await call("retry_failed", { work_type: WT }, "op-raw");
+    await refail(ids[1]);
+    await post("/worker-retry-failed", { work_type: WT }, "op-raw");
+    const opId = (await sql`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = 'op-key'`)[0]?.id;
+    const stamped = await qlog<{ target_id: string; agent_id: string | null }[]>`SELECT target_id::text, agent_id::text FROM query_log WHERE kind = 'action' AND tool = 'retry_failed' ORDER BY target_id`;
+    assert(typeof opId === "string" && stamped.length === 2 && [ids[0], ids[1]].every((id) => stamped.some((r) => r.target_id === id && r.agent_id === opId)),
+      `the tool's row and the POST's both name op-key's agent id (${JSON.stringify(stamped)}, op-key ${opId})`);
 
     // ── release_stale_leases: thought 0 stale (w-dead), thought 1 live (w-live).
     await sql`DELETE FROM thought_work_claims WHERE work_type = ${WT}`;
@@ -2097,6 +2110,90 @@ console.log("\n[16] Every write tool answers its typed result beside the text, a
   holds("delete_thought", del);
   const delGone = await result("delete_thought", { id: capId });
   assert(delGone.isError && delGone.sc?.code === "NOT_FOUND", "a delete of a deleted thought is NOT_FOUND");
+}
+
+console.log("\n[17] Every worker action answers its result beside the text, and each refusal its code (SMD-2283 PR 3)");
+{
+  // A pool no thought is in: each action answers its JSON, and the value is
+  // that JSON — the result is counts, a pool name and ids, nothing a thought wrote.
+  const WT = "smd2283-no-such-pool";
+  const answers: [string, Record<string, unknown>, string][] = [
+    ["retry_failed", { work_type: WT }, "retried"],
+    ["release_stale_leases", { work_type: WT }, "released"],
+    ["run_worker", { work_type: WT, dry_run: true }, "pending"],
+  ];
+  for (const [tool, args, field] of answers) {
+    const r = await result(tool, args);
+    assert(!r.isError && r.sc?.[field] === 0 && JSON.stringify(r.sc) === JSON.stringify(JSON.parse(r.text)), `${tool}: the value is the JSON its text is (${r.text.slice(0, 80)})`);
+  }
+
+  // The refusals, each in the words it always had, its code and `retryable` beside them.
+  const refusals: [string, Record<string, unknown>, string, string][] = [
+    ["retry_failed", { work_type: "  " }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to retry."],
+    ["release_stale_leases", { work_type: "  " }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type was given but blank — omit it to reap across all pools, or pass a real `workType`."],
+    ["release_stale_leases", { include_live: true }, "REFUSED_LIVE_LEASE_NEEDS_WORKER", "Refused: include_live releases a lease that has not lapsed, which risks the holder double-processing — name the worker_id whose live lease to release (worker_status reports the holder)."],
+    ["run_worker", { work_type: "  ", dry_run: true }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain."],
+    ["run_worker", { work_type: WT }, "RUN_WORKER_DRAIN_NOT_AVAILABLE", "Refused: the executing drain is not yet available — the server does not run the bulk LLM passes, and the drain will land on a callable worker core (SMD-2304). Call with dry_run: true to preview what a pass would claim."],
+  ];
+  for (const [tool, args, code, words] of refusals) {
+    const r = await result(tool, args);
+    assert(r.isError && r.text === words && r.sc?.code === code && r.sc?.retryable === false, `${tool} refuses ${JSON.stringify(args)} as ${code}, final, in its old words (${r.text.slice(0, 60)})`);
+    holds(`${tool}'s ${code}`, r);
+  }
+
+  // The keyed REST POSTs call the same operations and say a refusal in their
+  // own words, as a 400 body {error, code} byte for byte; a body field that is
+  // not a string reads as blank for retry and run, and as its String() for
+  // release (a pool named "5" holds nothing here) — each as it always was
+  // (review pass 3: only an uncommitted differential held these).
+  const post = (path: string, body: unknown) =>
+    fetch(`${BASE}${path}`, { method: "POST", headers: H, body: JSON.stringify(body) });
+  const retryBlank = "work_type is required — pass the exact workType worker_status reports.";
+  const runBlank = "work_type is required — pass the exact workType worker_status reports for the pool to drain.";
+  const rest: [string, Record<string, unknown>, number, unknown][] = [
+    ["/worker-retry-failed", { work_type: "  " }, 400, { error: retryBlank, code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-retry-failed", { work_type: 5 }, 400, { error: retryBlank, code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-run", { work_type: "  ", dry_run: true }, 400, { error: runBlank, code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-run", { work_type: 3, dry_run: true }, 400, { error: runBlank, code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-run", { work_type: WT, dry_run: "true" }, 400, { error: "the executing drain is not yet available — the server does not run the bulk LLM passes; the drain will land on a callable worker core (SMD-2304). Send dry_run: true to preview what a pass would claim.", code: "RUN_WORKER_DRAIN_NOT_AVAILABLE" }],
+    ["/worker-release-leases", { work_type: "  " }, 400, { error: "work_type was given but blank — omit it to reap across all pools, or pass a real workType.", code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-release-leases", { include_live: true, worker_id: " " }, 400, { error: "include_live requires worker_id — releasing a live lease risks the holder double-processing.", code: "REFUSED_LIVE_LEASE_NEEDS_WORKER" }],
+    ["/worker-release-leases", { work_type: 5 }, 200, { released: 0, ids: [], workers: [] }],
+  ];
+  for (const [path, body, status, want] of rest) {
+    const r = await post(path, body);
+    const text = await r.text();
+    assert(r.status === status && text === JSON.stringify(want), `POST ${path} ${JSON.stringify(body)} answers ${status} ${JSON.stringify(want).slice(0, 60)} (${r.status} ${text.slice(0, 80)})`);
+  }
+
+  // A fault: the claim table is away, so the store throws. Each action keeps
+  // its lead, FAILED beside it with no retryable — on a PostgREST deploy the
+  // store throws the SQL-only reason, which a retry does not mend — and each
+  // POST answers the reason as a 200 {error}, as /worker-status does. Put the
+  // table back whatever the assertions do; a lock held elsewhere fails the
+  // rename within seconds rather than hanging the suite.
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SET lock_timeout = '5s'`;
+  await sql`ALTER TABLE thought_work_claims RENAME TO thought_work_claims_away`;
+  try {
+    for (const [tool, args] of answers) {
+      const fault = await result(tool, args);
+      assert(fault.isError && fault.text.startsWith(`${tool} failed: `) && fault.sc?.code === "FAILED" && !("retryable" in fault.sc) && fault.sc?.text === fault.text,
+        `${tool}'s fault is FAILED under its lead, its words beside it (${JSON.stringify(fault.sc)?.slice(0, 120)})`);
+    }
+    const reason = JSON.stringify({ error: 'relation "thought_work_claims" does not exist' });
+    for (const [path, body] of [["/worker-retry-failed", { work_type: WT }], ["/worker-release-leases", {}], ["/worker-run", { work_type: WT, dry_run: true }]] as const) {
+      const r = await post(path, body);
+      const text = await r.text();
+      assert(r.status === 200 && text === reason, `POST ${path}'s fault is a 200 carrying the store's reason (${r.status} ${text.slice(0, 80)})`);
+    }
+  } finally {
+    try {
+      await sql`ALTER TABLE thought_work_claims_away RENAME TO thought_work_claims`;
+    } finally {
+      await sql.close();
+    }
+  }
 }
 
 server.stop();

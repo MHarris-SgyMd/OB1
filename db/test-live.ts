@@ -3443,6 +3443,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   let refused = 0;
   /** While above zero, the next calls answer 503 at once — the provider unavailable, a transient error the worker pauses on. */
   let unavailableCalls = 0;
+  /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
+  let unavailableMs = 0;
   const model = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -3460,6 +3462,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       }
       if (unavailableCalls > 0) {
         unavailableCalls--;
+        if (unavailableMs) await Bun.sleep(unavailableMs);
         return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       }
       await Bun.sleep(5 + slowMs);
@@ -3841,6 +3844,48 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   unavailableCalls = 0;
   assert(pauseCode === 130 && pauseMs < 1500 && calls === callsAtStop && !(await noteClaims()).claimed,
          `a hard stop during a provider-error pause returns 130 at once, sending nothing more (exit ${pauseCode} after ${pauseMs} ms, ${calls - callsAtStop} call(s) after the stop)`);
+  // A first stop during the pause wakes it too, and the thought goes back to
+  // the pool — neither sent again nor recorded failed "after 3 retries" after
+  // one, as main did (SMD-2401): the caller's AbortSignal, and the CLI's one
+  // SIGINT. And a stop that lands while the call is in hand, the call then
+  // failing transiently, returns the thought without a pause or a retry.
+  const firstStopInPause = async (label: string, inCallMs: number, start: () => { stop: () => void; done: Promise<{ code: number; stderr: string }> }) => {
+    unavailableCalls = 100;
+    unavailableMs = inCallMs;
+    const before = await noteClaims();
+    const from = calls;
+    const run = start();
+    // Paused: the 503 answered and the worker's line written — or, for the
+    // stop in the call, the call at the stub.
+    for (let i = 0; i < 100 && !((await noteClaims()).claimed === 1 && calls > from); i++) await Bun.sleep(50);
+    await Bun.sleep(inCallMs ? 100 : 300);
+    run.stop();
+    const at = Date.now(), callsAt = calls;
+    const { code, stderr } = await run.done;
+    const ms = Date.now() - at;
+    unavailableCalls = 0;
+    unavailableMs = 0;
+    const after = await noteClaims();
+    assert(code === 130 && ms < 1000 + inCallMs && calls === callsAt && !after.claimed && (after.failed ?? 0) === (before.failed ?? 0) && after.pending === before.pending
+           && stderr.includes("provider unavailable") === !inCallMs && !stderr.includes("retries:"),
+           `${label}: returns 130 within a second, sends nothing more, and leaves the thought pending, not failed (exit ${code} after ${ms} ms, ${calls - callsAt} call(s) after the stop, claims ${JSON.stringify(before)} → ${JSON.stringify(after)})`);
+  };
+  await firstStopInPause("a caller's AbortSignal during a provider-error pause", 0, () => {
+    const ac = new AbortController();
+    const errs: string[] = [];
+    return { stop: () => ac.abort(), done: runExtract({ url: URL_!, env, workers: 1, signal: ac.signal, writer: { out: () => {}, err: (l) => errs.push(l) } }).then((code) => ({ code, stderr: errs.join("\n") })) };
+  });
+  await firstStopInPause("one SIGINT to the CLI during a provider-error pause", 0, () => {
+    const p = cliRun();
+    const stderr = new Response(p.stderr).text();
+    void new Response(p.stdout).text();
+    return { stop: () => p.kill("SIGINT"), done: p.exited.then(async (code) => ({ code, stderr: await stderr })) };
+  });
+  await firstStopInPause("a caller's AbortSignal while the call that then fails transiently is in hand", 800, () => {
+    const ac = new AbortController();
+    const errs: string[] = [];
+    return { stop: () => ac.abort(), done: runExtract({ url: URL_!, env, workers: 1, signal: ac.signal, writer: { out: () => {}, err: (l) => errs.push(l) } }).then((code) => ({ code, stderr: errs.join("\n") })) };
+  });
 
   // A Writer that throws on the line naming the rows a worker returned is the
   // Writer's error, not a lease left unreturned (review pass 2): run() rejects
@@ -4557,6 +4602,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   let onJudge: (() => Promise<void>) | null = null;
   /** While above zero, the next judge calls answer 503 at once — a transient error the worker pauses on (SMD-2304). */
   let judgeUnavailable = 0;
+  /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
+  let judgeUnavailableMs = 0;
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -4569,6 +4616,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       seen.push({ a, b });
       if (judgeUnavailable > 0) {
         judgeUnavailable--;
+        if (judgeUnavailableMs) await Bun.sleep(judgeUnavailableMs);
         return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       }
       // Run during the call, before the verdict: a reviewer's decision racing the pass.
@@ -5339,6 +5387,31 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     judgeUnavailable = 0;
     assert(pauseCode === 130 && pauseMs < 1500 && calls === callsAtStop && !(await sigClaims()).claimed,
            `a hard stop during a consolidate worker's provider-error pause returns 130 at once, judging nothing more (exit ${pauseCode} after ${pauseMs} ms, ${calls - callsAtStop} call(s) after the stop)`);
+    // A first stop during the pause wakes it too, and the thought goes back to
+    // the pool, not judged again nor recorded failed (SMD-2401) — as [10]
+    // holds for extract, here on consolidate's own wiring; and a stop while the
+    // call that then fails transiently is in hand, with no pause or retry.
+    for (const inCallMs of [0, 800]) {
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+      judgeUnavailable = 100;
+      judgeUnavailableMs = inCallMs;
+      const ac2 = new AbortController();
+      const from = calls;
+      const errs: string[] = [];
+      const run = runConsolidate({ url: URL_!, env, workers: 1, signal: ac2.signal, writer: { out: () => {}, err: (l) => errs.push(l) } });
+      for (let i = 0; i < 100 && !((await sigClaims()).claimed === 1 && calls > from); i++) await Bun.sleep(50);
+      await Bun.sleep(inCallMs ? 100 : 300);
+      ac2.abort();
+      const at = Date.now(), callsAt = calls;
+      const code = await run;
+      const ms = Date.now() - at;
+      judgeUnavailable = 0;
+      judgeUnavailableMs = 0;
+      const after = await sigClaims();
+      assert(code === 130 && ms < 1000 + inCallMs && calls === callsAt && !after.claimed && !after.failed && (after.pending ?? 0) > 0
+             && errs.some((l) => l.includes("provider unavailable")) === !inCallMs && !errs.some((l) => l.includes("retries:")),
+             `a caller's AbortSignal ${inCallMs ? "while the judge call that then fails transiently is in hand" : "during a consolidate worker's provider-error pause"} returns 130 within a second, judging nothing more, the thought pending, not failed (exit ${code} after ${ms} ms, ${calls - callsAt} call(s) after the stop, claims ${JSON.stringify(after)})`);
+    }
 
     // run() takes its listener off a caller's signal when it returns: an abort
     // after the run writes nothing more (review pass 3, as [10] holds for extract).
