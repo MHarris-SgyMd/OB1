@@ -1510,6 +1510,7 @@ try {
 {
   console.log("\n[SMD-1724: the capture paths forward the client's trust]");
   const trustOf = async (text: string) => ((await sql`SELECT metadata->>'trust' AS t FROM thoughts WHERE content = ${text}`)[0]?.t ?? null) as string | null;
+  const claimOf = async (text: string) => ((await sql`SELECT a.actor_context->'claimed' AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE t.content = ${text} AND a.action = 'capture'`)[0]?.c ?? null) as unknown;
   const labels = (await sql`SELECT DISTINCT actor_name AS n FROM thought_audit WHERE actor_name IS NOT NULL`).map((r: { n: string }) => r.n);
   // One label at a time: Bun binds a JS array comma-joined, not as an array literal.
   const kindsBefore: { label: string; kind: string | null }[] = [];
@@ -1531,6 +1532,11 @@ try {
       const nulled = "a note sent to rest-api with trust null";
       const n = await send(h, "POST", "/capture", { content: nulled, trust: null });
       assert(n.status === 200 && await trustOf(nulled) === "operator", `…and takes a JSON null as no declaration: the key's (${n.status}; ${await trustOf(nulled)}; first review pass)`);
+      const [arr, num] = [await send(h, "POST", "/capture", { content: "a capture declaring an array", trust: ["agent"] }), await send(h, "POST", "/capture", { content: "a capture declaring a number", trust: 3 })];
+      assert(arr.status === 400 && num.status === 400 && await trustOf("a capture declaring an array") === null, `…and refuses a non-string, not stringified into a word (${arr.status}, ${num.status}; second review pass)`);
+      const viaMeta = "a capture whose metadata names a trust, through rest-api";
+      const vm = await send(h, "POST", "/capture", { content: viaMeta, metadata: { trust: "root" } });
+      assert(vm.status === 200 && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust: the key's, no claim filed (${vm.status}; ${await trustOf(viaMeta)}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
     }
     // open-brain-rest's POST /capture and POST /ingest.
     {
@@ -1546,6 +1552,9 @@ try {
         `open-brain-rest forwards the client's trust on /capture and /ingest, the key's when undeclared (${await trustOf(cap)}, ${await trustOf(ing)}, ${await trustOf(plain)})`);
       assert(bad.status === 400 && await trustOf("an ingest declaring a word off the ladder") === null && badCap.status === 400 && await trustOf("a capture declaring a word off the ladder, open-brain-rest") === null,
         `…and refuses a word off the ladder on both routes (${bad.status}, ${badCap.status})`);
+      const viaMeta = "a capture whose metadata names a trust, through open-brain-rest";
+      const vm = await send(h, "POST", "/capture", { content: viaMeta, metadata: { type: "idea", trust: "root" } });
+      assert(vm.status === 200 && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust: the key's, no claim filed (${vm.status}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
     }
     // enhanced-mcp's brain_capture_thought.
     {
@@ -1555,6 +1564,9 @@ try {
       const bad = await call(h, "brain_capture_thought", { content: "an enhanced-mcp capture declaring a word off the ladder", trust: "root" });
       assert(!a.isError && await trustOf(declared) === "ingested", `enhanced-mcp's brain_capture_thought forwards the client's trust (${a.toolText.slice(0, 60)}; ${await trustOf(declared)})`);
       assert((bad.isError || bad.json?.error) && await trustOf("an enhanced-mcp capture declaring a word off the ladder") === null, "…and its schema refuses a word off the ladder");
+      const viaMeta = "a capture whose metadata names a trust, through enhanced-mcp";
+      const vm = await call(h, "brain_capture_thought", { content: viaMeta, metadata: { trust: "root" }, trust: null });
+      assert(!vm.isError && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust, a null trust no declaration: the key's, no claim filed (${vm.toolText.slice(0, 60)}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
     }
     // agent-memory-api's POST /writeback.
     {

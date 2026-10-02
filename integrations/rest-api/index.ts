@@ -674,7 +674,11 @@ async function handleCapture(req: Request): Promise<Response> {
     return json({ error: "Restricted content cannot be captured through cloud API" }, 403);
   }
 
-  const bodyMetadata = isRecord(body.metadata) ? body.metadata : {};
+  // SMD-1724: a client's metadata carries no `trust` — the declaration is the
+  // `trust` argument's, refused above when it is not a word; a metadata.trust
+  // would reach the payload and be read as one past that refusal (second
+  // review pass).
+  const { trust: _metadataTrust, ...bodyMetadata } = isRecord(body.metadata) ? body.metadata : {};
   const metadataOverrides: Record<string, unknown> = {};
   if (body.type) metadataOverrides.type = body.type;
   if (body.importance !== undefined) metadataOverrides.importance = body.importance;

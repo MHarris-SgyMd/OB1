@@ -764,7 +764,7 @@ function buildServer(): McpServer {
         // SMD-1724: what the content is, as the caller declares it — forwarded
         // as the write event's trust, which the database clamps to the key's
         // kind (a lowering stands, a raise is filed). Absent: the key's.
-        trust: z.enum(["operator", "agent", "ingested"]).optional()
+        trust: z.enum(["operator", "agent", "ingested"]).nullish() // null is no declaration, as on the REST doors
           .describe("What this content is, when it is less than the key gives: `ingested` for outside text copied in (a web page, an email), `agent` for an agent's own output. It can lower the thought's trust, never raise it."),
       }),
     },
@@ -774,7 +774,9 @@ function buildServer(): McpServer {
         const content = asString(raw.content, "").trim();
         const trust = raw.trust === "operator" || raw.trust === "agent" || raw.trust === "ingested" ? raw.trust : undefined;
         const source = asString(raw.source, "mcp").trim() || "mcp";
-        const extraMetadata = isRecord(raw.metadata) ? raw.metadata : {};
+        // SMD-1724: a client's metadata carries no `trust` — the declaration is the
+        // `trust` argument's, held to the three words by the schema (second review pass).
+        const { trust: _metadataTrust, ...extraMetadata } = isRecord(raw.metadata) ? raw.metadata : {};
 
         if (!content) {
           return toolFailure("content is required");

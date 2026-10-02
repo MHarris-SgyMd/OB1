@@ -422,7 +422,12 @@ async function textSearch(body: z.infer<typeof searchSchema>) {
 /** `actorName` is the authenticated key's name, for 008's audit row (SMD-1541). */
 async function createThought(body: z.infer<typeof captureSchema>, actorName: string) {
   const content = body.content.trim();
-  const extracted = body.metadata ? body.metadata : await extractMetadata(content);
+  // SMD-1724: a client's metadata carries no `trust` — the declaration is the
+  // `trust` argument's, refused above when it is not a word; a metadata.trust
+  // would reach the payload and be read as one past that refusal (second
+  // review pass).
+  const { trust: _metadataTrust, ...given } = body.metadata ?? {};
+  const extracted = body.metadata ? given : await extractMetadata(content);
   const type = body.type || stringMeta(extracted, "type") || "observation";
   const sourceType = body.source_type || stringMeta(extracted, "source") || "dashboard";
   const metadata = {
