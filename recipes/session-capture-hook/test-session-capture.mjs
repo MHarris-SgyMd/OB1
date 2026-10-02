@@ -1935,7 +1935,13 @@ console.log("\n[8] Detached: the hook returns inside the SessionEnd budget and t
   assert(received.length === 1 && received[0].args.source === "claude-code", `the detached child posted (${received.length} capture(s), after ${Date.now() - t0} ms)`);
   while (!readState("s-detached") && Date.now() - t0 < 10_000) await sleep(50);
   assert(readState("s-detached")?.thought_id !== undefined, "…and recorded the id");
-  const log = readFileSync(join(STATE, "log"), "utf8");
+  // The child writes its state, then logs the capture (session-capture.mjs's
+  // bookkeeping order), so the state alone does not say the line is there:
+  // wait for the line too, as for the post and the state (SMD-2471, one
+  // failure on main).
+  const readLog = () => (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "");
+  while (!/captured session=s-detached/.test(readLog()) && Date.now() - t0 < 10_000) await sleep(50);
+  const log = readLog();
   assert(/posting in pid \d+/.test(log) && /captured session=s-detached harness=claude-code/.test(log), "the log has the hand-off and the capture, under the hook's session id");
   assert((log.match(/^\S+ captured session=s-detached/gm) ?? []).length === 1 && !/^captured 0000/m.test(log), "…once: the child's stdout is not echoed into the log");
 }
