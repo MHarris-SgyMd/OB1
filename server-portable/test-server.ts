@@ -1309,7 +1309,7 @@ console.log("\n[16d] A fault an operation throws is said as it always was, typed
   const plain = failed(new Error("connection refused"));
   assert(plain.isError === true && plain.content[0].text === "Error: connection refused" && plain.structuredContent.code === "FAILED" && plain.structuredContent.text === "Error: connection refused" && Object.keys(plain.structuredContent).sort().join() === "code,text",
     `the text is \`Error: <message>\`; the value is FAILED and that text, nothing else — no verdict, and the message, a store's words, only in the text (review pass 5) (${JSON.stringify(plain.structuredContent)})`);
-  const hinted = failed(new Error("function search_thoughts_current(vector) does not exist"), (m) => (m.includes("search_thoughts_current") ? " — a hint" : ""));
+  const hinted = failed(new Error("function search_thoughts_current(vector) does not exist"), { hint: (m) => (m.includes("search_thoughts_current") ? " — a hint" : "") });
   assert(hinted.content[0].text === "Error: function search_thoughts_current(vector) does not exist — a hint" && hinted.structuredContent.text === hinted.content[0].text,
     "a tool's hint follows the message in the text, and the value carries that text (review passes 1 and 5)");
   // A thrown non-Error: said as itself, and no throw from inside the catch (review pass 1).
@@ -1337,9 +1337,9 @@ console.log("\n[16e] Two cores over one store share one brain-info read in fligh
   const store = stub();
   const env = () => ({});
   // Two readers of ONE store — `db` and `() => db()` in a composition root (review pass 3: pass 2 keyed by the reader).
-  const [a, b] = [createCore({ env, store: () => Promise.resolve(store as never) }), createCore({ env, store: async () => store as never })];
+  const [a, b] = [createCore({ env, store: () => Promise.resolve(store as never), door: "test" }), createCore({ env, store: async () => store as never, door: "test" })];
   const elsewhere = stub();
-  const other = createCore({ env, store: () => Promise.resolve(elsewhere as never) });
+  const other = createCore({ env, store: () => Promise.resolve(elsewhere as never), door: "test" });
   const answers = [a.brainInfo("health"), b.brainInfo("health")];
   await Bun.sleep(10);
   const shared = reads;

@@ -1,13 +1,7 @@
 
-import { type EmbeddedCapture } from "./embed.ts";
-import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
-import { captureLineage } from "./lineage.ts";
-import { classifyGenre } from "./genre.ts";
-import { resolveJevConfig } from "./jev.ts";
-import { decideCalls, type EgressSubject } from "./egress.ts";
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
-import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
+import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from "./store.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
@@ -16,7 +10,6 @@ import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stopp
 import { subscribe as subscribeJob, markRunningLost, setJobSink } from "./jobs.ts";
 import { createCore, SPECS, type Input } from "./core/index.ts";
 import type { ToolName } from "./tools.ts";
-import { citeRows } from "./core/context.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
 
@@ -286,193 +279,37 @@ function agents(): AgentResolver {
 // /embeddings and /chat/completions shapes, which includes OpenRouter, OpenAI
 // itself, and Ollama's compatibility layer — so a fully local brain is a URL
 // change, not a code change.
-const core = createCore({ env, store: db });
-const { embedConfig, embedder } = core.ctx;
-// The tag extraction is metadata.ts (shared with db/sync-linear.ts); this is
-// the server's reader over it, lazy like embedConfig for the same reason.
-const extractMetadata = (text: string, subject: EgressSubject) => extractMetadataWith(text, subject, embedConfig());
-
-// The genre classifier (SMD-2323): a deterministic pre-signal over the metadata
-// first, then the typed-decision tier when OB1_JEV_BASE_URL names one — opt-in
-// and null-by-default, so a capture pays nothing for it unless the tier is
-// configured (the classifier is pre-signal-only and falls back to `other`).
-const jevConfig = () => resolveJevConfig(env());
-const classifyThoughtGenre = (content: string, metadata: Record<string, unknown>, subject: EgressSubject) =>
-  classifyGenre(content, metadata, jevConfig(), subject);
-
-const embedCapture = (content: string, subject: EgressSubject) => embedder.embedCapture(content, subject);
-
 /**
- * What a capture or an edit reply says when the whole-content vector could
- * not be had for a reason that says nothing about the next attempt — a 429, a
- * 5xx, a lost connection, OB1_LLM_TIMEOUT. The head window stands in, which is
- * a legitimate state and a silent one, and unlike the re-embed there is no
- * claim row here to record it. A provider that REFUSED the length stays silent,
- * as change 27 decided: that is the vector every long capture gets there.
+ * This server's name: what MCP clients see in `initialize`, and the door every
+ * write names in its actor (`via`), which migration 046 stamps as
+ * thought_audit.origin (SMD-1730). One constant, so the two cannot drift; the
+ * core takes it as its door.
  */
-function explainHeadWindow(e: EmbeddedCapture | undefined): string {
-  if (!e?.wholeContentFellBack || e.wholeContentRefused) return "";
-  return (
-    `\n\nNote: the whole content could not be embedded in one call (${e.wholeContentError ?? "no detail"}); ` +
-    `the head window's vector stands in for it. The thought is stored and searchable, and every search chunk ` +
-    `has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
-  );
-}
+const SERVER_NAME = "open-brain";
+const core = createCore({ env, store: db, door: SERVER_NAME });
 
 // --- MCP Server Setup ---
 
 /**
- * A machine-readable verdict carried in `structuredContent` beside the prose
- * (SMD-1978), so a client — the session-capture hook — need not parse English
- * to tell a refusal from a transient, which pointer to drop, or which
- * `derived_from` positions named no thought. `retryable` is the transient/final
- * split; `positions` are the derived_from indices to drop, present only for a
- * caller allowed to know they exist (the existence-oracle rule, SMD-1298).
+ * The worker actions' machine-readable verdict (SMD-1978, SMD-2132), carried in
+ * `structuredContent` beside the prose until those tools move into core/ in
+ * SMD-2283 PR 3; the other tools' refusals are core/refusal.ts's.
  */
 type ToolErrorCode =
-  | "REFUSED_SUPERSEDES_OWNERSHIP" // a capture key named a supersedes it did not write
-  | "REFUSED_SUPERSEDES_UNKNOWN"   // the supersedes names no thought
-  | "DERIVED_FROM_MISSING"         // a derived_from id names no thought
-  | "SUPERSEDES_UNJUDGED"          // the server could not check/attribute the supersedes; retry
   | "REFUSED_EMPTY_WORK_TYPE"      // retry_failed / release_stale_leases given a blank work_type
   | "REFUSED_LIVE_LEASE_NEEDS_WORKER" // release_stale_leases include_live without a worker_id
-  | "RUN_WORKER_DRAIN_NOT_AVAILABLE"  // run_worker called without dry_run:true; the executing drain is deferred (SMD-2272/2304)
-  | "STORE_UNAVAILABLE";           // the store did not answer; retry
-type ToolErrorInfo = { code: ToolErrorCode; retryable: boolean; positions?: number[] };
+  | "RUN_WORKER_DRAIN_NOT_AVAILABLE"; // run_worker called without dry_run:true; the executing drain is deferred (SMD-2272/2304)
+type ToolErrorInfo = { code: ToolErrorCode; retryable: boolean };
 
 /**
- * The `{ isError: true }` envelope the write tools return, in one place; with a
- * code, its machine-readable verdict rides `structuredContent` (SMD-1978), the
- * words beside it as `text` — Claude Code, VS Code and Codex show the model the
- * value alone when there is one (render.ts), and a refusal's words name which
- * pointer or position to drop (SMD-2283 review pass 3).
+ * The `{ isError: true }` envelope the worker actions return; with a code, its
+ * verdict rides `structuredContent` with the words beside it as `text` —
+ * Claude Code, VS Code and Codex show the model the value alone when there is
+ * one (render.ts).
  */
 function toolError(text: string, info?: ToolErrorInfo) {
   return { content: [{ type: "text" as const, text }], isError: true as const, ...(info ? { structuredContent: { ...info, text } } : {}) };
 }
-
-/**
- * Turn a refusal into something the caller can act on. A stale read is not a
- * fault — it is a race the caller can resolve by refetching — so the message
- * says what to do rather than only what went wrong.
- */
-function explainRefusal(
-  r: { error: string; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] },
-  id: string,
-): string {
-  switch (r.error) {
-    case "NOT_FOUND":
-      return `No thought with id ${id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
-    case "STALE_READ":
-      return `Refused: ${id} changed after the if_unchanged_since you passed${
-        r.currentUpdatedAt ? ` (it is now ${r.currentUpdatedAt})` : ""
-      }. Re-read the thought and retry, so you amend the current text rather than overwrite someone else's edit.`;
-    case "DUPLICATE_CONTENT":
-      return `Refused: that text already exists as another thought, and two identical thoughts would break deduplication. Edit one of them, or delete the other first.`;
-    // Migration 032: the provenance envelope.
-    case "SUPERSEDES_NOT_FOUND":
-      return `Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result — or null to clear the pointer.`;
-    case "WOULD_CYCLE":
-      return `Refused: that supersedes pointer would close a loop — the thought named already supersedes ${id}, directly or through a chain (or is ${id} itself). A version chain runs one way; point the newer thought at the older, or clear the older's pointer first.`;
-    // Migration 042: statements in other thoughts rest on this one. The rows
-    // are the function's sample (ten, newest first); the count is the whole.
-    case "CITED": {
-      const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${say.snipText(c.text, 120)}`);
-      const total = r.citedBy ?? rows.length;
-      const more = total - rows.length;
-      // One subject, one way through, three shapes: the number and its grammar
-      // spelled once (seventh review pass).
-      const one = total === 1;
-      const subject = `${total} citation${one ? "" : "s"} on other thoughts rest${one ? "s" : ""} on ${id} as ${one ? "its" : "their"} source`;
-      const through = `To delete anyway, pass detach_citations: true`;
-      const reread = `re-read the thought (fetch takes the id) before deciding. ${through}.`;
-      // The count and rows come from the guard's own refusal (042 carries them
-      // in the error), so a CITED envelope with neither is one the function did
-      // not write — a proxy, a truncated body. Say so rather than "0 citations".
-      if (total <= 0) return `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — ${reread}`;
-      // A count with no rows (a proxy that dropped the array): no list, no
-      // dangling colon, the same advice.
-      if (rows.length === 0) return `Refused: ${subject}, but the citing rows were not returned — ${reread}`;
-      return `Refused: ${subject} — deleting it would leave ${one ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). ${through} — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
-    }
-    default:
-      return `Refused: ${r.error}`;
-  }
-}
-
-// A caller-set metadata key (SMD-2014): lower-case, starts with a letter, 2-40
-// characters — the shape a reader can filter on. The server owns some keys of
-// `metadata`, and a caller naming one is refused rather than silently overruled
-// by the merge below: `source` (the origin label, set from the `source` arg),
-// the extractor's tag set (TAG_KEYS: type, topics, people…), the actor columns
-// migration 050 stamps from the key and the trust migration 073 stamps beside
-// them (SMD-1724), the embedding model migration 021 records,
-// and the extractor's own failure marker. Everything else — `summary_model`,
-// which the session hook sets when a local model wrote the summary — is the
-// caller's to add.
-const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
-const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed"]);
-const META_VALUE_MAX = 200;
-const META_KEYS_MAX = 8;
-/** The refusal for a bad `metadata` argument, or null when it is clean (or absent). Checked before the model calls, as the other shape refusals are. */
-function refuseMetadataShape(metadata: Record<string, unknown> | undefined): string | null {
-  if (metadata === undefined) return null;
-  const keys = Object.keys(metadata);
-  if (keys.length > META_KEYS_MAX) return `Refused: \`metadata\` carries ${keys.length} keys — at most ${META_KEYS_MAX}.`;
-  for (const k of keys) {
-    if (!META_KEY_RE.test(k)) return `Refused: the \`metadata\` key "${k.slice(0, 40)}" must be lower-case letters, digits and underscores, 2–40 characters, starting with a letter.`;
-    if (RESERVED_META.has(k)) return `Refused: \`metadata.${k}\` is set by the server, not the caller — use the \`source\` argument for the origin label; drop the rest.`;
-    const v = metadata[k];
-    if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") return `Refused: \`metadata.${k}\` must be a string, number or boolean.`;
-    if (typeof v === "string" && v.length > META_VALUE_MAX) return `Refused: \`metadata.${k}\` is ${v.length} characters — at most ${META_VALUE_MAX}.`;
-  }
-  return null;
-}
-
-/**
- * What a successful delete did to the citations that named the thought
- * (migration 042): the active ones it detached — only when asked — and the
- * expired or superseded ones it marked in either mode. Silent when neither.
- */
-function explainDetached(r: { detached?: number; inactive?: number }, id: string): string {
-  const parts: string[] = [];
-  if (r.detached) parts.push(`${r.detached} citation${r.detached === 1 ? "" : "s"} on other thoughts rested on it and ${r.detached === 1 ? "was" : "were"} detached: each keeps its text and stance and records ${id} as its deleted source.`);
-  if (r.inactive) parts.push(`${r.inactive} expired or superseded citation${r.inactive === 1 ? "" : "s"} that named it ${r.inactive === 1 ? "was" : "were"} marked with the deletion.`);
-  return parts.length ? ` ${parts.join(" ")}` : "";
-}
-
-/**
- * A `supersedes` that is not a thought id, refused at the tool before any model
- * call or database write (032) — both tools, one sentence; `orNull` is the
- * edit tool's clause, since only it takes null.
- */
-function refuseSupersedesShape(value: string, orNull = ""): string {
-  return `Refused: \`supersedes\` must be a thought id (the ID: line of a search result)${orNull}, not "${value.slice(0, 40)}".`;
-}
-
-/**
- * The two things migration 018 reports on a successful edit that the caller
- * should hear about: the edit's unchanged text is also another thought's, or
- * another thought's stale fingerprint blocks this one's. Neither says which
- * row is older — a capture merged around a legacy row produces the same pair —
- * so neither tells the caller which to delete.
- */
-function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): string {
-  if (r.duplicateOf) {
-    return `\nNote: this thought holds the same text as ${r.duplicateOf}. Deduplication could not see this one because it had no fingerprint, so the edit was kept and no fingerprint was written. Read both before deciding whether they should be one thought; delete_thought keeps the removed text in the audit trail.`;
-  }
-  if (r.fingerprintHeldBy) {
-    return `\nNote: ${r.fingerprintHeldBy} carries a stale fingerprint for this text under different content, so this thought could not take its own. Re-saving that thought's text corrects it.`;
-  }
-  return "";
-}
-
-/**
- * This server's name: what MCP clients see in `initialize`, and the door every
- * write names in its actor (`via`), which migration 046 stamps as
- * thought_audit.origin (SMD-1730). One constant, so the two cannot drift.
- */
-const SERVER_NAME = "open-brain";
 
 /**
  * The tool calls running, counted for the stop (SMD-2250, review pass 3): a
@@ -497,20 +334,18 @@ function buildServer(principal: Principal): McpServer {
     return registerTool(...args.slice(0, -1), (...call: unknown[]) => toolCalls.track(() => handler(...call)));
   };
 
-  // The action log of a write (034's click-through, SMD-1719's cites), stamped
+  // The worker actions' action log (SMD-2132), stamped
   // with this caller's agent id — core/context.ts owns the write and its rules.
   const logActionCalls = (rows: { tool: string; targetId: string }[]): Promise<void> => core.ctx.logActions(principal, rows);
-  const logActionCall = (tool: string, targetId: string): Promise<void> => logActionCalls([{ tool, targetId }]);
 
-  // The read tools (SMD-2283): each is its operation in core/reads.ts — the
-  // search op with its egress gate and query log, the store reads, the probes —
-  // and its words in render.ts. readTool registers one for a key that may read:
-  // the SDK validates the input against the tool's spec, `run` calls the
-  // operation and renders its outcome, and a fault the operation throws is
-  // `Error: <message>` with the tool's hint where it has one, FAILED beside it
-  // (review pass 6: sixteen copies of that body before).
-  const readTool = <K extends ToolName>(name: K, run: (input: Input<K>) => Promise<say.Reply>, hint?: (input: Input<K>) => ((msg: string) => string) | undefined): void => {
-    if (!canRead(principal)) return;
+  // A tool whose logic is in core/ (SMD-2283): registered only when `allowed` —
+  // the key's scope; a tool a key may not use is absent from its tools/list,
+  // not refused — with the SDK validating the input against the tool's spec,
+  // `run` calling the operation and rendering its outcome (render.ts), and
+  // `fault` saying what an operation throws (review pass 6: sixteen copies of
+  // that body before).
+  const registerOp = <K extends ToolName>(name: K, allowed: boolean, run: (input: Input<K>) => Promise<say.Reply>, fault: (err: unknown, input: Input<K>) => say.Reply): void => {
+    if (!allowed) return;
     // The generic K loses the SDK's per-tool inference of `input`; SPECS[name]'s
     // schema is what it validates against, and Input<K> is that schema's output.
     const register = server.registerTool as unknown as (name: string, spec: unknown, handler: (input: Input<K>) => Promise<say.Reply>) => unknown;
@@ -518,10 +353,17 @@ function buildServer(principal: Principal): McpServer {
       try {
         return await run(input);
       } catch (err: unknown) {
-        return say.failed(err, hint?.(input));
+        return fault(err, input);
       }
     });
   };
+
+  // The read tools: each is its operation in core/reads.ts — the search op
+  // with its egress gate and query log, the store reads, the probes — and its
+  // words in render.ts, for a key that may read; a fault is `Error: <message>`
+  // with the tool's hint where it has one, FAILED beside it.
+  const readTool = <K extends ToolName>(name: K, run: (input: Input<K>) => Promise<say.Reply>, hint?: (input: Input<K>) => ((msg: string) => string) | undefined): void =>
+    registerOp(name, canRead(principal), run, (err, input) => say.failed(err, { hint: hint?.(input) }));
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and
   // deep research look for exact read-only `search` and `fetch` tool shapes. Why
@@ -609,504 +451,27 @@ function buildServer(principal: Principal): McpServer {
   // client never offers it and never tries. That is a smaller surface than
   // refusing the call, and it is honest about what the key can do. The read
   // tools above are gated the same way for a capture key: absent, not refused.
-  if (canCapture(principal)) server.registerTool(
-    "capture_thought",
-    SPECS.capture_thought,
-    async ({ content, derived_from, supersedes, source, metadata: clientMetadata }) => {
-      // What a key that cannot read is told and allowed — decided once here
-      // and read below, in the catch too (fifth review pass: six scattered
-      // canRead tests; sixth: one survived in the catch).
-      const reader = canRead(principal);
-      try {
-        // The row's origin label: the caller's, else the one every capture
-        // through this tool carried before `source` existed (SMD-1298).
-        const origin = source ?? "mcp";
-        // The shape before the two model calls, in the tool's words — as
-        // update_thought's `supersedes` is refused (032). upsert_thought would
-        // raise on it after the embedding and the metadata were already paid for.
-        if (supersedes !== undefined && !UUID_RE.test(supersedes)) return toolError(refuseSupersedesShape(supersedes));
-        // derived_from's SHAPE likewise (fourth review pass): a non-id element
-        // paid both model calls before validate_derived_from refused it.
-        // Existence stays the write's.
-        const badDerived = derived_from?.find((d) => !UUID_RE.test(d));
-        if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${badDerived.slice(0, 40)}".`);
-        // A caller `metadata` key that names a server-owned one, or a bad shape,
-        // is refused BEFORE the two model calls are paid for (SMD-2014), as the
-        // pointer shapes above are.
-        const badMetadata = refuseMetadataShape(clientMetadata);
-        if (badMetadata) return toolError(badMetadata);
-        // A capture-only key's provenance is trimmed to the ids that exist
-        // BEFORE the write, and the reply says nothing of it — not which
-        // (third review pass: positions were an existence oracle on a key that
-        // cannot read) and not how many (eighth: with one id sent, the count
-        // was the answer). A reader is refused with positions and ids, and can
-        // look. A summary with its live sources beats a refusal over one
-        // deleted thought; the row's derived_from says what was recorded.
-        let derivedFrom = derived_from;
-        if (derivedFrom?.length && !reader) derivedFrom = await liveSubset(await db(), derivedFrom);
-        // A capture-only key may replace only what it captured itself (SMD-1298,
-        // first review pass): `supersedes` marks the target superseded in every
-        // search result — an alteration of a thought the key did not write, the
-        // one thing the scope promises it cannot do. Ownership is the target's
-        // capture audit row (008/010): the same agent id when both sides have
-        // one, else the same key name. One message whichever way it fails, so
-        // the refusal is not an existence oracle for a key that cannot read.
-        if (supersedes !== undefined && !reader) {
-          let writer: { actorName: string | null; agentId: string | null } | null;
-          try {
-            writer = await (await db()).captureActorOf(supersedes);
-          } catch (e) {
-            // The read needs SELECT on thought_audit — the `server` grant group,
-            // soft like the rest of it (second review pass: the capture group
-            // holds INSERT alone). Refuse THIS pointer, name the grant, and let
-            // the capture proceed without it on the caller's retry.
-            // An ERROR of the server's, not a refusal of the request as shaped:
-            // a caller keeps the pointer and tries again once the grant is
-            // there (fifth review pass: "Refused:" made the hook drop it, and
-            // the hook told the two apart by the sentence's wording).
-            const why = String((e as Error).message ?? e).slice(0, 120);
-            // The grant remedy only for a privilege error (42501); a dropped
-            // connection, a timeout or a brain before 010 gets the store's own
-            // words, since `--grant` would change nothing there (sixth review pass).
-            const noPrivilege = (e as { code?: string }).code === "42501" || /permission denied/i.test(why);
-            return toolError(`Error: this key's \`supersedes\` could not be checked against the target's capture record (${why})${noPrivilege ? " — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`, { code: "SUPERSEDES_UNJUDGED", retryable: true });
-          }
-          // By agent id when both sides carry one; by name only when NEITHER
-          // does (the registry away now, as it was at the write). A row without
-          // an id met by a principal with one is not this key's to replace: a
-          // later key minted under the same name would otherwise own every
-          // thought captured while the registry was down (fourth review pass).
-          // The registry away NOW while the row is attributed: nothing can be
-          // said either way, and that is the server's condition, not the
-          // caller's — an error to retry, not a refusal (fifth review pass).
-          // Unless the registry ANSWERED and refused this key's argument (a
-          // label the SQL rejects): that will not heal on a retry, so it is a
-          // refusal, and the caller posts without the pointer (sixth review pass).
-          if (writer !== null && writer.agentId !== null && principal.agentId === undefined) {
-            if (principal.agentUnresolved === "refused") return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself, and this key's identity could not be resolved — the agent registry refused its name or digest; see the server log.", { code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
-            return toolError("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
-          }
-          const own = writer !== null && (
-            writer.agentId !== null && principal.agentId !== undefined ? writer.agentId === principal.agentId
-              : writer.agentId === null && principal.agentId === undefined ? writer.actorName === principal.name
-                : false);
-          if (!own) return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.", { code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
-        }
-        // What may leave the box (SMD-1903): asked once, for both calls, and
-        // only the allowed ones are made — a refused capture costs no request
-        // and lands all the same, without the vector or the tags the refused
-        // call would have produced, with the decision on its audit row.
-        const cfg = embedConfig();
-        // Gated on `actor` (the key, proven) and `marker` (the text), NOT
-        // `source`: a capture's `source` is the caller's claim, so the subject
-        // carries none and no `source:` term can match this call — re-adding it
-        // here reopens the dodge (SMD-1941; egress.ts EGRESS_UNITS). The row
-        // still RECORDS the label below, for the passes and the per-source weight.
-        const subject: EgressSubject = { kind: "capture", actor: principal.name, content };
-        const gate = decideCalls(subject, cfg, cfg.egress);
-        // Independent of each other, so they overlap. The genre classifier reads
-        // the caller's metadata (a `source:linear`/arXiv pre-signal) and, only
-        // when the tier is configured, the content — never the extractor's tags,
-        // so it need not wait for extractMetadata (SMD-2323). Its own egress is
-        // the tier's, so it runs regardless of the capture's chat gate; a tier
-        // outage falls back to `other` inside the classifier, never here.
-        const [embedded, metadata, genre] = await Promise.all([
-          gate.embeddings.allowed ? embedCapture(content, subject) : Promise.resolve(undefined),
-          gate.chat.allowed ? extractMetadata(content, subject) : Promise.resolve(metadataRefused()),
-          classifyThoughtGenre(content, { ...clientMetadata, source: origin }, subject),
-        ]);
-        const chunks = embedded?.chunks ?? [];
-        const contextFailures = embedded?.contextFailures ?? 0;
-
-        // The caller's keys UNDER the server's: the extractor's tags and the
-        // origin label win over anything a caller sent by the same name (the
-        // shape check above has already refused a reserved key outright, so this
-        // only orders the rest), and `summary_model` and its like survive
-        // (SMD-2014).
-        // `genre` last, over both spreads: the classifier already honours a valid
-        // caller-supplied genre (its pre-signal returns it), so placing the
-        // classified value here lets that one round-trip while a bogus one is
-        // overwritten by the classification (SMD-2323).
-        const payload = { metadata: { ...clientMetadata, ...metadata, source: origin, genre: genre.genre } };
-
-        // Atomicity is the store's problem now: the SQL path writes content,
-        // metadata and vector in one statement, while the PostgREST path keeps the
-        // 3-arg RPC with its two-step fallback. Either way a row committed without
-        // its embedding is reported, never silently accepted.
-        // A source deleted between the trim above and this write — the one path
-        // left to 025's refusal for a key that cannot read — is met by trimming
-        // once more and writing again, so the summary keeps its live sources;
-        // the refusal that reaches such a key names no position, and the hook
-        // could only drop the whole list (twelfth review pass). A reader is
-        // refused as before, with positions, and decides.
-        const store = await db();
-        const captureArgs = {
-          content,
-          payload,
-          chunks,
-          // 061: what this capture derived and how — the windows' split and
-          // the extractor's model, prompt version and hash — recorded with
-          // the write (SMD-1731). Nothing when it made no windows and the
-          // extraction failed or was refused: a caller's tags are not a
-          // derivation.
-          lineage: captureLineage(cfg, embedded, metadata),
-          // The audit trail's actor. `name` is the access key's name from
-          // auth.ts; `agentId` is the stable id migration 010 resolved it to,
-          // and is absent when the registry could not answer — see agents.ts.
-          // Both are recorded: the name is what the agent was CALLED at the time
-          // of writing, which a later rename would otherwise erase. `via` is
-          // this server, the door (046's origin column); the row's source is
-          // its own metadata.source, "mcp" above, which the trigger reads
-          // itself (SMD-1730).
-          actor: {
-            name: principal.name,
-            agentId: principal.agentId,
-            via: SERVER_NAME,
-            // The gate's decisions for this write, on the audit row (SMD-1903);
-            // absent when both endpoints are declared local and nothing was judged.
-            ...(gate.record ? { egress: gate.record } : {}),
-          },
-          // NULL when the gate refused the embedding call: the row lands with
-          // its text and fingerprint and no vector, as the reply says.
-          embedding: embedded?.embedding ?? null,
-          // The model this vector came from, recorded on the row (021) — the
-          // one the embedder used, not the one ob1_config records: they differ
-          // exactly while a re-embed to another model is under way.
-          embeddingModel: embedded?.model,
-          // 025: provenance, if the caller named any. upsert_thought validates
-          // derived_from and refuses a bad reference, so a malformed value
-          // fails the capture with a clear message rather than storing a lie.
-          supersedes,
-        };
-        let captured;
-        try {
-          captured = await store.captureThought({ ...captureArgs, derivedFrom });
-        } catch (e) {
-          if (reader || !derivedFrom?.length || !/derived_from references a thought that does not exist/.test(String((e as Error)?.message ?? e))) throw e;
-          derivedFrom = await liveSubset(store, derivedFrom);
-          captured = await store.captureThought({ ...captureArgs, derivedFrom });
-        }
-
-        // Memory utilization (SMD-1719, over 034's log): a capture that names a
-        // returned id as its source — `derived_from`, or `supersedes` — is the
-        // caller USING a search result in a write, the signal MERIT calls memory
-        // utilization and this fork's fetch/edit/delete rows cannot carry (they
-        // say the caller looked, not that the fact reached a write). A cite row
-        // is a pointer the database ACCEPTED: on a fresh row upsert_thought
-        // validated every id (a ghost or a loop threw, and nothing reaches
-        // here); on a re-capture (`existed`) 035 wrote no pointer and validated
-        // none, so nothing is logged — the note below sends the caller to
-        // update_thought, which logs the cite when it writes the pointer. The
-        // store says `existed: false` only when 035's function answered; a
-        // brain without 035 reports nothing, and nothing is logged there
-        // either (second review pass: `!== true` had read an absent flag as
-        // "fresh" on the one schema where the pointer's fate is unknown). The
-        // vector attaching or not does not change what was written.
-        if (captured.existed === false) {
-          await logActionCalls(citeRows("capture_thought", { derived_from: derivedFrom, supersedes }));
-        }
-
-        if (captured.embeddingFailed) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text:
-                  `Thought saved (id ${captured.id}) but its embedding failed to attach: ` +
-                  `${captured.embeddingFailed}. It will NOT appear in semantic search until re-captured.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const meta = metadata as Record<string, unknown>;
-        // The id, because update_thought and delete_thought take one. Without it
-        // an agent that captures a typo has to search for its own thought to fix
-        // it, and the two new tools are only usable against things it did not
-        // just write.
-        let confirmation = `Captured as ${meta.type || "thought"} — id ${captured.id}`;
-        if (Array.isArray(meta.topics) && meta.topics.length)
-          confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
-        if (Array.isArray(meta.people) && meta.people.length)
-          confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
-        if (Array.isArray(meta.action_items) && meta.action_items.length)
-          confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
-
-        // The gate's refusal first among the notes (SMD-1903): a thought
-        // without its vector is the one fact a caller must not miss. Not an
-        // error — the policy did what it says — but said in full. On a
-        // RE-CAPTURE the row keeps the vector it had (upsert_thought
-        // coalesces), so the note says that instead of "no vector" (first
-        // review pass). A database from before 035, or the PostgREST
-        // two-step, does not say which this was — and the coalesce holds
-        // there too (033), so the note hedges rather than tell the fresh-row
-        // story of a row that may be keeping its vector (second review pass).
-        // What a key that cannot read may be told about the row: not whether
-        // the text was already a thought, nor what it points at (first review
-        // pass — an existence oracle on a capture-only key). The id is returned
-        // either way; a hook needs it to supersede its own earlier summary.
-        const existed = reader ? captured.existed : undefined;
-        if (!gate.embeddings.allowed) {
-          confirmation += existed === true
-            ? `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. This text was already a thought, and it keeps the vector it had.`
-            : existed === false
-              ? `\n\nNote: saved WITHOUT a vector — ${gate.embeddings.reason}. ` +
-                `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
-                `(db/reembed.ts) against an endpoint the gate allows.`
-              : `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. A new thought has no vector — findable by exact text ` +
-                `(search_thoughts_keyword), filled in by a re-embed pass (db/reembed.ts) against an endpoint the gate allows; text already captured keeps the vector it had. ` +
-                // A key that cannot read is not told which (SMD-1298); a database
-                // from before 035 cannot say.
-                (reader ? `This database does not say which this was.` : `This reply does not say which.`);
-        }
-
-        // A chunk whose situating blurb could not be generated is embedded bare
-        // and stored with a NULL context, which is a legitimate state and a
-        // silent one. Saying so here is half of what keeps it from being silent
-        // — preflight, which counts both kinds across the whole corpus, is the
-        // other half.
-        if (contextFailures > 0) {
-          confirmation += gate.chat.allowed
-            ? `\n\nNote: ${contextFailures} of ${chunks.length} search chunks were embedded without ` +
-              `their situating context — the call failed, or returned a blurb too long to be one. ` +
-              `They are stored and searchable; re-capture to regenerate, or check the model at ` +
-              `${embedConfig().chat.base}.`
-            // The blurbs are chat calls, and the gate refused the chat endpoint
-            // (SMD-1903): not a model to check, and the reason is the one the
-            // tagging note below carries.
-            : `\n\nNote: the ${chunks.length} search chunks were embedded without their situating context — ` +
-              `the blurb calls were not made: ${gate.chat.reason}. They are stored and searchable.`;
-        }
-        confirmation += explainHeadWindow(embedded);
-
-        // Migration 035 (SMD-1453): a re-capture writes no provenance. The text
-        // was already a thought, so the derived_from / supersedes named here
-        // were not written; say so and name the edit that records it, since
-        // otherwise nothing would — the trace would show nothing and no
-        // error would say why.
-        const derivedNamed = derivedFrom !== undefined && derivedFrom.length > 0;
-        if (existed === true && (derivedNamed || supersedes !== undefined)) {
-          const named = [derivedNamed ? "`derived_from`" : null, supersedes !== undefined ? "`supersedes`" : null].filter(Boolean);
-          // What stands, from the row's pointer the store returned beside
-          // `existed` (035) — not from the caller's inputs alone, which the
-          // second review pass found advising a redundant edit, a replacement
-          // it did not mention, or one update_thought would refuse.
-          const current = captured.supersedes ?? null;
-          // Postgres hands ids back lower-case; the shape check admits either
-          // case, so compare — and print — the caller's in lower case (third
-          // review pass: an upper-case self-pointer slipped past to an edit
-          // update_thought refuses).
-          const given = supersedes?.toLowerCase();
-          const advice = given === undefined ? ""
-            : given === captured.id ? ` The \`supersedes\` given names the thought itself; a thought cannot supersede itself.`
-            : current === given ? ` It already supersedes ${given}; there is nothing to record.`
-            : current !== null ? ` It currently supersedes ${current}; to replace that pointer with ${given}, call update_thought with id ${captured.id} and \`supersedes\` ${given}; it records the pointer if that thought exists and closes no loop.`
-            : ` To record that it supersedes ${given}, call update_thought with id ${captured.id} and \`supersedes\` ${given}; it records the pointer if that thought exists and closes no loop.`;
-          confirmation +=
-            `\n\nNote: this text was already captured as ${captured.id}, so the ${named.join(" and ")} given here ${named.length > 1 ? "were" : "was"} not written — ` +
-            `a re-capture leaves an existing thought's provenance as it is.` + advice +
-            (derivedNamed ? ` \`derived_from\` cannot be set on an existing thought through these tools.` : "");
-        }
-
-        // Tell the user when tags are placeholders rather than real extraction,
-        // so a broken credential does not look like a successful capture. The
-        // remedy names the endpoint the tagging call dialled — the chat one,
-        // which since SMD-1902 need not be where the embedding went.
-        if (meta.metadata_extraction_failed === "egress_denied") {
-          // Not a failure to check the endpoint for: the call was not made.
-          // The reason is the decision made here; providerCall's own refusal
-          // (the belt) reaching this branch would mean the two disagreed,
-          // which the shared function makes impossible — but say so rather
-          // than print an "allowed" sentence under a refusal.
-          const why = gate.chat.allowed ? "the egress gate refused the tagging call" : gate.chat.reason;
-          confirmation += existed === true
-            ? `\n\nNote: the tagging call for this capture was not made — ${why}. The existing thought keeps its tags; its metadata now carries the refusal marker.`
-            : existed === false
-              ? `\n\nNote: no topics, people or type were extracted — ${why}.`
-              : `\n\nNote: the tagging call for this capture was not made — ${why}. A new thought has no topics or type; text already captured keeps its tags, with the refusal marker merged in.`;
-        } else if (typeof meta.metadata_extraction_failed === "string") {
-          confirmation +=
-            `\n\nNote: the thought was saved, but automatic tagging failed ` +
-            `(${meta.metadata_extraction_failed}) — topics and people are placeholders. ` +
-            `Check the chat endpoint (${embedConfig().chat.base}), its credential, and the server logs.`;
-        }
-
-        return {
-          content: [{ type: "text" as const, text: confirmation }],
-        };
-      } catch (err: unknown) {
-        const msg = (err as Error).message;
-        // 025's self-FK is what refuses a first capture's supersedes naming no
-        // thought (a re-capture writes no pointer, so it never fires there —
-        // migration 035). Said as update_thought says it, not as Postgres does
-        // (fourth review pass).
-        if (/thoughts_supersedes_fkey/.test(msg)) return toolError("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.", { code: "REFUSED_SUPERSEDES_UNKNOWN", retryable: false });
-        // Its sibling: validate_derived_from's existence refusal (032), the
-        // one provenance refusal that still reached the caller as a raw error
-        // (fifth review pass).
-        if (/derived_from references a thought that does not exist/.test(msg)) {
-          // WHICH ones (second review pass): 025 names the whole list, so the
-          // store is asked which exist and the reply names the POSITIONS that
-          // do not — what a caller needs to drop exactly those and try again,
-          // and nothing it did not send — with the ids beside them for a key
-          // that can read. A capture key's list was trimmed before the write
-          // (third review pass), so it reaches here only when a source was
-          // deleted between the check and the write — and is told no position
-          // even then (eighth review pass: the race was the one path that still
-          // named one to a key that cannot read).
-          const sent = derived_from ?? [];
-          let missingAt: number[] = [];
-          if (reader) { // a non-reader is told no position, so the store is not asked (tenth review pass)
-            try {
-              const have = await (await db()).existingIds(sent);
-              missingAt = sent.map((d, i) => (have.has(d.toLowerCase()) ? -1 : i)).filter((i) => i >= 0);
-            } catch { /* the store could not say: the list alone, then */ }
-          }
-          // The verb agrees with what is SAID: the plural leaked the count to a
-          // non-reader through the placeholder (ninth review pass).
-          const named = reader && missingAt.length ? missingAt : [];
-          const where = named.length
-            ? named.map((i) => `derived_from[${i}] (${sent[i]})`).join(", ")
-            : "a `derived_from` id";
-          // The positions ride the code only when they are NAMED in the prose —
-          // a caller allowed to know a source exists (the existence-oracle rule);
-          // a capture key gets the code with no positions, as it gets no prose
-          // position (SMD-1978).
-          return toolError(`Refused: ${where} name${named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`, { code: "DERIVED_FROM_MISSING", retryable: false, ...(named.length ? { positions: named } : {}) });
-        }
-        // The store did not answer as itself — down, a missing function, a front
-        // returning 401: a transient the caller keeps and retries (SMD-1978).
-        return toolError(`Error: ${msg}`, { code: "STORE_UNAVAILABLE", retryable: true });
-      }
-    }
-  );
-
+  // Its rules — the shapes, the capture key's pointers and provenance, the
+  // egress gate, the parallel model calls, the write and its cites — are
+  // core/writes.ts's; a fault is STORE_UNAVAILABLE, a transient the session
+  // hook keeps and retries (SMD-1978).
+  registerOp("capture_thought", canCapture(principal),
+    async (input) => say.renderCapture(await core.capture(principal, input)),
+    (err) => say.storeUnavailable(err));
 
   /**
    * Both are writes, so both are gated on scope exactly as capture_thought is —
    * a read-scoped key does not merely get a permission error, the tools are
-   * never registered and do not appear in tools/list.
+   * never registered and do not appear in tools/list. A fault keeps the tool's
+   * own lead, `update_thought failed:`, FAILED beside it.
    */
-  if (canWrite(principal)) server.registerTool(
-    "update_thought",
-    SPECS.update_thought,
-    async ({ id, content, metadata_patch, if_unchanged_since, supersedes }) => {
-      try {
-        if (content === undefined && metadata_patch === undefined && supersedes === undefined) {
-          return toolError("Provide `content`, `metadata_patch`, `supersedes`, or any of them — an update with none would do nothing.");
-        }
-        // The shape here, in the tool's words, as the two named refusals are;
-        // the function would raise on it, and a raised message reads as a
-        // failure rather than a refusal. The string "null" is not a clear —
-        // clearing is JSON null, and a client that sends the word meant an id.
-        if (typeof supersedes === "string" && !UUID_RE.test(supersedes)) return toolError(refuseSupersedesShape(supersedes, " or null to clear it"));
+  registerOp("update_thought", canWrite(principal),
+    async (input) => say.renderUpdate(await core.updateThought(principal, input)),
+    (err) => say.failed(err, { lead: "update_thought failed: " }));
 
-        // Only re-embed when the text actually changed. A metadata-only edit
-        // must not spend two model calls, nor risk replacing a good vector.
-        // The gate as at capture (SMD-1903), asked only when the text moves:
-        // refused, the new text is stored and the stale vector cleared with it
-        // (update_thought's rule: content and no vector is NULL), and the
-        // reply says so.
-        // The subject is the ROW — its own source, type and topics, which a
-        // capture cannot know but an edit can: one read, only when the text
-        // moves (first review pass: an edit judged under the capture's bare
-        // {source: "mcp"} let a row a type: or source: term names slip past).
-        // A row that is not there is judged as bare and refused by the write.
-        // Here a `source:` term DOES gate: the label is the row's, written by
-        // the server at its capture, not a claim on this call — the opposite of
-        // capture_thought, which keeps its caller-claimed `source` off the
-        // subject so it cannot gate (SMD-1941).
-        const cfg = embedConfig();
-        const existing = content !== undefined ? await (await db()).getThought(id) : null;
-        const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };
-        const gate = content !== undefined ? decideCalls(subject, cfg, cfg.egress) : undefined;
-        const embedded = content !== undefined && gate?.embeddings.allowed ? await embedCapture(content, subject) : undefined;
-
-        const result = await (await db()).updateThought({
-          id,
-          content,
-          metadataPatch: metadata_patch,
-          embedding: embedded?.embedding,
-          chunks: embedded?.chunks,
-          ifUnchangedSince: if_unchanged_since,
-          actor: { name: principal.name, agentId: principal.agentId, via: SERVER_NAME, ...(gate?.record ? { egress: gate.record } : {}) },
-          // Read by update_thought only with content, when the vector moves (021).
-          embeddingModel: embedded?.model,
-          // 061: the windows' recipe when the new text made windows; the patch
-          // is the caller's, so no tag recipe (SMD-1731).
-          lineage: captureLineage(cfg, embedded, undefined),
-          // 032: only the key the caller named reaches the envelope — absent
-          // must stay absent, since null means CLEAR at the function.
-          provenance: supersedes !== undefined ? { supersedes } : undefined,
-        });
-
-        if (!result.ok) return toolError(explainRefusal(result, id));
-
-        // Click-through relevance (034): the caller edited this id after a
-        // search. Only on a written edit, not a refusal. SMD-1719: an edit that
-        // sets `supersedes` also names a returned id as this thought's source —
-        // the same act as a capture's pointer, and the path capture_thought's
-        // re-capture note sends the caller down. The function accepted the
-        // pointer (a ghost or a loop was refused above), so it is a cite of the
-        // SUPERSEDED id; the edited id stays "opened". One batch, one round trip.
-        await logActionCalls([
-          { tool: "update_thought", targetId: id },
-          ...(typeof supersedes === "string" ? citeRows("update_thought", { supersedes }) : []),
-        ]);
-
-        const what = [
-          content !== undefined ? (gate?.embeddings.allowed ? "content re-embedded" : "content saved without a vector") : null,
-          metadata_patch !== undefined ? "metadata merged" : null,
-          supersedes === null ? "supersedes cleared" : supersedes !== undefined ? `now supersedes ${supersedes}` : null,
-          // An edit replaces every chunk, so a failure here leaves the SAME
-          // half-contextualized state a capture can, and is worth the same
-          // sentence rather than a silent partial rewrite.
-          embedded?.contextFailures ? `${embedded.contextFailures} chunks without context` : null,
-        ].filter(Boolean).join(", ");
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(result)}${explainHeadWindow(embedded)}${
-              gate && !gate.embeddings.allowed
-                ? `\n\nNote: saved WITHOUT a vector — ${gate.embeddings.reason}. It is findable by exact text and joins semantic search after a re-embed pass (db/reembed.ts) against an endpoint the gate allows.`
-                : ""}`,
-          }],
-        };
-      } catch (e) {
-        return toolError(`update_thought failed: ${(e as Error).message}`);
-      }
-    }
-  );
-
-  if (canWrite(principal)) server.registerTool(
-    "delete_thought",
-    SPECS.delete_thought,
-    async ({ id, detach_citations }) => {
-      try {
-        const result = await (await db()).deleteThought({
-          id,
-          actor: { name: principal.name, agentId: principal.agentId, via: SERVER_NAME },
-          // 042: the refusal is the default; the way through is named here.
-          detach: detach_citations === true,
-        });
-        if (!result.ok) return toolError(explainRefusal(result, id));
-
-        // Click-through relevance (034): the caller deleted this id after a
-        // search — a strong signal it was the one they meant. Only on success.
-        await logActionCall("delete_thought", id);
-
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Deleted ${id}. Its previous content is preserved in the audit trail.${explainDetached(result, id)}`,
-          }],
-        };
-      } catch (e) {
-        return toolError(`delete_thought failed: ${(e as Error).message}`);
-      }
-    }
-  );
+  registerOp("delete_thought", canWrite(principal),
+    async (input) => say.renderDelete(await core.deleteThought(principal, input)),
+    (err) => say.failed(err, { lead: "delete_thought failed: " }));
 
   // Tool 12 & 13: the write half of worker_status (SMD-2132). Both mutate
   // thought_work_claims and consume nothing on the model — they are the control
@@ -1127,9 +492,10 @@ function buildServer(principal: Principal): McpServer {
         await logActionCalls(result.ids.map((id) => ({ tool: "retry_failed", targetId: id })));
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
       } catch (e) {
-        // Codeless, as delete_thought/update_thought and worker_status are: on a
-        // PostgREST (Workers) deploy the store throws the SQL-only reason, which is
-        // permanent, not the transient STORE_UNAVAILABLE a code would imply.
+        // Codeless until the worker actions move into core/ (SMD-2283 PR 3), where
+        // a fault is FAILED as every other tool's is (update/delete since PR 2):
+        // on a PostgREST (Workers) deploy the store throws the SQL-only reason,
+        // which is permanent, not the transient STORE_UNAVAILABLE capture's implies.
         return toolError(`retry_failed failed: ${(e as Error).message}`);
       }
     }
@@ -1179,8 +545,8 @@ function buildServer(principal: Principal): McpServer {
         // sibling write actions), so there is no thought to record an action against.
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
       } catch (e) {
-        // Codeless, as retry_failed/release_stale_leases are: on a PostgREST
-        // (Workers) deploy the store throws the permanent SQL-only reason.
+        // Codeless, as retry_failed/release_stale_leases are until PR 3: on a
+        // PostgREST (Workers) deploy the store throws the permanent SQL-only reason.
         return toolError(`run_worker failed: ${(e as Error).message}`);
       }
     }
@@ -1263,17 +629,6 @@ const JSON_RPC_BUSY_CODE = -32003;
 // the busy case (a registry lock; agents.ts retries within its own deadline).
 // Advisory, as `Retry-After` is: it names "a few seconds" as BUSY_MESSAGE says.
 const RETRY_AFTER_SECONDS = 2;
-
-/**
- * The ids in `ids` that name a thought, or undefined when none does — the one
- * rule for trimming a capture-only key's `derived_from` before the write and
- * again on the retry (thirteenth review pass: it was spelled twice).
- */
-async function liveSubset(store: ThoughtStore, ids: string[]): Promise<string[] | undefined> {
-  const have = await store.existingIds(ids);
-  const kept = ids.filter((d) => have.has(d.toLowerCase()));
-  return kept.length ? kept : undefined;
-}
 const UNAUTHORIZED_MESSAGE = "Unauthorized: missing or invalid authentication.";
 
 /**
