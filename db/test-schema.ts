@@ -2125,7 +2125,17 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const asLocals = (b: string) => b.replace(RANK_LINE, "").replaceAll("$1", "query_embedding").replaceAll("$2", "filter").replaceAll("$4", "v_fetch");
   assert(/RETURN QUERY EXECUTE \$walk\$\s+WITH direct AS/.test(mt.prosrc) && /\$walk\$ USING query_embedding, v_filter, v_min, v_fetch, match_threshold, v_weight, v_half, v_count;/.test(mt.prosrc)
       && (blocks[3].match(RANK_LINE) ?? []).length === 2 && asLocals(blocks[3]) === blocks[2],
-         "…and the fourth, min_trust's walk (074), is the broad-filter walk EXECUTEd with its locals as parameters and the rank beside the containment in both CTEs, nothing else moved");
+         "…and the fourth, min_trust's walk (074), is the broad-filter walk EXECUTEd with its locals as parameters and the rank beside the containment in both CTEs");
+  // The whole statement, the final SELECT too: 041's walk from its CTEs to its
+  // LIMIT, comments out and whitespace collapsed, against min_trust's with
+  // every parameter named back — so a $5 for $6 in the threshold, which no
+  // call at threshold -1 would show, fails here (second review pass).
+  const plain = (t: string) => t.replace(/^[ \t]*--.*$/gm, "").replace(/\s+/g, " ").trim();
+  const walk041 = (() => { const a = mt.prosrc.indexOf(blocks[2]); return a < 0 ? "" : mt.prosrc.slice(a, mt.prosrc.indexOf("LIMIT v_count;", a) + "LIMIT v_count".length); })();
+  const walk074 = (() => { const a = mt.prosrc.indexOf(blocks[3]); return a < 0 ? "" : mt.prosrc.slice(a, mt.prosrc.indexOf("LIMIT $8", a) + "LIMIT $8".length); })();
+  const named = (t: string) => asLocals(t).replaceAll("$5", "match_threshold").replaceAll("$6", "v_weight").replaceAll("$7", "v_half").replaceAll("$8", "v_count");
+  assert(walk041 !== "" && walk074 !== "" && plain(named(walk074)) === plain(walk041),
+         "…to its LIMIT: the final SELECT's threshold, blend and count are 041's, parameter for local");
   assert(routing(mt.prosrc).length > 0 && routing(mt.prosrc) === routing(mt014.prosrc), "…and so is the routing statement");
   assert(Number(mt014.prorows) === 1000 && !("enable_seqscan" in mt014.settings),
          `014's function has the estimate 1,000 and no plan setting (prorows ${mt014.prorows}, proconfig ${JSON.stringify(mt014.settings)}) — the trap that puts both in the defining statement`);
@@ -11738,18 +11748,19 @@ console.log("\n[67] Migration 074: min_trust — match_thoughts and search_thoug
   const viaChunk = await call(walkQs[1], null, "{}", 3);
   assert(viaChunk.some((r) => r.id === chunky.id) && !(await call(walkQs[1], "operator", "{}")).some((r) => r.id === chunky.id),
     "the chunk-only ingested page is found through its chunk without min_trust, and the min_trust walk's chunk side leaves it out");
-  const nearest = await call(walkQs[0], null, "{}", 1);
-  assert(nearest[0]?.t === "ingested", "without min_trust each walk query's nearest row is the ingested one planted at it");
-  let walkOverlap = 0, walkReturned = 0, walkBelow = 0;
+  const nearest = await Promise.all(walkQs.map((qv) => call(qv, null, "{}", 1)));
+  assert(nearest.every((r) => r[0]?.t === "ingested"), "without min_trust each walk query's nearest row is the ingested one planted at it");
+  let walkOverlap = 0, walkReturned = 0, walkBelow = 0, walkShort = 0;
   for (let i = 0; i < 3; i++) {
     const qv = walkQs[i];
     const want = new Set(await oracle(qv, 3, "{}"));
     const got = await call(qv, "operator", "{}");
     walkReturned += got.length;
+    if (got.length !== 10) walkShort++;
     walkOverlap += got.filter((r) => want.has(r.id)).length;
     walkBelow += got.filter((r) => r.t !== "operator").length;
   }
-  assert(walkReturned === 30 && walkBelow === 0 && walkOverlap >= 27, `the walk returns 10 rows for each of 3 queries, every one the operator's, at least 27 of 30 the exact top-10 (${walkReturned} returned, ${walkOverlap} exact)`);
+  assert(walkReturned === 30 && walkShort === 0 && walkBelow === 0 && walkOverlap >= 27, `the walk returns 10 rows for each of 3 queries, every one the operator's, at least 27 of 30 the exact top-10 (${walkReturned} returned, ${walkOverlap} exact)`);
   // The gate reached: 074 applied with the floor at zero, so a min_trust
   // call samples the heap first; the table is not ten times the threshold,
   // so the collection still runs and the exact branch's answers hold.

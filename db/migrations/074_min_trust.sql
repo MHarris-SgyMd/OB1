@@ -32,9 +32,10 @@
 --     the new one — 020's mechanism, one form later — or every 6-argument
 --     call would be "function is not unique". NULL is today's function: the
 --     unfiltered path and every filtered statement 041 shipped run as they
---     were, byte for byte, so 014's route, 037/038's gate, 039's walk and
---     every reader of those statements (db/test-schema.ts [20], the benches'
---     extractor) are unmoved. A min_trust takes the filtered path whatever
+--     were, byte for byte, so 014's route, 037/038's gate and 039's walk are
+--     unmoved, and so is every reader of those statements (the benches'
+--     extractor finds them first; db/test-schema.ts [20] holds them to 014's
+--     and 041's text, min_trust's beside them). A min_trust takes the filtered path whatever
 --     the filter (an empty filter with a min_trust is filtered), and its
 --     statements stand BESIDE 041's in the same branches: the gate's sample
 --     counts rows passing both, the collection reads the rank index (and the
@@ -105,7 +106,9 @@ COMMENT ON FUNCTION ob1_min_trust_rank(text) IS
 -- migrator's transaction, so writes to thoughts wait for it (SHARE): one read
 -- of every row's metadata, seconds on a brain of a few hundred thousand
 -- thoughts. A brain far past that can build it by hand first, CONCURRENTLY
--- under this name, and this statement then finds it.
+-- under this name, and this statement then finds it — a VALID one: an
+-- interrupted CONCURRENTLY build leaves an INVALID index under the name, which
+-- IF NOT EXISTS accepts and the planner ignores (drop it and build again).
 CREATE INDEX IF NOT EXISTS thoughts_trust_rank_idx ON thoughts (ob1_trust_rank(metadata->>'trust'));
 
 -- ---------------------------------------------------------------------------

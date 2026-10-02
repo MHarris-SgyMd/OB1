@@ -127,9 +127,10 @@ const DIRECT_CHECKS = [
  * match_thoughts (041's body — 039's half-precision walk over 038's gate, run
  * with jit off and its two planner paths pinned — with min_trust beside it,
  * under a seventh argument; SMD-1724). A remedy
- * that applied 020 alone would leave 020's bodies over theirs — the
- * stale-body state the ledger then cannot see — so the signature remedies
- * name all three, in order.
+ * that applied 020 alone would leave 020's hybrid body over 027's — the
+ * stale-body state the ledger then cannot see — and, since 074, 020's
+ * 6-argument match_thoughts beside 074's, every 6-argument call ambiguous; so
+ * the signature remedies name all three, in order.
  */
 const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 074_min_trust.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
 const APPLY_074 = "Apply db/migrations/074_min_trust.sql.";
@@ -1074,7 +1075,7 @@ if (configFailed) {
           if (missing(msg)) {
             add("keyword search", "fail",
                 "search_thoughts_keyword is missing, but the tool that calls it is registered — every call to it, and every search through search_thoughts_hybrid, would fail",
-                "Apply db/migrations/012_search_thoughts_keyword.sql against the project's direct connection (server-portable/README.md §4).");
+                "Apply db/migrations/012_search_thoughts_keyword.sql against the project's direct connection (server-portable/README.md §4). Then db/migrations/074_min_trust.sql, its last definer: 012's file alone re-creates the 4-argument form, without min_trust and with ROWS 1000 (SMD-1724).");
           } else {
             add("keyword search", "skip", `could not probe search_thoughts_keyword over PostgREST (${msg}); ${CATALOG_HINT}`);
           }
@@ -2480,7 +2481,7 @@ if (configFailed) {
         if (Number(keyword[0].c) >= 1) add("keyword search", "ok", "search_thoughts_keyword present");
         else add("keyword search", "fail",
                  "search_thoughts_keyword is missing, but the tool that calls it is registered — every call to it would fail",
-                 "Apply db/migrations/012_search_thoughts_keyword.sql.");
+                 "Apply db/migrations/012_search_thoughts_keyword.sql. Then db/migrations/074_min_trust.sql, its last definer: 012's file alone re-creates the 4-argument form, without min_trust and with ROWS 1000 (SMD-1724).");
 
         /**
          * Migration 017's function. `search` and `search_thoughts` call it
@@ -2495,7 +2496,7 @@ if (configFailed) {
         if (Number(hybrid[0].c) >= 1) add("hybrid search", "ok", "search_thoughts_hybrid present");
         else add("hybrid search", "fail",
                  "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
-                 "Apply the migrations through db/migrations/027_search_thoughts_relative_floor.sql (017_search_thoughts_hybrid.sql defines it; 020_match_thoughts_recency.sql redefines it with the arguments the server sends; 027 last defines it — stopping at 020 would leave 020's body over 027's).");
+                 "Apply the migrations through db/migrations/027_search_thoughts_relative_floor.sql (017_search_thoughts_hybrid.sql defines it; 020_match_thoughts_recency.sql redefines it with the arguments the server sends; 027 last defines it — stopping at 020 would leave 020's body over 027's). Then db/migrations/074_min_trust.sql: 020's file re-creates match_thoughts' 6-argument form, which beside 074's 7-argument one makes every 6-argument call 'function is not unique' (SMD-1724).");
 
         /**
          * Migration 024's function. On the SQL path thought_stats calls
@@ -3114,14 +3115,13 @@ if (configFailed) {
             const today = jitOn ? "" : " (not on this server today: it has no JIT, or its own jit is off — Supabase ships both; the clause is for a server that compiles)";
             const missing019 = !seqOff || rows !== 10 || kwOff;
             const mtMissing = !seqOff || rows !== 10 || !jitOff || !pinned;
-            // match_thoughts' five clauses and its row estimate are restored by
-            // its LAST definer, 041 — never by 019's file, whose CREATE is the
-            // 4-argument form 020 dropped and would put a second overload beside
-            // the shipped one on any brain past 020 (review pass 2) — named
-            // while the ledger does not record 041, ALTERed once it does (a
-            // plain run skips a recorded file). The keyword estimate is 019's
-            // and 041 does not define that function, so its remedy is the ALTER
-            // in either case, beside the file or in the Put-it-back list.
+            // match_thoughts' five clauses and both row estimates are restored
+            // by their LAST definer, 074, which defines search_thoughts_keyword
+            // too (SMD-1724) — never by 019's file, whose CREATE is the forms
+            // 020 and 074 dropped and would put a second overload beside each
+            // shipped one (review pass 2 of SMD-1624) — named while the ledger
+            // does not record 074, ALTERed once it does (a plain run skips a
+            // recorded file).
             const mtAlter = mtMissing ? `ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${nestloopOn ? "" : " SET enable_nestloop = on"}${tidscanOn ? "" : " SET enable_tidscan = on"}${rows !== 10 ? " ROWS 10" : ""};` : "";
             const kwAlter = kwOff ? `ALTER FUNCTION ${kwSig ?? "search_thoughts_keyword(text, int, int, jsonb, text)"} ROWS 25;` : "";
             const remedy = (mtMissing || kwOff) && !ledgerHas074

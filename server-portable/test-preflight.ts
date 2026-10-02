@@ -783,7 +783,7 @@ else {
   const rawBody = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(rawBody.code === 0 && /walk index.*orders its walk by the vector column but thoughts_embedding_idx is over embedding::halfvec; thought_chunks_embedding_idx is over embedding::halfvec/s.test(rawBody.out),
          "038 re-applied over 039: the check names the raw-column body over both halfvec indexes, as a warning");
-  assert(/Apply db\/migrations\/039_match_thoughts_halfvec_index\.sql/.test(rawBody.out), "…with 039 as the remedy");
+  assert(/Apply db\/migrations\/039_match_thoughts_halfvec_index\.sql[^\n]*then db\/migrations\/074_min_trust\.sql, the last definer of match_thoughts/.test(rawBody.out), "…with 039 as the remedy, then 074 — 039's file alone re-creates the 6-argument form beside 074's (second review pass)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const rebuilt = new SQL({ url: LIVE, max: 1 });
   await rebuilt.unsafe(`DROP INDEX thoughts_embedding_idx`);
@@ -950,7 +950,8 @@ else {
   assert(oneForm.code === 0 && /search signatures.*one of each/s.test(oneForm.out), "re-applying 019 and 020 leaves one form again");
   // And at 074: 020 re-applied by hand puts its 6-argument form BESIDE 074's
   // 7-argument one. The signature check fails with the DROP; the body checks
-  // read the form the servers resolve to — 074's — and stay green (first
+  // read the form the DROP leaves — 074's — and stay green (the servers'
+  // 6-argument call resolves to neither until then; first
   // review pass, run-it: a catalog read preferring the 6-argument form read
   // 020's stale body and warned about the wrong function).
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
