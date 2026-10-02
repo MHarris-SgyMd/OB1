@@ -2734,6 +2734,9 @@ if (configFailed) {
             const hyStale7 = hy8 && hy.some((r) => r.nargs === 7 && !/ob1:seven-calls-eight/.test(r.src));
             const mtKeep = mt.some((r) => r.nargs === 7) ? 7 : 6;
             const extra = [...mt.filter((r) => r.nargs !== mtKeep), ...hy.filter((r) => r.nargs !== 7 && r.nargs !== 8)].map((r) => r.sig);
+            // 075 refuses without 074, so a brain needing both is told both,
+            // in order (second review pass: 075 alone was named, and refused).
+            const then075 = mt020Only ? "Apply db/migrations/074_min_trust.sql, then 075_min_trust_hybrid.sql." : APPLY_075;
             const behind = [
               ...(mt020Only ? ["match_thoughts' is 020's, from before migration 074"] : []),
               ...(hy8 ? [] : ["search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075"]),
@@ -2742,16 +2745,16 @@ if (configFailed) {
             if (mtNew && hyWrapperAlone && extra.length === 0) {
               add("search signatures", "fail",
                   `${hy[0].sig} is 075's 7-argument search_thoughts_hybrid, which calls its 8-argument form, and that form is missing — dropped by hand? — so every search would fail`,
-                  `${APPLY_075} It re-creates the 8-argument form beside the 7.`);
+                  `${then075} It re-creates the 8-argument form beside the 7.`);
             } else if (mtNew && hyNew && extra.length === 0 && behind.length) {
               add("search signatures", "warn", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migration 020, one of each — but ${behind.join("; and ")}: every search answers, and min_trust (SMD-1724) ${mt020Only ? "is not on this brain" : hy8 ? "is on the 8-argument form alone" : "does not reach the hybrid the search tools read"}`,
-                  mt020Only && !hy8 ? "Apply db/migrations/074_min_trust.sql, then 075_min_trust_hybrid.sql." : mt020Only ? APPLY_074 : APPLY_075);
+                  mt020Only && hy8 && !hyStale7 ? APPLY_074 : then075);
             } else if (mtNew && hyNew && extra.length === 0) {
               add("search signatures", "ok", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migrations 020 and 074, one of each, with min_trust's 8-argument hybrid beside them (075)`);
             } else if (mtNew && !hyNew && hy8 && extra.length === 0) {
               add("search signatures", "fail",
                   `${hy.map((r) => r.sig).join(", ")}: the 7-argument search_thoughts_hybrid the servers call is missing beside 075's 8-argument form — dropped by hand? — so every search would fail`,
-                  `${APPLY_075} Its CREATE OR REPLACE puts the 7-argument form back, calling the 8.`);
+                  `${then075} Its CREATE OR REPLACE puts the 7-argument form back, calling the 8.`);
             } else if (mtNew && hyNew) {
               add("search signatures", "fail",
                   `beside the forms the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 020 or 074 — so every call that sends fewer arguments than the form it stands beside, which is every PostgREST caller by name, every hand-written SELECT and the servers' six-argument match_thoughts call, fails with "function is not unique"`,

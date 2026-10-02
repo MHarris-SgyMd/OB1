@@ -3237,7 +3237,7 @@ console.log("\n[20y] Migration 074 onto a populated brain at the file before it 
   await sql.close();
 }
 
-console.log("\n[20z] Migration 075: refused without 074, naming it; onto a populated brain at the file before it — an 8-argument hybrid and current read beside the 7-argument forms, every argument required, an operator's REVOKE on each 7 carried to its 8, every 7-argument call answering row for row as before, min_trust read through both arms, no audit row and no row moved; a re-apply a no-op (SMD-1724)");
+console.log("\n[20z] Migration 075: refused without 074 or 068, naming each; onto a populated brain at the file before it — an 8-argument hybrid and current read beside the 7-argument forms, every argument required, an operator's REVOKE on each 7 carried to its 8, every 7-argument call answering row for row as before, min_trust read through both arms, no audit row and no row moved; a re-apply a no-op (SMD-1724)");
 {
   // The guard, driven: a schema stopping before 074, baselined. A plpgsql
   // body binds its calls when it runs, so without it 075 would apply and
@@ -3254,6 +3254,14 @@ console.log("\n[20z] Migration 075: refused without 074, naming it; onto a popul
   const refusedOk = baselined.code === 0 && plain.code === 1 &&
     /_min_trust_hybrid\.sql\s+FAILED: migration 075 needs 074 \(ob1_min_trust_rank, match_thoughts and search_thoughts_keyword with min_trust\); this schema lacks it/.test(plain.out);
   assert(refusedOk, `075 on a schema without 074 is refused up front, naming 074, not left to fail at the first search (exit ${plain.code})${refusedOk ? "" : `:\n${plain.out}`}`);
+  // …and without 068: 074 has no guard of its own requiring it, so 074 lands
+  // on a schema before 068 and 075 must refuse there (second review pass).
+  const the068 = MIGRATIONS.find((f) => f.endsWith("_node_state_projection.sql"))!;
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the068 || f === the074 });
+  const no068 = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the075 }).then(() => "applied", (e: Error) => e.message);
+  assert(no068 === "migration 075 needs 068 (node_state, ob1_superseded_by); this schema lacks it",
+    `…and on a schema with 074 but not 068 it is refused, naming 068 (${no068})`);
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the075 });
   const sql = new SQL({ url: URL_, max: 1 });
