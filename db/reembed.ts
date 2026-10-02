@@ -415,7 +415,7 @@ import { blanketGate, egressDescription, egressRefusal } from "./worker-bootstra
 import { actorPayload, maskUrl, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
-import { commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
+import { blankProblem, commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
 /**
@@ -524,19 +524,6 @@ function leaseNumbers(opts: ReembedOptions): { ttl: number; heartbeat: number } 
   return { ttl, heartbeat };
 }
 
-/**
- * A blank value where the CLI's scanner refuses one — `--job ""` reaches no
- * run — in its words and with its flag list, or null (review pass 1: run()
- * pooled under the key ''). The scanner refuses before anything else.
- */
-function blankProblem(opts: Pick<ReembedOptions, "job" | "retire" | "acceptFailed">): string | null {
-  const blank = (v: string | null | undefined) => v != null && v.trim() === "";
-  const problem = blank(opts.job) ? "--job is empty; give it a value"
-    : blank(opts.retire) ? "--retire is empty; give it a value"
-    : (opts.acceptFailed ?? []).some(blank) ? "one of --accept-failed's values is empty"
-    : null;
-  return problem === null ? null : `${problem}\n${flagList(FLAGS, HINTS)}`;
-}
 
 /**
  * The modes' own rule — one thing at a time (see "Saying I know": the two
@@ -567,9 +554,12 @@ export function modeProblem(opts: Pick<ReembedOptions, "status" | "acceptFailed"
  */
 export async function run(opts: ReembedOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
-  const blank = blankProblem(opts);
+  // A blank value where the CLI's scanner refuses one — `--job ""` reaches no
+  // run — first, in its words and with its flag list (review pass 1: run()
+  // pooled under the key ''; db/cli.ts's blankProblem since SMD-2425).
+  const blank = blankProblem(FLAGS, { job: opts.job, retire: opts.retire, "accept-failed": opts.acceptFailed });
   if (blank !== null) {
-    err(blank);
+    err(`${blank}\n${flagList(FLAGS, HINTS)}`);
     return 2;
   }
   // databaseUrl's two refusals without its exit, then the numbers and the

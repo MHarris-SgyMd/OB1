@@ -3223,7 +3223,9 @@ per script of what each flag takes, scanned before anything else runs. A flag
 the script does not have, one given twice, one that takes a value followed by nothing, another flag or a
 blank, a value joined with `=`, or a value where no flag takes one exits 2 with
 the script's flag list; `--help` prints the list and exits 0; a number is
-decimal digits only. A refusal names the argument's position, never its text —
+decimal digits only. An engine's `run()` refuses a blank option first, in the
+scanner's words, through `cli.ts`'s `blankProblem` (`reembed.ts` since SMD-2304,
+`extract-entities.ts` and `consolidate.ts` since SMD-2425). A refusal names the argument's position, never its text —
 an argument can be a password or a key. Before it, `consolidate.ts`
 and `extract-entities.ts` ignored a flag they did not know, so `--K 10` ran the
 default `--k` and exited 0 (SMD-2015). `test-cli.ts` holds the scanner's rules,
