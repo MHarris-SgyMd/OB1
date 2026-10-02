@@ -1884,9 +1884,11 @@ jobs:
           ACTIONLINT_SHA256: "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
         run: |
           # Pinned by version and checksum; ubuntu-24.04 ships shellcheck, which
-          # actionlint invokes on every run: body.
+          # actionlint invokes on every run: body. The fetch retries a transient
+          # error — one 504 from the release host failed this job on main (run
+          # 36868446301, SMD-2472) — and the checksum stays the integrity gate.
           url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL -o actionlint.tar.gz "$url"
+          curl -fsSL --retry 4 --retry-all-errors --retry-delay 2 -o actionlint.tar.gz "$url"
           echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
           tar xzf actionlint.tar.gz actionlint
           ./actionlint -color
