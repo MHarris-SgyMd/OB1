@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-2304, SMD-2134]
-migrations: []
----
-
-## Changelog
-
-`db/consolidate.ts` and `db/reembed.ts` are importable engines, as `db/migrate.ts` and `db/extract-entities.ts` became in 1.4.0: importing either does nothing until its `run(opts)` is called, the CLI's run returning its exit code, with its output going to the writer it is given; consolidate's review flags' rules and reembed's modes' rule are exported pure functions, a consolidate pass's hard stop aborts the judge's call in hand, and reembed reads its model and width from the `env` it is given by config.mjs's own rules. The three claim workers now refuse, before anything is claimed, a number the database or the runtime could not take: `--batch` above 2147483647 (claim_thoughts' int — every claim failed), `--workers` above 2147483647 (the pool's max: a stack trace blaming the URL), extract's and consolidate's `--timeout` above 9007199254740 seconds (extract marked every thought failed) and consolidate's `--stale` above 2000000 days (the listing ended in a stack trace) (SMD-2304, SMD-2134).
-
-## FORK
-
-consolidate.ts and reembed.ts are engines: import one and call run(); the workers' numbers held to what the database takes — PRs 3–5 of 5 (SMD-2304 / 2134)
+# 243. consolidate.ts and reembed.ts are engines: import one and call run(); the workers' numbers held to what the database takes — PRs 3–5 of 5 (SMD-2304 / 2134)
 
 **What changed.** SMD-2134's fourth cut, PRs 3–5; change 240 has PRs 1–2
 (the migrator and extract-entities.ts, the Writer, `PassStop`,

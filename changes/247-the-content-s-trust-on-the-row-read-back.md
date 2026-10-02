@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1724]
-migrations: ["073", "074", "075"]
----
-
-## Changelog
-
-Every thought carries the trust of the write that put its text there, `metadata.trust` (`operator`, `agent` or `ingested`), from the key and the write's declaration, never the payload: a payload's `metadata.trust` above the key is clamped and filed under the audit row's `actor_context.claimed`, unless it repeats the row's own trust on a write that leaves the text. `match_thoughts`, `search_thoughts_keyword`, and an 8-argument form of `search_thoughts_hybrid` and `search_thoughts_current` take `min_trust`, keeping rows at or above it through an index on 014's route. The read tools print each thought's trust on its `By:` line, put a fixed notice before an ingested thought's text (`fetch`'s text included; its title and `search`'s start `[ingested]`), and take `min_trust`; `capture_thought` takes `trust`, which lowers the key's trust and never raises it. Every vendored capture path declares the trust of what it writes — the importers `ingested`, the model-writing workers `agent`, and the HTTP and MCP servers forward their client's `trust` (rest-api, open-brain-rest, enhanced-mcp, smart-ingest, agent-memory-api) — which the consistency checker's check 26 holds. Migrations 073 (the stamp and its backfill), 074 and 075 (`min_trust`) (SMD-1724).
-
-## FORK
-
-The content's trust on the row, read back on every thought a tool returns — metadata.trust from the key and the write's declaration, never the payload; a raise clamped and filed; min_trust on 014's route; the label, the notice and the declaration over MCP; every vendored capture path declaring it (SMD-1724)
+# 247. The content's trust on the row, read back on every thought a tool returns — metadata.trust from the key and the write's declaration, never the payload; a raise clamped and filed; min_trust on 014's route; the label, the notice and the declaration over MCP; every vendored capture path declaring it (SMD-1724)
 
 **What changed.** PRs 1, 2a, 2b, 3 and 4 of SMD-1724's.
 - 073: `metadata.trust` is the database's third key, beside 050's two

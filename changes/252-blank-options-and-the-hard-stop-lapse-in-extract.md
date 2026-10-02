@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2425]
-migrations: []
----
-
-## Changelog
-
-`db/extract-entities.ts` and `db/consolidate.ts` now behave like `db/reembed.ts` in two places (SMD-2425). Their `run()` refuses a blank string option first, in the CLI scanner's words, before anything connects: extract's `job: ""` used to pool and record under the key `''`, and consolidate's `note: "  "` used to reach the decision. And a hard stop whose lease release beats a worker's own no longer leads to a false report that the row's "lease lapsed".
-
-## FORK
-
-Blank options and the hard-stop lapse in extract and consolidate, as reembed since SMD-2304 PR 4 (SMD-2425)
+# 252. Blank options and the hard-stop lapse in extract and consolidate, as reembed since SMD-2304 PR 4 (SMD-2425)
 
 **What changed.**
 - **One blank rule for every engine.** `db/cli.ts` gains `blankProblem(spec, values)`. It returns the scanner's refusal of the first blank value (empty or whitespace only) in the flag table's order: "--job is empty; give it a value", "--list is empty; give it a value or leave it out", "one of --accept-failed's values is empty".

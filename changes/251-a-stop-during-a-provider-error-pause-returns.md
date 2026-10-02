@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2401]
-migrations: []
----
-
-## Changelog
-
-A first stop during a provider outage now returns the thought in hand to the pool. This applies to one Ctrl-C, one SIGINT, or a caller's `AbortSignal` that lands while `db/extract-entities.ts` or `db/consolidate.ts` is pausing on a transient provider error (429, 5xx, a dropped connection), or while the call that then fails is in flight. Before this fix, the worker slept the rest of the 5–45 s pause, called the provider again, then recorded the thought `failed` as "provider error after 3 retries", after one retry or none (SMD-2401).
-
-## FORK
-
-A stop during a provider-error pause returns the thought to the pool, not as a failed row (SMD-2401)
+# 251. A stop during a provider-error pause returns the thought to the pool, not as a failed row (SMD-2401)
 
 **What changed.** In both claim workers' transient-error branch:
 - **The first stop wakes the pause.** Before, only the second (hard) stop did, since SMD-2304. The worker then returns, and its `finally` hands the thought back with `release_claims_for_worker`. No call is made after the stop.
