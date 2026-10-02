@@ -16,7 +16,7 @@ import * as say from "./render.ts";
 // What the suites import from the module they drive; each now lives beside the
 // core or the renderer it belongs to (SMD-2283).
 export { parseFilter, withActorFilter } from "./core/filter.ts";
-export { actorLine, demotedLine, currentNote, currentSearchHint } from "./render.ts";
+export { actorLine, demotedLine, currentNote, currentSearchHint, ingestedNotice, INGESTED_NOTICE, minTrustHint } from "./render.ts";
 export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";
 
 /**
@@ -380,7 +380,7 @@ function buildServer(principal: Principal): McpServer {
   // pick out of a sentence on its own.
   readTool("search_thoughts",
     async (input) => say.renderSearchThoughts(await core.searchThoughts(principal, input), input.prefer_current),
-    (input) => (input.prefer_current ? say.currentSearchHint : undefined));
+    (input) => say.searchHint(input));
 
   /**
    * Tool 1b: Exact keyword search. Migration 012, SMD-944.
@@ -391,7 +391,7 @@ function buildServer(principal: Principal): McpServer {
    * choosing between two meanings of one tool. The description leads with WHEN to
    * reach for it, because that is the only part the model reads before deciding.
    */
-  readTool("search_thoughts_keyword", async (input) => say.renderSearchThoughtsKeyword(await core.searchThoughtsKeyword(principal, input)));
+  readTool("search_thoughts_keyword", async (input) => say.renderSearchThoughtsKeyword(await core.searchThoughtsKeyword(principal, input)), (input) => say.searchHint(input));
 
   // Tool 2: List Recent
   readTool("list_thoughts", async (input) => say.renderListThoughts(await core.listThoughts(principal, input)));

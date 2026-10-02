@@ -560,6 +560,13 @@ export type ListFilters = {
   saidBy?: string;
   /** SMD-1726: `metadata.actor_name` — that key's name. */
   actor?: string;
+  /**
+   * SMD-1724: `metadata.trust` is one of these words — the ladder at or above
+   * a min_trust, which core/filter.ts's trustAtOrAbove spells out, since a
+   * PostgREST filter cannot call ob1_trust_rank. A row with no trust is in no
+   * list. Absent: every row.
+   */
+  trustIn?: string[];
 };
 
 /**
@@ -950,10 +957,19 @@ export function captureEnvelope(
    * capture carries, recorded in `derivations` with the write. Absent: no
    * `lineage` key, and upsert_thought records nothing for the tags.
    */
-  lineage?: Lineage
+  lineage?: Lineage,
+  /**
+   * Migration 046's write event (SMD-1730), `p_payload.event`: what the write
+   * declares about itself, which validate_write_event checks. The server
+   * declares one key, the content's trust (SMD-1724), which 073 clamps to the
+   * key's kind — a lowering stands, a raise is filed as a claim. Absent: no
+   * `event` key, the key's trust.
+   */
+  event?: WriteEvent
 ): Record<string, unknown> {
   return {
     ...payload,
+    ...(event?.trust !== undefined ? { event: { trust: event.trust } } : {}),
     ...(actor ? { actor: actorPayload(actor) } : {}),
     ...(embeddingModel !== undefined ? { embedding_model: embeddingModel } : {}),
     ...(provenance?.derivedFrom !== undefined ? { derived_from: provenance.derivedFrom } : {}),
@@ -961,6 +977,9 @@ export function captureEnvelope(
     ...(lineage !== undefined ? { lineage } : {}),
   };
 }
+
+/** What a write declares about itself (046's event): the one key this server sends. */
+export type WriteEvent = { trust?: string };
 
 /**
  * The provenance an edit names (migration 032). Each key is tri-state at the
@@ -1094,6 +1113,13 @@ export interface ThoughtStore {
     limit: number;
     offset: number;
     filter: Record<string, unknown>;
+    /**
+     * SMD-1724: only rows whose trust is at or above this word (074's
+     * ob1_trust_rank; a row with none is below every word). Sent only when
+     * set, so a brain before migration 074 answers every search without it as
+     * before, and refuses one with it by name ("does not exist").
+     */
+    minTrust?: string;
   }): Promise<ThoughtKeywordMatch[]>;
 
   /**
@@ -1115,6 +1141,13 @@ export interface ThoughtStore {
      * false) is today's function, and today's order.
      */
     preferCurrent?: boolean;
+    /**
+     * SMD-1724: only rows whose trust is at or above this word (074's
+     * ob1_trust_rank; a row with none is below every word). Sent only when
+     * set, so a brain before migration 075 (the 8-argument forms) answers every search without it as
+     * before, and refuses one with it by name ("does not exist").
+     */
+    minTrust?: string;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]>;
 
   getThought(id: string): Promise<ThoughtRecord | null>;
@@ -1272,6 +1305,12 @@ export interface ThoughtStore {
      * no row. Rides the envelope, as the actor and the provenance do.
      */
     lineage?: Lineage;
+    /**
+     * Migration 046's write event, riding the envelope (captureEnvelope):
+     * capture_thought's `trust` (SMD-1724), the content's trust as the write
+     * declares it — clamped to the key's kind by 073. Absent: the key's.
+     */
+    event?: WriteEvent;
   }): Promise<CaptureResult>;
 
   /**
