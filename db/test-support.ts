@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_CURRENT_SIGNATURE, SEARCH_THOUGHTS_CURRENT_SIGNATURE_7, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -175,7 +175,10 @@ const FUNCTIONS = [
   "node_settled_types()",
   "node_lifecycle_types()",
   // 059 (SMD-2255)
-  "search_thoughts_current(vector, text, float, int, jsonb, float, float)",
+  SEARCH_THOUGHTS_CURRENT_SIGNATURE,
+  // 075 (SMD-1724): the 7-argument forms the servers call, beside the 8.
+  SEARCH_THOUGHTS_HYBRID_SIGNATURE_7,
+  SEARCH_THOUGHTS_CURRENT_SIGNATURE_7,
   "search_demote_weight()",
   // 068 (SMD-2256): the triggers go with thoughts; their function is named here.
   "ob1_node_projection_sync()",

@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import { parseEnv } from "../../db/env.ts";
 import { setEnvValues, singleQuoted } from "../env-file.ts";
 import { argon2idProblem, configFromEnv, wholeArgon2id } from "./config.ts";
+import { REGISTRATION_PATH, RegistrationGate } from "./registration.ts";
 import { clientIds, originFromEnv, secretName, servicesFromEnv, TIER_PREFIX, tiersFromEnv, type TierName } from "./layout.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -47,8 +48,8 @@ const MIN_PASSWORD = 12;
 
 /**
  * What deploy/compose.yaml's `auth` service passes, and nothing else: the
- * layout, the keys, the hash and the secrets of the clients every deploy can
- * have (the GUI and each tier's MCP server). A service client's secret is not
+ * layout, the keys, the hash, the registration cap and the secrets of the
+ * clients every deploy can have (the GUI and each tier's MCP server). A service client's secret is not
  * here, since its name is the operator's; it needs a line of its own.
  */
 export const COMPOSE_PASSES = [
@@ -58,6 +59,7 @@ export const COMPOSE_PASSES = [
   "OB1_AUTH_JWKS",
   "OB1_AUTH_COOKIE_KEYS",
   "OB1_AUTH_OPERATOR_PASSWORD_HASH",
+  "OB1_AUTH_MAX_CLIENTS",
   ...clientIds(Object.keys(TIER_PREFIX) as TierName[], {}).map(secretName),
 ];
 
@@ -263,6 +265,19 @@ async function selfCheck(): Promise<number> {
     expect("--init names a costly hash it has no password for as costly", /costs more than the server allows[^]*, and there is no OB1_AUTH_OPERATOR_PASSWORD/.test(await initSecrets(costlyOnly).then(() => "", (e) => (e as Error).message)));
     expect("the POC switch is on for 1 alone", configFromEnv({ ...good, OB1_AUTH_POC_ERROR_DETAIL: "1" }).pocErrorDetail && !configFromEnv({ ...good, OB1_AUTH_POC_ERROR_DETAIL: "true" }).pocErrorDetail);
     expect("OB1_AUTH_DB names another file", configFromEnv({ ...good, OB1_AUTH_DB: "/tmp/x.sqlite" }).dbPath === "/tmp/x.sqlite");
+    const maxOf = (v: string | undefined) => {
+      try {
+        return configFromEnv(v === undefined ? good : { ...good, OB1_AUTH_MAX_CLIENTS: v }).maxClients;
+      } catch (e) {
+        return (e as Error).message;
+      }
+    };
+    const maxes = [maxOf(undefined), maxOf(" "), maxOf("1"), maxOf("100000")];
+    expect("OB1_AUTH_MAX_CLIENTS is 200 unset or blank, and takes a whole number from 1 to 100,000", JSON.stringify(maxes) === "[200,200,1,100000]", JSON.stringify(maxes));
+    for (const bad of ["0", "100001", "-5", "2.5", "1e3", "lots"]) {
+      const said = refusal(() => configFromEnv({ ...good, OB1_AUTH_MAX_CLIENTS: bad }));
+      expect(`OB1_AUTH_MAX_CLIENTS "${bad}" is refused`, said.includes(`OB1_AUTH_MAX_CLIENTS is not a whole number from 1 to 100000 ("${bad}"`), said || "accepted");
+    }
 
     // layout.ts: the origin, strictly.
     const origins: [string, string | RegExp][] = [
@@ -404,6 +419,27 @@ async function selfCheck(): Promise<number> {
     writeFileSync(badTier, "OB1_AUTH_TIERS=stable,nope\n");
     expect("--init refuses an unreadable OB1_AUTH_TIERS and writes nothing", /no such tier: nope/.test(await initSecrets(badTier).then(() => "", (e) => (e as Error).message)) && readFileSync(badTier, "utf8") === "OB1_AUTH_TIERS=stable,nope\n");
 
+    // registration.ts: every spelling the library routes to registration, and the gate.
+    const routed = ["/auth/reg", "/auth/REG", "/auth/Reg", "/auth/reg/", "/AUTH/reg"];
+    const notRouted = ["/auth/reg/abc", "/auth/register", "/auth//reg", "/auth/regx", "/reg", "/auth/reg//", "/x/auth/reg"];
+    expect(
+      "the registration path matches every spelling the library's router takes under /auth (any case, a trailing slash; server.ts forwards /auth/ in lower case alone, so an upper-case /AUTH is a 404 before it) and nothing else",
+      routed.every((p) => REGISTRATION_PATH.test(p)) && notRouted.every((p) => !REGISTRATION_PATH.test(p)),
+      `${routed.filter((p) => !REGISTRATION_PATH.test(p)).join(", ")} | ${notRouted.filter((p) => REGISTRATION_PATH.test(p)).join(", ")}`,
+    );
+    let stored = 1;
+    const gate = new RegistrationGate(3, () => stored);
+    const firstTwo = gate.admit() && gate.admit();
+    expect("the gate admits while the stored and the under-way stay under the bound, and counts the ones under way", firstTwo && gate.underWay === 2 && !gate.admit());
+    gate.release();
+    stored = 2; // one of the two saved its client before its response closed
+    expect("a released place is given back, and a saved client still counts against it", !gate.admit());
+    gate.release();
+    expect("with nothing under way, room is the stored clients' alone", gate.underWay === 0 && gate.admit() && !gate.admit());
+    gate.release();
+    gate.release();
+    expect("a release with nothing under way does not go below zero", gate.underWay === 0);
+
     // deploy/tier.sh's own filter, run: what it hands tier.ts's container.
     const tierSh = readFileSync(join(HERE, "..", "tier.sh"), "utf8");
     // The loop that reads compose's environment, wherever it sits: the one
@@ -421,7 +457,7 @@ async function selfCheck(): Promise<number> {
     const env = auth.environment ?? {};
     expect("compose: the auth service is in the auth profile alone", JSON.stringify(auth.profiles) === '["auth"]');
     expect(
-      "compose: it passes exactly the layout, the keys, the hash and the fixed clients' secrets, each as ${X:-}",
+      "compose: it passes exactly the layout, the keys, the hash, the registration cap and the fixed clients' secrets, each as ${X:-}",
       JSON.stringify(Object.keys(env).sort()) === JSON.stringify([...COMPOSE_PASSES].sort()) && Object.entries(env).every(([k, v]) => v === `\${${k}:-}`),
       Object.keys(env).join(", "),
     );

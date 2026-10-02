@@ -30,7 +30,7 @@
 
 import { SQL } from "bun";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -703,9 +703,10 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
       // start from the heap they would have had without this one.
       await sql.unsafe(`VACUUM thoughts`);
       await sql.unsafe(String(hnswDef));
-      await applyMigrations(URL_, { ...opts041, only: (f) => f.startsWith("027") || f.startsWith("074") });
+      await applyMigrations(URL_, { ...opts041, only: (f) => f.startsWith("027") || f.startsWith("074") || f.startsWith("075") });
       assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} AND v_min = 0 THEN`).test(await body()) && TID_PROBE.test(await body()) && (await hasClauses()), `041 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages, jit = off and both pins`);
-      assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
+      // 027's body stands as 075's 8-argument form, the 7-argument one calling it.
+      assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${SEARCH_THOUGHTS_HYBRID_SIGNATURE}::regprocedure`)[0].s)),
         "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
     } catch (cleanup) {
       if (failure === undefined) throw cleanup;
