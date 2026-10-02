@@ -10,9 +10,11 @@ import type { Citation } from "../store.ts";
 /**
  * Every refusal an operation returns. The SMD-1978 codes the session hook keys
  * on keep their names; the rest name refusals that carried no code before
- * SMD-2283. A shape refusal of capture_thought's carries the code the hook's
- * verdictOf mends by (recipes/session-capture-hook), so a new code never
- * changes what the hook drops and retries.
+ * SMD-2283. A shape refusal of capture_thought's carries a code the session
+ * hook's verdictOf maps (recipes/session-capture-hook) to the mend its prose
+ * gave — for a hook from the same release. An older checkout's verdictOf reads
+ * the two pointer shapes as final and drops the summary, so the hook's
+ * checkout is upgraded with the server (changes/smd-2283.md, Upgrading).
  */
 export type Refusal =
   // The read tools.

@@ -492,9 +492,10 @@ function buildServer(principal: Principal): McpServer {
         await logActionCalls(result.ids.map((id) => ({ tool: "retry_failed", targetId: id })));
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
       } catch (e) {
-        // Codeless, as delete_thought/update_thought and worker_status are: on a
-        // PostgREST (Workers) deploy the store throws the SQL-only reason, which is
-        // permanent, not the transient STORE_UNAVAILABLE a code would imply.
+        // Codeless until the worker actions move into core/ (SMD-2283 PR 3), where
+        // a fault is FAILED as every other tool's is (update/delete since PR 2):
+        // on a PostgREST (Workers) deploy the store throws the SQL-only reason,
+        // which is permanent, not the transient STORE_UNAVAILABLE capture's implies.
         return toolError(`retry_failed failed: ${(e as Error).message}`);
       }
     }
@@ -544,8 +545,8 @@ function buildServer(principal: Principal): McpServer {
         // sibling write actions), so there is no thought to record an action against.
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
       } catch (e) {
-        // Codeless, as retry_failed/release_stale_leases are: on a PostgREST
-        // (Workers) deploy the store throws the permanent SQL-only reason.
+        // Codeless, as retry_failed/release_stale_leases are until PR 3: on a
+        // PostgREST (Workers) deploy the store throws the permanent SQL-only reason.
         return toolError(`run_worker failed: ${(e as Error).message}`);
       }
     }

@@ -96,17 +96,19 @@ function safeRefusal(r: Refusal): object {
 const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
 
 /**
- * A fault an operation threw — the store down, a missing migration — as every
- * tool has always said it, `Error: <message>`, with the tool's hint for the
- * message when it has one; FAILED beside it, unclassified (core/refusal.ts says
- * why; SMD-2461 classifies), the message and hint in the text alone. A thrown
- * non-Error (a string, undefined, an object that cannot be printed) is said as
- * itself where it can be, and never throws here.
+ * A fault an operation threw — the store down, a missing migration — said as
+ * the tool has always said it: `lead` (`Error: `, or update/delete's
+ * `<tool> failed: `), the message, and the tool's hint for it when it has one.
+ * Beside it the verdict: the fault's own (`failure()`: FAILED, unclassified,
+ * no `retryable` until SMD-2461), or one a tool states for itself — capture's
+ * STORE_UNAVAILABLE, retryable (SMD-1978). The message and hint ride the text
+ * alone. A thrown non-Error (a string, undefined, an object that cannot be
+ * printed) is said as itself where it can be, and never throws here.
  */
-export function failed(err: unknown, { hint, lead = "Error: ", verdict = { code: "FAILED" } }: { hint?: (msg: string) => string; lead?: string; verdict?: { code: string; retryable?: boolean } } = {}): Reply {
-  const f = failure(err);
-  const text = `${lead}${f.message}${hint ? hint(f.message) : ""}`;
-  return { content: [{ type: "text", text }], isError: true, structuredContent: { ...verdict, text } };
+export function failed(err: unknown, { hint, lead = "Error: ", verdict }: { hint?: (msg: string) => string; lead?: string; verdict?: { code: string; retryable?: boolean } } = {}): Reply {
+  const { message, ...own } = failure(err);
+  const text = `${lead}${message}${hint ? hint(message) : ""}`;
+  return { content: [{ type: "text", text }], isError: true, structuredContent: { ...(verdict ?? own), text } };
 }
 
 /**

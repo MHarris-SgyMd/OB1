@@ -514,9 +514,9 @@ MCP tools do rather than a copy of it:
 - **`index.ts`** — the Hono app, authentication, and the registration that joins the
   two: validate (the SDK runs the spec's schema), call the operation, render.
 
-Every read tool's reply carries a typed answer as `structuredContent` beside the
-text. Claude Code, VS Code and Codex show the model `structuredContent` alone when it
-is present, so:
+Every tool's reply carries a typed answer as `structuredContent` beside the text
+(the worker actions' from SMD-2283's last pull request). Claude Code, VS Code and
+Codex show the model `structuredContent` alone when it is present, so:
 
 - A tool whose text is its value's JSON (`search`, `fetch`, `list_thought_ids`,
   `list_logged_searches`, `worker_status`, `job_status`, `scan_thoughts`) answers
@@ -525,18 +525,29 @@ is present, so:
 - A tool whose text is prose answers its `text` plus fields that cannot carry a
   word a thought, a key or a judge wrote: ids, timestamps, counts, scores, booleans,
   enum codes (a search hit's id, scores, `supersededBy` and demotion reasons; a
-  change's id, action, thought id and pointers; the stats' totals). Every such word
-  reaches the model through the text, cleaned and bounded there as it always was.
+  change's id, action, thought id and pointers; the stats' totals; a capture's id,
+  whether it was already a thought — a reader's to know — and whether its embedding
+  call was made; an edit's id, `updatedAt` and what moved). Every such word reaches
+  the model through the text, cleaned and bounded there as it always was.
   `render.ts`'s `guard` holds each such string to the shape its field's name
   promises — a time, a uuid, or one enum token — and nulls anything else, so a
   field typed as a time but filled from a thought's metadata (prefer_current's
   `window.syncedAt`) cannot carry a sentence.
   `brain_info` answers its whole record beside the table: it holds only the
   server's and the database's own facts.
-- A refusal answers `{ code, retryable, text }` (`NOT_FOUND`, `REFUSED_FILTER`,
-  `REFUSED_EGRESS` with its `rule`, `REFUSED_SINCE`, `REFUSED_CURSOR`); a fault
-  `{ code: "FAILED", text }`, with no `retryable` yet — classifying faults is
-  SMD-2461.
+- A refusal answers `{ code, retryable, text }`. The reads': `NOT_FOUND`,
+  `REFUSED_FILTER`, `REFUSED_EGRESS` (with its `rule`), `REFUSED_SINCE`,
+  `REFUSED_CURSOR`. Capture's: the pointer and metadata shapes
+  (`REFUSED_SUPERSEDES_SHAPE`, `REFUSED_DERIVED_FROM_SHAPE`,
+  `REFUSED_METADATA_SHAPE`), SMD-1978's pointer codes (`DERIVED_FROM_MISSING` with
+  a reader's `positions`, `REFUSED_SUPERSEDES_UNKNOWN`,
+  `REFUSED_SUPERSEDES_OWNERSHIP`, `SUPERSEDES_UNJUDGED`), and
+  `EMBEDDING_NOT_ATTACHED` (saved without its vector; retryable, with the `id`). An
+  edit's and a delete's: `REFUSED_NOTHING_TO_UPDATE`, `REFUSED_STALE_READ`,
+  `REFUSED_DUPLICATE_CONTENT`, `REFUSED_WOULD_CYCLE`, `REFUSED_CITED`.
+- A fault answers `{ code: "FAILED", text }`, with no `retryable` yet —
+  classifying faults is SMD-2461 — except capture's, `STORE_UNAVAILABLE` and
+  retryable, which the session hook keys on (SMD-1978).
 
 The core's values are whole, for the REST core. The worker actions move into
 `core/` in SMD-2283's last pull request; until then they keep their own codes.
@@ -548,7 +559,7 @@ bun test-server.ts        # 374 — transport, auth, tool surface, OAuth discove
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 196 — store conformance, real Postgres in a container
-bun run test:e2e          # 363 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 364 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 bun run cf:build          # ~353 KiB gzipped (measured 2026-10-01, SMD-2283 PR 2; the PostgREST store and supabase-js are in it)
 ```
 

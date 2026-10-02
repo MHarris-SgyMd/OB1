@@ -1951,6 +1951,24 @@ console.log("\n[16] Every write tool answers its typed result beside the text, a
     holds(`capture_thought's ${code}`, r);
   }
 
+  // A fault in capture: the store does not answer as itself (here a function
+  // the write needs is gone). The verdict is STORE_UNAVAILABLE, retryable —
+  // what the session hook keeps a payload by (SMD-1978); a FAILED with no
+  // retryable here would make the hook drop a summary on any outage (PR 2
+  // review pass 3: nothing held it). Put back whatever the assertions do.
+  {
+    const sql = new SQL({ url: URL_, max: 1 });
+    await sql`ALTER FUNCTION validate_derived_from(jsonb) RENAME TO validate_derived_from_away`;
+    try {
+      const fault = await result("capture_thought", { content: `${marker}: a capture whose write cannot run`, derived_from: [capId] });
+      assert(fault.isError && fault.text.startsWith("Error: ") && fault.sc?.code === "STORE_UNAVAILABLE" && fault.sc?.retryable === true && fault.sc?.text === fault.text,
+        `capture_thought's fault is STORE_UNAVAILABLE, retryable, its words beside it (${JSON.stringify(fault.sc)?.slice(0, 120)})`);
+    } finally {
+      await sql`ALTER FUNCTION validate_derived_from_away(jsonb) RENAME TO validate_derived_from`;
+      await sql.close();
+    }
+  }
+
   // An edit: what moved and when, as ids, flags and the time the text names.
   const up = await result("update_thought", { id: capId, metadata_patch: { reviewed: true } });
   assert(!up.isError && up.sc?.id === capId && up.sc?.metadataMerged === true && up.sc?.content === null && typeof up.sc?.updatedAt === "string" && up.text.includes(`updated_at: ${up.sc.updatedAt}`),
