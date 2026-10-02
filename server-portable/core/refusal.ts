@@ -35,5 +35,19 @@ export const refuse = <T = never>(refusal: Refusal): Outcome<T> => ({ ok: false,
  * it retryable). One classifier for every fault, capture's STORE_UNAVAILABLE
  * included, is SMD-2461, which adds the field back.
  */
-export type Failure = { code: "FAILED"; message: string; hint?: string };
-export const failure = (err: unknown): Failure => ({ code: "FAILED", message: (err as Error)?.message ?? String(err) });
+export type Failure = { code: "FAILED"; message: string };
+export const failure = (err: unknown): Failure => ({ code: "FAILED", message: messageOf(err) });
+
+/**
+ * What a thrown value says: an Error's message, anything else as String()
+ * prints it — and something String() cannot print (a null-prototype object, a
+ * throwing toString) a fixed phrase rather than a second throw inside the
+ * caller's catch (review pass 6).
+ */
+function messageOf(err: unknown): string {
+  try {
+    return (err as Error)?.message ?? String(err);
+  } catch {
+    return "a fault that could not be printed";
+  }
+}

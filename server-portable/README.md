@@ -525,6 +525,10 @@ is present, so:
   enum codes (a search hit's id, scores, `supersededBy` and demotion reasons; a
   change's id, action, thought id and pointers; the stats' totals). Every such word
   reaches the model through the text, cleaned and bounded there as it always was.
+  `render.ts`'s `guard` holds each such string to the shape its field's name
+  promises — a time, a uuid, or one enum token — and nulls anything else, so a
+  field typed as a time but filled from a thought's metadata (prefer_current's
+  `window.syncedAt`) cannot carry a sentence.
   `brain_info` answers its whole record beside the table: it holds only the
   server's and the database's own facts.
 - A refusal answers `{ code, retryable, text }` (`NOT_FOUND`, `REFUSED_FILTER`,

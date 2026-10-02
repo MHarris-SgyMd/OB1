@@ -1811,10 +1811,12 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   // counts, codes — never a word a thought, a key or a judge wrote, which
   // reaches a value-only model (Claude Code, VS Code, Codex) through the text
   // alone, cleaned and bounded there. Every string leaf but the top-level
-  // `text`: at most 40 characters, no control character, none of the words
-  // this section writes. Returns the paths that break it.
+  // `text` is a uuid, an ISO time or Postgres's infinity, or one enum token
+  // (review pass 6: a length cap let a short phrase through). Returns the paths
+  // that break it.
+  const SHAPE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[+-]?\d{4,6}-\d{2}-\d{2}(?:T[\d:.]+(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity|[A-Za-z][A-Za-z0-9_-]{0,39})$/i;
   const wordless = (v: unknown, at = ""): string[] => {
-    if (typeof v === "string") return v.length <= 40 && !/[\x00-\x1f]/.test(v) && !v.includes(marker) && !v.includes("judged") ? [] : [at || "(root)"];
+    if (typeof v === "string") return SHAPE.test(v) ? [] : [at || "(root)"];
     if (Array.isArray(v)) return v.flatMap((x, i) => wordless(x, `${at}[${i}]`));
     if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => (at === "" && k === "text" ? [] : wordless(x, at ? `${at}.${k}` : k)));
     return [];
@@ -1843,6 +1845,11 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   const kw = await result("search_thoughts_keyword", { query: marker });
   assert(!kw.isError && kw.sc?.total >= 1 && kw.sc?.offset === 0 && kw.sc?.hits?.some((h: { id: string; occurrences: number }) => h.id === id && h.occurrences === 1), `search_thoughts_keyword: the page, its total and occurrences (${kw.sc?.total})`);
   holds("search_thoughts_keyword", kw);
+  // A page past the end says nothing of the whole set: total is unknown, not
+  // zero; a first page that is empty is a true zero (review pass 6).
+  const past = await result("search_thoughts_keyword", { query: marker, offset: 500 });
+  const none = await result("search_thoughts_keyword", { query: "smd2283-no-thought-holds-this" });
+  assert(past.sc?.total === null && past.sc?.hits?.length === 0 && none.sc?.total === 0, `search_thoughts_keyword: an empty later page has total null, an empty first page 0 (${past.sc?.total}, ${none.sc?.total})`);
 
   const lt = await result("list_thoughts", { limit: 3 });
   assert(!lt.isError && Array.isArray(lt.sc?.thoughts) && lt.sc.thoughts.length === 3 && "supersededBy" in lt.sc.thoughts[0], "list_thoughts: the listed thoughts' ids and supersession");
@@ -1883,6 +1890,10 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   assert(!ch.isError && Array.isArray(ch.sc?.changes) && ch.sc.changes.length === 2 && ch.sc.bounded === false && ch.text.includes(`Cursor: ${ch.sc.cursor}`) && ch.text.includes(`${marker} newer side`),
     "thought_changes: the page, its bound and the cursor the text names; the heads in the text");
   holds("thought_changes", ch);
+  // Polling from the newest cursor finds nothing new: the text says keep the
+  // cursor, and the value's cursor is that cursor, not null (review pass 6).
+  const idle = await result("thought_changes", { since: ch.sc?.cursor });
+  assert(idle.sc?.changes?.length === 0 && idle.text.includes("Keep the cursor.") && idle.sc?.cursor === ch.sc?.cursor, `thought_changes: an empty page after a cursor hands that cursor back (${idle.sc?.cursor})`);
   const chBad = await result("thought_changes", { since: "yesterday" });
   assert(chBad.isError && chBad.text.startsWith("Refused: `since` must be an ISO-8601 time") && chBad.text.includes(`not "yesterday"`) && chBad.sc?.code === "REFUSED_SINCE", `thought_changes refuses a since that is neither, REFUSED_SINCE (${JSON.stringify(chBad.sc)})`);
   const chLong = await result("thought_changes", { since: `${marker} ${"x".repeat(500)}` });

@@ -14,7 +14,8 @@ import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { subscribe as subscribeJob, markRunningLost, setJobSink } from "./jobs.ts";
-import { createCore, SPECS } from "./core/index.ts";
+import { createCore, SPECS, type Input } from "./core/index.ts";
+import type { ToolName } from "./tools.ts";
 import { citeRows } from "./core/context.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
@@ -502,36 +503,30 @@ function buildServer(principal: Principal): McpServer {
 
   // The read tools (SMD-2283): each is its operation in core/reads.ts — the
   // search op with its egress gate and query log, the store reads, the probes —
-  // and its words in render.ts. The handler validates (the SDK runs SPECS' zod
-  // schema), calls the operation and renders the outcome; a fault the operation
-  // throws is `Error: <message>`, with the tool's hint where it has one.
+  // and its words in render.ts. readTool registers one for a key that may read:
+  // the SDK validates the input against the tool's spec, `run` calls the
+  // operation and renders its outcome, and a fault the operation throws is
+  // `Error: <message>` with the tool's hint where it has one, FAILED beside it
+  // (review pass 6: sixteen copies of that body before).
+  const readTool = <K extends ToolName>(name: K, run: (input: Input<K>) => Promise<say.Reply>, hint?: (input: Input<K>) => ((msg: string) => string) | undefined): void => {
+    if (!canRead(principal)) return;
+    // The generic K loses the SDK's per-tool inference of `input`; SPECS[name]'s
+    // schema is what it validates against, and Input<K> is that schema's output.
+    const register = server.registerTool as unknown as (name: string, spec: unknown, handler: (input: Input<K>) => Promise<say.Reply>) => unknown;
+    register(name, SPECS[name], async (input) => {
+      try {
+        return await run(input);
+      } catch (err: unknown) {
+        return say.failed(err, hint?.(input));
+      }
+    });
+  };
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and
   // deep research look for exact read-only `search` and `fetch` tool shapes. Why
   // the shape pins hybrid, no recency weight and no prefer_current: core/reads.ts.
-  if (canRead(principal)) server.registerTool(
-    "search",
-    SPECS.search,
-    async (input) => {
-      try {
-        return say.renderSearch(await core.search(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
-
-  if (canRead(principal)) server.registerTool(
-    "fetch",
-    SPECS.fetch,
-    async (input) => {
-      try {
-        return say.renderFetch(await core.fetch(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
+  readTool("search", async (input) => say.renderSearch(await core.search(principal, input)));
+  readTool("fetch", async (input) => say.renderFetch(await core.fetch(principal, input)));
 
   // Tool 1: Search — semantic, with the identifiers in the query matched exactly.
   //
@@ -540,17 +535,9 @@ function buildServer(principal: Principal): McpServer {
   // it still needs search_thoughts_keyword: it does, for paging through every
   // thought containing a string, and for a needle the extraction rule would not
   // pick out of a sentence on its own.
-  if (canRead(principal)) server.registerTool(
-    "search_thoughts",
-    SPECS.search_thoughts,
-    async (input) => {
-      try {
-        return say.renderSearchThoughts(await core.searchThoughts(principal, input), input.prefer_current);
-      } catch (err: unknown) {
-        return say.failed(err, input.prefer_current ? say.currentSearchHint : undefined);
-      }
-    }
-  );
+  readTool("search_thoughts",
+    async (input) => say.renderSearchThoughts(await core.searchThoughts(principal, input), input.prefer_current),
+    (input) => (input.prefer_current ? say.currentSearchHint : undefined));
 
   /**
    * Tool 1b: Exact keyword search. Migration 012, SMD-944.
@@ -561,56 +548,16 @@ function buildServer(principal: Principal): McpServer {
    * choosing between two meanings of one tool. The description leads with WHEN to
    * reach for it, because that is the only part the model reads before deciding.
    */
-  if (canRead(principal)) server.registerTool(
-    "search_thoughts_keyword",
-    SPECS.search_thoughts_keyword,
-    async (input) => {
-      try {
-        return say.renderSearchThoughtsKeyword(await core.searchThoughtsKeyword(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
+  readTool("search_thoughts_keyword", async (input) => say.renderSearchThoughtsKeyword(await core.searchThoughtsKeyword(principal, input)));
 
   // Tool 2: List Recent
-  if (canRead(principal)) server.registerTool(
-    "list_thoughts",
-    SPECS.list_thoughts,
-    async (input) => {
-      try {
-        return say.renderListThoughts(await core.listThoughts(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
+  readTool("list_thoughts", async (input) => say.renderListThoughts(await core.listThoughts(principal, input)));
 
   // Tool 2b: the supersession review queue (migration 029, SMD-1294)
-  if (canRead(principal)) server.registerTool(
-    "list_supersession_proposals",
-    SPECS.list_supersession_proposals,
-    async (input) => {
-      try {
-        return say.renderSupersessionProposals(await core.listSupersessionProposals(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err, say.proposalsHint);
-      }
-    }
-  );
+  readTool("list_supersession_proposals", async (input) => say.renderSupersessionProposals(await core.listSupersessionProposals(principal, input)), () => say.proposalsHint);
 
   // Tool 3: Stats
-  if (canRead(principal)) server.registerTool(
-    "thought_stats",
-    SPECS.thought_stats,
-    async (input) => {
-      try {
-        return say.renderThoughtStats(await core.thoughtStats(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
+  readTool("thought_stats", async (input) => say.renderThoughtStats(await core.thoughtStats(principal, input)));
 
   // Tool 3b: the change feed (migration 052, SMD-1296) — what moved since a
   // time or a cursor, for an agent that returns after a break. Gated like the
@@ -618,17 +565,7 @@ function buildServer(principal: Principal): McpServer {
   // key does not). The store calls one SQL function that chooses the page
   // and bounds the rendering; the operation decides `since`, render.ts lays the
   // rows out.
-  if (canRead(principal)) server.registerTool(
-    "thought_changes",
-    SPECS.thought_changes,
-    async (input) => {
-      try {
-        return say.renderThoughtChanges(await core.thoughtChanges(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err, say.changesHint);
-      }
-    }
-  );
+  readTool("thought_changes", async (input) => say.renderThoughtChanges(await core.thoughtChanges(principal, input)), () => say.changesHint);
 
   // Tool 3b-ii: the corpus's thought ids (SMD-2244) — ids only, in id order, for a
   // cheap cross-brain id-set diff (db/tier.ts --compare) that the prose read tools
@@ -638,17 +575,7 @@ function buildServer(principal: Principal): McpServer {
   // the previous page's `cursor` pages on until it is null. Read-only, ids only —
   // no content, no vectors. Gated like the other read tools, so a capture-only key
   // never sees it.
-  if (canRead(principal)) server.registerTool(
-    "list_thought_ids",
-    SPECS.list_thought_ids,
-    async (input) => {
-      try {
-        return say.renderThoughtIds(await core.listThoughtIds(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
+  readTool("list_thought_ids", async (input) => say.renderThoughtIds(await core.listThoughtIds(principal, input)));
 
   // Tool 3b-iii: the brain's logged searches (SMD-2245) — the query_log rows a
   // cross-brain replay sources from (db/tier.ts --compare --from-log), so it can
@@ -657,51 +584,21 @@ function buildServer(principal: Principal): McpServer {
   // {searches, truncated}: the most recent searches at or after `since`, bounded by
   // `limit` (a replay is two searches per row, so a window is the unit, not the
   // whole log). Empty when OB1_QUERY_LOG was never on.
-  if (canRead(principal)) server.registerTool(
-    "list_logged_searches",
-    SPECS.list_logged_searches,
-    async (input) => {
-      try {
-        return say.renderLoggedSearches(await core.listLoggedSearches(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err, say.loggedSearchesHint);
-      }
-    }
-  );
+  readTool("list_logged_searches", async (input) => say.renderLoggedSearches(await core.listLoggedSearches(principal, input)), () => say.loggedSearchesHint);
 
   // Tool 3b-iv: the background-work queues (SMD-2131) — per work_type, what is
   // pending / in flight / done / failed / stalled over thought_work_claims, so an
   // operator or agent can ask a running brain about its queues without shelling into
   // Postgres (SMD-1844 closed the host port). Read-only, aggregated in SQL; SQL
   // backend only (the table is not on PostgREST). Gated like the other read tools.
-  if (canRead(principal)) server.registerTool(
-    "worker_status",
-    SPECS.worker_status,
-    async (input) => {
-      try {
-        return say.renderWorkerStatus(await core.workerStatus(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
+  readTool("worker_status", async (input) => say.renderWorkerStatus(await core.workerStatus(principal, input)));
 
   // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
   // database's versions, ledger, counts, size and HNSW parameters, one short
   // table. Gated like the other read tools. The same record is the keyed
   // /health body, as JSON; brainInfo never raises, so a database that cannot
   // answer is a line in the table, not a tool error.
-  if (canRead(principal)) server.registerTool(
-    "brain_info",
-    SPECS.brain_info,
-    async () => {
-      try {
-        return say.renderBrainInfoReply(await core.brainInfo("tool"));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
+  readTool("brain_info", async () => say.renderBrainInfoReply(await core.brainInfo("tool")));
 
   // Tool 4: Capture Thought — the tool that adds.
   //
@@ -1294,19 +1191,8 @@ function buildServer(principal: Principal): McpServer {
   // Ownership-scoped: a job is visible only to the key that started it (the
   // handle inherits that call's scope), so a wrong id or another key's job reads
   // as not found. Read-only. A registry fault (the durable jobs table away,
-  // SMD-2318) is FAILED like every read tool's (review pass 4: it reached the
-  // SDK's default error result, with no code).
-  if (canRead(principal)) server.registerTool(
-    "job_status",
-    SPECS.job_status,
-    async (input) => {
-      try {
-        return say.renderJobStatus(await core.jobStatus(principal, input));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
+  // SMD-2318) is FAILED like every read tool's.
+  readTool("job_status", async (input) => say.renderJobStatus(await core.jobStatus(principal, input)));
 
   // Tool 3b-vi: the first async-job-backed tool (SMD-2273) — a bounded, paged
   // scan of the corpus that returns a job HANDLE at once rather than blocking,
@@ -1315,17 +1201,7 @@ function buildServer(principal: Principal): McpServer {
   // re-embed backfill, the run_worker drain SMD-2272) build on the same
   // startJob. Read-only, but it starts background work, so it is gated like the
   // reads; the detached run is tracked, so the stop waits for it.
-  if (canRead(principal)) server.registerTool(
-    "scan_thoughts",
-    SPECS.scan_thoughts,
-    async (input) => {
-      try {
-        return say.renderJobHandle(await core.scanThoughts(principal, input, { track: toolCalls.track }));
-      } catch (err: unknown) {
-        return say.failed(err);
-      }
-    }
-  );
+  readTool("scan_thoughts", async (input) => say.renderJobHandle(await core.scanThoughts(principal, input, { track: toolCalls.track })));
 
   return server;
 }

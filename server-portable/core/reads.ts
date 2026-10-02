@@ -221,7 +221,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
 }
 
 export type KeywordHit = Pick<ThoughtKeywordMatch, "id" | "content" | "metadata" | "created_at" | "occurrences">;
-export type KeywordResult = { query: string; offset: number; total: number; hits: KeywordHit[] };
+export type KeywordResult = { query: string; offset: number; total: number | null; hits: KeywordHit[] };
 
 export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, input: Input<"search_thoughts_keyword">): Promise<Outcome<KeywordResult>> {
   const { query, limit, offset } = input;
@@ -235,8 +235,8 @@ export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, inpu
   return ok({
     query,
     offset,
-    // The whole match set, not the page: every row carries it.
-    total: rows[0]?.totalCount ?? 0,
+    // The whole match set, not the page: every row carries it. An empty first page is none; an empty later page (an offset past the end) says nothing of the set, so null (review pass 6).
+    total: rows.length ? rows[0].totalCount : offset === 0 ? 0 : null,
     hits: rows.map((t) => ({ id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, occurrences: t.occurrences })),
   });
 }
@@ -325,7 +325,7 @@ export type ChangesResult = {
   notAgent: string | null;
   /** The kinds of change asked for, deduplicated; null for every kind. */
   actions: AuditChange["action"][] | null;
-  /** The last change's id — the `since` that continues from here; null on an empty page. */
+  /** The `since` that continues from here: the last change's id, or on an empty page the cursor that was passed (the text says keep it; review pass 6); null for an empty page with no cursor. */
   cursor: string | null;
 };
 
@@ -359,7 +359,7 @@ export async function thoughtChanges(ctx: Ctx, principal: Principal, { since, ot
   const shown = !more ? rows : bounded ? rows.slice(0, limit) : rows.slice(1);
   return ok({
     changes: shown, more, bounded, since: start.since, after: start.after, agent: name, notAgent, actions: kinds,
-    cursor: shown.length ? shown[shown.length - 1].id : null,
+    cursor: shown.length ? shown[shown.length - 1].id : start.after,
   });
 }
 

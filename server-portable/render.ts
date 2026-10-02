@@ -28,19 +28,46 @@ import type { ChangesResult, KeywordResult, ListThoughtsResult, ProposalsResult,
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
 export type Reply = { content: { type: "text"; text: string }[]; isError?: true; structuredContent: Record<string, unknown> };
 
-/** A prose tool's safe fields, picked from its value — never a word a thought, a key or a judge wrote. */
+/** A prose tool's safe fields, picked from its value — ids, timestamps, numbers, booleans, enum codes; `guard` holds every string to that. */
 type Safe<T> = (v: T) => object;
 /** A tool whose text is its value's JSON: the value itself (the spec's structured-plus-serialized shape). */
 const AS_JSON = Symbol("the value is the text's JSON");
+/** brain_info: its whole record beside the table — the server's and the database's own facts, versions included, so not held to tokens. */
+const AS_RECORD = Symbol("the value is the server's own record");
 
 /** An outcome in the tool's words — its value's text, or its refusal's — with the text inside the value, last, so no field can stand in for it. */
-function render<T extends object>(o: Outcome<T>, value: (v: T) => string, refusal: (r: Refusal) => string, safe: Safe<T> | typeof AS_JSON): Reply {
+function render<T extends object>(o: Outcome<T>, value: (v: T) => string, refusal: (r: Refusal) => string, safe: Safe<T> | typeof AS_JSON | typeof AS_RECORD): Reply {
   if (!o.ok) {
     const text = refusal(o.refusal);
-    return { content: [{ type: "text", text }], isError: true, structuredContent: { ...safeRefusal(o.refusal), text } };
+    return { content: [{ type: "text", text }], isError: true, structuredContent: { ...(guard(safeRefusal(o.refusal)) as object), text } };
   }
   const text = value(o.value);
-  return { content: [{ type: "text", text }], structuredContent: safe === AS_JSON ? { ...(o.value as Record<string, unknown>) } : { ...safe(o.value), text } };
+  const v = o.value as Record<string, unknown>;
+  return { content: [{ type: "text", text }], structuredContent: safe === AS_JSON ? { ...v } : safe === AS_RECORD ? { ...v, text } : { ...(guard(safe(o.value)) as object), text } };
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** store.ts's isoTimestamp forms: toISOString (an extended year included) and Postgres's infinities. */
+const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity)$/;
+/** An enum word or code: one token, no space, no punctuation a sentence needs. */
+const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
+const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
+const ID_KEY = /^(?:id|after|cursor|supersededBy|supersedesBefore|supersedesAfter)$|Id$/;
+
+/**
+ * The rule at the chokepoint (review pass 6): every string a picker hands over
+ * is held to the shape its field's name promises — a time, a uuid, or one enum
+ * token — and any other string becomes null. A picker that lists a field whose
+ * type says timestamp but whose source is a thought's metadata (prefer_current's
+ * `window.syncedAt`, `max(metadata->>'linear_updated_at')` over the corpus)
+ * cannot carry a sentence through: the guard reads the value, not the type.
+ */
+function guard(v: unknown, key = ""): unknown {
+  if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
+  if (Array.isArray(v)) return v.map((x) => guard(x, key));
+  if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
+  return v;
 }
 
 /**
@@ -60,8 +87,8 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
  * tool has always said it, `Error: <message>`, with the tool's hint for the
  * message when it has one; FAILED beside it, unclassified (core/refusal.ts says
  * why; SMD-2461 classifies), the message and hint in the text alone. A thrown
- * non-Error (a string, undefined) is said as itself rather than `undefined`,
- * and never throws here.
+ * non-Error (a string, undefined, an object that cannot be printed) is said as
+ * itself where it can be, and never throws here.
  */
 export function failed(err: unknown, hint?: (msg: string) => string): Reply {
   const f = failure(err);
@@ -77,11 +104,12 @@ const DEMOTIONS = ["completed", "canceled", "superseded"] as const;
 /** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, and why it was demoted; the window prefer_current read. */
 const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   preferCurrent: v.preferCurrent,
-  literalOnly: v.facts?.literalOnly ?? false,
+  // Unknown, not false, when the brain had no row to report the query's facts on (review pass 6).
+  literalOnly: v.facts?.literalOnly ?? null,
   window: v.window,
   hits: v.hits.map((h) => ({
     id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
-    supersededBy: h.supersededBy, demoted: h.demoted.filter((d) => (DEMOTIONS as readonly string[]).includes(d)),
+    supersededBy: h.supersededBy, demoted: h.demoted.map((d) => oneOf(DEMOTIONS, d)).filter((d) => d !== null),
   })),
 });
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date and occurrence count. */
@@ -165,7 +193,7 @@ function searchRefusal(r: Refusal, hint?: (msg: string) => string): string {
  */
 export function actorLine(m: Record<string, unknown>): string | null {
   const name = typeof m.actor_name === "string" && m.actor_name.trim() ? snipText(m.actor_name, 80) : null;
-  const kind = typeof m.actor_kind === "string" && (SAID_BY as readonly string[]).includes(m.actor_kind) ? m.actor_kind : null;
+  const kind = oneOf(SAID_BY, m.actor_kind);
   if (!name && !kind) return null;
   return `By: ${name ?? "an unnamed key"} (${kind ?? "kind not classified"})`;
 }
@@ -196,7 +224,9 @@ export function demotedLine(t: Pick<ThoughtHybridMatch, "demoted" | "score" | "f
 export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">[]): string | null {
   const w = rows[0]?.window;
   if (!w) return null;
-  const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${w.syncedAt})` : ""}`;
+  // The latest sync is a thought's own metadata (068: max over linear_updated_at),
+  // which any capture key can set, so it is quoted as untrusted text is (review pass 6).
+  const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${snipText(w.syncedAt, 40)})` : ""}`;
   // A demoted exact hit keeps a quarter of its literal bonus (1/61 per literal
   // it holds), so one can still rank above current rows — on a query of
   // literals only, or holding several literals. Rather than state when (the
@@ -374,7 +404,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
     // "there are four hundred more", and will not page.
     const shown = `${offset + 1}-${offset + data.length} of ${total}`;
     const more =
-      offset + data.length < total
+      offset + data.length < total! // a non-empty page always carries its total
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
@@ -624,7 +654,7 @@ export const renderJobStatus = (o: Outcome<object>): Reply =>
   render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `No job ${JSON.stringify(r.id)} for this key — an unknown id, another key's job, or one pruned from the registry.` : unknownRefusal(r)), AS_JSON);
 
 /** brain_info: the short table (brain-info.ts), and the record the keyed /health body answers as JSON beside it — whole: it holds the server's and the database's own facts, no word a thought, a key or a judge wrote. */
-export const renderBrainInfoReply = (info: BrainInfo): Reply => render(ok(info), renderBrainInfo, unknownRefusal, (v) => v);
+export const renderBrainInfoReply = (info: BrainInfo): Reply => render(ok(info), renderBrainInfo, unknownRefusal, AS_RECORD);
 
 /** scan_thoughts: the handle is the text. */
 export const renderJobHandle = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);
