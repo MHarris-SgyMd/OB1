@@ -106,7 +106,8 @@
  * thought is recorded failed when ANY of its pairs was malformed or timed out,
  * so --retry-failed re-judges its pairs (the ones already proposed are skipped
  * by the candidate rule). A rate limit, a server error or a lost connection is
- * paused and retried three times; if it persists, the thought in hand is
+ * paused and retried three times — a stop wakes the pause, and the thought
+ * goes back to the pool (SMD-2401); if it persists, the thought in hand is
  * recorded failed with the error (so a thought that reliably draws a 500 is
  * visible rather than cycling for ever) and the worker stops, its other
  * leases returning to the pool. A 401/403/404, or a 400 about the request
@@ -797,9 +798,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    */
   let hardStopped = false;
   /**
-   * Aborted by the first stop and by the hard stop: a follower's sleep wakes
-   * on the first; the judge's call in hand and a transient pause on the hard,
-   * so neither holds run() nor sends a pair again after the leases are gone
+   * Aborted by the first stop and by the hard stop: a follower's sleep and a
+   * transient pause wake on the first (SMD-2401), the judge's call in hand on
+   * the hard, so none holds run() nor sends a pair again on a stopping pass
    * (db/lease.ts's sleepUnless keeps nothing per sleep).
    */
   const onStop = new AbortController();
@@ -1144,12 +1145,20 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   stopping = true;
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
                   return;
-                } else if (attempt < TRANSIENT_PAUSES_MS.length && !stopping) {
+                } else if (stopping) {
+                  // A transient error on a stopping pass: neither called again
+                  // nor recorded failed — the thought goes back to the pool with
+                  // the leases the finally returns (SMD-2401).
+                  return;
+                } else if (attempt < TRANSIENT_PAUSES_MS.length) {
                   err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
-                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onHardStop.signal);
-                  if (hardStopped) return;
+                  // A first stop wakes the pause too, and the thought goes back
+                  // the same way: main slept the pause out, called again, and
+                  // recorded the thought failed "after 3 retries" after one (SMD-2401).
+                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onStop.signal);
+                  if (stopping) return;
                 } else {
-                  outcome = { outcome: "failed", error: `provider error after ${TRANSIENT_PAUSES_MS.length} retries: ${msg}` };
+                  outcome = { outcome: "failed", error: `provider error after ${attempt} retries: ${msg}` };
                   stopAfter = true;
                 }
               }
