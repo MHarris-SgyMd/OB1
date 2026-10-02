@@ -2196,6 +2196,46 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
   }
 }
 
+console.log("\n[18] The serving entry wires the durable job store when it first builds the store: a job a prior process left running is marked lost (SMD-2318; root.ts's serveHere, SMD-2284)");
+{
+  // `bun index.ts` as Bun's entry, not an import: only the entry says it
+  // serves (serveHere), and only then does the store's first build reconcile
+  // the rows a prior process left live. Its first keyed request builds the
+  // store (the registry lookup reads it); the reconcile runs detached after.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const jobId = crypto.randomUUID();
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at) VALUES (${jobId}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now())`;
+  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const port = free.port;
+  free.stop(true);
+  const child = Bun.spawn(["bun", "index.ts"], {
+    cwd: dirname(fileURLToPath(import.meta.url)),
+    env: { ...process.env, PORT: String(port), MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
+    stdout: "pipe", stderr: "pipe",
+  });
+  let status = "running";
+  try {
+    const deadline = Date.now() + 15_000;
+    let answered = false;
+    while (!answered && Date.now() < deadline) {
+      answered = await realFetch(`http://127.0.0.1:${port}/health`, { headers: { "x-brain-key": "e2e-key" }, signal: AbortSignal.timeout(2_000) })
+        .then((r) => r.ok, () => false);
+      if (!answered) await Bun.sleep(100);
+    }
+    assert(answered, "the entry answers a keyed /health, which builds its store");
+    while (status === "running" && Date.now() < deadline) {
+      status = (await sql`SELECT status FROM jobs WHERE id = ${jobId}::uuid`)[0]?.status;
+      if (status === "running") await Bun.sleep(100);
+    }
+    assert(status === "lost", `the job a prior process left running is reconciled to lost (${status})`);
+  } finally {
+    child.kill();
+    await child.exited;
+    await sql`DELETE FROM jobs WHERE id = ${jobId}::uuid`;
+    await sql.close();
+  }
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 
