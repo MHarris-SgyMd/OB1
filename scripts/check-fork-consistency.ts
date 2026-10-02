@@ -261,7 +261,7 @@
  *      (`_store`, `createStore`) named only in root.ts's STORE_WIRING bodies,
  *      db() and closeStore() (the factory in db() alone), and the store
  *      module's import — a second db() or closeStore(), in root.ts or
- *      elsewhere, is a hit. A value passed on (the agent
+ *      index.ts, is a hit. A value passed on (the agent
  *      registry's lookups) and a global's alias are not followed;
  *      transportLeaksIn is a pure function its probes run on in-memory text;
  *      no exceptions
@@ -5156,7 +5156,7 @@ checkPostgrestClients();
 //     root.ts, inside STORE_WIRING's bodies — db() builds it and wires the job
 //     sink to it, closeStore() closes it at a stop; the factory in db() alone —
 //     at its declaration and in the store module's import. A second db() or
-//     closeStore(), in root.ts or a transport file, is a hit.
+//     closeStore(), in either of TRANSPORT_FILES, is a hit.
 // What it does not see: a store method reached through a value it cannot name
 // (a parameter, the agent registry's own lookups, a context the core hands
 // back), an alias of a global (`Bun.sql`), and a module the allowlist admits

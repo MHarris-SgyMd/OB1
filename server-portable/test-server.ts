@@ -1563,7 +1563,7 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const stalled = warned.filter((w) => /request still running/.test(w));
   const sm = /after (\d+) s/.exec(stalled[0] ?? "");
   assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
-    `…and says so once, in index.ts's own line naming the call (${stalled.length} line)`);
+    `…and says so once, in sse.ts's own line naming the call (${stalled.length} line)`);
   assert(slow.ok && slow.ms >= SLOW_EMBED_MS, `the real server answers search_thoughts after a ${SLOW_EMBED_MS} ms embedding, past the last sweep (${slow.ok ? `${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
   const dataLine = slow.text.split("\n").find((l) => l.startsWith("data: "));
   let envelope: { jsonrpc?: string; id?: unknown } | null = null;

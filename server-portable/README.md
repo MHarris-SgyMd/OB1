@@ -579,7 +579,7 @@ bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
 bun run test:e2e          # 417 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-bun run cf:build          # ~355 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1; the PostgREST store and supabase-js are in it)
+bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
