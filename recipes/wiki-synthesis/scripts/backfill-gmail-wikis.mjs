@@ -354,6 +354,10 @@ async function captureWikiThought(sb, threadGroup, wikiText, runId) {
         quality_score: 60,
         metadata,
         created_at: new Date().toISOString(),
+        // SMD-1724: a wiki of a correspondent's mail carries that mail's words
+        // — outside text, declared so (the plain-insert fallback below cannot
+        // declare: a raw row's trust is the database's to strip).
+        event: { trust: "ingested" },
       },
     });
     if (result?.thought_id) return result.thought_id;

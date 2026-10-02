@@ -661,13 +661,24 @@ async function handleCapture(req: Request): Promise<Response> {
   const sourceType = String(body.source_type ?? "").trim() || source;
 
   if (!content) return json({ error: "content is required" }, 400);
+  // SMD-1724: what the content is, as the caller declares it — one of the three
+  // words, or absent (the key's). Forwarded as the write event's trust, which
+  // the database clamps to the key's kind: a lowering stands, a raise is filed.
+  // JSON null is no declaration, as absence is; a non-string is refused, not stringified — `["agent"]` read as
+  // `agent` (first review pass, run-it).
+  const trust = body.trust == null ? undefined : body.trust;
+  if (trust !== undefined && trust !== "operator" && trust !== "agent" && trust !== "ingested") return json({ error: "trust must be operator, agent or ingested" }, 400);
 
   const detectedSensitivity = detectSensitivity(content);
   if (detectedSensitivity.tier === "restricted") {
     return json({ error: "Restricted content cannot be captured through cloud API" }, 403);
   }
 
-  const bodyMetadata = isRecord(body.metadata) ? body.metadata : {};
+  // SMD-1724: a client's metadata carries no `trust` — the declaration is the
+  // `trust` argument's, refused above when it is not a word; a metadata.trust
+  // would reach the payload and be read as one past that refusal (second
+  // review pass).
+  const { trust: _metadataTrust, ...bodyMetadata } = isRecord(body.metadata) ? body.metadata : {};
   const metadataOverrides: Record<string, unknown> = {};
   if (body.type) metadataOverrides.type = body.type;
   if (body.importance !== undefined) metadataOverrides.importance = body.importance;
@@ -697,6 +708,8 @@ async function handleCapture(req: Request): Promise<Response> {
       metadata: prepared.metadata,
       ...(embedding ? { embedding_model: embeddingModelUsed() } : {}),
       actor: ACTOR, // 008's actor, read from the payload into ob1.actor (SMD-1541; ACTOR above)
+      // SMD-1724: the caller's declaration, forwarded as 046's write event.
+      ...(trust ? { event: { trust } } : {}),
     },
     p_embedding: embedding,
   });

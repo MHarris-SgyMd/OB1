@@ -117,6 +117,10 @@ const writebackSchema = z.object({
   step_id: z.string().nullable().optional(),
   idempotency_key: z.string().nullable().optional(),
   content_hash: z.string().nullable().optional(),
+  // SMD-1724: what the memories are, as the runtime declares it — forwarded as
+  // each write's event trust, which the database clamps to the key's kind (a
+  // lowering stands, a raise is filed). Absent: the key's. Another word is a 400.
+  trust: z.enum(["operator", "agent", "ingested"]).nullish(), // null is no declaration, as absence is
   channel: channelSchema.default({}),
   runtime: runtimeSchema.default({ name: "unknown" }),
   models_used: z.array(z.object({
@@ -527,6 +531,8 @@ app.post("/writeback", requireWrite, async (c) => {
         // 008's actor, read from the payload: the key's name, this server as `via`, the runtime that wrote back
         // (both kept in actor_context), no source (SMD-1541; FORK.md change 103 has the why).
         actor: { name: principal.name, via: "agent-memory-api", runtime: req.runtime.name },
+        // SMD-1724: the runtime's declaration, forwarded as 046's write event.
+        ...(req.trust ? { event: { trust: req.trust } } : {}),
         metadata: {
           source: "agent_memory",
           source_type: "agent_memory",

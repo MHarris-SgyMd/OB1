@@ -228,7 +228,7 @@ if (READ_KEY) {
   assert(!html.includes("+ Capture") && html.includes("Read-only key"), "…without the capture button");
   const stats = await tool("thought_stats");
   assert(stats.status === 200 && stats.text.startsWith("Total thoughts:"), `the read key reads stats (${stats.status})`);
-  const cap = await tool("capture_thought", { content: "the dashboard smoke must never store this" });
+  const cap = await tool("capture_thought", { content: "the dashboard smoke must never store this", trust: "operator" });
   assert(cap.status === 403 && /read-scoped/.test(cap.error), `the read key is refused capture by the proxy with 403, before the server is asked (${cap.status}: ${cap.error})`);
   // A write tool the proxy does not gate itself: the SERVER refuses it under the read key — the tool is not
   // registered for it — which proves the key forwarded is this visitor's, not one from the dashboard's env

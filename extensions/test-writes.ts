@@ -1244,12 +1244,15 @@ try {
     && appendedItems[0].matched_thought_id === row?.id && appendedItems[0].result_thought_id === row?.id && appendedItems[0].similarity > 0.85 && appendedItems[0].similarity < 0.92
     && Array.isArray(evidence?.list) && evidence.list.length === 1 && evidence.list[0].source_label === "test-writes" && evidence.list[0].source === "smart_ingest",
     `a shorter text 0.88 from the first thought appends evidence to it: the item an append_evidence for existing_is_richer with the thought as matched and result, and the thought's metadata.evidence one entry from this source — append_thought_evidence(uuid, jsonb) (${appended.status} ${JSON.stringify(appended.json).slice(0, 120)}; items ${JSON.stringify(appendedItems).slice(0, 220)}; evidence ${JSON.stringify(evidence?.list).slice(0, 120)})`);
-  const revised = await send(h, "POST", "/", { text: longer, dry_run: false, skip_classification: true, source_label: "test-writes" });
+  // Declared ingested (SMD-1724): the revision's write carries the declaration too — under this unclassified key an
+  // ingested declaration is the trust it stamps, and a dropped one leaves none (first review pass, run-it: the branch
+  // forwarded it untested).
+  const revised = await send(h, "POST", "/", { text: longer, dry_run: false, skip_classification: true, source_label: "test-writes", trust: "ingested" });
   const revisedItems = await jobItems(Number(revised.json?.job_id));
-  const revision = (await sql`SELECT id, embedding IS NOT NULL AS has_vec, embedding_model, supersedes, type, metadata->>'supersedes' AS meta_supersedes FROM thoughts WHERE content = ${longer}`)[0];
+  const revision = (await sql`SELECT id, embedding IS NOT NULL AS has_vec, embedding_model, supersedes, type, metadata->>'supersedes' AS meta_supersedes, metadata->>'trust' AS trust FROM thoughts WHERE content = ${longer}`)[0];
   assert(revised.status === 200 && revised.json?.revised_count === 1 && revisedItems.length === 1 && revisedItems[0].action === "create_revision" && revisedItems[0].reason === "new_has_more_info" && revisedItems[0].status === "executed"
-    && revisedItems[0].matched_thought_id === row?.id && revision !== undefined && revisedItems[0].result_thought_id === revision.id && revision.supersedes === row?.id && revision.has_vec === true && revision.embedding_model === MODEL && revision.type === "idea" && revision.meta_supersedes === null,
-    `a longer text 0.88 from the first thought is a revision: a new row with its vector and label whose supersedes is the first thought (025's pointer, not metadata.supersedes), the item a create_revision with the first as matched and the new row as result (${revised.status} ${JSON.stringify(revised.json).slice(0, 120)}; items ${JSON.stringify(revisedItems).slice(0, 220)}; row ${JSON.stringify(revision).slice(0, 200)})`);
+    && revisedItems[0].matched_thought_id === row?.id && revision !== undefined && revisedItems[0].result_thought_id === revision.id && revision.supersedes === row?.id && revision.has_vec === true && revision.embedding_model === MODEL && revision.type === "idea" && revision.meta_supersedes === null && revision.trust === "ingested",
+    `a longer text 0.88 from the first thought is a revision: a new row with its vector and label whose supersedes is the first thought (025's pointer, not metadata.supersedes) and the declared trust, the item a create_revision with the first as matched and the new row as result (${revised.status} ${JSON.stringify(revised.json).slice(0, 120)}; items ${JSON.stringify(revisedItems).slice(0, 220)}; row ${JSON.stringify(revision).slice(0, 200)})`);
   judgeActor("smart-ingest revision", await auditRow(revision?.id, "capture"), "smart-ingest");
   // A revision parked by a dry run whose text is captured meanwhile: the function writes `supersedes` on a fresh row only
   // and keeps the existing row's provenance (035), so the pointer is not written — the item fails saying so, where it was
@@ -1500,6 +1503,118 @@ try {
 
 // ── The files that cannot run here say what this test assumes ────────────────
 
+// SMD-1724 (PR 4): every server that captures for a client forwards the client's declared trust — a lowering stands,
+// a word off the ladder is refused — and with no declaration the key's kind stands. The servers' keys are classified
+// `operator` for this block (073 stamps the trust from the registry's kind and the declaration below it), so a
+// forwarded `ingested` shows as itself, and an unforwarded one as `operator`; their kinds are put back after.
+{
+  console.log("\n[SMD-1724: the capture paths forward the client's trust]");
+  const trustOf = async (text: string) => ((await sql`SELECT metadata->>'trust' AS t FROM thoughts WHERE content = ${text}`)[0]?.t ?? null) as string | null;
+  const claimOf = async (text: string) => ((await sql`SELECT a.actor_context->'claimed' AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE t.content = ${text} AND a.action = 'capture'`)[0]?.c ?? null) as unknown;
+  const labels = (await sql`SELECT DISTINCT actor_name AS n FROM thought_audit WHERE actor_name IS NOT NULL`).map((r: { n: string }) => r.n);
+  // One label at a time: Bun binds a JS array comma-joined, not as an array literal.
+  const kindsBefore: { label: string; kind: string | null }[] = [];
+  for (const label of labels) kindsBefore.push(...(await sql`SELECT label, kind FROM ob1_agents WHERE label = ${label}`) as { label: string; kind: string | null }[]);
+  for (const label of labels) await sql`SELECT set_agent_kind(${label}, 'operator')`;
+  try {
+    // rest-api's POST /capture.
+    {
+      // A third instance of the module: its rate-limit bucket is its own, as the defaults instance's is above.
+      const h = (await import(join(ROOT, "integrations/rest-api/index.ts") + "?trust")).default!.fetch! as Handler;
+      const [plain, declared] = ["a note typed into rest-api, trust undeclared", "a page pasted into rest-api, declared ingested"];
+      const a = await send(h, "POST", "/capture", { content: plain });
+      const b = await send(h, "POST", "/capture", { content: declared, trust: "ingested" });
+      const bad = await send(h, "POST", "/capture", { content: "a capture declaring a word off the ladder", trust: "root" });
+      assert(a.status === 200 && b.status === 200 && await trustOf(plain) === "operator" && await trustOf(declared) === "ingested",
+        `rest-api POST /capture forwards the client's trust: undeclared the key's (${await trustOf(plain)}), declared ingested (${await trustOf(declared)})`);
+      assert(bad.status === 400 && /trust must be operator, agent or ingested/.test(String(bad.json?.error)) && await trustOf("a capture declaring a word off the ladder") === null,
+        `…and refuses a word off the ladder before it writes (${bad.status})`);
+      const nulled = "a note sent to rest-api with trust null";
+      const n = await send(h, "POST", "/capture", { content: nulled, trust: null });
+      assert(n.status === 200 && await trustOf(nulled) === "operator", `…and takes a JSON null as no declaration: the key's (${n.status}; ${await trustOf(nulled)}; first review pass)`);
+      const [arr, num] = [await send(h, "POST", "/capture", { content: "a capture declaring an array", trust: ["agent"] }), await send(h, "POST", "/capture", { content: "a capture declaring a number", trust: 3 })];
+      assert(arr.status === 400 && num.status === 400 && await trustOf("a capture declaring an array") === null, `…and refuses a non-string, not stringified into a word (${arr.status}, ${num.status}; second review pass)`);
+      const viaMeta = "a capture whose metadata names a trust, through rest-api";
+      const vm = await send(h, "POST", "/capture", { content: viaMeta, metadata: { trust: "root" } });
+      assert(vm.status === 200 && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust: the key's, no claim filed (${vm.status}; ${await trustOf(viaMeta)}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
+    }
+    // open-brain-rest's POST /capture and POST /ingest.
+    {
+      const h = await load("integrations/open-brain-rest/index.ts");
+      const [cap, ing] = ["a page pasted into open-brain-rest's capture, declared ingested", "a page pasted into open-brain-rest's ingest, declared ingested"];
+      const a = await send(h, "POST", "/capture", { content: cap, trust: "ingested" });
+      const b = await send(h, "POST", "/ingest", { text: ing, trust: "ingested" });
+      const plain = "a note typed into open-brain-rest, trust undeclared";
+      await send(h, "POST", "/capture", { content: plain });
+      const bad = await send(h, "POST", "/ingest", { text: "an ingest declaring a word off the ladder", trust: "Operator" });
+      const badCap = await send(h, "POST", "/capture", { content: "a capture declaring a word off the ladder, open-brain-rest", trust: "root" });
+      assert(a.status === 200 && b.status === 200 && await trustOf(cap) === "ingested" && await trustOf(ing) === "ingested" && await trustOf(plain) === "operator",
+        `open-brain-rest forwards the client's trust on /capture and /ingest, the key's when undeclared (${await trustOf(cap)}, ${await trustOf(ing)}, ${await trustOf(plain)})`);
+      assert(bad.status === 400 && await trustOf("an ingest declaring a word off the ladder") === null && badCap.status === 400 && await trustOf("a capture declaring a word off the ladder, open-brain-rest") === null,
+        `…and refuses a word off the ladder on both routes (${bad.status}, ${badCap.status})`);
+      const viaMeta = "a capture whose metadata names a trust, through open-brain-rest";
+      const vm = await send(h, "POST", "/capture", { content: viaMeta, metadata: { type: "idea", trust: "root" } });
+      assert(vm.status === 200 && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust: the key's, no claim filed (${vm.status}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
+    }
+    // enhanced-mcp's brain_capture_thought.
+    {
+      const h = await load("integrations/enhanced-mcp/index.ts");
+      const declared = "a page pasted into enhanced-mcp, declared ingested";
+      const a = await call(h, "brain_capture_thought", { content: declared, trust: "ingested" });
+      const bad = await call(h, "brain_capture_thought", { content: "an enhanced-mcp capture declaring a word off the ladder", trust: "root" });
+      assert(!a.isError && await trustOf(declared) === "ingested", `enhanced-mcp's brain_capture_thought forwards the client's trust (${a.toolText.slice(0, 60)}; ${await trustOf(declared)})`);
+      assert((bad.isError || bad.json?.error) && await trustOf("an enhanced-mcp capture declaring a word off the ladder") === null, "…and its schema refuses a word off the ladder");
+      const viaMeta = "a capture whose metadata names a trust, through enhanced-mcp";
+      const vm = await call(h, "brain_capture_thought", { content: viaMeta, metadata: { trust: "root" }, trust: null });
+      assert(!vm.isError && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust, a null trust no declaration: the key's, no claim filed (${vm.toolText.slice(0, 60)}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
+    }
+    // agent-memory-api's POST /writeback.
+    {
+      const h = await load("integrations/agent-memory-api/index.ts");
+      const decision = "We decided the ledger is replayed from the import, declared ingested.";
+      const r = await send(h, "POST", "/writeback", {
+        schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" }, trust: "ingested",
+        memory_payload: { decisions: [decision] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
+      });
+      const plain = "We decided the runtime keeps its own cache, trust undeclared.";
+      const p2 = await send(h, "POST", "/writeback", {
+        schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" },
+        memory_payload: { decisions: [plain] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
+      });
+      const offLadder = "We decided nothing, declaring a word off the ladder.";
+      const bad = await send(h, "POST", "/writeback", {
+        schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" }, trust: "root",
+        memory_payload: { decisions: [offLadder] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
+      });
+      assert(r.status === 200 && await trustOf(decision) === "ingested" && p2.status === 200 && await trustOf(plain) === "operator",
+        `agent-memory-api's /writeback forwards the runtime's trust to each memory's thought, the key's when undeclared (${r.status}; ${await trustOf(decision)}, ${await trustOf(plain)})`);
+      assert(bad.status === 400 && await trustOf(offLadder) === null, `…and refuses a word off the ladder (${bad.status}; first review pass)`);
+    }
+    // smart-ingest: an ingest executed at once, and a dry run executed later — the job carries the declaration.
+    {
+      const h = await load("integrations/smart-ingest/index.ts");
+      const now = "A page the importer copied in, ingested at once with its trust declared.";
+      const later = "A page the importer copied in, dry run first, its trust kept on the job.";
+      const a = await send(h, "POST", "/", { text: now, dry_run: false, skip_classification: true, source_label: "test-trust", trust: "ingested" });
+      const d = await send(h, "POST", "/", { text: later, dry_run: true, skip_classification: true, source_label: "test-trust", trust: "ingested" });
+      const x = await send(h, "POST", "/execute", { job_id: d.json?.job_id });
+      const bad = await send(h, "POST", "/", { text: "An ingest declaring a word off the ladder.", dry_run: false, trust: "root" });
+      assert(a.status === 200 && await trustOf(now) === "ingested", `smart-ingest forwards the ingest's trust to the thought it writes (${a.status}; ${await trustOf(now)})`);
+      assert(d.status === 200 && x.status === 200 && await trustOf(later) === "ingested", `…and a dry run's execute writes it from the job's record (${x.status}; ${await trustOf(later)})`);
+      assert(bad.status === 400 && await trustOf("An ingest declaring a word off the ladder.") === null, `…and a word off the ladder is refused before extraction (${bad.status})`);
+      // A `source_metadata.trust` is not the argument: dropped, so it neither declares nor slips past the refusal into a claim.
+      const smuggled = "A page whose source metadata names a trust of its own.";
+      const sm = await send(h, "POST", "/", { text: smuggled, dry_run: false, skip_classification: true, source_label: "test-trust", source_metadata: { source_client: "test", trust: "root" } });
+      const [claim] = await sql`SELECT a.actor_context->'claimed' AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE t.content = ${smuggled} AND a.action = 'capture'`;
+      assert(sm.status === 200 && await trustOf(smuggled) === "operator" && (claim?.c ?? null) === null,
+        `…and a source_metadata.trust is dropped: the key's trust, no claim filed (${sm.status}; ${await trustOf(smuggled)}; claimed ${JSON.stringify(claim?.c ?? null)}; first review pass)`);
+    }
+  } finally {
+    for (const label of labels) await sql`UPDATE ob1_agents SET kind = NULL WHERE label = ${label}`;
+    for (const r of kindsBefore) if (r.kind) await sql`SELECT set_agent_kind(${r.label}, ${r.kind})`;
+  }
+}
+
 console.log("\n[the files say what this test assumes]");
 const spells = (rel: string, re: RegExp, what: string) => assert(re.test(readFileSync(join(ROOT, rel), "utf8")), `${rel} ${what}`);
 // The date helpers rest-api's /search copied from enhanced-mcp (SMD-2054) — DateWindow, ISO_BOUND, parseBound,
@@ -1526,7 +1641,7 @@ spells("integrations/telegram-capture/README.md", /p_embedding_model: EMBEDDING_
 spells("integrations/readwise-capture/index.ts", /\.update\(\{ \[column\]: value \}\)\s*\.eq\("id", result\.id\)\s*\.is\(column, null\)/s, " writes each column where it is NULL — a fresh row, or one an interrupted first write left half-shaped");
 spells("recipes/readwise-import/import-readwise.py", /for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(\s*\{column: thoughts\[0\]\[column\]\}\s*\)\.in_\("id", ids\)\.is_\(column, "null"\)\.execute\(\)/s, " writes each column over the batch's rows where it is NULL");
 spells("recipes/adaptive-capture-classification/capture-with-gating.ts", /db\.rpc\("upsert_thought", \{\s*p_content: classified\.title,\s*p_payload: \{\s*metadata: \{/s, " captures through upsert_thought, the classifier's fields in metadata");
-spells("recipes/readwise-import/import-readwise.py", /supabase\.rpc\(\s*"upsert_thought",\s*\{\s*"p_content": thought\["content"\],\s*"p_payload": \{\s*"metadata": thought\["metadata"\],\s*"embedding_model": EMBEDDING_MODEL,\s*\},\s*"p_embedding": thought\["embedding"\],/s, " stores each highlight through the 3-argument upsert_thought with its label");
+spells("recipes/readwise-import/import-readwise.py", /supabase\.rpc\(\s*"upsert_thought",\s*\{\s*"p_content": thought\["content"\],\s*"p_payload": \{\s*"metadata": thought\["metadata"\],\s*"embedding_model": EMBEDDING_MODEL,\s*(?:#[^\n]*\s*)*"event": \{"trust": "ingested"\},\s*\},\s*"p_embedding": thought\["embedding"\],/s, " stores each highlight through the 3-argument upsert_thought with its label");
 spells("recipes/readwise-import/import-readwise.py", /ids\.append\(str\(data\["id"\]\)\)\s*if not data\.get\("existed"\):\s*fresh \+= 1\s*except BaseException as e:\s*loop_error = e\s*raise\s*finally:[\s\S]{0,1200}?if ids:\s*try:\s*for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(/s, "…and writes the enhanced columns once per column per batch, in a finally, so a refused reply leaves no half-shaped row behind it — the loop's own error staying the one raised");
 spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\):[\s\S]{0,400}?raise RuntimeError\(/, "…and refuses a reply that names no id instead of skipping the row");
 for (const sample of ["integrations/telegram-capture/README.md", "integrations/slack-capture/README.md"]) {
