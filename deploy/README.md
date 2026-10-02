@@ -1135,6 +1135,33 @@ no Postgres credential, and until the proxy moves the stack onto the mesh
 what is in flight, closes the store and exits. The library's in-memory store,
 which the proof of concept first ran on, forgot all of it at every restart.
 
+**Registration** is open, as MCP clients expect: claude.ai and Claude Code
+register themselves before anyone signs in. It is bounded two ways:
+- **A cap.** The store holds at most `OB1_AUTH_MAX_CLIENTS` registered clients
+  (200 unless set), counting registrations still under way. Past it, a
+  registration is answered 503 `temporarily_unavailable` until room frees,
+  however its path is spelled (the library takes any case and a trailing
+  slash). The static clients (the GUI,
+  the MCP servers, the services) are configuration, not rows, and a client
+  named by a metadata document is never stored, so neither counts.
+- **A purge**, once the server is listening and then hourly. A registered
+  client goes once it is a day old and nothing of its own (a grant, a code, a
+  refresh token, a sign-in under way) has been alive for a day: an abandoned
+  sign-in's, or one registered for the sake of it. Rows that expired go a
+  day after. The log says what each pass removed. A pass over 100,000
+  clients and 300,000 grants took under half a second on an Apple M5 Pro,
+  with the server answering nothing meanwhile (`bun:sqlite` is synchronous);
+  a slower host or larger rows take longer.
+
+A sign-in's grant lasts 30 days from consent, used or not, and a refresh
+token at most 14; the registration stays while any grant or refresh token of
+the client is alive, and a day after. A client then finds its `client_id`
+unknown, and what it does next is the client's. The MCP TypeScript SDK
+registers again when a refresh is answered `invalid_client` and the app
+around it supports forgetting its client; a client with no refresh token
+meets an unknown-client page at sign-in, and its app must forget the client
+to register afresh.
+
 **Custody and backups.**
 - **The signing key** signs every token the server issues: a new key
   invalidates them all, and a lost one cannot be recovered.
@@ -1178,11 +1205,8 @@ job does the same.
 
 **Not yet.** The `/auth` route and the discovery paths (SMD-1846); passkey
 sign-in, which needs the public origin (SMD-2382, SMD-2286); the MCP server
-and the GUI as its clients (SMD-2286, SMD-2287); and pruning expired rows and
-idle registered clients from the store, with a limit on registration
-itself, an initial access token or a cap on registered clients (SMD-2285's
-next cut). Registration is open today and each one is a row kept until that
-pruning, so the route (SMD-1846) must not open before the limit does. The release
+and the GUI as its clients (SMD-2286, SMD-2287); and rate limits on the
+public edge (SMD-2309), beside the cap above. The release
 overlay does not pin an image for it yet, so the profile builds from a
 checkout.
 

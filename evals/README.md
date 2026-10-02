@@ -6712,9 +6712,10 @@ The consent-page mutants above hold its pages too.
   `auth` profile, and compose does not pass `OB1_AUTH_POC_ERROR_DETAIL`, so
   the POC's `error_detail` stays off there. CI's full-stack job holds the
   service across a restart (`../deploy/README.md`, "Authorization server").
-- **Work step 3, still to come:**
-  - passkeys and the loopback break-glass;
-  - the TTL or purge for DCR rows and expired ones.
+- **Work step 3, done in the deploy, its third cut:** registration stays open
+  but is capped (`OB1_AUTH_MAX_CLIENTS`), and an hourly purge removes expired
+  rows and registered clients unused for a day (`../deploy/auth/store.ts`).
+- **Work step 3, still to come:** passkeys and the loopback break-glass.
 - **Also Work step 3:**
   - the guard's 64 KiB body cap is never exercised live (the oversize case
     stops at the library's 5 KiB limit first); it matters for `jwks_uri`, which

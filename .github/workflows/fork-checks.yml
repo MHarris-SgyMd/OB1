@@ -1204,7 +1204,9 @@ jobs:
       # SQLite store is in its volume, and the memory adapter forgot both.
       # The store's directory is the server's user's alone; an interaction
       # with no session is the library's 400, and a write to a store another
-      # connection holds locked answers 500 and is logged; and a stop is the
+      # connection holds locked answers 500 and is logged; with the cap set to
+      # 3, a fourth registration is refused 503 for now, however the path is
+      # spelled; and a stop is the
       # server's own (exit 0 inside 5 s, its line in the log), not the grace
       # period's SIGKILL. The container goes at the end; the volume, the
       # networks and the auth lines in .env stay to the job's end (tier.sh
@@ -1213,7 +1215,7 @@ jobs:
         working-directory: deploy
         run: |
           auth() { docker compose -f compose.yaml --profile auth "$@"; }
-          echo "OB1_PUBLIC_ORIGIN=https://brain.example.test" >> .env
+          printf 'OB1_PUBLIC_ORIGIN=https://brain.example.test\nOB1_AUTH_MAX_CLIENTS=3\n' >> .env
           bun auth/provision.ts --init
           bun auth/provision.ts
           set +e
@@ -1244,6 +1246,13 @@ jobs:
           # shellcheck disable=SC2016 # JavaScript, run in the container
           locked=$(auth exec -T auth bun -e 'const { Database } = require("bun:sqlite"); const d = new Database("/data/auth.sqlite"); d.exec("BEGIN IMMEDIATE"); try { const r = await fetch("http://127.0.0.1:3000/auth/reg", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); console.log(r.status, (await r.json()).error); } finally { d.exec("ROLLBACK"); }')
           [ "$locked" = "500 server_error" ] || { echo "a write to a locked store answered \"$locked\", not 500 server_error"; exit 1; }
+          # The cap (3 here): the client registered above and two more fill it, and the next is refused for now.
+          for _ in 1 2; do auth exec -T auth bun restart-check.ts --register > /dev/null; done
+          # Every spelling the library routes to registration (any case, a trailing slash) is held to it.
+          # shellcheck disable=SC2016 # JavaScript, run in the container
+          full=$(auth exec -T auth bun -e 'const out = []; for (const p of ["/auth/reg", "/auth/REG", "/auth/reg/"]) { const r = await fetch("http://127.0.0.1:3000" + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); out.push(`${r.status} ${(await r.json()).error} ${r.headers.get("retry-after")}`); } console.log(out.join(" | "))')
+          want="503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600"
+          [ "$full" = "$want" ] || { echo "registrations past the cap answered \"$full\", not \"$want\""; exit 1; }
           grep -qF "server error: SQLiteError: database is locked" <<<"$(auth logs --no-color auth)" || { echo "the locked store's server_error is not in the log"; exit 1; }
           id=$(auth ps -q auth)
           SECONDS=0
