@@ -958,8 +958,11 @@ where it was (a text-changing edit restamps a row), a lowering a writer set
 before 073 is kept (a word off the ladder is replaced), and a text no audit
 row vouches for loses its trust with its marks. The read tools print it on
 the `By:` line (`not recorded` for none) and put a fixed notice on an ingested
-row, before its text; `capture_thought`'s `trust` declares it, and
-`min_trust` filters by it (074, 075). test-schema [66], test-upgrade [20x].
+row, before its text — in `search_thoughts`, `search_thoughts_keyword` and
+`list_thoughts` a text fenced (every line starts `│`, SMD-2483) so no line of
+it can forge another row's block or `By:` line; `capture_thought`'s
+`trust` declares it, and `min_trust` filters by it (074, 075). test-schema
+[66], test-upgrade [20x].
 
 Migration 074 reads it (SMD-1724): `match_thoughts` gains a seventh argument,
 `min_trust text DEFAULT NULL`, and `search_thoughts_keyword` a fifth,
