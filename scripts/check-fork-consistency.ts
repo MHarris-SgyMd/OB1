@@ -249,16 +249,18 @@
  *  25. a tripwire on server-portable/index.ts for the logic a move to
  *      server-portable/core/ leaves behind (SMD-2283): its import and export
  *      statements name only TRANSPORT_IMPORTS' modules, whole or by the names
- *      listed (never egress.ts, embed.ts, metadata.ts or a store backend; the
- *      store's module for its factory, core/reads.ts for its deadlines), and
- *      nothing is imported for effect or dynamically; with comments and
- *      strings blanked, no `sql` template, `new SQL`, `.unsafe(` or bare
- *      `fetch(`; the store's builder `db` named only at its declaration, as
- *      the core's `store:` and in `agents().resolve(db(), …)`; and the store
- *      itself (`_store`, `createStore(`) touched only in STORE_WIRING's
- *      bodies, db() and closeStore(). A value passed on (the agent
- *      registry's lookups) is not followed; transportLeaksIn is a pure
- *      function its probes run on in-memory text; no exceptions
+ *      listed and under those names (never egress.ts, embed.ts, metadata.ts
+ *      or a store backend; the store's module, core/reads.ts, core/filter.ts
+ *      and db/config.mjs by name), and nothing is imported for effect or
+ *      dynamically; with comments and strings blanked, no `sql` template,
+ *      `new SQL`, `.unsafe(` or `fetch(`, bare or on globalThis; the store's
+ *      builder `db` named only at its declaration, as createCore's `store:`,
+ *      in `agents().resolve(db(), …)` and as an object key; and the store
+ *      itself (`_store`, `createStore`) named only in STORE_WIRING's bodies,
+ *      db() and closeStore(), and the store module's import. A value passed
+ *      on (the agent registry's lookups) and a global's alias are not
+ *      followed; transportLeaksIn is a pure function its probes run on
+ *      in-memory text; no exceptions
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20 and 23 parse YAML with Bun.YAML)
@@ -5114,27 +5116,30 @@ checkPostgrestClients();
 // scan cannot follow a value. In server-portable/index.ts:
 //   - every import and re-export statement (comments and strings blanked, so
 //     a sentence naming a file is not one) names a module TRANSPORT_IMPORTS
-//     allows, whole or by the names it lists — the store's module for its
-//     factory and two words, core/reads.ts for its deadlines, never egress.ts,
-//     embed.ts, metadata.ts or a store backend; no side-effect import, no
-//     dynamic import or require;
-//   - strings blanked too: no `sql` template, `new SQL`, `.unsafe(` or bare
-//     `fetch(` (a provider call is the core's);
+//     allows, whole or by the names it lists, under their own names — the
+//     store's module for its factory, a notice, its kind and its type;
+//     core/reads.ts for its deadlines; core/filter.ts and db/config.mjs for
+//     the names index.ts uses — never egress.ts, embed.ts, metadata.ts or a
+//     store backend; no side-effect import, no dynamic import or require;
+//   - strings blanked too: no `sql` template, `new SQL`, `.unsafe(`, or
+//     `fetch(` bare or on globalThis (a provider call is the core's);
 //   - the store's builder `db` named only where it is declared, handed to the
-//     core (`store: db`) and called for the agent registry
-//     (`agents().resolve(db(), …)`) — an alias, `(db)()` or another caller is
-//     a hit;
-//   - the store itself (`_store`, `createStore(`) touched only inside
-//     STORE_WIRING's bodies — db() builds it and wires the job sink to it,
-//     closeStore() closes it at a stop — and at its declaration.
+//     core (`createCore({ …, store: db })`), called for the agent registry
+//     (`agents().resolve(db(), …)`), or as an object key — an alias, `(db)()`,
+//     another caller or another `store:` is a hit;
+//   - the store itself (`_store`, `createStore`, called or not) named only
+//     inside STORE_WIRING's bodies — db() builds it and wires the job sink to
+//     it, closeStore() closes it at a stop — at its declaration and in the
+//     store module's import.
 // What it does not see: a store method reached through a value it cannot name
-// (a parameter, the agent registry's own lookups), and a module the allowlist
-// admits doing more than its name says. Probes run on in-memory text.
+// (a parameter, the agent registry's own lookups, a context the core hands
+// back), an alias of a global (`Bun.sql`), and a module the allowlist admits
+// doing more than its name says. Probes run on in-memory text.
 const TRANSPORT_FILE = "server-portable/index.ts";
 /** What index.ts may import: a module whole ("*"), or only the names listed. */
 const TRANSPORT_IMPORTS = new Map<string, "*" | ReadonlySet<string>>([
   ["@modelcontextprotocol/server", "*"], ["hono", "*"],
-  // The factory, for db() alone (STORE_WIRING); a notice and the store's kind.
+  // The factory, for db() alone (STORE_WIRING); a notice, the store's kind and its type.
   ["./store.ts", new Set(["createStore", "postgrestOnBunNotice", "storeKind", "ThoughtStore"])],
   ["../db/config.mjs", new Set(["tierProblem", "trimmedEnv"])],
   ["./auth.ts", "*"], ["./agents.ts", "*"], ["./version.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./tools.ts", "*"],
@@ -5149,10 +5154,11 @@ const STORE_WIRING = ["db", "closeStore"];
 function wiringSpans(bare: string): Map<string, [number, number]> {
   const spans = new Map<string, [number, number]>();
   for (const name of STORE_WIRING) {
-    const m = new RegExp(`\\bfunction\\s+${name}\\s*\\(`).exec(bare);
+    // The body opens with the `{` that ends the signature's line, so a brace in
+    // a return type or a parameter (`Promise<{ closed: boolean }>`) is not it.
+    const m = new RegExp(`\\bfunction\\s+${name}\\s*\\([^\\n]*\\{[ \\t]*$`, "m").exec(bare);
     if (!m) continue;
-    const open = bare.indexOf("{", m.index);
-    if (open < 0) continue;
+    const open = m.index + m[0].lastIndexOf("{");
     let depth = 0, i = open;
     for (; i < bare.length; i++) {
       if (bare[i] === "{") depth++;
@@ -5169,33 +5175,40 @@ function transportLeaksIn(text: string): { line: number; what: string }[] {
   const code = blanked(text, false); // comments blanked: a specifier is read here
   const bare = blanked(text, true); // strings too: a statement is found here, so a sentence naming a file is not one
   const specAt = (q: number) => code.slice(q + 1, code.indexOf(code[q], q + 1));
+  const statements: [number, number][] = [];
   for (const m of bare.matchAll(/\b(?:import|export)\s+(?:type\s+)?([^;"'`]*?)\s*\bfrom\s*["']/g)) {
+    statements.push([m.index, m.index + m[0].length]);
     const spec = specAt(m.index + m[0].length - 1);
     const allowed = TRANSPORT_IMPORTS.get(spec);
     if (!allowed) { hits.push({ line: lineAt(m.index), what: `imports ${spec}` }); continue; }
     if (allowed === "*") continue;
     const list = /\{([^}]*)\}/.exec(m[1]);
     if (!list || /\*/.test(m[1]) || /^[\w$]+\s*(?:,|$)/.test(m[1].trim())) { hits.push({ line: lineAt(m.index), what: `imports ${spec} whole, where only ${[...allowed].join(", ")} may be named` }); continue; }
-    for (const entry of list[1].split(",").map((s) => s.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0]).filter(Boolean)) {
-      if (!allowed.has(entry)) hits.push({ line: lineAt(m.index), what: `imports ${entry} from ${spec}` });
+    for (const entry of list[1].split(",").map((s) => s.trim().replace(/^type\s+/, "")).filter(Boolean)) {
+      // Under its own name: a rename would hide the name the rules below look for.
+      const [name, alias] = entry.split(/\s+as\s+/);
+      if (!allowed.has(name)) hits.push({ line: lineAt(m.index), what: `imports ${name} from ${spec}` });
+      else if (alias !== undefined && alias !== name) hits.push({ line: lineAt(m.index), what: `imports ${name} from ${spec} as ${alias}` });
     }
   }
+  const inStatement = (i: number) => statements.some(([s, e]) => i >= s && i < e);
   for (const m of bare.matchAll(/\bimport\s*["']/g)) hits.push({ line: lineAt(m.index), what: `a side-effect import of ${specAt(m.index + m[0].length - 1)}` });
   for (const m of bare.matchAll(/\b(?:import|require)\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a dynamic import" });
   for (const m of bare.matchAll(/\bsql\s*`|\bnew\s+(?:Bun\s*\.\s*)?SQL\b|\.unsafe\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a SQL call" });
-  for (const m of bare.matchAll(/(?<![.\w$])fetch\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a fetch (a provider call is the core's)" });
+  for (const m of bare.matchAll(/(?<![.\w$])fetch\s*\(|\bglobalThis\s*\.\s*fetch\b/g)) hits.push({ line: lineAt(m.index), what: "a fetch (a provider call is the core's)" });
   for (const m of bare.matchAll(/(?<![.\w$])db\b/g)) {
     const before = bare.slice(0, m.index), after = bare.slice(m.index + 2);
     if (/\bfunction\s+$/.test(before)) continue; // its declaration
-    if (/\bstore\s*:\s*$/.test(before)) continue; // handed to the core
+    if (/\bcreateCore\(\s*\{[^{}]*\bstore\s*:\s*$/.test(before) && /^\s*[,}]/.test(after)) continue; // handed to the core, uncalled
     if (/\bagents\(\)\s*\.\s*resolve\(\s*$/.test(before) && /^\s*\(\s*\)/.test(after)) continue; // the agent registry's lookup
+    if (/[{,]\s*$/.test(before) && /^\s*:/.test(after)) continue; // an object key, not the builder
     hits.push({ line: lineAt(m.index), what: "the store's builder db named past the core" });
   }
   const spans = [...wiringSpans(bare).values()];
   const inWiring = (i: number) => spans.some(([s, e]) => i >= s && i < e);
-  for (const m of bare.matchAll(/(?<![.\w$])(?:_store\b|createStore\s*\()/g)) {
-    if (inWiring(m.index) || /\blet\s+$/.test(bare.slice(0, m.index))) continue;
-    hits.push({ line: lineAt(m.index), what: `the store (${m[0].replace(/\s*\($/, "(")}) touched outside ${STORE_WIRING.map((n) => `${n}()`).join(" and ")}` });
+  for (const m of bare.matchAll(/(?<![.\w$])(?:_store|createStore)\b/g)) {
+    if (inWiring(m.index) || inStatement(m.index) || /\blet\s+$/.test(bare.slice(0, m.index))) continue;
+    hits.push({ line: lineAt(m.index), what: `the store (${m[0]}) named outside ${STORE_WIRING.map((n) => `${n}()`).join(" and ")}` });
   }
   return hits;
 }
@@ -5223,6 +5236,14 @@ const TRANSPORT_PROBES: [string, boolean][] = [
   ["const pg = new SQL(url);\n", true],
   ['await s.unsafe("select 1");\n', true],
   ['const r = await fetch("https://openrouter.ai/api/v1/embeddings", { method: "POST" });\n', true],
+  ["const r = await globalThis.fetch(url);\n", true],
+  // Review pass 2: the factory renamed, aliased or applied, and a store: that is not the core's.
+  ['import { createStore as mk } from "./store.ts";\nconst s = await mk(env());\n', true],
+  ["const mk = createStore;\n", true],
+  ["const s = await createStore.call(null, env());\n", true],
+  ["const o = { store: db() };\n", true],
+  ["const c = createContext({ env, store: db, door });\n", true],
+  ["const core = createCore({ env, store: db(), door });\n", true],
   ['import { createCore, SPECS } from "./core/index.ts";\n', false],
   ['import type { ToolName } from "./tools.ts";\nexport { parseFilter } from "./core/filter.ts";\n', false],
   ['import { HEALTH_DEADLINE_MS } from "./core/reads.ts";\nexport { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";\n', false],
@@ -5233,6 +5254,10 @@ const TRANSPORT_PROBES: [string, boolean][] = [
   ["function closeStore(): Promise<boolean> {\n  return _store ? _store.then(async (s) => { await s.close(); return true; }) : Promise.resolve(false);\n}\n", false],
   ["const identity = await agents().resolve(db(), principal);\n", false],
   ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],
+  ["const core = createCore({\n  env,\n  store: db,\n  door: SERVER_NAME,\n});\n", false],
+  ['import {\n  createStore,\n  storeKind,\n  type ThoughtStore,\n} from "./store.ts";\n', false],
+  ['return c.json({ db: "up", store: "sql" });\n', false],
+  ["function closeStore(): Promise<{ closed: boolean }> {\n  return _store ? _store.then(() => ({ closed: true })) : Promise.resolve({ closed: false });\n}\n", false],
   ["export default { port, fetch: app.fetch };\nconst r = await app.fetch(req);\n", false],
   ['// (await db()).retryFailed(workType) — said in a comment\nconst s = "await db() and sql`x` in a string";\n', false],
 ];

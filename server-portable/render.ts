@@ -965,21 +965,20 @@ export function renderDelete(o: Outcome<Deleted>): Reply {
 // sentence, the code and `retryable` beside it, as it always did. Each table
 // words every code its action refuses with (core/workers.ts), and no other.
 
-const worded = <C extends RefusalCode>(words: Record<C, string>) => (r: Refusal): string => words[r.code as C] ?? unknownRefusal(r);
+/** A worker action's reply: its JSON, the value beside it; a refusal in the table's words, which take their codes from the outcome's own. */
+const renderWorker = <T extends object, C extends RefusalCode>(o: Outcome<T, C>, words: Record<NoInfer<C>, string>): Reply =>
+  render(o, (v) => JSON.stringify(v), (r) => words[r.code as C] ?? unknownRefusal(r), AS_JSON);
 
-export const renderRetryFailed = (o: Outcome<RetryFailedResult, RetryFailedCode>): Reply =>
-  render(o, (v) => JSON.stringify(v), worded<RetryFailedCode>({
-    REFUSED_EMPTY_WORK_TYPE: "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to retry.",
-  }), AS_JSON);
+export const renderRetryFailed = (o: Outcome<RetryFailedResult, RetryFailedCode>): Reply => renderWorker(o, {
+  REFUSED_EMPTY_WORK_TYPE: "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to retry.",
+});
 
-export const renderReleaseStaleLeases = (o: Outcome<ReleaseLeasesResult, ReleaseLeasesCode>): Reply =>
-  render(o, (v) => JSON.stringify(v), worded<ReleaseLeasesCode>({
-    REFUSED_EMPTY_WORK_TYPE: "Refused: work_type was given but blank — omit it to reap across all pools, or pass a real `workType`.",
-    REFUSED_LIVE_LEASE_NEEDS_WORKER: "Refused: include_live releases a lease that has not lapsed, which risks the holder double-processing — name the worker_id whose live lease to release (worker_status reports the holder).",
-  }), AS_JSON);
+export const renderReleaseStaleLeases = (o: Outcome<ReleaseLeasesResult, ReleaseLeasesCode>): Reply => renderWorker(o, {
+  REFUSED_EMPTY_WORK_TYPE: "Refused: work_type was given but blank — omit it to reap across all pools, or pass a real `workType`.",
+  REFUSED_LIVE_LEASE_NEEDS_WORKER: "Refused: include_live releases a lease that has not lapsed, which risks the holder double-processing — name the worker_id whose live lease to release (worker_status reports the holder).",
+});
 
-export const renderRunWorker = (o: Outcome<DryRunClaimResult, RunWorkerCode>): Reply =>
-  render(o, (v) => JSON.stringify(v), worded<RunWorkerCode>({
-    REFUSED_EMPTY_WORK_TYPE: "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain.",
-    RUN_WORKER_DRAIN_NOT_AVAILABLE: "Refused: the executing drain is not yet available — the server does not run the bulk LLM passes, and the drain will land on a callable worker core (SMD-2304). Call with dry_run: true to preview what a pass would claim.",
-  }), AS_JSON);
+export const renderRunWorker = (o: Outcome<DryRunClaimResult, RunWorkerCode>): Reply => renderWorker(o, {
+  REFUSED_EMPTY_WORK_TYPE: "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain.",
+  RUN_WORKER_DRAIN_NOT_AVAILABLE: "Refused: the executing drain is not yet available — the server does not run the bulk LLM passes, and the drain will land on a callable worker core (SMD-2304). Call with dry_run: true to preview what a pass would claim.",
+});
