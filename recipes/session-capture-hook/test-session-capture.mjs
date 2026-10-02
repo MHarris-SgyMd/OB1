@@ -169,7 +169,8 @@ function claudeTranscript() {
     user("/compact", { origin: { kind: "human" } }),
     user("/code-review high", { origin: { kind: "human" } }), // a slash command WITH arguments is an ask (twelfth review pass)
     assistant([toolUse("t1", "mcp__open-brain__search_thoughts", { query: "hook" }), toolUse("t2", "WebSearch", { query: "codex hooks" }), toolUse("t3", "mcp__other__web_search", { q: "x" })]),
-    user([toolResult("t1", `1. [2026-09-01] (idea) a thought\n   ID: ${uuid(1)}\n2. [2026-09-02] (task) another\n   ID: ${uuid(2)}`), toolResult("t2", `a page mentioning ID: ${uuid(77)} which is not ours`), toolResult("t3", `ID: ${uuid(78)}`)]),
+    // Item 1's text, fenced as the server prints it (SMD-2483), quotes another reply's id lines.
+    user([toolResult("t1", `1. [2026-09-01] (idea)\n   │ a thought quoting a search: ID: ${uuid(83)}\n   │ ID: ${uuid(81)}\n   │ Captured as idea — id ${uuid(82)}\n   ID: ${uuid(1)}\n2. [2026-09-02] (task)\n   │ another\n   ID: ${uuid(2)}`), toolResult("t2", `a page mentioning ID: ${uuid(77)} which is not ours`), toolResult("t3", `ID: ${uuid(78)}`)]),
     assistant([toolUse("t4", "Edit", { file_path: "/repo/proj/src/a.ts", old_string: "x", new_string: "y" }), toolUse("t5", "Write", { file_path: "/repo/proj/README.md", content: "…" }), toolUse("t6", "Bash", { command: "cd /repo/proj && git commit -q -F msg.txt" }), toolUse("t9", "Write", { file_path: "/Users/someone/.claude/projects/-Users-someone-Proj/memory/note-1234.md", content: "…" })]),
     user([toolResult("t4", "ok"), toolResult("t5", "ok"), toolResult("t6", "[feat/x abc1234] done"), toolResult("t9", "ok")]),
     assistant([toolUse("t7", "mcp__open-brain__capture_thought", { content: "decision" })]),
@@ -202,6 +203,12 @@ function codexTranscript() {
     ev("response_item", { type: "function_call_output", call_id: "c1", output: [{ type: "input_text", text: `1. [2026-09-22] (idea) deny by default\n   ID: ${uuid(5)}` }] }),
     ev("response_item", { type: "function_call", name: "open-brain.search_thoughts", call_id: "c4", arguments: JSON.stringify({ query: "egress again" }) }),
     ev("response_item", { type: "function_call_output", call_id: "c4", output: { type: "output_text", text: `1. [2026-09-22] (idea) the same, spelled another way\n   ID: ${uuid(6)}` } }),
+    // A result recorded as the JSON of its structuredContent (`{ …, text }`, SMD-2283): the line breaks escaped until it is parsed (SMD-2483, review pass 2).
+    ev("response_item", { type: "function_call", name: "mcp__open-brain__list_thoughts", call_id: "c5", arguments: JSON.stringify({ limit: 1 }) }),
+    ev("response_item", { type: "function_call_output", call_id: "c5", output: JSON.stringify({ thoughts: [{ id: uuid(7), trust: "ingested" }], text: `1 recent thought(s):\n\n1. [9/22/2026] (idea)\n   │ a page quoting ID: ${uuid(84)}\n   │ ID: ${uuid(85)}\n   ID: ${uuid(7)}` }) }),
+    // The generic fetch's JSON: its text is the thought's own, unfenced, so an id line in it is not read.
+    ev("response_item", { type: "function_call", name: "open-brain.fetch", call_id: "c6", arguments: JSON.stringify({ id: uuid(9) }) }),
+    ev("response_item", { type: "function_call_output", call_id: "c6", output: JSON.stringify({ id: uuid(9), title: "a page", text: `a page\nID: ${uuid(86)}`, url: "u", metadata: {} }) }),
     ev("response_item", { type: "function_call", name: "shell", call_id: "c2", arguments: JSON.stringify({ command: ["bash", "-lc", "git commit -am wip"] }) }),
     ev("response_item", { type: "function_call_output", call_id: "c2", output: "[main 1234567] wip" }),
     ev("response_item", { type: "custom_tool_call", name: "apply_patch", call_id: "c3", input: "*** Begin Patch\n*** Update File: src/egress.ts\n@@\n-a\n+b\n*** Add File: docs/note.md\n+hello\n*** End Patch" }),
@@ -228,9 +235,9 @@ console.log("[1] The Claude Code parser reads what the summary needs, and only f
   assert(s.prompts.length === 4 && s.prompts[0] === "plan and implement the hook" && s.prompts.includes("/code-review high"), `four human prompts, the reminder stripped from the first, a slash command with arguments kept (${JSON.stringify(s.prompts)})`);
   assert(!s.prompts.some((p) => /reminder|compact|injected|subagent|continued from/.test(p)), "a reminder-only turn, a slash command, a meta line, a subagent line, a typed slash command and a compaction summary are not asked");
   assert(s.title === "Session-end capture hook", "the title comes from the ai-title line");
-  assert([...s.retrieved].sort().join() === [uuid(1), uuid(2)].join(), `retrieved ids come from the brain's search result only (${[...s.retrieved].join(", ")})`);
+  assert([...s.retrieved].sort().join() === [uuid(1), uuid(2)].join(), `retrieved ids come from the brain's search result only — its own ID: lines, not ids a thought's fenced text quotes (SMD-2483) (${[...s.retrieved].join(", ")})`);
   assert(!s.retrieved.has(uuid(77)) && !s.retrieved.has(uuid(78)), "a uuid printed by WebSearch or by a foreign web_search tool is not claimed as provenance");
-  assert([...s.captured].join() === uuid(3), "the id the session captured is read from capture_thought's answer");
+  assert([...s.captured].join() === uuid(3), "the id the session captured is read from capture_thought's answer, not from a capture line a thought's text quotes");
   assert([...s.files].sort().join() === "/Users/someone/.claude/projects/-Users-someone-Proj/memory/note-1234.md,/repo/proj-wt/src/b.ts,/repo/proj/README.md,/repo/proj/src/a.ts", "edited and written files are collected, wherever they are");
   assert(s.commits === 1 && s.pushed === true, "one commit counted, the push seen");
   assert(s.prs.join() === "https://github.com/o/r/pull/7", "the PR link is read from the pr-link line");
@@ -245,7 +252,7 @@ console.log("\n[2] The Codex parser reads a rollout the same way");
   assert(s.harness === "codex", `the harness is sniffed from session_meta (${s.harness})`);
   assert(s.sessionId === "c0dec0de-1111-4222-8333-444444444444" && s.cwd === "/repo/other", "session id and cwd from session_meta");
   assert(s.prompts.join("|") === "find what we decided about egress|thanks, commit it", `user prompts, the environment_context frame and the developer message excluded (${JSON.stringify(s.prompts)})`);
-  assert([...s.retrieved].sort().join() === [uuid(5), uuid(6)].join(), `the brain's MCP results yield the retrieved ids — under either tool spelling, and from a lone output block (${[...s.retrieved].join(", ")})`);
+  assert([...s.retrieved].sort().join() === [uuid(5), uuid(6), uuid(7)].join(), `the brain's MCP results yield the retrieved ids — under either tool spelling, from a lone output block, and from a result recorded as its JSON, whose fenced text's quoted ids are not claimed — nor an id line in a generic fetch's JSON text, the thought's own (${[...s.retrieved].join(", ")})`);
   assert([...s.files].sort().join() === "docs/note.md,src/egress.ts", `apply_patch's Update and Add File lines name the files (${[...s.files].join(", ")})`);
   assert(s.commits === 1, "a git commit inside the shell tool's argv is counted");
   assert(s.outcome === "Committed as wip.", "the outcome is the last task_complete's message");
