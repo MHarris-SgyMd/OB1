@@ -283,15 +283,28 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
  * The review flags' own rules — which combine, what a --list word may be, a
  * proposal id's shape, a note's marker — as the refusal of the first broken,
  * in the CLI's order and words, or null. Pure: no database, no output; run()
- * and the CLI both refuse through it (SMD-2304).
+ * and the CLI both refuse through it (SMD-2304). A review takes the pass's
+ * place, so --status and --dry-run, which report on the pass, are refused
+ * beside one: beside a decision the decision was written anyway, and beside
+ * --list or --stale they were dropped without a word (SMD-2405). --list and
+ * --stale do combine with a decision: they only read, after it is written.
  */
-export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" | "reject" | "direction" | "force" | "note" | "limit">): string | null {
+export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" | "reject" | "direction" | "force" | "note" | "limit" | "stale" | "status" | "dryRun">): string | null {
   const { list, accept, reject, direction, note } = { list: opts.list ?? undefined, accept: opts.accept ?? undefined, reject: opts.reject ?? undefined, direction: opts.direction ?? undefined, note: opts.note ?? undefined };
   if (list !== undefined && !LIST_STATUSES.includes(list)) return "--list takes pending, accepted, rejected, stale, lineage or all (or nothing, for pending).";
   for (const [name, v] of [["accept", accept], ["reject", reject]] as const) {
     if (v !== undefined && !UUID_RE.test(v)) return `--${name} needs a proposal id (a UUID from --list or the list_supersession_proposals tool).`;
   }
   if (accept && reject) return "--accept and --reject are one decision each; pass one.";
+  const report = opts.dryRun === true ? "--dry-run" : opts.status === true ? "--status" : undefined;
+  // A decision writes whatever else is asked: `--accept <id> --dry-run` accepted the proposal (SMD-2405).
+  if (report !== undefined && (accept !== undefined || reject !== undefined)) {
+    return `${report} writes nothing, and ${accept !== undefined ? "--accept" : "--reject"} writes a decision; pass one (--list shows the proposal without deciding it).`;
+  }
+  // A listing takes the pass's place: the pass's report beside it was dropped without a word (SMD-2015's kind, SMD-2405).
+  if (report !== undefined && (list !== undefined || (opts.stale ?? 0) > 0)) {
+    return `${report} reports on the pass, and ${list !== undefined ? "--list" : "--stale"} takes the pass's place, so ${report} would be dropped without a word; pass one.`;
+  }
   if (direction !== undefined && (!accept || !["newer", "older"].includes(direction))) return "--direction takes newer or older, and only with --accept.";
   if (opts.force === true && !accept) return "--force goes with --accept: it accepts a proposal whose thought was edited after it was judged, one gone stale, or one standing on a lineage pair (070).";
   // The pass's thought cap: beside --list it would be dropped without a word (SMD-2015's kind) — the
@@ -1424,7 +1437,7 @@ if (import.meta.main) {
   // The review flags' rules before the client, where the script refused them:
   // a URL Bun's client rejects then still meets a bad --list word first, as on
   // main (review pass 3). run() refuses through the same function.
-  const review = reviewProblem({ list, accept: cli.value("accept"), reject: cli.value("reject"), direction: cli.value("direction"), force: cli.has("force"), note: cli.value("note"), limit });
+  const review = reviewProblem({ list, accept: cli.value("accept"), reject: cli.value("reject"), direction: cli.value("direction"), force: cli.has("force"), note: cli.value("note"), limit, stale, status: cli.has("status"), dryRun: cli.has("dry-run") });
   if (review !== null) {
     console.error(review);
     process.exit(2);

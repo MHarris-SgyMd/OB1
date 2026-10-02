@@ -396,6 +396,11 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     ["--reject blank", { url: AT, reject: "  " }, ["--url", AT, "--reject", "  "], {}],
     ["--direction blank", { url: AT, accept: ID, direction: " " }, ["--url", AT, "--accept", ID, "--direction", " "], {}],
     ["--note blank", { url: AT, reject: ID, note: "  " }, ["--url", AT, "--reject", ID, "--note", "  "], {}],
+    // The pass's report beside a review (SMD-2405): beside a decision it never stopped the write (`--accept <id> --dry-run` accepted the proposal), beside a listing it was dropped without a word.
+    ["--accept with --dry-run", { url: AT, accept: ID, dryRun: true }, ["--url", AT, "--accept", ID, "--dry-run"], {}],
+    ["--reject with --status", { url: AT, reject: ID, status: true }, ["--url", AT, "--reject", ID, "--status"], {}],
+    ["--status beside --list", { url: AT, status: true, list: "pending" }, ["--url", AT, "--status", "--list"], {}],
+    ["--dry-run beside --stale", { url: AT, dryRun: true, stale: 90 }, ["--url", AT, "--dry-run", "--stale"], {}],
     ["a blank --note before --workers 0", { url: AT, workers: 0, reject: ID, note: " " }, ["--url", AT, "--workers", "0", "--reject", ID, "--note", " "], {}],
     // The banner on stdout, then the blanket gate (SMD-1903), under a judge model named in env.
     ["the egress gate's refusal under OB1_JUDGE_MODEL from env", { url: AT }, ["--url", AT], { OB1_JUDGE_MODEL: "env-judge" }],
@@ -416,6 +421,11 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   ok(reviewProblem({}) === null && reviewProblem({ list: "stale" }) === null && reviewProblem({ accept: ID, direction: "older", force: true, note: "read both" }) === null && reviewProblem({ reject: ID, note: "  a note" }) === null && reviewProblem({ list: null, accept: null, note: null } as never) === null,
      "consolidate's reviewProblem admits what the CLI admits, null as absent");
   ok(reviewProblem({ accept: ID, note: "  settled by the pass: x" })?.includes("marker is the pass's own") === true, "…and refuses a note carrying the pass's marker after leading spaces");
+  // SMD-2405: a decision combines with the reads (--list, --stale), which run after it; not with the pass's report.
+  ok(reviewProblem({ accept: ID, list: "pending" }) === null && reviewProblem({ reject: ID, stale: 30 }) === null && reviewProblem({ status: true }) === null && reviewProblem({ dryRun: true, stale: 0 }) === null,
+     "consolidate's reviewProblem admits a decision beside --list or --stale, and --status or --dry-run alone");
+  ok(reviewProblem({ accept: ID, status: true, dryRun: true })?.startsWith("--dry-run writes nothing, and --accept writes a decision") === true && reviewProblem({ reject: ID, list: "all", status: true })?.startsWith("--status writes nothing, and --reject") === true,
+     "…refuses the pass's report beside a decision first — before a listing beside it");
   // A caller's client: the narrow one, the handles, a keyed run or decision without a URL; never closed.
   let closed = false;
   const stub = (extra: Record<string, unknown> = {}) => Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 3 }, close: async () => { closed = true; }, unsafe: () => { throw new Error("stub queried"); } }, extra);
@@ -436,9 +446,9 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   // A decision writes: an aborted signal stops it before anything opens, as it stops a run (review pass 1).
   const decisionAborted = await inProcess({ url: AT, accept: ID, signal: AbortSignal.abort() });
   ok(decisionAborted.code === 130 && decisionAborted.err === "\n  stopped before the decision was written: the caller's signal was aborted\n" && decisionAborted.seen === 0, `…while a decision under an aborted signal returns 130 before connecting, in words that name no pass (exit ${decisionAborted.code}, ${decisionAborted.seen} connection(s))`);
-  // …beside --dry-run too: the decision writes whatever else is asked (review pass 2: it read the tables first).
+  // …beside --dry-run, refused before the signal is read: a decision beside the pass's report is a usage error (SMD-2405; before it, the decision wrote whatever else was asked).
   const dryDecision = await inProcess({ url: AT, reject: ID, dryRun: true, signal: AbortSignal.abort() });
-  ok(dryDecision.code === 130 && dryDecision.seen === 0, `…and a decision beside --dry-run stops before connecting too (exit ${dryDecision.code}, ${dryDecision.seen} connection(s))`);
+  ok(dryDecision.code === 2 && /^--dry-run writes nothing, and --reject writes a decision/.test(dryDecision.err) && dryDecision.seen === 0, `…and a decision beside --dry-run is refused before connecting, whatever the signal (exit ${dryDecision.code}, ${dryDecision.seen} connection(s))`);
   ok(!closed, "…and never closes the caller's client");
 }
 
