@@ -1,0 +1,53 @@
+// What an operation answers when it does not do what was asked (SMD-2283): a
+// typed refusal, never a sentence. `code` says which rule; `retryable` is the
+// transient/final split SMD-1978 gave the session hook; the other fields are
+// the facts a renderer needs to say it — the MCP layer in prose, the REST core
+// as JSON. A refusal is what the principal may be told: a field the existence-
+// oracle rule (SMD-1298) withholds from a key is left off by the operation.
+
+/**
+ * Every refusal an operation returns. The SMD-1978 codes the session hook keys
+ * on keep their names; the rest name the read tools' refusals, which carried no
+ * code before SMD-2283.
+ */
+export type Refusal =
+  // The read tools.
+  | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch: no such thought; job_status: no such job for this key
+  | { code: "REFUSED_FILTER"; retryable: false; message: string }     // a metadata filter (or said_by/actor) the boundary refuses
+  | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
+  | { code: "REFUSED_SINCE"; retryable: false; value: string }        // a `since` that is neither a time nor a cursor
+  | { code: "REFUSED_CURSOR"; retryable: false; value: string };      // list_thought_ids' `after` is not a thought id
+
+export type RefusalCode = Refusal["code"];
+
+/** An operation's answer: the typed value, or the refusal. A fault — the store down, a missing migration — is thrown, not returned. */
+export type Outcome<T> = { ok: true; value: T } | { ok: false; refusal: Refusal };
+
+export const ok = <T>(value: T): Outcome<T> => ({ ok: true, value });
+export const refuse = <T = never>(refusal: Refusal): Outcome<T> => ({ ok: false, refusal });
+
+/**
+ * A fault an operation threw, typed for a caller that wants a code: FAILED,
+ * with the thrown message, and no `retryable`. The fault is unclassified — a
+ * missing migration and a dropped connection read alike here — so the server
+ * states neither verdict rather than one it does not know (review pass 4:
+ * `retryable: false` called a restarting database final while capture called
+ * it retryable). One classifier for every fault, capture's STORE_UNAVAILABLE
+ * included, is SMD-2461, which adds the field back.
+ */
+export type Failure = { code: "FAILED"; message: string };
+export const failure = (err: unknown): Failure => ({ code: "FAILED", message: messageOf(err) });
+
+/**
+ * What a thrown value says: an Error's message, anything else as String()
+ * prints it — and something String() cannot print (a null-prototype object, a
+ * throwing toString) a fixed phrase rather than a second throw inside the
+ * caller's catch (review pass 6).
+ */
+function messageOf(err: unknown): string {
+  try {
+    return (err as Error)?.message ?? String(err);
+  } catch {
+    return "a fault that could not be printed";
+  }
+}

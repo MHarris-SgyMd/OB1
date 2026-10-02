@@ -298,6 +298,25 @@ jobs:
         working-directory: evals
         run: bun eval-auth.ts --self-check
 
+      # The authorization server itself (SMD-2285), typechecked against
+      # oidc-provider's published types (its devDependencies, which the image
+      # does not install). Then its rules with no stack: the SQLite store's
+      # adapter on a scratch file (expiry, consume, a grant's revocation, a
+      # second open); every start-up setting refused at once, the origin
+      # strictly; --init and the check of deploy/.env on scratch files; and
+      # compose's `auth` block as written. The full-stack job runs the service.
+      - name: Install the authorization server's pinned packages
+        working-directory: deploy/auth
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the authorization server
+        working-directory: deploy/auth
+        run: bunx tsc --noEmit
+
+      - name: Authorization server rules
+        working-directory: deploy/auth
+        run: bun store.ts --self-check && bun provision.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -1073,6 +1092,11 @@ jobs:
           # names exactly the four services it should: SMD-1846 added the proxy.
           docker compose -f compose.yaml --profile orchestration config --format json \
             | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
+          # SMD-2285: the authorization server publishes nothing, joins only
+          # the internal mesh and the egress network, and is handed no
+          # Postgres credential, no plain password and not the POC's switch.
+          docker compose -f compose.yaml --profile auth config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "migrate postgres proxy server " ]
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
@@ -1176,6 +1200,65 @@ jobs:
             fi
           done
           docker rm -f ob1-runner-egress
+
+      # SMD-2285: the authorization server as compose runs it. Its secrets are
+      # --init's, into this job's deploy/.env. First, with one setting blanked
+      # and the origin given a path, it refuses to start, exit 2, naming both
+      # at once. Then it comes up healthy, and a client registered by DCR is
+      # read back with its registration token after a restart (the log shows
+      # the second start) and again after a recreate, as an upgrade does: the
+      # SQLite store is in its volume, and the memory adapter forgot both.
+      # The store's directory is the server's user's alone; an interaction
+      # with no session is the library's 400, and a write to a store another
+      # connection holds locked answers 500 and is logged; and a stop is the
+      # server's own (exit 0 inside 5 s, its line in the log), not the grace
+      # period's SIGKILL. The container goes at the end; the volume, the
+      # networks and the auth lines in .env stay to the job's end (tier.sh
+      # hands tier.ts no OB1_AUTH_* line).
+      - name: The authorization server starts, refuses a bad setting, and keeps its state across a restart
+        working-directory: deploy
+        run: |
+          auth() { docker compose -f compose.yaml --profile auth "$@"; }
+          echo "OB1_PUBLIC_ORIGIN=https://brain.example.test" >> .env
+          bun auth/provision.ts --init
+          bun auth/provision.ts
+          set +e
+          out=$(auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth auth 2>&1)
+          code=$?
+          set -e
+          echo "$out" | tail -4
+          [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
+          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone"; do
+            grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
+          done
+          auth up -d --build --wait --wait-timeout 120 --no-deps auth
+          auth exec -T auth bun restart-check.ts --register > /tmp/auth-client.json
+          auth restart auth
+          auth up -d --wait --wait-timeout 60 --no-deps auth
+          auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
+          log=$(auth logs --no-color auth)
+          starts=$(grep -cF "issuer https://brain.example.test/auth" <<<"$log" || true)
+          [ "$starts" = 2 ] || { echo "the log shows $starts starts, not 2: the restart did not restart the server"; exit 1; }
+          auth up -d --force-recreate --wait --wait-timeout 60 --no-deps auth
+          auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
+          [ "$(auth exec -T auth stat -c '%U %a' /data)" = "bun 700" ] || { echo "/data is not the server's alone"; exit 1; }
+          bogus=$(auth exec -T auth bun -e 'const r = await fetch("http://127.0.0.1:3000/auth/interaction/not-a-uid"); console.log(r.status, (await r.text()).includes("cookie not found"))')
+          [ "$bogus" = "400 true" ] || { echo "an interaction with no session answered \"$bogus\", not 400 naming the missing cookie"; exit 1; }
+          # One process holds the store's write lock across the whole request and
+          # lets go only after the answer, so nothing depends on two start-ups'
+          # timing: the server's write waits out its 5 s and answers 500.
+          # shellcheck disable=SC2016 # JavaScript, run in the container
+          locked=$(auth exec -T auth bun -e 'const { Database } = require("bun:sqlite"); const d = new Database("/data/auth.sqlite"); d.exec("BEGIN IMMEDIATE"); try { const r = await fetch("http://127.0.0.1:3000/auth/reg", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); console.log(r.status, (await r.json()).error); } finally { d.exec("ROLLBACK"); }')
+          [ "$locked" = "500 server_error" ] || { echo "a write to a locked store answered \"$locked\", not 500 server_error"; exit 1; }
+          grep -qF "server error: SQLiteError: database is locked" <<<"$(auth logs --no-color auth)" || { echo "the locked store's server_error is not in the log"; exit 1; }
+          id=$(auth ps -q auth)
+          SECONDS=0
+          auth stop auth
+          took=$SECONDS
+          [ "$(docker inspect -f '{{.State.ExitCode}}' "$id")" = 0 ] || { echo "the stop did not exit 0"; exit 1; }
+          [ "$took" -lt 5 ] || { echo "the stop took ${took} s: the server did not stop on SIGTERM"; exit 1; }
+          grep -qF "stopped on SIGTERM" <<<"$(docker logs "$id" 2>&1)" || { echo "the server's stop line is missing"; exit 1; }
+          auth rm -sfv auth
 
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.

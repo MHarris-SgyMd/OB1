@@ -16,6 +16,7 @@ COPY --from=deps /app/node_modules ./node_modules
 # .dockerignore keeps tests and tooling out.
 COPY server-portable/*.ts server-portable/package.json ./
 COPY server-portable/shims ./shims
+COPY server-portable/core ./core
 # The embedding contract and the version helpers, both imported by preflight.ts.
 # Kept at ../db/ inside the image so the import path is identical in the container
 # and in a checkout; releases.json at their parent's parent, where version.mjs

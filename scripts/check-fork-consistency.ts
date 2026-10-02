@@ -2696,6 +2696,17 @@ const NOT_FORWARDED: Record<string, string> = {
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
 };
 
+/**
+ * Names .env.example documents that no compose service forwards, by design: a
+ * provisioning step run from a checkout reads them from deploy/.env. Each is
+ * held here to staying unforwarded by compose, and to staying documented.
+ * deploy/tier.sh hands OB1_* lines to a container outside compose; it skips
+ * OB1_AUTH_*, which deploy/auth/provision.ts --self-check holds.
+ */
+const FILE_ONLY: Record<string, string> = {
+  OB1_AUTH_OPERATOR_PASSWORD: "the operator's sign-in password, which deploy/auth/provision.ts --init hashes into OB1_AUTH_OPERATOR_PASSWORD_HASH; the auth container is given the hash alone (SMD-2285)",
+};
+
 /** The names `type Env = { … }` declares in a server source, in order; null when the block is not there. */
 function declaredEnvIn(source: string): string[] | null {
   const m = /type Env = \{([\s\S]*?)\n\};/.exec(source);
@@ -2882,17 +2893,18 @@ type ServerEnvGap =
   | [kind: "undeclared", file: string, service: string, name: string, detail: string | null]
   | [kind: "no-server" | "no-base", file: string, service: null, name: null, detail: string]
   | [kind: "undocumented" | "dead-switch", file: string, service: null, name: string, detail: string]
-  | [kind: "excuse-stale", file: null, service: null, name: string, detail: string];
+  | [kind: "excuse-stale" | "file-only-stale", file: null, service: null, name: string, detail: string]
+  | [kind: "file-only-forwarded", file: string, service: null, name: string, detail: string];
 /**
  * The decision, pure: `declared` (type Env's names), `documented` (a Set of the
  * example's knob names), `files` = [{ name, doc }] with "compose.yaml" among
- * them; `excused` is NOT_FORWARDED, or a probe's own map. Returns gaps
+ * them; `excused` is NOT_FORWARDED and `fileOnly` FILE_ONLY, or a probe's own maps. Returns gaps
  * `[kind, file, service, name, detail]`, in the order the
  * rules run: per file — the reader's gaps, then each knob's shape and, under
  * the server, its declaration and excuse; then the base file's universe;
  * stale excuses; dead switches; the fallback.
  */
-function serverEnvGapsIn(declared: string[], documented: Set<string>, files: ComposeFile[], excused: Record<string, string> = NOT_FORWARDED) {
+function serverEnvGapsIn(declared: string[], documented: Set<string>, files: ComposeFile[], excused: Record<string, string> = NOT_FORWARDED, fileOnly: Record<string, string> = FILE_ONLY) {
   const gaps: ServerEnvGap[] = [];
   const anywhere = new Set<string>();
   const forwardedBy = new Map<string, Map<string, ServiceEnv>>(); // file name → its services' environments, read once
@@ -2933,7 +2945,12 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
     if (!declared.includes(k)) gaps.push(["excuse-stale", null, null, k, ""]);
   }
   for (const k of documented) {
-    if (!anywhere.has(k)) gaps.push(["dead-switch", ".env.example", null, k, ""]);
+    if (k in fileOnly) {
+      if (anywhere.has(k)) gaps.push(["file-only-forwarded", ".env.example", null, k, fileOnly[k]]);
+    } else if (!anywhere.has(k)) gaps.push(["dead-switch", ".env.example", null, k, ""]);
+  }
+  for (const k of Object.keys(fileOnly)) {
+    if (!documented.has(k)) gaps.push(["file-only-stale", null, null, k, ""]);
   }
   // The fallback is held wherever a file's server sets it — an overlay's
   // `OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-https://…}` lands in the same
@@ -2959,8 +2976,11 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
 const BASE = (yaml: string) => ({ name: "compose.yaml", yaml });
 const OVERLAY = (yaml: string) => ({ name: "compose.x.yaml", yaml });
 const SRV = (env: string) => `services:\n  server:\n    environment:\n${env}`;
-const DECISION_PROBES: [string[], string[], { name: string; yaml: string }[], string[], Record<string, string>?][] = [
-  // [declared, documented, files, expected "kind:name" list, excused (none unless given)]
+const DECISION_PROBES: [string[], string[], { name: string; yaml: string }[], string[], Record<string, string>?, Record<string, string>?][] = [
+  // [declared, documented, files, expected "kind:name" list, excused (none unless given), file-only (none unless given)]
+  [["OB1_A"], ["OB1_A", "OB1_P"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], [], undefined, { OB1_P: "why" }],
+  [["OB1_A"], ["OB1_A", "OB1_P"], [BASE(`${SRV("      OB1_A: ${OB1_A:-}\n")}  other:\n    environment:\n      OB1_P: \${OB1_P:-}\n`)], ["file-only-forwarded:OB1_P"], undefined, { OB1_P: "why" }],
+  [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], ["file-only-stale:OB1_P"], undefined, { OB1_P: "why" }],
   [["OB1_A", "OB1_B", "OB1_STORE"], ["OB1_A", "OB1_B"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n      OB1_B: ${OB1_B:-x}\n"))], [], { OB1_STORE: "why" }],
   [["OB1_A", "OB1_B"], ["OB1_A", "OB1_B"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], ["unforwarded:OB1_B", "dead-switch:OB1_B"]],
   [["OB1_A"], ["OB1_A", "OB1_C"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], ["dead-switch:OB1_C"]],
@@ -3032,9 +3052,9 @@ function checkServerEnvForwarded() {
       fail(SELF, `forwarded-env reader no longer reports ${JSON.stringify(kinds)} / ${JSON.stringify(server)} for its probe (reported ${JSON.stringify(gotKinds)} / ${JSON.stringify(gotServer)}): ${JSON.stringify(yaml)}`);
     }
   }
-  for (const [declared, documented, probeFiles, expected, excused] of DECISION_PROBES) {
+  for (const [declared, documented, probeFiles, expected, excused, fileOnly] of DECISION_PROBES) {
     const files = probeFiles.map(({ name, yaml }) => ({ name, doc: Bun.YAML.parse(yaml) as YamlValue }));
-    const got = serverEnvGapsIn(declared, new Set(documented), files, excused ?? {}).map(([kind, , , name]) => `${kind}:${name ?? ""}`);
+    const got = serverEnvGapsIn(declared, new Set(documented), files, excused ?? {}, fileOnly ?? {}).map(([kind, , , name]) => `${kind}:${name ?? ""}`);
     if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 14's decision no longer reports ${JSON.stringify(expected)} for its probe (reported ${JSON.stringify(got)}): declared ${JSON.stringify(declared)}, documented ${JSON.stringify(documented)}, ${probeFiles.map((f) => f.name).join(" + ")}`);
   }
 
@@ -3111,6 +3131,8 @@ function checkServerEnvForwarded() {
       case "unforwarded": fail(at(file, "server", "environment"), `the server reads \`${name}\` (${SERVER_ENV_SOURCE}, type Env) and \`server.environment\` never forwards it, so a value in deploy/.env does nothing and says nothing — add \`${name}: \${${name}:-}\` (or, when the stack must not forward it, the name and the reason to NOT_FORWARDED in ${SELF}) (SMD-1843)`); break;
       case "undocumented": fail("deploy/.env.example", `does not document \`${name}\`, which the server reads and compose forwards — an operator cannot find the knob; add a \`# ${name}=\` line with what it does (SMD-1843)`); break;
       case "excuse-stale": fail(SELF, `NOT_FORWARDED excuses \`${name}\`, which ${SERVER_ENV_SOURCE} no longer declares — drop the entry (SMD-1843)`); break;
+      case "file-only-forwarded": fail(`deploy/.env.example${exampleLine(name) ? `:${exampleLine(name)}` : ""}`, `\`${name}\` is forwarded to a container, which FILE_ONLY in ${SELF} says no compose service forwards: ${detail}`); break;
+      case "file-only-stale": fail(SELF, `FILE_ONLY names \`${name}\`, which deploy/.env.example no longer documents — drop the entry`); break;
       case "dead-switch": fail(`deploy/.env.example${exampleLine(name) ? `:${exampleLine(name)}` : ""}`, `documents \`${name}\`, and no service's \`environment:\` in any deploy/compose*.yaml forwards it, so setting it in deploy/.env does nothing and says nothing — a mention in a comment or on a command line is not a forward (SMD-1843)`); break;
       case "bad-fallback": fail(at(file, "server", name), `OB1_LLM_BASE_URL falls back to \`${detail}\` — the fallback is \`http://<service>:11434/v1\` for a service this file or compose.yaml defines and db/config.mjs's LOCAL_PROVIDER_SERVICES names (${LOCAL_PROVIDER_SERVICES.map((n) => `\`${n}\``).join(", ")}: what preflight calls local), the one address that means something inside the compose network; any other default belongs in db/config.mjs or the operator's deploy/.env (SMD-1843)`); break;
       default: throw new Error(`check 14: no message for kind ${kind}`);
@@ -3804,7 +3826,7 @@ await checkVersionModule();
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
