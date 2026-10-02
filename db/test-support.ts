@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -128,7 +128,7 @@ const FUNCTIONS = [
   MATCH_THOUGHTS_SIGNATURE,
   "recency_score(float, timestamptz, float, float)",
   ...SUPERSEDED_SIGNATURES,
-  "search_thoughts_keyword(text, int, int, jsonb)",
+  SEARCH_THOUGHTS_KEYWORD_SIGNATURE,
   "update_updated_at()",
   "enqueue_thoughts(text, uuid[])",
   "claim_thoughts(text, text, int, int, int)",
@@ -286,6 +286,11 @@ const FUNCTIONS = [
   // trigger, the 1-argument stamp and the backfill it redefines are above.
   "ob1_actor_stamp(jsonb, text)",
   "ob1_declared_trust(jsonb, jsonb, jsonb)",
+  // 074 (SMD-1724): the ladder as a number and a caller's min_trust against
+  // it; match_thoughts and search_thoughts_keyword are named above, their
+  // older forms among SUPERSEDED_SIGNATURES; the index drops with thoughts.
+  "ob1_trust_rank(text)",
+  "ob1_min_trust_rank(text)",
 ];
 
 /**
