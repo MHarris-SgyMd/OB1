@@ -61,7 +61,7 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #   mcp     /mcp and everything under it — the endpoint clients are given;
 #   health  GET and HEAD /health at the origin root, for a GET-only probe;
 #   legacy  everything but /.well-known — what clients reach today at the root
-#           (`POST /?key=`, the root /health, /worker-status, /jobs/<id>, and
+#           (`POST /?key=`, /worker-status, /jobs/<id>, and
 #           `GET /`, whose 405 an MCP SDK client takes as "no stream here";
 #           the proxy's 404 there made v1 and v2 clients report an error on
 #           every connect, measured), kept so the upgrade that lands the proxy
@@ -72,8 +72,11 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 # those 404 itself and the server never sees them: a claude.ai connector at
 # https://host/mcp asks /.well-known/oauth-protected-resource/mcp at the
 # origin root, and proceeds on the key only on a 404 (SMD-1246, FORK.md
-# change 42). Traefik matches the cleaned, decoded path, so `//.well-known/`
-# and `/%2ewell-known/` are refused too (measured on v3.7.13). Its 404 carries
+# change 42). Traefik matches the cleaned, decoded path, so `//.well-known/`,
+# `/%2ewell-known/` and `/x/../.well-known/` are refused too (measured on
+# v3.7.13) — all but an encoded slash, which it leaves encoded:
+# `/.well-known%2Fx` reaches the server's 405, as it did before the proxy, and
+# no discovery client sends it. Its 404 carries
 # none of the server's CORS headers; the SDK's discovery reads a CORS failure
 # as a 404 and goes on.
 x-proxy-routes: &proxy-routes |
@@ -910,11 +913,11 @@ services:
   # deploy/.env and `bun deploy/auth/provision.ts` checks the file; set
   # OB1_PUBLIC_ORIGIN yourself (deploy/README.md, "Authorization server").
   #
-  # Nothing routes to it yet. The proxy that serves `/auth` and the
-  # well-known paths comes with SMD-1846, so for now it publishes no port and
+  # Nothing routes to it yet. The proxy's `/auth` and well-known routes come
+  # with SMD-1846's PR 2, so for now it publishes no port and
   # answers only on the mesh as auth.ob1.internal. It joins two networks of
   # its own and not the default one, so it cannot reach Postgres, Ollama or
-  # n8n until SMD-1846 moves them onto the mesh: `mesh`, internal, where the
+  # n8n until that PR moves them onto the mesh: `mesh`, internal, where the
   # proxy, the MCP server and the GUI will meet it; and `egress`, for the
   # client metadata documents it fetches (each through its fetch guard, which
   # refuses private and *.ob1.internal targets).
@@ -975,7 +978,8 @@ services:
 networks:
   # The ADR's two networks (docs/operator-surface-tiers.md, "Two networks"),
   # joined by the authorization server alone so far: the rest of the stack is
-  # still on compose's default network until SMD-1846's proxy moves it.
+  # still on compose's default network, the proxy included, until SMD-1846's
+  # PR 2 moves it.
   mesh:
     internal: true
   egress: {}

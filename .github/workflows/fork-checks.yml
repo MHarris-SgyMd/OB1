@@ -1303,7 +1303,11 @@ jobs:
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' "$B/?key=$OB1_SMOKE_KEY")
           grep -qF 'Total thoughts: ' <<<"$stats" || { echo "POST /?key= at the root no longer reaches the brain: ${stats:0:200}" >&2; exit 1; }
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
-          curl -s --max-time 10 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{}' --request-target "http://ci-$OB1_SMOKE_KEY@127.0.0.1:8010/mcp?key=$OB1_SMOKE_KEY" "$B/"
+          # Answered by the server, so Traefik took the absolute form and logged it:
+          # a refusal before the log would leave the userinfo half untested.
+          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' --request-target "http://ci-$OB1_SMOKE_KEY@127.0.0.1:8010/mcp?key=$OB1_SMOKE_KEY" "$B/")
+          [ "$code" = 200 ] || { echo "the absolute-form probe got HTTP $code, not the server's 200, so its log line proves nothing" >&2; exit 1; }
           sleep 1
           LOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
           if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the proxy's access log holds the smoke key from a query string or userinfo" >&2; exit 1; fi

@@ -159,7 +159,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which nothing in the stack dials until the proxy (SMD-1846); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres` until SMD-1846 moves the stack onto the mesh, and it holds no Postgres credential | Nothing. `compose exec auth …` for the backup below | Not yet: the proxy that routes `/auth` comes with SMD-1846 |
+| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which nothing in the stack dials until the proxy's `/auth` route (SMD-1846 PR 2); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres` until SMD-1846 moves the stack onto the mesh, and it holds no Postgres credential | Nothing. `compose exec auth …` for the backup below | Not yet: the proxy's `/auth` route comes with SMD-1846 PR 2 |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -236,9 +236,13 @@ container for a changed inline config alone (docker/compose#11900, measured on
 **Upgrading a stack from before SMD-1846** is one plain `compose up -d --build`
 (with the `-f` files and profiles it runs with): compose recreates the server
 without its port, then starts the proxy on it — about 1.5 s with no answer on
-the port, measured on podman — and every client URL keeps working. Name the
-proxy whenever you name the server (`up -d --build server proxy`): `up server`
-alone recreates the server and leaves nothing on the port. **Rolling back** to
+the port, measured on podman — and every client URL keeps working. The last
+30–100 ms of it is the proxy's own 404, between its start and its routes
+loading; an SDK client connected across it saw one 404 and went on (measured).
+On that first `up` name the proxy wherever you name the server (`up -d --build
+server proxy`): `up server` alone recreates the server without its port and
+never creates the proxy. Once the proxy runs, recreating the server alone is
+fine — the proxy keeps the port and finds the new container by name. **Rolling back** to
 a `compose.yaml` from before it needs `up -d --remove-orphans`: without it the
 proxy, now an orphan, keeps the port and the old server cannot bind it
 (measured: "address already in use", the stack down).
@@ -265,10 +269,12 @@ an SSE stream through as it is written — the server's keepalive frame (every
 **Its access log never holds a query string.** A connector carries its key in
 `?key=`, and an OAuth redirect will carry its code and state there; a log line
 with the query would put on disk the key `keygen.ts` shows once. Traefik logs
-one JSON line per request with the query parameters and every header dropped:
-`compose logs proxy` shows the method, the path, the status and the timings.
-CI's "Full stack, no Supabase" job greps that log for the smoke key after calls
-carrying it in a query string.
+one JSON line per request with the query parameters, every header and the
+userinfo of an absolute-form target (`ClientUsername`) dropped: `compose logs
+proxy` shows the method, the path, the status and the timings. CI's "Full
+stack, no Supabase" job greps that log for the smoke key after calls carrying
+it in a query string and as userinfo. `compose.yaml` sets no rotation for that
+log; the engine's default driver decides (SMD-1849).
 
 **Podman.** Nothing here needs the engine's socket, so there is no socket path
 to find and no SELinux label to relax. On podman machine (macOS), while
@@ -1159,8 +1165,8 @@ OAuth for the brain (SMD-2285; `../docs/operator-surface-tiers.md`, decisions
 13–16): oidc-provider 9.12.2 in a small Bun service of the fork's own
 (`auth/server.ts`), which won the proof of concept (`../evals/README.md`). The
 `auth` profile runs it. **Nothing routes to it yet:** it publishes no port,
-and the proxy that serves `/auth` and the discovery paths on the public origin
-comes with SMD-1846. Until then the profile is for standing the server up and
+and the proxy's `/auth` and discovery routes on the public origin come with
+SMD-1846's PR 2 (the proxy itself is in front of the server already). Until then the profile is for standing the server up and
 holding its state, not for signing a client in.
 
 Below, `compose` stands for `podman compose -f deploy/compose.yaml --profile
@@ -1321,7 +1327,7 @@ checkout.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
   The `auth` profile's authorization server runs, but nothing routes to it
-  until the proxy ("Authorization server", above).
+  until the proxy's `/auth` route (SMD-1846 PR 2; "Authorization server", above).
 
 ## Related
 
