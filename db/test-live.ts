@@ -6851,25 +6851,28 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   // migration — the gate, reading under a fresh snapshot, derived a deleted
   // thought's created_at as gone and refused, and the statement was the
   // pass). The pass catches the refusal, sets the moved rows aside and runs
-  // again; nothing it filled is lost, and the next pass fills the deleted
-  // thoughts' captures from their tombstones.
-  // Fourth review pass (run-it): forty deletes fired at once landed inside
-  // one or two attempts of a pass retried five times as one statement, and
-  // the arm passed; ten deletes SPREAD over half a second — one per attempt
-  // — exhausted the five and failed the apply. So the deleter runs for as
-  // long as the pass does. Fifth review pass (run-it): deletes spread over
-  // all eight batches landed about one refusal per batch against a budget of
-  // five per batch, so the arm returned with the budget rule removed as
-  // well. The victims are the FIRST batch's candidates, one deleted every
-  // 3 ms, so each attempt of that batch is refused and re-derived until the
-  // deleter stops: the budget spent by every refusal raises after some
-  // twenty deletes — the raise is what kills that mutant; spent by a
-  // fruitless one alone, the pass returns with the deleted rows set aside.
-  // The rows-set-aside assertion guards the vacuous run: a deleter that never
-  // landed would leave the mutant returning with nothing set aside (sixth
-  // review pass). Only a delete before the scan's snapshot is not set aside
-  // (it is filled from its tombstone in the same pass), so a slower runner
-  // sets more aside, not fewer.
+  // the batch again; nothing it filled is lost, and the next pass fills the
+  // deleted thoughts' captures from their tombstones. A refusal that set
+  // nothing aside spends the batch's budget of five; one that set a row aside
+  // does not. That rule is what this arm holds: with every refusal spending
+  // the budget, the pass raises at the fifth (the mutant the fourth to sixth
+  // review passes chased with a deleter on a 3 ms clock).
+  // SMD-2262: the clock could not say where a delete landed. Only one that
+  // commits after the scan's snapshot and before the batch's gate reads the
+  // row is a refusal (earlier, the row is filled from its tombstone in the
+  // same pass; later, it is already filled), and CI landed 0 to 5 of 6 to 60
+  // deletes there, short of the six the arm needs. So the pass drives the
+  // deletes. K of the first batch's capture rows — one batch, so one budget
+  // of five, which the fifth review pass found the refusals must share — are
+  // held FOR UPDATE, each by a transaction of its own; delete_thought locks
+  // the thought and the supersession key, never an audit row, so the hold
+  // does not stall it. The fill's UPDATE takes a row's lock before the gate
+  // reads the row, so each attempt waits on the first held row it meets —
+  // seen waiting, through pg_blocking_pids, not assumed. That victim is
+  // deleted and then released: the gate refuses it, the batch re-derives
+  // with that row alone moved, and the next attempt waits on the next held
+  // row. Exactly K refusals, each setting one row aside, whatever the
+  // runner's pace.
   await sql`DELETE FROM thoughts`;
   const M = 8000;
   await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at) SELECT 'racing pass row ' || g, '{"source": "race"}'::jsonb, now() - interval '1 day' FROM generate_series(1, ${M}) g`);
@@ -6877,23 +6880,55 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'race'`);
   await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
   assert((await waiting()) === M, `${M} capture rows wait, every one with a created_at the pass would fill (${await waiting()})`);
-  const victims = (await sql`SELECT t.id FROM thoughts t JOIN (SELECT thought_id, row_number() OVER (ORDER BY created_at, seq) AS n FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object') a ON a.thought_id = t.id WHERE a.n <= 300 ORDER BY a.n`).map((r: { id: string }) => r.id);
+  // The pass's own order, (created_at, seq): the first K candidates are its first batch's.
+  const K = 8;
+  const victims = (await sql`SELECT id::text AS audit_id, thought_id::text FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object' ORDER BY created_at, seq LIMIT ${K}`) as { audit_id: string; thought_id: string }[];
+  const holders: { thoughtId: string; pid: number; locked: number; conn: InstanceType<typeof SQL> }[] = [];
+  for (const v of victims) {
+    const conn = new SQL({ url: URL_, max: 1 });
+    await conn`BEGIN`;
+    const locked = (await conn`SELECT 1 FROM thought_audit WHERE id = ${v.audit_id}::uuid FOR UPDATE`).length;
+    const [{ pid }] = await conn`SELECT pg_backend_pid() AS pid`;
+    holders.push({ thoughtId: v.thought_id, pid: Number(pid), locked, conn });
+  }
+  const passConn = new SQL({ url: URL_, max: 1 });
+  const passPid = Number((await passConn`SELECT pg_backend_pid() AS pid`)[0].pid);
   const deleter = new SQL({ url: URL_, max: 1 });
   let passDone = false;
-  const racingPass = (async () => { try { return await sql`SELECT backfill_thought_payloads() AS r`.execute(); } finally { passDone = true; } })();
+  const racingPass = (async () => { try { return await passConn`SELECT backfill_thought_payloads() AS r`.execute(); } finally { passDone = true; } })();
+  const open = new Map(holders.map((h) => [h.pid, h]));
+  let forced = 0;
   let deleted = 0;
-  for (const id of victims) {
-    if (passDone) break;
-    const [{ r }] = await deleter`SELECT delete_thought(${id}::uuid, NULL::jsonb, false) AS r`;
+  while (open.size > 0 && !passDone) {
+    // The first wait comes after the scan, which derives all M rows; once
+    // the pass waits, the answer comes well inside its 10 s lock_timeout.
+    // unnest, not the array: Bun hands a bound query's int4[] back as an
+    // Int32Array, whose map coerces what it returns to a number (run-it).
+    let held: (typeof holders)[number] | undefined;
+    for (const until = Date.now() + 30_000; !held && !passDone && Date.now() < until; ) {
+      const blockers = (await deleter`SELECT unnest(pg_blocking_pids(${passPid}::int)) AS p`) as { p: number }[];
+      held = blockers.map((r) => open.get(Number(r.p))).find((h) => h !== undefined);
+      if (!held) await new Promise((r) => setTimeout(r, 5));
+    }
+    if (!held) break;
+    const [{ r }] = await deleter`SELECT delete_thought(${held.thoughtId}::uuid, NULL::jsonb, false) AS r`;
     if ((r as { ok: boolean }).ok) deleted++;
-    await new Promise((r) => setTimeout(r, 3));
+    await held.conn`COMMIT`;
+    open.delete(held.pid);
+    forced++;
   }
-  const raced = (await racingPass)[0].r as Bf & { unrecoverable: number };
+  for (const h of holders) {
+    if (open.has(h.pid)) await h.conn`COMMIT`;
+    await h.conn.close();
+  }
+  const settled = await racingPass.then((rows) => ({ raced: rows[0].r as Bf & { unrecoverable: number } }), (e: Error) => ({ raised: e.message }));
+  await passConn.close();
   await deleter.close();
-  assert(deleted > 5 && raced.skipped > 5, `more of the first batch's rows were deleted while the pass ran, and set aside by it, than the five refusals a budget spent by every refusal allows (${deleted} deleted, ${raced.skipped} set aside)`);
-  assert(raced.rows + raced.skipped + raced.unrecoverable === M && raced.unrecoverable === 0, `the pass beside ${deleted} deletes of its first batch's rows, one every 3 ms for as long as it ran, returned rather than raising, and accounts for every candidate — ${raced.rows} filled, ${raced.skipped} set aside (${JSON.stringify(raced)})`);
+  assert(holders.every((h) => h.locked === 1) && forced === K && deleted === K, `the pass was seen waiting on each of the ${K} held capture rows of its first batch, and each was deleted while it waited — ${forced} refusals forced, more than the five a budget spent by every refusal allows (${deleted} deleted, ${holders.filter((h) => h.locked === 1).length} of ${K} rows held)`);
+  const raced = "raced" in settled ? settled.raced : null;
+  assert(raced !== null && raced.skipped === K && raced.rows + raced.skipped + raced.unrecoverable === M && raced.unrecoverable === 0, `the pass beside those ${K} refusals returned rather than raising, set aside exactly the ${K} deleted rows and accounts for every candidate — ${raced ? `${raced.rows} filled, ${raced.skipped} set aside (${JSON.stringify(raced)})` : `it raised: ${"raised" in settled ? settled.raised : "?"}`}`);
   const after = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_tombstone: number };
-  assert(after.rows === raced.skipped && after.from_tombstone === raced.skipped && after.awaiting === 0, `…and the next pass fills what was set aside, from the tombstones, leaving nothing waiting (${JSON.stringify(after)})`);
+  assert(after.rows === K && after.from_tombstone === K && after.awaiting === 0, `…and the next pass fills what was set aside, from the tombstones, leaving nothing waiting (${JSON.stringify(after)})`);
   await sql`DELETE FROM thoughts`;
   await sql.close();
 }
