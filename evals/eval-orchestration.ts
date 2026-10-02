@@ -215,7 +215,9 @@ async function up(): Promise<void> {
   // and compose started the old one: a brain two migrations behind the tree,
   // with `--build` in the command (SMD-2210, measured).
   const stamp = `${run(["git", "rev-parse", "--short=12", "HEAD"]).out.trim() || "nogit"}+orch${Date.now()}`;
-  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
+  // The proxy too: the brain's only published port is its (SMD-1846), and
+  // nothing the named services wait on starts it.
+  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", "proxy", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
   if (r.code !== 0) throw new Error(`compose up failed:\n${r.err.slice(-2000)}`);
   await waitFor("the brain's /health", brainHealthy);
   const reported = await fetch("http://127.0.0.1:8012/health", { headers: { "x-brain-key": env.ORCH_BRAIN_READ_KEY } }).then((h) => h.json()).then((j: any) => String(j.commit), () => "unreadable");

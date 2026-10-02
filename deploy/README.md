@@ -93,9 +93,10 @@ client that resolves `localhost` to `::1` first without falling back is refused
 
 ## Pinning a release
 
-The stack above builds `server` and `migrate` from the checkout, and pins
+The stack above builds `server` and `migrate` from the checkout, pins
 `postgres` and `ollama` by tag (`ollama`'s is the one `x-ollama-image` anchor in
-`compose.yaml`, shared by `ollama-pull`). A release pins everything: the job
+`compose.yaml`, shared by `ollama-pull`), and `proxy` and `n8n` by digest in
+`compose.yaml` itself, which the overlay leaves as they are. A release pins everything: the job
 `.github/workflows/release.yml` (SMD-1860) runs on the tag a cut is named by —
 `v<X.Y.Z>`; [`FORK.md`](../FORK.md) "Versioning" has the scheme and the cut —
 publishes the two images to GHCR, `ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z>` and
@@ -219,10 +220,9 @@ paths today:
 | Path | Answered by |
 | --- | --- |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
-| `/health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key |
-| `GET /`, `HEAD /` | the proxy: a 404. Never the MCP catch-all |
-| `/.well-known/*` | the proxy: a 404, for every path under it. A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246) |
-| anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `/worker-status`, `/jobs/<id>` (the poll links `scan_thoughts` returns are root-relative). It keeps every client configured before SMD-1846 working; SMD-2306 gives it a deprecation window and then removes it |
+| `GET`/`HEAD /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key |
+| `/.well-known` and everything under it | the proxy: a 404. A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246). The 404 carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
+| anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>` (the poll links `scan_thoughts` returns are root-relative). It keeps every client configured before SMD-1846 working; SMD-2306 gives it a deprecation window and then removes it, after which `/` is the proxy's 404 |
 
 The path reaches the server as it came, prefix and all: the server answers POST
 at every path and `/health` under any prefix, so `/mcp` needs no setting there.
@@ -232,6 +232,16 @@ and there is no second file to fetch. The same text is a label on the proxy, so
 an `up` after a route changed recreates it: compose does not recreate a
 container for a changed inline config alone (docker/compose#11900, measured on
 5.5).
+
+**Upgrading a stack from before SMD-1846** is one plain `compose up -d --build`
+(with the `-f` files and profiles it runs with): compose recreates the server
+without its port, then starts the proxy on it — about 1.5 s with no answer on
+the port, measured on podman — and every client URL keeps working. Name the
+proxy whenever you name the server (`up -d --build server proxy`): `up server`
+alone recreates the server and leaves nothing on the port. **Rolling back** to
+a `compose.yaml` from before it needs `up -d --remove-orphans`: without it the
+proxy, now an orphan, keeps the port and the old server cannot bind it
+(measured: "address already in use", the stack down).
 
 **Adding a service** is two edits in `compose.yaml`: the service, with no
 `ports:`, and a router for its path in `x-proxy-routes`, at a priority above
@@ -282,9 +292,9 @@ Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) —
 `http://127.0.0.1:8000/health` at the origin root or `…/mcp/health` under the
 endpoint, or whatever URL you configure outside the proxy; the exact match rule
 is the `HEALTH_PATH` comment in `server-portable/index.ts` (FORK.md change 75).
-The MCP endpoint serves POST only: `GET /mcp` answers 405, and `GET /` the
-proxy's 404, so a platform-default probe aimed at `/` marks a healthy server
-down. The image's own `HEALTHCHECK` POSTs to the endpoint instead, which also
+The MCP endpoint serves POST only: `GET /mcp` answers 405 (and `GET /` too,
+through the legacy route; the proxy's 404 once SMD-2306 removes it), so a
+platform-default probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK` POSTs to the endpoint instead, which also
 proves the MCP path serves; either is fine. Opening the connector URL in a
 browser shows `Method Not Allowed`, which is expected.
 
@@ -311,8 +321,12 @@ baked one, so set none. Unset at build, the image reports `unknown`; a Worker
 always does (wrangler has no build arg). Rebuild with it:
 
 ```bash
-OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server
+OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy
 ```
+
+`proxy` named beside `server`: the proxy waits on the server, nothing waits on
+the proxy, so `up server` alone on a stack from before SMD-1846 recreates the
+server without its port and never creates the proxy that takes it over.
 
 The release images carry the tagged commit — the cut's merge commit, in full
 (`.github/workflows/release.yml`) — which is not `releases.json`'s `server` field
@@ -348,7 +362,7 @@ and SMD-2238.
 It only needs a URL and a key, so the same check covers every target:
 
 ```bash
-./deploy/smoke.sh https://ob1.internal.example.com "$MCP_ACCESS_KEY"
+./deploy/smoke.sh https://ob1.internal.example.com/mcp "$MCP_ACCESS_KEY"
 ```
 
 Read-only — it never captures a thought, so it is safe against production. Exit 0

@@ -1263,44 +1263,51 @@ jobs:
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.
       # Through the proxy (SMD-1846): smoke.sh's default URL is the stack's
-      # endpoint, http://127.0.0.1:8010/mcp.
+      # endpoint, http://127.0.0.1:8010/mcp. Then again at the origin root,
+      # the URL every client configured before the proxy holds: the legacy
+      # router must answer it as the server did, the SDK's `GET /` probe's 405
+      # included (review pass 1: the proxy's 404 there made SDK clients report
+      # an error on every connect).
       - name: Smoke-test it over MCP
         working-directory: deploy
-        run: ./smoke.sh
+        run: |
+          ./smoke.sh
+          ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY"
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
 
       # SMD-1846. What the proxy itself owes, beside the smoke:
-      # - the origin root's `GET /` and /.well-known/ are answered by the
-      #   proxy, not the server — Traefik's 404 body, where the server's would
-      #   be 405 and "Not Found" — so a claude.ai connector's discovery at the
-      #   root gets its 404 whatever the server does;
-      # - the URLs clients hold today still answer at the root: `POST /?key=`
-      #   and GET /health (the legacy router, until SMD-2306 closes it);
-      # - the access log never holds a query string: after calls carrying the
-      #   smoke key as `?key=`, `code=` and `state=`, no log line carries it,
-      #   and the `?key=` call's own line is there, so the log is on;
+      # - /.well-known, bare and under it, is answered by the proxy, not the
+      #   server — Traefik's 404 body, where the server's would be "Not
+      #   Found" — so a claude.ai connector's discovery at the root gets its
+      #   404 whatever the server does;
+      # - the connector form clients hold today still answers at the root:
+      #   `POST /?key=` (the legacy router, until SMD-2306 closes it);
+      # - the access log never holds a query string or userinfo: after calls
+      #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
+      #   part of an absolute-form target, no log line carries it, and the
+      #   callback's own line is there with its bare path, so the log is on;
       # - an SSE stream passes through as it is written: with the stub's
       #   embedding held 6 s, the server's 5 s keepalive frame must arrive a
       #   good second before the result. A buffering proxy delivers both
       #   together.
-      - name: The proxy answers the origin root and streams unbuffered
+      - name: The proxy answers discovery itself, logs no key and streams unbuffered
         working-directory: deploy
         run: |
           B=http://127.0.0.1:8010
-          for u in "$B/" "$B/.well-known/oauth-protected-resource" "$B/.well-known/oauth-protected-resource/mcp"; do
+          for u in "$B/.well-known" "$B/.well-known/oauth-protected-resource" "$B/.well-known/oauth-protected-resource/mcp"; do
             code=$(curl -s --max-time 10 -o /tmp/proxy-body -w '%{http_code}' "$u")
             if ! { [ "$code" = 404 ] && [ "$(cat /tmp/proxy-body)" = "404 page not found" ]; }; then echo "GET $u → HTTP $code '$(head -c 80 /tmp/proxy-body)', expected the proxy's own 404" >&2; exit 1; fi
           done
           stats=$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' "$B/?key=$OB1_SMOKE_KEY")
           grep -qF 'Total thoughts: ' <<<"$stats" || { echo "POST /?key= at the root no longer reaches the brain: ${stats:0:200}" >&2; exit 1; }
-          [ "$(curl -s --max-time 10 "$B/health")" = ok ] || { echo "GET /health at the root is not the server's ok" >&2; exit 1; }
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
+          curl -s --max-time 10 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{}' --request-target "http://ci-$OB1_SMOKE_KEY@127.0.0.1:8010/mcp?key=$OB1_SMOKE_KEY" "$B/"
           sleep 1
           LOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
-          if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the proxy's access log holds the smoke key from a query string" >&2; exit 1; fi
-          grep -qE '"RequestMethod":"POST".*"RequestPath":"/"[,}]' <<<"$LOG" || { echo "no access-log line for the POST /?key= call, so the absence of the key proves nothing:" >&2; tail -5 <<<"$LOG" >&2; exit 1; }
+          if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the proxy's access log holds the smoke key from a query string or userinfo" >&2; exit 1; fi
+          grep -qF '"RequestPath":"/auth/callback"' <<<"$LOG" || { echo "no access-log line for the callback with its bare path, so the absence of the key proves nothing:" >&2; tail -5 <<<"$LOG" >&2; exit 1; }
           touch /tmp/provider-stub-slow-embed
           trap 'rm -f /tmp/provider-stub-slow-embed' EXIT
           python3 - "$B/mcp" "$OB1_SMOKE_KEY" <<'PY'

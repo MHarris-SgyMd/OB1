@@ -55,34 +55,44 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 # A request's path reaches the server as it came (no prefix stripped): the
 # server answers POST at every path and /health under any prefix
 # (server-portable/index.ts, HEALTH_PATH), so `/mcp` needs no setting there.
-# The routers, highest priority first:
+# The routers, highest priority first, each on the one public entrypoint
+# (`web`): a router that names none is on every entrypoint, the ping one
+# included, and so would be any entrypoint added later:
 #   mcp     /mcp and everything under it — the endpoint clients are given;
-#   health  /health at the origin root, for a GET-only probe;
-#   legacy  everything else but `GET /`, `HEAD /` and /.well-known/ — what
-#           clients reach today at the root (`POST /?key=`, the root /health,
-#           /worker-status, /jobs/<id>), kept so the upgrade that lands the
-#           proxy breaks no configured client. SMD-2306 owns its window: a
-#           deprecation header, the upgrade guide, then its removal.
-# No router matches `GET /`, `HEAD /` or anything under /.well-known/, so the
-# proxy answers those 404 itself and the server never sees them: a claude.ai
-# connector at https://host/mcp asks /.well-known/oauth-protected-resource/mcp
-# at the origin root, and proceeds on the key only on a 404 (SMD-1246, FORK.md
+#   health  GET and HEAD /health at the origin root, for a GET-only probe;
+#   legacy  everything but /.well-known — what clients reach today at the root
+#           (`POST /?key=`, the root /health, /worker-status, /jobs/<id>, and
+#           `GET /`, whose 405 an MCP SDK client takes as "no stream here";
+#           the proxy's 404 there made v1 and v2 clients report an error on
+#           every connect, measured), kept so the upgrade that lands the proxy
+#           breaks no configured client. SMD-2306 owns its window: a
+#           deprecation header, the upgrade guide, then its removal, after
+#           which `/` is the proxy's 404 too.
+# No router matches /.well-known or anything under it, so the proxy answers
+# those 404 itself and the server never sees them: a claude.ai connector at
+# https://host/mcp asks /.well-known/oauth-protected-resource/mcp at the
+# origin root, and proceeds on the key only on a 404 (SMD-1246, FORK.md
 # change 42). Traefik matches the cleaned, decoded path, so `//.well-known/`
-# and `/%2ewell-known/` are refused too (measured on v3.7.13).
+# and `/%2ewell-known/` are refused too (measured on v3.7.13). Its 404 carries
+# none of the server's CORS headers; the SDK's discovery reads a CORS failure
+# as a 404 and goes on.
 x-proxy-routes: &proxy-routes |
   http:
     routers:
       mcp:
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
         priority: 30
+        entryPoints: [web]
         service: server
       health:
-        rule: "Path(`/health`) || Path(`/health/`)"
+        rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`))"
         priority: 20
+        entryPoints: [web]
         service: server
       legacy:
-        rule: "!PathPrefix(`/.well-known/`) && !(Path(`/`) && (Method(`GET`) || Method(`HEAD`)))"
+        rule: "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))"
         priority: 1
+        entryPoints: [web]
         service: server
     services:
       server:
@@ -410,12 +420,17 @@ services:
       # state there (SMD-2285), so a log line with the query would put the
       # key on disk that keygen.ts shows once — the path, the status and the
       # timings are what the log is for. Measured on v3.7.13: RequestPath is
-      # `/mcp` for `/mcp?key=…`; CI's "The proxy" step greps the log for the
-      # smoke key after a `?key=` call.
+      # `/mcp` for `/mcp?key=…`; CI's "The proxy answers discovery itself…"
+      # step greps the log for the smoke key after calls carrying it.
       TRAEFIK_ACCESSLOG: "true"
       TRAEFIK_ACCESSLOG_FORMAT: json
       TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: drop
       TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: drop
+      # …and no userinfo: a request in absolute form
+      # (`POST http://user:secret@host/mcp`) put its user part in the
+      # ClientUsername field, the one place a probe's secret reached the log
+      # (review pass 1, measured). The server reads no key from userinfo.
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_CLIENTUSERNAME: drop
       # Its liveness, on an entrypoint of its own that only the container's
       # loopback reaches, so /ping is not a route on the origin.
       TRAEFIK_PING: "true"
@@ -452,9 +467,14 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # Started with the server, so `up proxy` brings the brain; not held for the
-    # server's health: while the server is down or in preflight the proxy
-    # answers 502, and it answers again when the server does.
+    # Started after the server, so `up proxy` brings the brain; not held for
+    # the server's health: while the server is down or in preflight the proxy
+    # answers 502, and it answers again when the server does. The direction is
+    # what hands the port over on the first `up` after SMD-1846: compose
+    # recreates the old server, which held the port, before it creates this.
+    # The other way round, this would bind while the old server still held it.
+    # It also means `up server` alone never starts the proxy: name both
+    # (deploy/README.md, "One origin").
     depends_on:
       server:
         condition: service_started

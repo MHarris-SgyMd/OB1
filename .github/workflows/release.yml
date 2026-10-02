@@ -236,10 +236,11 @@ jobs:
       # checkout: the same deploy/.env shape (a provider address that is neither
       # the code's default nor the compose fallback, declared local; the query
       # log on), and `up` with `--pull never` so nothing here is built or fetched
-      # behind the overlay's back. Postgres is pulled by name first — a fresh
+      # behind the overlay's back. Postgres and the proxy (SMD-1846, pinned by
+      # digest in compose.yaml itself) are pulled by name first — a fresh
       # runner has no image at all, and `--pull never` refused the pgvector pull
       # too on the first rehearsal (caught: run-it, PR #119) — and on a tag the
-      # two OB1 images with it, which proves the registry serves what was
+      # two OB1 images with them, which proves the registry serves what was
       # pushed, under the job's token.
       # Since SMD-1875 preflight dials the provider address once (GET /models)
       # and the container refuses to start when nothing answers, so the same
@@ -273,10 +274,11 @@ jobs:
           SERVER_PORT=8010
           EOF
           # What compose makes of the overlay: every service the release names
-          # runs the release's image, Ollama's by digest.
+          # runs the release's image, Ollama's by digest, and the proxy keeps
+          # compose.yaml's digest (the overlay does not name it).
           docker compose -f compose.yaml -f compose.release.yaml --profile local-models config --format json \
-            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image)' >/dev/null
-          pull=(postgres)
+            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
+          pull=(postgres proxy)
           if [ "$PUBLISH" = true ]; then pull+=(server migrate); fi
           docker compose -f compose.yaml -f compose.release.yaml pull "${pull[@]}"
           docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240
