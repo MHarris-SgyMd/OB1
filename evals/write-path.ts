@@ -215,7 +215,8 @@ export function parseHits(reply: string): Hit[] {
     const id = idLine?.slice(4).trim() ?? "";
     if (!UUID_RE.test(id)) continue;
     const by = header.find((l) => l.startsWith("By: "));
-    const kind = by ? /\((operator|agent|ingested)\)\s*$/.exec(by)?.[1] ?? null : null;
+    // The kind is the parenthesis before the line's trust (SMD-1724), or its end on a reply from before it.
+    const kind = by ? /\((operator|agent|ingested)\)(?: · trust (?:operator|agent|ingested|not recorded))?\s*$/.exec(by)?.[1] ?? null : null;
     hits.push({ id: id.toLowerCase(), superseded: header.some((l) => l.startsWith("⚠ Superseded by a newer thought")), writer: kind as WriterKind | null, content });
   }
   return hits;

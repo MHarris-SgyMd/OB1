@@ -48,6 +48,7 @@ import type {
   ThoughtStore,
   UpdateProvenance,
   UpdateResult,
+  WriteEvent,
 } from "./store.ts";
 
 // thought_stats aggregation for the PostgREST path. PostgREST returns at most
@@ -103,12 +104,15 @@ export class PostgrestStore implements ThoughtStore {
     limit: number;
     offset: number;
     filter: Record<string, unknown>;
+    minTrust?: string;
   }): Promise<ThoughtKeywordMatch[]> {
     const { data, error } = await this.client.rpc("search_thoughts_keyword", {
       p_query: opts.query,
       p_limit: opts.limit,
       p_offset: opts.offset,
       p_filter: opts.filter,
+      // 074 (SMD-1724), named only when set: a brain before 074 has no such argument.
+      ...(opts.minTrust !== undefined ? { p_min_trust: opts.minTrust } : {}),
     });
     if (error) throw new Error(error.message);
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseKeywordRow);
@@ -121,8 +125,12 @@ export class PostgrestStore implements ThoughtStore {
     limit: number;
     filter: Record<string, unknown>;
     preferCurrent?: boolean;
+    minTrust?: string;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]> {
-    // prefer_current is 059's function, same arguments (SMD-2255).
+    // prefer_current is 059's function, same arguments (SMD-2255). min_trust
+    // (SMD-1724) names 075's eighth argument, beside all seven of the others —
+    // the 8-argument forms have no defaults, so PostgREST resolves a call to
+    // one only when every argument is named — and only when set.
     const { data, error } = await this.client.rpc(opts.preferCurrent === true ? "search_thoughts_current" : "search_thoughts_hybrid", {
       query_embedding: opts.embedding,
       query_text: opts.query,
@@ -131,6 +139,7 @@ export class PostgrestStore implements ThoughtStore {
       filter: opts.filter,
       recency_weight: opts.recencyWeight ?? RECENCY_DEFAULTS.weight,
       half_life_days: opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays,
+      ...(opts.minTrust !== undefined ? { min_trust: opts.minTrust } : {}),
     });
     if (error) throw new Error(error.message);
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseHybridRow);
@@ -162,6 +171,8 @@ export class PostgrestStore implements ThoughtStore {
     // SMD-1726: the two keys migration 050 stamps, the same containment.
     if (f.saidBy) q = q.contains("metadata", { actor_kind: f.saidBy });
     if (f.actor?.trim()) q = q.contains("metadata", { actor_name: f.actor.trim() });
+    // SMD-1724: the ladder's words at or above min_trust (a filter cannot call ob1_trust_rank).
+    if (f.trustIn) q = q.in("metadata->>trust", f.trustIn);
     if (f.days) {
       const since = new Date();
       since.setDate(since.getDate() - f.days);
@@ -345,6 +356,7 @@ export class PostgrestStore implements ThoughtStore {
     derivedFrom?: string[];
     supersedes?: string;
     lineage?: Lineage;
+    event?: WriteEvent;
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
     // cannot leave a committed row with a NULL embedding — stored but invisible
@@ -362,7 +374,7 @@ export class PostgrestStore implements ThoughtStore {
     // 025: derived_from / supersedes ride it too, validated by upsert_thought.
     // 061: and the lineage envelope, recorded with the write.
     const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel,
-      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage);
+      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage, opts.event);
 
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,

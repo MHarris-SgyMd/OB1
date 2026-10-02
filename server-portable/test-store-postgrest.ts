@@ -22,7 +22,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
+import { applyMigrations, createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
 import { isoDay, isoTimestamp, isoTimestampOrNull, normaliseMutation } from "./store.ts";
@@ -794,6 +794,43 @@ console.log("\n[15] resolveAgent's failure carries PostgREST's SQLSTATE as errno
   let err: { errno?: string; message?: string } = {};
   try { await timedOut.resolveAgent({ keyHash: "f".repeat(64), label: "worker", scope: "read" }); } catch (e) { err = e as typeof err; }
   assert(err.errno === "57014" && /statement timeout/.test(err.message ?? ""), `the thrown error carries errno 57014 and the message (${err.errno}, ${err.message})`);
+}
+
+console.log("\n[16] min_trust and the write's declared trust (SMD-1724): capture's event.trust lowers the row's trust; minTrust keeps rows at or above it on every arm; and 074's and 075's forms are called only when it is set, so a brain without them answers every other search and refuses a min_trust one by name");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  await raw`SELECT set_agent_kind('op-key', 'operator')`;
+  const actor = { name: "op-key", via: "test-store-postgrest" };
+  const own = await store.captureThought({ content: "kappa the operator's own line", payload: { metadata: {} }, embedding: vec(5), actor });
+  const pasted = await store.captureThought({ content: "kappa a page the operator pasted", payload: { metadata: {} }, embedding: vec(6), actor, event: { trust: "ingested" } });
+  const trustOf = async (id: string) => String((await raw`SELECT metadata->>'trust' AS t FROM thoughts WHERE id = ${id}::uuid`)[0].t);
+  assert(await trustOf(own.id) === "operator" && await trustOf(pasted.id) === "ingested", "capture's event.trust reaches the row: the operator's key's own text is operator, its declared lowering ingested");
+  const has = (rows: { id: string }[], id: string) => rows.some((r) => r.id === id);
+  const kw = (minTrust?: string) => store.keywordThoughts({ query: "kappa", limit: 10, offset: 0, filter: {}, ...(minTrust ? { minTrust } : {}) });
+  const hy = (minTrust?: string, preferCurrent = false) => store.hybridThoughts({ query: "kappa", embedding: vec(6), threshold: -1, limit: 10, filter: {}, preferCurrent, ...(minTrust ? { minTrust } : {}) });
+  const [kwAll, kwOp, hyAll, hyOp, cuOp] = [await kw(), await kw("operator"), await hy(), await hy("operator"), await hy("operator", true)];
+  assert(has(kwAll, pasted.id) && has(kwOp, own.id) && !has(kwOp, pasted.id), "keyword: minTrust operator keeps the operator's text and leaves the ingested one out");
+  assert(has(hyAll, pasted.id) && has(hyOp, own.id) && !has(hyOp, pasted.id) && has(cuOp, own.id) && !has(cuOp, pasted.id), "hybrid and the current read: the same, through 075's 8-argument forms");
+  const ls = await store.listThoughts({ limit: 10, trustIn: ["operator"] });
+  assert(has(ls, own.id) && !has(ls, pasted.id) && has(await store.listThoughts({ limit: 10, trustIn: ["operator", "agent", "ingested"] }), pasted.id), "list: trustIn keeps the rows whose trust is one of the words");
+
+  // A brain before 074 and 075: 019's 4-argument keyword, 027's 7-argument
+  // hybrid and 068's current read (each the last to define it before them),
+  // the 8- and 5-argument forms gone. Every search without min_trust answers
+  // as before; one with it is refused by name.
+  await applyMigrations(URL_, { dim: DIM, model: "stub", only: (f) => f.startsWith("019") || f.startsWith("027") || f.startsWith("068") });
+  await raw.unsafe(`DROP FUNCTION search_thoughts_keyword(text, int, int, jsonb, text)`);
+  await raw.unsafe(`DROP FUNCTION search_thoughts_current(vector, text, float, int, jsonb, float, float, text)`);
+  await raw.unsafe(`DROP FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float, text)`);
+  const refusal = async (p: Promise<unknown>) => { try { await p; return ""; } catch (e) { return (e as Error).message; } };
+  assert(has(await kw(), pasted.id) && has(await hy(), pasted.id) && has(await hy(undefined, true), pasted.id), "before 074 and 075, every search without minTrust answers — the store sends the forms that brain has");
+  const [kwNo, hyNo, cuNo] = [await refusal(kw("operator")), await refusal(hy("operator")), await refusal(hy("operator", true))];
+  assert(/search_thoughts_keyword/.test(kwNo) && /does not exist|could not find/i.test(kwNo) && /search_thoughts_hybrid/.test(hyNo) && /does not exist|could not find/i.test(hyNo) && /search_thoughts_current/.test(cuNo) && /does not exist|could not find/i.test(cuNo),
+    `…and a minTrust search is refused by the function it names, which the tools' hint reads (${kwNo.slice(0, 90)} | ${hyNo.slice(0, 90)})`);
+  await applyMigrations(URL_, { dim: DIM, model: "stub", only: (f) => f.startsWith("074") || f.startsWith("075") });
+  assert(!has(await hy("operator"), pasted.id) && !has(await kw("operator"), pasted.id), "074 and 075 re-applied: minTrust answers again");
+  await raw`DELETE FROM thoughts WHERE id = ${own.id}::uuid OR id = ${pasted.id}::uuid`;
+  await raw.close();
 }
 
 await store.close();

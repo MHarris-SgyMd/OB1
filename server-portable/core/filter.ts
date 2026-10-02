@@ -48,6 +48,24 @@ export function parseFilter(raw: unknown): Record<string, unknown> {
 /** The three words the key registry holds (migration 046, `ob1_agents.kind`); `said_by` takes one. */
 export const SAID_BY = ["operator", "agent", "ingested"] as const;
 
+// SMD-1724: what the content is, on the read path. Migration 073 stamps a third
+// reserved key, `metadata.trust` — the trust of the write that put the current
+// text there, in the same three words — and 074 ranks them (ob1_trust_rank:
+// operator 3, agent 2, ingested 1, anything else 0). A row with no trust is
+// below every word.
+/** The trust ladder, highest first: 073's words in the order 074's ob1_trust_rank ranks them. */
+export const TRUST = SAID_BY;
+export type Trust = (typeof TRUST)[number];
+
+/**
+ * The words at or above `min` on the ladder — what list_thoughts keeps
+ * `metadata->>'trust'` to, since a PostgREST filter cannot call
+ * ob1_trust_rank. test-e2e-sql holds this to the function, word for word.
+ */
+export function trustAtOrAbove(min: Trust): Trust[] {
+  return TRUST.slice(0, TRUST.indexOf(min) + 1);
+}
+
 /**
  * `said_by` and `actor` folded into the metadata filter (SMD-1726): the two
  * are the keys migration 050 stamps, so the store, the query log and the plan
