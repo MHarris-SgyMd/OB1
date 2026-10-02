@@ -514,9 +514,12 @@ MCP tools do rather than a copy of it:
 - **`render.ts`** — the words: each tool's reply rendered from that value, the text the
   tools have always said.
 - **`index.ts`** — the Hono app, authentication, and the registration that joins the
-  two: validate (the SDK runs the spec's schema), call the operation, render. It holds
-  no SQL, egress or embedding call: `scripts/check-fork-consistency.ts` check 25 limits
-  what it imports and refuses a store call past the core.
+  two: validate (the SDK runs the spec's schema), call the operation, render. Of the
+  store it holds only the wiring — `db()` builds it and wires the job sink, `closeStore()`
+  closes it at a stop, the agent registry looks keys up through it — and no egress or
+  embedding call. `scripts/check-fork-consistency.ts` check 25 is a tripwire for what a
+  move would leave behind: an import outside its list, a SQL call or `fetch`, the store
+  named outside that wiring.
 
 Every tool's reply carries a typed answer as `structuredContent` beside the text.
 Claude Code, VS Code and Codex show the model `structuredContent` alone when it is present, so:
@@ -569,7 +572,7 @@ bun test-server.ts        # 374 — transport, auth, tool surface, OAuth discove
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 196 — store conformance, real Postgres in a container
-bun run test:e2e          # 380 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 381 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 bun run cf:build          # ~353 KiB gzipped (measured 2026-10-01, SMD-2283 PR 2; the PostgREST store and supabase-js are in it)
 ```
 

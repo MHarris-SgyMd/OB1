@@ -97,11 +97,16 @@ export function refusalValue(r: Refusal): Record<string, unknown> {
   return { code: r.code, retryable: r.retryable, ...(FACTS[r.code] as (r: Refusal) => Record<string, unknown>)(r) };
 }
 
-/** An operation's answer: the typed value, or the refusal. A fault — the store down, a missing migration — is thrown, not returned. */
-export type Outcome<T> = { ok: true; value: T } | { ok: false; refusal: Refusal };
+/**
+ * An operation's answer: the typed value, or the refusal. A fault — the store
+ * down, a missing migration — is thrown, not returned. `C` narrows the codes an
+ * operation can refuse with, so a caller that words each code (render.ts, the
+ * REST routes) must word every one, and no other.
+ */
+export type Outcome<T, C extends RefusalCode = RefusalCode> = { ok: true; value: T } | { ok: false; refusal: Extract<Refusal, { code: C }> };
 
-export const ok = <T>(value: T): Outcome<T> => ({ ok: true, value });
-export const refuse = <T = never>(refusal: Refusal): Outcome<T> => ({ ok: false, refusal });
+export const ok = <T>(value: T): Outcome<T, never> => ({ ok: true, value });
+export const refuse = <T = never, R extends Refusal = Refusal>(refusal: R): Outcome<T, R["code"]> => ({ ok: false, refusal } as unknown as Outcome<T, R["code"]>);
 
 /**
  * A fault an operation threw, typed for a caller that wants a code: FAILED,

@@ -520,6 +520,19 @@ console.log("\n[6e] retry_failed and release_stale_leases over HTTP — tools, k
     const rfPost = await post("/worker-retry-failed", { work_type: WT });
     const rfPostBody = await rfPost.json() as { retried: number };
     assert(rfPost.status === 200 && rfPostBody.retried === 0, `POST /worker-retry-failed returns JSON, 0 now (${JSON.stringify(rfPostBody)})`);
+    // The row names the key that acted, through either door: a named write key's
+    // registry id, the tool's from its principal, the POST's from the identity
+    // the route resolved (SMD-2283 PR 3 review pass 1: nothing held the REST one).
+    await qlog`DELETE FROM query_log WHERE kind = 'action' AND tool = 'retry_failed'`;
+    const refail = (id: string) => sql`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'boom' WHERE work_type = ${WT} AND thought_id = ${id}::uuid`;
+    await refail(ids[0]);
+    await call("retry_failed", { work_type: WT }, "op-raw");
+    await refail(ids[1]);
+    await post("/worker-retry-failed", { work_type: WT }, "op-raw");
+    const opId = (await sql`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = 'op-key'`)[0]?.id;
+    const stamped = await qlog<{ target_id: string; agent_id: string | null }[]>`SELECT target_id::text, agent_id::text FROM query_log WHERE kind = 'action' AND tool = 'retry_failed' ORDER BY target_id`;
+    assert(typeof opId === "string" && stamped.length === 2 && [ids[0], ids[1]].every((id) => stamped.some((r) => r.target_id === id && r.agent_id === opId)),
+      `the tool's row and the POST's both name op-key's agent id (${JSON.stringify(stamped)}, op-key ${opId})`);
 
     // ── release_stale_leases: thought 0 stale (w-dead), thought 1 live (w-live).
     await sql`DELETE FROM thought_work_claims WHERE work_type = ${WT}`;
@@ -2028,8 +2041,10 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
   // A fault: the claim table is away, so the store throws. Each action keeps
   // its lead, FAILED beside it with no retryable — on a PostgREST deploy the
   // store throws the SQL-only reason, which a retry does not mend. Put the
-  // table back whatever the assertions do.
+  // table back whatever the assertions do; a lock held elsewhere fails the
+  // rename within seconds rather than hanging the suite.
   const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SET lock_timeout = '5s'`;
   await sql`ALTER TABLE thought_work_claims RENAME TO thought_work_claims_away`;
   try {
     for (const [tool, args] of answers) {

@@ -246,12 +246,18 @@
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
  *      remaining size (SMD-2126)
- *  25. server-portable/index.ts is transport: comments blanked, it imports
- *      only TRANSPORT_IMPORTS (never egress.ts, embed.ts, metadata.ts or a
- *      store backend); strings blanked too, it holds no dynamic import, no
- *      `sql` template, and no call of the store's builder `db()` but the
- *      agent registry's — the store, the egress gate and the model calls are
- *      server-portable/core/'s (SMD-2283); transportLeaksIn is a pure
+ *  25. a tripwire on server-portable/index.ts for the logic a move to
+ *      server-portable/core/ leaves behind (SMD-2283): its import and export
+ *      statements name only TRANSPORT_IMPORTS' modules, whole or by the names
+ *      listed (never egress.ts, embed.ts, metadata.ts or a store backend; the
+ *      store's module for its factory, core/reads.ts for its deadlines), and
+ *      nothing is imported for effect or dynamically; with comments and
+ *      strings blanked, no `sql` template, `new SQL`, `.unsafe(` or bare
+ *      `fetch(`; the store's builder `db` named only at its declaration, as
+ *      the core's `store:` and in `agents().resolve(db(), …)`; and the store
+ *      itself (`_store`, `createStore(`) touched only in STORE_WIRING's
+ *      bodies, db() and closeStore(). A value passed on (the agent
+ *      registry's lookups) is not followed; transportLeaksIn is a pure
  *      function its probes run on in-memory text; no exceptions
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
@@ -5104,37 +5110,92 @@ checkPostgrestClients();
 // server-portable/core/, so index.ts validates (the SDK runs core/schemas.ts's
 // zod), calls a core operation and renders its answer (render.ts), and the REST
 // core (SMD-2284) calls the same operations: one gateway, not two (SMD-1931).
-// This holds the split. In server-portable/index.ts, comments blanked, every
-// import and re-export names a module in TRANSPORT_IMPORTS — the wiring, the
-// key check, the agent registry, the core and the renderer; never egress.ts,
-// embed.ts, metadata.ts or a store backend, so no egress decision, embedding
-// or extraction call can be made there. With strings blanked as well: no
-// dynamic import or require, no `sql` template, and the store's builder
-// `db()` called only by the agent registry (`.resolve(db(), …)`) — the core
-// takes the builder itself (`store: db`) — so `await db()` and a method on
-// what it returns, a store call the core did not make, is a hit.
+// This is a tripwire for the forms a move leaves behind, not a proof: a text
+// scan cannot follow a value. In server-portable/index.ts:
+//   - every import and re-export statement (comments and strings blanked, so
+//     a sentence naming a file is not one) names a module TRANSPORT_IMPORTS
+//     allows, whole or by the names it lists — the store's module for its
+//     factory and two words, core/reads.ts for its deadlines, never egress.ts,
+//     embed.ts, metadata.ts or a store backend; no side-effect import, no
+//     dynamic import or require;
+//   - strings blanked too: no `sql` template, `new SQL`, `.unsafe(` or bare
+//     `fetch(` (a provider call is the core's);
+//   - the store's builder `db` named only where it is declared, handed to the
+//     core (`store: db`) and called for the agent registry
+//     (`agents().resolve(db(), …)`) — an alias, `(db)()` or another caller is
+//     a hit;
+//   - the store itself (`_store`, `createStore(`) touched only inside
+//     STORE_WIRING's bodies — db() builds it and wires the job sink to it,
+//     closeStore() closes it at a stop — and at its declaration.
+// What it does not see: a store method reached through a value it cannot name
+// (a parameter, the agent registry's own lookups), and a module the allowlist
+// admits doing more than its name says. Probes run on in-memory text.
 const TRANSPORT_FILE = "server-portable/index.ts";
-const TRANSPORT_IMPORTS = new Set([
-  "@modelcontextprotocol/server", "hono",
-  "./store.ts", "../db/config.mjs", "./auth.ts", "./agents.ts", "./version.ts", "./shutdown.ts", "./jobs.ts", "./tools.ts",
-  "./core/index.ts", "./core/reads.ts", "./core/filter.ts", "./render.ts",
+/** What index.ts may import: a module whole ("*"), or only the names listed. */
+const TRANSPORT_IMPORTS = new Map<string, "*" | ReadonlySet<string>>([
+  ["@modelcontextprotocol/server", "*"], ["hono", "*"],
+  // The factory, for db() alone (STORE_WIRING); a notice and the store's kind.
+  ["./store.ts", new Set(["createStore", "postgrestOnBunNotice", "storeKind", "ThoughtStore"])],
+  ["../db/config.mjs", new Set(["tierProblem", "trimmedEnv"])],
+  ["./auth.ts", "*"], ["./agents.ts", "*"], ["./version.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./tools.ts", "*"],
+  ["./core/index.ts", "*"], ["./render.ts", "*"],
+  // The core's deadlines and filter parser — its operations are reached through createCore.
+  ["./core/reads.ts", new Set(["HEALTH_DEADLINE_MS", "BRAIN_INFO_TOOL_DEADLINE_MS"])],
+  ["./core/filter.ts", new Set(["parseFilter", "withActorFilter"])],
 ]);
+/** The functions whose bodies are the store's wiring: build it once (and wire the job sink), close it at a stop. */
+const STORE_WIRING = ["db", "closeStore"];
+/** [start, end) of each STORE_WIRING function's body in `bare` (strings and comments blanked); a name not found is absent. */
+function wiringSpans(bare: string): Map<string, [number, number]> {
+  const spans = new Map<string, [number, number]>();
+  for (const name of STORE_WIRING) {
+    const m = new RegExp(`\\bfunction\\s+${name}\\s*\\(`).exec(bare);
+    if (!m) continue;
+    const open = bare.indexOf("{", m.index);
+    if (open < 0) continue;
+    let depth = 0, i = open;
+    for (; i < bare.length; i++) {
+      if (bare[i] === "{") depth++;
+      else if (bare[i] === "}" && --depth === 0) break;
+    }
+    spans.set(name, [m.index, i + 1]);
+  }
+  return spans;
+}
 /** The lines of `text` (the server's index.ts) that reach past the core, each with what it reached. Pure over a text. */
 function transportLeaksIn(text: string): { line: number; what: string }[] {
   const hits: { line: number; what: string }[] = [];
   const lineAt = (i: number) => text.slice(0, i).split("\n").length;
-  const code = blanked(text, false);
-  for (const m of code.matchAll(/\bfrom\s*["']([^"'\n]+)["']|\bimport\s*["']([^"'\n]+)["']/g)) {
-    const spec = m[1] ?? m[2];
-    if (!TRANSPORT_IMPORTS.has(spec)) hits.push({ line: lineAt(m.index), what: `imports ${spec}` });
+  const code = blanked(text, false); // comments blanked: a specifier is read here
+  const bare = blanked(text, true); // strings too: a statement is found here, so a sentence naming a file is not one
+  const specAt = (q: number) => code.slice(q + 1, code.indexOf(code[q], q + 1));
+  for (const m of bare.matchAll(/\b(?:import|export)\s+(?:type\s+)?([^;"'`]*?)\s*\bfrom\s*["']/g)) {
+    const spec = specAt(m.index + m[0].length - 1);
+    const allowed = TRANSPORT_IMPORTS.get(spec);
+    if (!allowed) { hits.push({ line: lineAt(m.index), what: `imports ${spec}` }); continue; }
+    if (allowed === "*") continue;
+    const list = /\{([^}]*)\}/.exec(m[1]);
+    if (!list || /\*/.test(m[1]) || /^[\w$]+\s*(?:,|$)/.test(m[1].trim())) { hits.push({ line: lineAt(m.index), what: `imports ${spec} whole, where only ${[...allowed].join(", ")} may be named` }); continue; }
+    for (const entry of list[1].split(",").map((s) => s.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0]).filter(Boolean)) {
+      if (!allowed.has(entry)) hits.push({ line: lineAt(m.index), what: `imports ${entry} from ${spec}` });
+    }
   }
-  const bare = blanked(text, true);
+  for (const m of bare.matchAll(/\bimport\s*["']/g)) hits.push({ line: lineAt(m.index), what: `a side-effect import of ${specAt(m.index + m[0].length - 1)}` });
   for (const m of bare.matchAll(/\b(?:import|require)\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a dynamic import" });
-  for (const m of bare.matchAll(/\bsql\s*`/g)) hits.push({ line: lineAt(m.index), what: "a sql template" });
-  for (const m of bare.matchAll(/\bdb\s*\(\s*\)/g)) {
-    const before = bare.slice(0, m.index);
-    if (/\bfunction\s+$/.test(before) || /\.resolve\(\s*$/.test(before)) continue;
-    hits.push({ line: lineAt(m.index), what: "a store call past the core" });
+  for (const m of bare.matchAll(/\bsql\s*`|\bnew\s+(?:Bun\s*\.\s*)?SQL\b|\.unsafe\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a SQL call" });
+  for (const m of bare.matchAll(/(?<![.\w$])fetch\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a fetch (a provider call is the core's)" });
+  for (const m of bare.matchAll(/(?<![.\w$])db\b/g)) {
+    const before = bare.slice(0, m.index), after = bare.slice(m.index + 2);
+    if (/\bfunction\s+$/.test(before)) continue; // its declaration
+    if (/\bstore\s*:\s*$/.test(before)) continue; // handed to the core
+    if (/\bagents\(\)\s*\.\s*resolve\(\s*$/.test(before) && /^\s*\(\s*\)/.test(after)) continue; // the agent registry's lookup
+    hits.push({ line: lineAt(m.index), what: "the store's builder db named past the core" });
+  }
+  const spans = [...wiringSpans(bare).values()];
+  const inWiring = (i: number) => spans.some(([s, e]) => i >= s && i < e);
+  for (const m of bare.matchAll(/(?<![.\w$])(?:_store\b|createStore\s*\()/g)) {
+    if (inWiring(m.index) || /\blet\s+$/.test(bare.slice(0, m.index))) continue;
+    hits.push({ line: lineAt(m.index), what: `the store (${m[0].replace(/\s*\($/, "(")}) touched outside ${STORE_WIRING.map((n) => `${n}()`).join(" and ")}` });
   }
   return hits;
 }
@@ -5146,30 +5207,49 @@ const TRANSPORT_PROBES: [string, boolean][] = [
   ['import "./store-sql.ts";\n', true],
   ['const egress = await import("./egress.ts");\n', true],
   ['const t = require("./thoughts.ts");\n', true],
+  ['import { workerStatus } from "./core/reads.ts";\n', true],
+  ['import * as reads from "./core/reads.ts";\n', true],
+  ['import { createStore, isoTimestamp } from "./store.ts";\n', true],
   ["const r = await (await db()).retryFailed(workType);\n", true],
   ["const s = await db();\nawait s.retryFailed(workType);\n", true],
   ["void db().then((s) => s.logActions(rows));\n", true],
+  ["const s = db;\nawait (await s()).retryFailed(workType);\n", true],
+  ["await (db)().then((s) => s.close());\n", true],
+  ["await db?.();\n", true],
+  ["await Promise.resolve(db()).then((s) => s.retryFailed(workType));\n", true],
+  ["const r = await (await _store!).retryFailed(workType);\n", true],
+  ["const s = await createStore(env());\n", true],
   ["const rows = await sql`select 1`;\n", true],
+  ["const pg = new SQL(url);\n", true],
+  ['await s.unsafe("select 1");\n', true],
+  ['const r = await fetch("https://openrouter.ai/api/v1/embeddings", { method: "POST" });\n', true],
   ['import { createCore, SPECS } from "./core/index.ts";\n', false],
   ['import type { ToolName } from "./tools.ts";\nexport { parseFilter } from "./core/filter.ts";\n', false],
+  ['import { HEALTH_DEADLINE_MS } from "./core/reads.ts";\nexport { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";\n', false],
+  ['import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from "./store.ts";\n', false],
   ['// import { decideCalls } from "./egress.ts";\n', false],
-  ["function db(): Promise<ThoughtStore> {\n  return _store;\n}\n", false],
+  ["const msg = \"copied from './egress.ts' once\";\nconst t = `moved from \"./x.ts\"`;\n", false],
+  ["let _store: Promise<ThoughtStore> | null = null;\nfunction db(): Promise<ThoughtStore> {\n  if (!_store) _store = createStore(env());\n  void _store.then((s) => s.jobSink());\n  return _store;\n}\n", false],
+  ["function closeStore(): Promise<boolean> {\n  return _store ? _store.then(async (s) => { await s.close(); return true; }) : Promise.resolve(false);\n}\n", false],
   ["const identity = await agents().resolve(db(), principal);\n", false],
   ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],
+  ["export default { port, fetch: app.fetch };\nconst r = await app.fetch(req);\n", false],
   ['// (await db()).retryFailed(workType) — said in a comment\nconst s = "await db() and sql`x` in a string";\n', false],
 ];
 function checkTransportOnly() {
   for (const [probe, hit] of TRANSPORT_PROBES) {
     const n = transportLeaksIn(probe).length;
     if (hit && n === 0) fail(SELF, `check 25 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
-    if (!hit && n > 0) fail(SELF, `check 25 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
+    if (!hit && n > 0) fail(SELF, `check 25 catches a non-probe: ${JSON.stringify(probe)} — ${transportLeaksIn(probe).map((h) => h.what).join("; ")} (its own probe)`);
   }
   const path = join(ROOT, TRANSPORT_FILE);
   if (!existsSync(path)) { fail(TRANSPORT_FILE, "check 25's file is gone — move the check with it"); return; }
   const text = readFileSync(path, "utf8");
   if (!/\bfrom\s*["']\.\/core\/index\.ts["']/.test(blanked(text, false))) fail(TRANSPORT_FILE, "check 25 reads no import of ./core/index.ts — the reader is broken, not the file clean");
+  const spans = wiringSpans(blanked(text, true));
+  for (const name of STORE_WIRING) if (!spans.has(name)) fail(TRANSPORT_FILE, `check 25 finds no function ${name}() — STORE_WIRING names the functions that build and close the store; rename it there with the function`);
   for (const { line, what } of transportLeaksIn(text)) {
-    fail(`${TRANSPORT_FILE}:${line}`, `${what} — the MCP server's index.ts validates, calls a core operation and renders its answer (SMD-2283); the store, the egress gate and the model calls are server-portable/core/'s, so the REST core (SMD-2284) makes the same calls: move the logic into core/, or add a module that holds no logic to TRANSPORT_IMPORTS`);
+    fail(`${TRANSPORT_FILE}:${line}`, `${what} — the MCP server's index.ts validates, calls a core operation and renders its answer (SMD-2283); the store, the egress gate and the model calls are server-portable/core/'s, so the REST core (SMD-2284) makes the same calls: move the logic into core/, or, for a module or name that holds no logic, add it to TRANSPORT_IMPORTS`);
   }
 }
 checkTransportOnly();

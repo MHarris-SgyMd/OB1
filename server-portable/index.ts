@@ -261,6 +261,16 @@ function db(): Promise<ThoughtStore> {
   return _store;
 }
 
+/**
+ * The stop's close: the pool only if a request opened one — a store that
+ * failed to build has none, and the PostgREST store holds no pooled connection
+ * to close. True when a SQL pool was closed. Beside db(), so the store's wiring
+ * is these two bodies (check 25).
+ */
+function closeStore(): Promise<boolean> {
+  return _store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : Promise.resolve(false);
+}
+
 // Built on first use, for the same reason as the store: reading env() at module
 // scope runs before initEnv() has seeded it.
 let _agents: AgentResolver | null = null;
@@ -450,7 +460,7 @@ function buildServer(principal: Principal): McpServer {
 
   // Tool 12 & 13: the write half of worker_status (SMD-2132), and Tool 14,
   // run_worker's dry-run preview (SMD-2272) — core/workers.ts. Write-scoped,
-  // like update/delete: a read or capture key is never registered them. The two
+  // like update/delete: none is registered for a read or capture key. The two
   // mutating actions stamp the calling key into the action log, one row per
   // affected thought; the preview mutates nothing and writes none. A fault keeps
   // the tool's lead, `<tool> failed:`, FAILED beside it — on a PostgREST
@@ -844,9 +854,10 @@ app.post("*", async (c, next) => {
   // affected thought, stamped with the resolved agent id (SMD-2132). A dry run
   // mutates nothing, so it writes none.
   const caller: Principal = { ...principal, agentId: identity.agentId };
-  const said = <T extends object>(o: Outcome<T>, words: Partial<Record<RefusalCode, string>>) => o.ok
+  // Each table words every code its operation refuses with (core/workers.ts), and no other.
+  const said = <T extends object, C extends RefusalCode>(o: Outcome<T, C>, words: Record<NoInfer<C>, string>) => o.ok
     ? c.json(o.value, 200, corsHeaders)
-    : c.json({ error: words[o.refusal.code] ?? o.refusal.code, code: o.refusal.code }, 400, corsHeaders);
+    : c.json({ error: words[o.refusal.code as C], code: o.refusal.code }, 400, corsHeaders);
   const named = (v: unknown): string => (typeof v === "string" ? v : "");
   try {
     if (isRetry) return said(await core.retryFailed(caller, { work_type: named(args.work_type) }), {
@@ -1230,9 +1241,7 @@ if (SERVES_ON_BUN) {
     drainBoundMs: grace.drainBoundMs,
     server: () => bunServer,
     calls: toolCalls,
-    // The pool only if a request opened one: a store that failed to build has
-    // none, and the PostgREST store holds no pooled connection to close.
-    close: async () => (_store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : false),
+    close: closeStore,
     onCut: () => {
       cutByStop = true;
       // Jobs still running when the stop cuts what is in flight are marked lost,
