@@ -217,6 +217,9 @@ def store_thoughts(supabase, thoughts: list[dict]) -> int:
                         "p_payload": {
                             "metadata": thought["metadata"],
                             "embedding_model": EMBEDDING_MODEL,
+                            # SMD-1724: a highlight is outside text — declared,
+                            # so the thought's trust is ingested whatever the key.
+                            "event": {"trust": "ingested"},
                         },
                         "p_embedding": thought["embedding"],
                     },

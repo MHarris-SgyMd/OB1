@@ -1500,6 +1500,83 @@ try {
 
 // ── The files that cannot run here say what this test assumes ────────────────
 
+// SMD-1724 (PR 4): every server that captures for a client forwards the client's declared trust — a lowering stands,
+// a word off the ladder is refused — and with no declaration the key's kind stands. The servers' keys are classified
+// `operator` for this block (073 stamps the trust from the registry's kind and the declaration below it), so a
+// forwarded `ingested` shows as itself, and an unforwarded one as `operator`; their kinds are put back after.
+{
+  console.log("\n[SMD-1724: the capture paths forward the client's trust]");
+  const trustOf = async (text: string) => ((await sql`SELECT metadata->>'trust' AS t FROM thoughts WHERE content = ${text}`)[0]?.t ?? null) as string | null;
+  const labels = (await sql`SELECT DISTINCT actor_name AS n FROM thought_audit WHERE actor_name IS NOT NULL`).map((r: { n: string }) => r.n);
+  // One label at a time: Bun binds a JS array comma-joined, not as an array literal.
+  const kindsBefore: { label: string; kind: string | null }[] = [];
+  for (const label of labels) kindsBefore.push(...(await sql`SELECT label, kind FROM ob1_agents WHERE label = ${label}`) as { label: string; kind: string | null }[]);
+  for (const label of labels) await sql`SELECT set_agent_kind(${label}, 'operator')`;
+  try {
+    // rest-api's POST /capture.
+    {
+      // A third instance of the module: its rate-limit bucket is its own, as the defaults instance's is above.
+      const h = (await import(join(ROOT, "integrations/rest-api/index.ts") + "?trust")).default!.fetch! as Handler;
+      const [plain, declared] = ["a note typed into rest-api, trust undeclared", "a page pasted into rest-api, declared ingested"];
+      const a = await send(h, "POST", "/capture", { content: plain });
+      const b = await send(h, "POST", "/capture", { content: declared, trust: "ingested" });
+      const bad = await send(h, "POST", "/capture", { content: "a capture declaring a word off the ladder", trust: "root" });
+      assert(a.status === 200 && b.status === 200 && await trustOf(plain) === "operator" && await trustOf(declared) === "ingested",
+        `rest-api POST /capture forwards the client's trust: undeclared the key's (${await trustOf(plain)}), declared ingested (${await trustOf(declared)})`);
+      assert(bad.status === 400 && /trust must be operator, agent or ingested/.test(String(bad.json?.error)) && await trustOf("a capture declaring a word off the ladder") === null,
+        `…and refuses a word off the ladder before it writes (${bad.status})`);
+    }
+    // open-brain-rest's POST /capture and POST /ingest.
+    {
+      const h = await load("integrations/open-brain-rest/index.ts");
+      const [cap, ing] = ["a page pasted into open-brain-rest's capture, declared ingested", "a page pasted into open-brain-rest's ingest, declared ingested"];
+      const a = await send(h, "POST", "/capture", { content: cap, trust: "ingested" });
+      const b = await send(h, "POST", "/ingest", { text: ing, trust: "ingested" });
+      const plain = "a note typed into open-brain-rest, trust undeclared";
+      await send(h, "POST", "/capture", { content: plain });
+      const bad = await send(h, "POST", "/ingest", { text: "an ingest declaring a word off the ladder", trust: "Operator" });
+      assert(a.status === 200 && b.status === 200 && await trustOf(cap) === "ingested" && await trustOf(ing) === "ingested" && await trustOf(plain) === "operator",
+        `open-brain-rest forwards the client's trust on /capture and /ingest, the key's when undeclared (${await trustOf(cap)}, ${await trustOf(ing)}, ${await trustOf(plain)})`);
+      assert(bad.status === 400 && await trustOf("an ingest declaring a word off the ladder") === null, `…and refuses a word off the ladder (${bad.status})`);
+    }
+    // enhanced-mcp's brain_capture_thought.
+    {
+      const h = await load("integrations/enhanced-mcp/index.ts");
+      const declared = "a page pasted into enhanced-mcp, declared ingested";
+      const a = await call(h, "brain_capture_thought", { content: declared, trust: "ingested" });
+      const bad = await call(h, "brain_capture_thought", { content: "an enhanced-mcp capture declaring a word off the ladder", trust: "root" });
+      assert(!a.isError && await trustOf(declared) === "ingested", `enhanced-mcp's brain_capture_thought forwards the client's trust (${a.toolText.slice(0, 60)}; ${await trustOf(declared)})`);
+      assert((bad.isError || bad.json?.error) && await trustOf("an enhanced-mcp capture declaring a word off the ladder") === null, "…and its schema refuses a word off the ladder");
+    }
+    // agent-memory-api's POST /writeback.
+    {
+      const h = await load("integrations/agent-memory-api/index.ts");
+      const decision = "We decided the ledger is replayed from the import, declared ingested.";
+      const r = await send(h, "POST", "/writeback", {
+        schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" }, trust: "ingested",
+        memory_payload: { decisions: [decision] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
+      });
+      assert(r.status === 200 && await trustOf(decision) === "ingested", `agent-memory-api's /writeback forwards the runtime's trust to each memory's thought (${r.status}; ${await trustOf(decision)})`);
+    }
+    // smart-ingest: an ingest executed at once, and a dry run executed later — the job carries the declaration.
+    {
+      const h = await load("integrations/smart-ingest/index.ts");
+      const now = "A page the importer copied in, ingested at once with its trust declared.";
+      const later = "A page the importer copied in, dry run first, its trust kept on the job.";
+      const a = await send(h, "POST", "/", { text: now, dry_run: false, skip_classification: true, source_label: "test-trust", trust: "ingested" });
+      const d = await send(h, "POST", "/", { text: later, dry_run: true, skip_classification: true, source_label: "test-trust", trust: "ingested" });
+      const x = await send(h, "POST", "/execute", { job_id: d.json?.job_id });
+      const bad = await send(h, "POST", "/", { text: "An ingest declaring a word off the ladder.", dry_run: false, trust: "root" });
+      assert(a.status === 200 && await trustOf(now) === "ingested", `smart-ingest forwards the ingest's trust to the thought it writes (${a.status}; ${await trustOf(now)})`);
+      assert(d.status === 200 && x.status === 200 && await trustOf(later) === "ingested", `…and a dry run's execute writes it from the job's record (${x.status}; ${await trustOf(later)})`);
+      assert(bad.status === 400 && await trustOf("An ingest declaring a word off the ladder.") === null, `…and a word off the ladder is refused before extraction (${bad.status})`);
+    }
+  } finally {
+    for (const label of labels) await sql`UPDATE ob1_agents SET kind = NULL WHERE label = ${label}`;
+    for (const r of kindsBefore) if (r.kind) await sql`SELECT set_agent_kind(${r.label}, ${r.kind})`;
+  }
+}
+
 console.log("\n[the files say what this test assumes]");
 const spells = (rel: string, re: RegExp, what: string) => assert(re.test(readFileSync(join(ROOT, rel), "utf8")), `${rel} ${what}`);
 // The date helpers rest-api's /search copied from enhanced-mcp (SMD-2054) — DateWindow, ISO_BOUND, parseBound,
@@ -1526,7 +1603,7 @@ spells("integrations/telegram-capture/README.md", /p_embedding_model: EMBEDDING_
 spells("integrations/readwise-capture/index.ts", /\.update\(\{ \[column\]: value \}\)\s*\.eq\("id", result\.id\)\s*\.is\(column, null\)/s, " writes each column where it is NULL — a fresh row, or one an interrupted first write left half-shaped");
 spells("recipes/readwise-import/import-readwise.py", /for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(\s*\{column: thoughts\[0\]\[column\]\}\s*\)\.in_\("id", ids\)\.is_\(column, "null"\)\.execute\(\)/s, " writes each column over the batch's rows where it is NULL");
 spells("recipes/adaptive-capture-classification/capture-with-gating.ts", /db\.rpc\("upsert_thought", \{\s*p_content: classified\.title,\s*p_payload: \{\s*metadata: \{/s, " captures through upsert_thought, the classifier's fields in metadata");
-spells("recipes/readwise-import/import-readwise.py", /supabase\.rpc\(\s*"upsert_thought",\s*\{\s*"p_content": thought\["content"\],\s*"p_payload": \{\s*"metadata": thought\["metadata"\],\s*"embedding_model": EMBEDDING_MODEL,\s*\},\s*"p_embedding": thought\["embedding"\],/s, " stores each highlight through the 3-argument upsert_thought with its label");
+spells("recipes/readwise-import/import-readwise.py", /supabase\.rpc\(\s*"upsert_thought",\s*\{\s*"p_content": thought\["content"\],\s*"p_payload": \{\s*"metadata": thought\["metadata"\],\s*"embedding_model": EMBEDDING_MODEL,\s*(?:#[^\n]*\s*)*"event": \{"trust": "ingested"\},\s*\},\s*"p_embedding": thought\["embedding"\],/s, " stores each highlight through the 3-argument upsert_thought with its label");
 spells("recipes/readwise-import/import-readwise.py", /ids\.append\(str\(data\["id"\]\)\)\s*if not data\.get\("existed"\):\s*fresh \+= 1\s*except BaseException as e:\s*loop_error = e\s*raise\s*finally:[\s\S]{0,1200}?if ids:\s*try:\s*for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(/s, "…and writes the enhanced columns once per column per batch, in a finally, so a refused reply leaves no half-shaped row behind it — the loop's own error staying the one raised");
 spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\):[\s\S]{0,400}?raise RuntimeError\(/, "…and refuses a reply that names no id instead of skipping the row");
 for (const sample of ["integrations/telegram-capture/README.md", "integrations/slack-capture/README.md"]) {

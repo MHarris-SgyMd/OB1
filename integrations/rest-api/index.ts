@@ -661,6 +661,11 @@ async function handleCapture(req: Request): Promise<Response> {
   const sourceType = String(body.source_type ?? "").trim() || source;
 
   if (!content) return json({ error: "content is required" }, 400);
+  // SMD-1724: what the content is, as the caller declares it — one of the three
+  // words, or absent (the key's). Forwarded as the write event's trust, which
+  // the database clamps to the key's kind: a lowering stands, a raise is filed.
+  const trust = body.trust === undefined ? undefined : String(body.trust);
+  if (trust !== undefined && trust !== "operator" && trust !== "agent" && trust !== "ingested") return json({ error: "trust must be operator, agent or ingested" }, 400);
 
   const detectedSensitivity = detectSensitivity(content);
   if (detectedSensitivity.tier === "restricted") {
@@ -697,6 +702,8 @@ async function handleCapture(req: Request): Promise<Response> {
       metadata: prepared.metadata,
       ...(embedding ? { embedding_model: embeddingModelUsed() } : {}),
       actor: ACTOR, // 008's actor, read from the payload into ob1.actor (SMD-1541; ACTOR above)
+      // SMD-1724: the caller's declaration, forwarded as 046's write event.
+      ...(trust ? { event: { trust } } : {}),
     },
     p_embedding: embedding,
   });

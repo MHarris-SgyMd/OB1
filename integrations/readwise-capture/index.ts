@@ -223,6 +223,10 @@ const handler = async (req: Request): Promise<Response> => {
           tags: event.tags?.map((t) => t.name) ?? [],
         },
         embedding_model: EMBEDDING_MODEL,
+        // SMD-1724: a highlight is outside text. With no key behind this
+        // receiver the database supports no trust above the floor, and a
+        // declared `ingested` is the one it stamps for an unclassified writer.
+        event: { trust: "ingested" },
       },
       p_embedding: embedding,
     });

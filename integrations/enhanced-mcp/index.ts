@@ -761,12 +761,18 @@ function buildServer(): McpServer {
         content: z.string().min(1),
         source: z.string().default("mcp").optional(),
         metadata: z.record(z.string(), z.unknown()).optional(),
+        // SMD-1724: what the content is, as the caller declares it — forwarded
+        // as the write event's trust, which the database clamps to the key's
+        // kind (a lowering stands, a raise is filed). Absent: the key's.
+        trust: z.enum(["operator", "agent", "ingested"]).optional()
+          .describe("What this content is, when it is less than the key gives: `ingested` for outside text copied in (a web page, an email), `agent` for an agent's own output. It can lower the thought's trust, never raise it."),
       }),
     },
     async (params) => {
       try {
         const raw = params as Record<string, unknown>;
         const content = asString(raw.content, "").trim();
+        const trust = raw.trust === "operator" || raw.trust === "agent" || raw.trust === "ingested" ? raw.trust : undefined;
         const source = asString(raw.source, "mcp").trim() || "mcp";
         const extraMetadata = isRecord(raw.metadata) ? raw.metadata : {};
 
@@ -834,6 +840,8 @@ function buildServer(): McpServer {
             metadata: prepared.metadata,
             ...(embedding ? { embedding_model: embeddingModelUsed() } : {}),
             actor: ACTOR, // 008's actor, read from the payload into ob1.actor (SMD-1541; ACTOR above)
+            // SMD-1724: the caller's declaration, forwarded as 046's write event.
+            ...(trust ? { event: { trust } } : {}),
           },
           p_embedding: embedding,
         });

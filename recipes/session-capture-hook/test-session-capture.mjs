@@ -990,6 +990,7 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   const [o] = await postPending(cfg, p.payloadPath);
   assert(o.ok && o.id === uuid(1001), `posted and the id read from the answer (${o.id})`);
   assert(received[0].args.source === "claude-code" && received[0].args.derived_from.length === 3 && received[0].args.content === JSON.parse(JSON.stringify(p.payload)).text, "the call carries source, derived_from and the summary");
+  assert(received[0].args.trust === "agent" && received.every((r) => r.args.trust === "agent"), "…and declares the summary an agent's output, on every post (SMD-1724)");
   assert(received[0].key === "cap-key", "…under the configured key");
   const st = readState(SID);
   assert(st.thought_id === uuid(1001) && st.fingerprint === p.payload.fingerprint && st.sources === 3, "the state records the thought id and the fingerprint");

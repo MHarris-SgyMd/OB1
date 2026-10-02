@@ -234,6 +234,9 @@ async function writeToOB1(classified: Classified): Promise<void> {
         due_date: classified.due_date,
         source: "adaptive-capture",
       },
+      // SMD-1724: the title is the classifier's words for the raw text — an
+      // agent's output, declared so; the database stamps the thought's trust.
+      event: { trust: "agent" },
     },
   });
   if (error) throw new Error(`upsert_thought failed: ${error.message}`);

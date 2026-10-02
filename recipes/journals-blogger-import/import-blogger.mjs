@@ -154,6 +154,9 @@ async function upsertThought(content, metadata, embedding, createdAt) {
       metadata: { ...metadata, source: "blogger_import", source_type: "blogger_import" },
       embedding: JSON.stringify(embedding),
       created_at: createdAt,
+      // SMD-1724: an export is outside text — the write event declares it, and
+      // the database stamps the thought's trust ingested whatever the key.
+      event: { trust: "ingested" },
     },
   });
   if (error) throw new Error(`upsert_thought failed: ${error.message}`);

@@ -246,6 +246,22 @@
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
  *      remaining size (SMD-2126)
+ *  25. every vendored capture path names the trust of what it writes
+ *      (SMD-1724): a code file under the seven category directories that
+ *      captures through the function — an `upsert_thought` RPC by any client,
+ *      JS, TS or Python — or calls the MCP `capture_thought` tool (a client's
+ *      call, not a server registering it) carries a `trust` key, which the
+ *      database reads as the write's declaration and clamps to the key's
+ *      kind (073): an importer says `ingested`, a worker writing a model's
+ *      output `agent`, a server relaying a client's text forwards the
+ *      client's word. Whole-file, as checks 8 and 10 bind a name: one
+ *      declaration answers the file's every call, comments blanked. A raw row
+ *      — a POST to `rest/v1/thoughts`, a `.post("thoughts", …)`, or check
+ *      10's raw insert — cannot declare (073's trigger strips a payload's
+ *      trust and nothing sets the event handoff over PostgREST), so
+ *      TRUST_EXCEPTIONS counts each such line with the reason and the ticket
+ *      that ports it; a port that lands fails until its entry goes, and its
+ *      new call must declare
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20 and 23 parse YAML with Bun.YAML)
@@ -5089,6 +5105,152 @@ function checkPostgrestClients() {
   for (const rel of POSTGREST_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 24's exception names a file the scan does not reach — stale, or the file is gone: remove the entry");
 }
 checkPostgrestClients();
+
+// ── 25: every vendored capture path names its trust ──────────────────────────
+//
+// SMD-1724. Migration 073 stamps every thought with the trust of the write
+// that put its text there — the key's registry kind, or what the write
+// declared below it — and the read tools label it, with a notice on outside
+// text. A key's kind is a ceiling, not a description: an importer whose key
+// is an operator's would label a scraped page `operator` unless the write
+// says what it carries. So every vendored path that captures says so:
+//   - a capture through the function — `.rpc("upsert_thought", …)`,
+//     `callRpc(…)`, supabase-py's `.rpc("upsert_thought", {…})` — or a
+//     client's call of the MCP `capture_thought` tool (`{ name:
+//     "capture_thought", arguments }`, `callTool("capture_thought", {…})`;
+//     a server registering the tool — `server.registerTool(…)`,
+//     `server.tool(…)` — is not a call) makes the file a capture path;
+//   - a capture path carries a `trust` key — `trust: "ingested"`,
+//     `event: { trust }`, Python's `"trust": "ingested"` — comments blanked;
+//     whole-file, as checks 8 and 10 bind a name: one declaration answers
+//     the file's every call. The value is the file's to choose: a word, or a
+//     client's forwarded (the database clamps it either way);
+//   - a raw row cannot declare: 073's trigger strips a payload's trust, and
+//     the event handoff is a transaction setting nothing sets over PostgREST.
+//     So a raw capture — a POST to `rest/v1/thoughts`, a `.post("thoughts",
+//     …)`, or check 10's raw insert — is listed in TRUST_EXCEPTIONS with the
+//     reason and the exact count of its lines: a port that lands fails until
+//     its entry goes, and the port's call must declare.
+// Scanned: every .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.py/.sh under the
+// seven category directories (docs/ holds no capture path; a README's sample
+// is prose).
+/** A capture through the function: an `upsert_thought` RPC by any client, the name a string literal. */
+const UPSERT_RPC = /\b\w*rpc\s*\(\s*(["'`])upsert_thought\1\s*,/gi;
+/** A JSON-RPC tools/call of capture_thought: its params object. */
+const MCP_CAPTURE_PARAMS = /\bname\s*:\s*(["'`])capture_thought\1\s*,\s*arguments\b/g;
+/** A call whose first argument is the tool's name and second its arguments object — a client's, unless the callee registers a tool. */
+const MCP_CAPTURE_CALL = /(?<![\w$])([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(\s*(["'`])capture_thought\2\s*,\s*\{/g;
+/** The callees that register a tool rather than call one: the SDK's two, reached as a method. */
+const REGISTERS_TOOL = /\.\s*(?:registerTool|tool)$/;
+/** A trust declaration: a `trust` key with a value (quoted or not), or a shorthand `{ trust }` / `, trust,`. */
+const TRUST_DECLARED = /(?<![\w$])(["'`]?)trust\1\s*:|[{,]\s*trust\s*[,}]/;
+/** A raw capture over PostgREST: the table's own path, closed (a `?` query is a read or an edit), or a helper's `.post("thoughts", …)`. */
+const RAW_CAPTURE_FORMS = [/\brest\/v1\/thoughts["'`]/g, /\.post\(\s*(["'`])thoughts\1\s*,/g];
+
+/** A file's capture call sites and raw captures, by line, comments blanked by its kind (check 24's blankers). */
+function capturePathsIn(text: string, rel: string): { calls: number[]; raw: number[]; declares: boolean } {
+  const hash = HASH_COMMENT_FILE.test(rel);
+  const code = hash ? hashCommentsBlanked(text, SHELL_FILE.test(rel)) : blanked(text, false);
+  const lineOf = lineIndexer(code);
+  const calls = new Set<number>();
+  for (const m of code.matchAll(UPSERT_RPC)) calls.add(lineOf(m.index!));
+  if (!hash) {
+    for (const m of code.matchAll(MCP_CAPTURE_PARAMS)) calls.add(lineOf(m.index!));
+    for (const m of code.matchAll(MCP_CAPTURE_CALL)) if (!REGISTERS_TOOL.test(m[1])) calls.add(lineOf(m.index!));
+  }
+  const raw = new Set<number>();
+  for (const re of RAW_CAPTURE_FORMS) for (const m of code.matchAll(re)) raw.add(lineOf(m.index!));
+  // Check 10's raw insert, read on the file's own text (it blanks SQL comments itself).
+  if (!hash) for (const line of thoughtWritesAroundIn(text)) raw.add(line);
+  return { calls: [...calls].sort((a, b) => a - b), raw: [...raw].sort((a, b) => a - b), declares: TRUST_DECLARED.test(code) };
+}
+
+/** [text, file name, calls, raw, declares] — the shapes in the tree, and the neighbours the rule must not reach. */
+const TRUST_PROBES: [string, string, number, number, boolean][] = [
+  // The function, by every client in the tree: supabase-js and the shim, a helper, supabase-py, a call over lines.
+  ['await supabase.rpc("upsert_thought", { p_content: c, p_payload: { metadata, event: { trust: "ingested" } } });', "x.mjs", 1, 0, true],
+  ['await supabase.rpc("upsert_thought", { p_content: c, p_payload: { metadata } });', "x.ts", 1, 0, false],
+  ["const r = await callRpc('upsert_thought', { p_content: c, p_payload: {} });", "x.mjs", 1, 0, false],
+  ['const r = await sb.rpc(\n  "upsert_thought",\n  { p_content: c },\n);', "x.mjs", 1, 0, false],
+  ['supabase.rpc(\n    "upsert_thought",\n    {"p_content": c, "p_payload": {"event": {"trust": "ingested"}}},\n).execute()', "x.py", 1, 0, true],
+  // MCP: the params object, a helper call, a bare one; a declaration by shorthand.
+  ['rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });', "x.mjs", 1, 0, false],
+  ["const result = await callMcpTool('capture_thought', { content, trust: 'operator' });", "x.ts", 1, 0, true],
+  ['const cap = await tool("capture_thought", { content: "x" });', "x.ts", 1, 0, false],
+  ['await client.callTool("capture_thought", { content });', "x.ts", 1, 0, false],
+  ['const declared = trust ? { event: { trust } } : {};\nawait supabase.rpc("upsert_thought", { p_payload: { ...declared } });', "x.ts", 1, 0, true],
+  // Raw rows: PostgREST's table path, a helper's post, check 10's insert.
+  ['resp = requests.post(f"{SUPABASE_URL}/rest/v1/thoughts", headers=h, json=body)', "x.py", 0, 1, false],
+  ["const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts`, { method: 'POST', body });", "x.ts", 0, 1, false],
+  ['const inserted = await sb.post(\n  "thoughts",\n  { content, metadata },\n);', "x.mjs", 0, 1, false],
+  ['await supabase.from("thoughts").insert({ content, embedding, metadata });', "x.ts", 0, 1, false],
+  // Not the rule's: a server registering the tool, a tool list, a gate on the name, a read, an edit,
+  // the function in a comment, a docstring, a log line, a regex literal, prose naming trust.
+  ['server.registerTool(\n  "capture_thought",\n  { title: "Capture" },\n  handler,\n);', "x.ts", 0, 0, false],
+  ['server.tool("capture_thought", "Save a thought", { content: z.string() }, async () => {});', "x.ts", 0, 0, false],
+  ['const BRAIN_TOOLS = ["search_thoughts", "capture_thought"];', "x.mjs", 0, 0, false],
+  ["if (name === 'capture_thought' && !session.canCapture) return deny();", "x.ts", 0, 0, false],
+  ["let url = `${SUPABASE_URL}/rest/v1/thoughts?select=id,content&limit=${limit}`;", "x.ts", 0, 0, false],
+  ["const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts?id=eq.${id}`, { method: 'PATCH', body });", "x.ts", 0, 0, false],
+  ['// await supabase.rpc("upsert_thought", { p_content: c });\nconst n = 1;', "x.ts", 0, 0, false],
+  // A Python string is read, as check 24 reads one: a docstring quoting the call is a call, answered by naming the trust.
+  ['"""Store each highlight through supabase.rpc("upsert_thought", ...)."""', "x.py", 1, 0, false],
+  ['throw new Error(`upsert_thought failed: ${error.message}`);', "x.ts", 0, 0, false],
+  ['if (/\\brpc\\/upsert_thought\\b/.test(msg)) retry();', "x.mjs", 0, 0, false],
+  ['// the trust: the key decides\nawait supabase.rpc("upsert_thought", { p_content: c });', "x.ts", 1, 0, false],
+];
+
+const RAW_IMPORT = (ticket: string): CountedException["why"] =>
+  `an import that POSTs its rows raw, so they carry no declared trust (073's trigger strips a payload's, and PostgREST sets no event handoff); its port onto the ingestion contract (${ticket}) writes through db/ingest-records.ts, whose rows take the ingester key's kind — classify that key \`ingested\``;
+const RAW_FALLBACK = "the plain insert its upsert_thought call falls back to on a brain without the function; that call declares, the raw row cannot (SMD-2143 moves the script onto the shim)";
+const RAW_OWN_DATABASE = "a deployment with a database of its own and none of the fork's migrations: no 073, so no trust to declare (check 10 counts the same insert)";
+/**
+ * file → why its raw captures cannot declare, and the exact count of their lines. A line past the count fails (a
+ * new raw capture), a count no line reaches fails as stale (a port landed: lower it, or remove the entry), a file
+ * that is gone fails until its entry goes.
+ */
+const TRUST_EXCEPTIONS = new Map<string, CountedException>([
+  ["recipes/chatgpt-conversation-import/import-chatgpt.py", { why: RAW_IMPORT("SMD-2147"), lines: 1 }],
+  ["recipes/perplexity-conversation-import/import-perplexity.py", { why: RAW_IMPORT("SMD-2148"), lines: 1 }],
+  ["recipes/google-activity-import/import-google-activity.mjs", { why: RAW_IMPORT("SMD-2150"), lines: 1 }],
+  ["recipes/email-history-import/pull-gmail.ts", { why: `${RAW_IMPORT("SMD-2021")}; the second line is the retry`, lines: 2 }],
+  ["recipes/entity-wiki/generate-wiki.mjs", { why: RAW_FALLBACK, lines: 1 }],
+  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", { why: RAW_FALLBACK, lines: 1 }],
+  ["integrations/kubernetes-deployment/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
+  ["recipes/vercel-neon-telegram/src/lib/db.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
+  ["recipes/schema-aware-routing/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
+  ["extensions/test-writes.ts", { why: "the fixtures check 10 counts: rows planted as an older write left them, and a restricted twin — test rows, not captures", lines: 2 }],
+]);
+
+function checkCaptureTrust() {
+  for (const [probe, name, calls, raw, declares] of TRUST_PROBES) {
+    const got = capturePathsIn(probe, name);
+    if (got.calls.length !== calls || got.raw.length !== raw || got.declares !== declares) {
+      fail(SELF, `check 25 reads its probe as ${got.calls.length} call(s), ${got.raw.length} raw, declares ${got.declares} — expected ${calls}, ${raw}, ${declares}: ${JSON.stringify(probe)} (${name}; its own probe)`);
+    }
+  }
+  const files = textFilesUnder(CATEGORIES.map((c) => ({ dir: join(ROOT, c), rel: c }))).filter((f) => POSTGREST_CODE_FILE.test(f));
+  if (files.length === 0) fail(SELF, "check 25 found no code file under the seven category directories — the listing is broken, not the tree clean");
+  const MSG = "captures a thought without naming its trust — the database stamps the key's kind, a ceiling and not a description, so an importer behind an operator's key labels outside text `operator`; declare what the content is: `event: { trust: \"ingested\" }` in upsert_thought's payload (`agent` for a model's output; a server relaying a client forwards the client's word), or `trust` among capture_thought's arguments (SMD-1724)";
+  const seen = new Set<string>();
+  let capturePaths = 0;
+  for (const file of files) {
+    const rel = relOf(file);
+    const { calls, raw, declares } = capturePathsIn(readFileSync(file, "utf8"), rel);
+    if (calls.length) capturePaths++;
+    if (calls.length && !declares) for (const line of calls) fail(`${rel}:${line}`, MSG);
+    const excepted = TRUST_EXCEPTIONS.get(rel);
+    if (excepted) {
+      seen.add(rel);
+      if (raw.length !== excepted.lines) fail(rel, `check 25's exception covers ${excepted.lines} raw capture line(s) and the file has ${raw.length} (${raw.join(", ") || "none"}) — ${raw.length > excepted.lines ? "a new raw capture beside the documented ones" : "a port landed on those lines, so the exception is stale: lower the count, or remove the entry when none remains"} (${excepted.why})`);
+    } else {
+      for (const line of raw) fail(`${rel}:${line}`, "writes a thought as a raw row, which cannot declare its trust — 073's trigger strips a payload's, and nothing sets the event handoff over PostgREST; capture through upsert_thought with `event: { trust }` in the payload, or list the file in TRUST_EXCEPTIONS with its line count and the reason (SMD-1724)");
+    }
+  }
+  if (capturePaths === 0) fail(SELF, "check 25 found no capture path under the seven category directories — the detector is broken, not the tree clean");
+  for (const rel of TRUST_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 25's exception names a file the scan does not reach — stale, or the file is gone: remove the entry");
+}
+checkCaptureTrust();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

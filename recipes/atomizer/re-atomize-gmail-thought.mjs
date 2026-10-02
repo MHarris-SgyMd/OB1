@@ -251,6 +251,10 @@ async function processOne(old) {
         source_type: old.source_type,
         metadata: newMeta,
         created_at: old.created_at,
+        // SMD-1724: an atom carries the email's own words, so it is outside
+        // text, as the thought it was cut from — declared, not inherited
+        // (the event's trust wins over any metadata.trust newMeta copied).
+        event: { trust: "ingested" },
       },
     });
     const newId = resp?.thought_id || (Array.isArray(resp) ? resp[0]?.thought_id : null);
