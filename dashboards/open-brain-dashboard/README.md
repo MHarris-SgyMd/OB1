@@ -38,7 +38,7 @@ the REST gateway.)
 ## Prerequisites
 
 - A running Open Brain server ([SETUP.md](../../SETUP.md) — the compose stack
-  publishes it on `http://127.0.0.1:8000/`), or any URL that speaks MCP
+  publishes it on `http://127.0.0.1:8000/mcp`), or any URL that speaks MCP
 - An access key for it — read-scoped is enough to browse and search
 - Bun 1.4+ (or Node.js 20.19+ / 22.12+ with npm — Vite 7's floor)
 
@@ -82,7 +82,7 @@ HOSTING
 
    | Variable | Where to get it |
    |----------|----------------|
-   | `MCP_URL` | Where your server answers MCP — `http://127.0.0.1:8000/` for the compose stack (`SERVER_PORT` in `deploy/.env` if you changed it), or your deployed URL |
+   | `MCP_URL` | Where your server answers MCP — `http://127.0.0.1:8000/mcp` for the compose stack (`SERVER_PORT` in `deploy/.env` if you changed it), or your deployed URL |
    | `SESSION_SECRET` | `openssl rand -hex 32` — 32+ characters; the dashboard refuses to serve without it |
 
 4. Mint an access key for the dashboard if you have none to spare:
@@ -142,7 +142,7 @@ After setup, you should be able to:
 `smoke.ts` drives all of that against a running server, the way CI does:
 
 ```bash
-MCP_URL=http://127.0.0.1:8000/ bun smoke.ts --key <write-key> --read-key <read-key>
+MCP_URL=http://127.0.0.1:8000/mcp bun smoke.ts --key <write-key> --read-key <read-key>
 ```
 
 It builds nothing — run `bun run build` first — and starts `vite preview` on a
@@ -160,7 +160,7 @@ drives the keyword tool so it runs where no provider does (CI).
 Solution: Ensure `.env.local` exists with a value from `openssl rand -hex 32`, and restart the dev server after editing env.
 
 **Issue: `MCP_URL is not set`**
-Solution: Set it to where your server answers MCP. The compose stack's default is `http://127.0.0.1:8000/`; `deploy/README.md` says what is reachable from where.
+Solution: Set it to where your server answers MCP. The compose stack's default is `http://127.0.0.1:8000/mcp`; `deploy/README.md` says what is reachable from where.
 
 **Issue: sign-in says `The server refused that access key`**
 Solution: The server answered, and the key is not one it knows. Check that the key's hash is a line in the server's `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` also works) and that the container was restarted after editing `deploy/.env`.

@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2357 assertions: 2357 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy-three (73) migrations applied, and
+`bun test-schema.ts` prints `2396 assertions: 2396 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-five (75) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -959,6 +959,43 @@ before 073 is kept (a word off the ladder is replaced), and a text no audit
 row vouches for loses its trust with its marks. Nothing reads it yet;
 the tools' label and `min_trust` are SMD-1724's later PRs. test-schema [66],
 test-upgrade [20x].
+
+Migration 074 reads it (SMD-1724): `match_thoughts` gains a seventh argument,
+`min_trust text DEFAULT NULL`, and `search_thoughts_keyword` a fifth,
+`p_min_trust`, each keeping rows whose `metadata.trust` is at or above the word
+(operator > agent > ingested; a row with no trust is below every word, so
+`ingested` means "labelled"; any other word is refused). The earlier forms are
+dropped first and their privileges replayed onto the new ones, as 020 did, so a
+six- or four-argument call resolves to the default and is never "not unique".
+NULL is the function 041 shipped: every statement it ran runs byte for byte.
+A min_trust takes the filtered path whatever the filter, and its statements
+stand beside 041's — the gate's sample, a collection by
+`thoughts_trust_rank_idx` (a btree over `ob1_trust_rank(metadata->>'trust')`)
+alone or beside the GIN index when a filter is given too, and the walk with the
+rank inside both candidate scans, EXECUTEd so each call is planned with its
+values known (as a static statement it fell to plpgsql's cached generic plan
+on a connection's sixth call, a bitmap scan and a sort instead of the walk —
+SMD-2468 tracks the same exposure in 041's own walk); the exact answer is
+041's over the ids collected. The index is built inside the migrator's
+transaction, so writes to `thoughts` wait for it. The hybrid and `search_thoughts_current` call both through their
+defaults; 075 gives them the argument. test-schema [67], test-live [21b],
+test-upgrade [20y].
+
+Migration 075 carries `min_trust` to the two functions the search tools read:
+`search_thoughts_hybrid` and `search_thoughts_current` each gain an 8-argument
+form, `(…, half_life_days, min_trust)`, with every argument required — the
+hybrid passing it to both arms and its needle probe counting only rows at or
+above it, the current read passing it to the hybrid. The 7-argument forms keep
+their signatures, defaults and privileges (each new form is created with its
+7's) and call the 8 with NULL, so a call is resolved by its count: seven or
+fewer to the old form, eight to the new. Not 074's shape (a defaulted argument,
+the shorter form dropped): 059's `search_thoughts_current` is `LANGUAGE sql`,
+resolved when `--reapply` re-creates it, and a defaulted 8-argument hybrid
+beside 027's 7 would make its call "not unique". A call by name that names `min_trust` names
+all eight. 075 refuses to apply without 074, and preflight reads the pair by the
+7's body. An operator's REVOKE on the 7-argument `search_thoughts_current` does
+not survive a `--reapply` (059 drops and re-creates it — as on main), while its
+8's does. test-schema [68], test-upgrade [20z].
 
 ## What changed relative to the guide
 
@@ -3167,8 +3204,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2357 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1043 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2396 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1048 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

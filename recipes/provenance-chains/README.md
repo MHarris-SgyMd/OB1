@@ -108,7 +108,7 @@ Legacy names (still accepted with a deprecation warning):
 
 1. Open your Open Brain MCP server, [`server-portable/index.ts`](../../server-portable/index.ts), and paste the three `server.registerTool(...)` blocks from [`mcp-tools.ts`](./mcp-tools.ts) alongside your other tool registrations. The `capture_derived_thought` block reuses the canonical `getEmbedding` and `extractMetadata` helpers already defined in `index.ts` — paste it after those are in scope.
 
-   Rebuild and restart the server — `podman compose -f deploy/compose.yaml up --build server` for the reference stack.
+   Rebuild and restart the server — `podman compose -f deploy/compose.yaml up --build server proxy` for the reference stack.
 
    In Claude Desktop, open your Open Brain connector — you should now see `trace_provenance`, `find_derivatives`, and `capture_derived_thought` in the tool list.
 

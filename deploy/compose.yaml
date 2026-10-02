@@ -10,20 +10,23 @@
 # The profile is the stack's own Ollama, where the server's model endpoint
 # defaults; drop it when deploy/.env names another provider.
 #
-# Then point an MCP client at http://127.0.0.1:8000/?key=$MCP_ACCESS_KEY
+# Then point an MCP client at http://127.0.0.1:8000/mcp?key=$MCP_ACCESS_KEY
 #
 # Secrets come from deploy/.env, which is gitignored. Copy .env.example first.
 # Nothing here is production-shaped — no TLS, no backups, no resource limits — it
 # is a working reference for what the pieces are once Supabase is gone.
 #
-# What the host can reach: only the server (and n8n, under --profile
+# What the host can reach: only the proxy (and n8n, under --profile
 # orchestration), and only from the host itself; the authorization server
-# (--profile auth) publishes nothing. Every
+# (--profile auth) publishes nothing. The proxy is the stack's one
+# origin: each service is a path on it (`/mcp` the server), not a port of its
+# own (SMD-1846). Every
 # published port here names its address, `127.0.0.1` unless the operator sets
 # the `*_BIND` knob, because an address-less `"8000:8000"` binds 0.0.0.0 — every
 # interface — and this stack holds a brain (personal data at rest) behind one
-# password and one key over plain HTTP. Postgres and Ollama publish nothing;
-# the server reaches both over the compose network by service name, and a tool
+# password and one key over plain HTTP. Postgres, Ollama and the server publish
+# nothing; the proxy reaches the server, and the server Postgres and Ollama,
+# over the compose network by service name, and a tool
 # run from a checkout gets them through compose.host-ports.yaml (a second -f),
 # loopback again unless told otherwise. scripts/check-fork-consistency.ts
 # check 13 refuses a mapping that drops the address (SMD-1844).
@@ -37,6 +40,68 @@ name: open-brain
 # resolves this tag to a digest and writes `ollama/ollama@sha256:…` into the
 # release's compose overlay (SMD-1860; deploy/README.md, "Pinning a release").
 x-ollama-image: &ollama-image ollama/ollama:0.34.3
+
+# The proxy's route table (SMD-1846), which Traefik's file provider reads. It
+# lives here rather than in a file of its own because compose.yaml is the file
+# a release ships (scripts/release-artifacts.ts, ASSETS): a pinned stack on a
+# machine with no checkout has it with nothing else to fetch.
+#
+# Not container labels read through the engine's socket, which the ticket
+# first proposed: the socket is root on the host, and the proxy is the one
+# process a client on the network reaches — docs/orchestration-tool.md declined
+# the same socket for n8n. So adding a service is two edits in this file, the
+# service and its router here.
+#
+# A request's path reaches the server as it came (no prefix stripped): the
+# server answers POST at every path and /health under any prefix
+# (server-portable/index.ts, HEALTH_PATH), so `/mcp` needs no setting there.
+# The routers, highest priority first, each on the one public entrypoint
+# (`web`): a router that names none is on every entrypoint, the ping one
+# included, and so would be any entrypoint added later:
+#   mcp     /mcp and everything under it — the endpoint clients are given;
+#   health  GET and HEAD /health at the origin root, for a GET-only probe;
+#   legacy  everything but /.well-known — what clients reach today at the root
+#           (`POST /?key=`, /worker-status, /jobs/<id>, and
+#           `GET /`, whose 405 an MCP SDK client takes as "no stream here";
+#           the proxy's 404 there made v1 and v2 clients report an error on
+#           every connect, measured), kept so the upgrade that lands the proxy
+#           breaks no configured client. SMD-2306 owns its window: a
+#           deprecation header, the upgrade guide, then its removal, after
+#           which `/` is the proxy's 404 too.
+# No router matches /.well-known or anything under it, so the proxy answers
+# those 404 itself and the server never sees them: a claude.ai connector at
+# https://host/mcp asks /.well-known/oauth-protected-resource/mcp at the
+# origin root, and proceeds on the key only on a 404 (SMD-1246, FORK.md
+# change 42). Traefik matches the cleaned, decoded path, so `//.well-known/`,
+# `/%2ewell-known/` and `/x/../.well-known/` are refused too (measured on
+# v3.7.13) — all but an encoded slash, which it leaves encoded:
+# `/.well-known%2Fx` reaches the server's 405, as it did before the proxy, and
+# no discovery client sends it. Its 404 carries
+# none of the server's CORS headers; the SDK's discovery reads a CORS failure
+# as a 404 and goes on.
+x-proxy-routes: &proxy-routes |
+  http:
+    routers:
+      mcp:
+        rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
+        priority: 30
+        entryPoints: [web]
+        service: server
+      health:
+        rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`))"
+        priority: 20
+        entryPoints: [web]
+        service: server
+      legacy:
+        rule: "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))"
+        priority: 1
+        entryPoints: [web]
+        service: server
+    services:
+      server:
+        loadBalancer:
+          servers:
+            - url: "http://server:8000"
 
 services:
   # Replaces: the Supabase-hosted Postgres.
@@ -285,14 +350,9 @@ services:
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
       PORT: "8000"
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
-    ports:
-      # Loopback unless SERVER_BIND says otherwise. The one published port of the
-      # stack without its opt-in profiles. A remote client — a claude.ai connector, another machine — goes
-      # through a TLS proxy or a tunnel; one on this host dials 127.0.0.1 and
-      # needs no change here. `SERVER_BIND=0.0.0.0` is for a proxy on another
-      # machine, and puts the key on the wire in clear on every request: the
-      # header is as visible as `?key=` over plain HTTP (SMD-1844).
-      - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
+    # No `ports:`. The proxy below is the stack's published port and reaches
+    # this server as `server:8000` on the compose network; so do n8n and a
+    # container on the network (SMD-1846).
     depends_on:
       postgres:
         condition: service_healthy
@@ -322,6 +382,106 @@ services:
     # (fourth review pass).
     extra_hosts: &host-alias
       - "host.docker.internal:host-gateway"
+
+  # The stack's one origin (SMD-1846): a reverse proxy, and the only service
+  # without a profile that publishes a port. Each service is a path on it —
+  # the routes are x-proxy-routes above — so a new one is a router, not a port
+  # an operator picks, opens and hands a client separately. It does no
+  # authentication: the key travels to the server untouched, in the header or
+  # in `?key=`, and the server checks it. It terminates nothing but TCP; TLS
+  # in front is still a tunnel's or a proxy's on the host (deploy/README.md).
+  #
+  # Traefik, pinned by digest: the multi-arch index v3.7.13 resolved to. Chosen
+  # over nginx, which buffers a response unless told not to — the server's tool
+  # calls answer as SSE streams, and its keepalive frame (SMD-1864) must reach
+  # the client when it is written; Traefik flushes an event stream as it
+  # arrives. Caddy would also do, and wins on TLS; the query-string rule below
+  # is one setting here.
+  proxy:
+    image: docker.io/library/traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+    # Nothing it needs is root's: it listens on 8000, reads its route table and
+    # writes only to stdout. Not read_only: compose writes an inline config
+    # (`configs:` below) into the container's own filesystem, and refuses to
+    # into a read-only one.
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Traefik's static configuration, from its environment so that the
+    # healthcheck below — a second traefik process in this container — reads
+    # the same. No OB1_* knob here: nothing in it is the operator's to set
+    # but the address and port it publishes.
+    environment:
+      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000"
+      # A header spelled with `_` or `.` (X_Brain_Key) is read by some
+      # backends as the `-` header it aliases; deleted here, so a client
+      # cannot supply one header twice under two spellings.
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: delete
+      TRAEFIK_PROVIDERS_FILE_FILENAME: /etc/traefik/routes.yaml
+      # The access log: one JSON line per request, with no query string and
+      # no header. A connector carries its key as `?key=` (the documented
+      # form, deploy/README.md) and an OAuth redirect will carry its code and
+      # state there (SMD-2285), so a log line with the query would put the
+      # key on disk that keygen.ts shows once — the path, the status and the
+      # timings are what the log is for. Measured on v3.7.13: RequestPath is
+      # `/mcp` for `/mcp?key=…`; CI's "The proxy answers discovery itself…"
+      # step greps the log for the smoke key after calls carrying it.
+      TRAEFIK_ACCESSLOG: "true"
+      TRAEFIK_ACCESSLOG_FORMAT: json
+      TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: drop
+      # …and no userinfo: a request in absolute form
+      # (`POST http://user:secret@host/mcp`) put its user part in the
+      # ClientUsername field, the one place a probe's secret reached the log
+      # (review pass 1, measured). The server reads no key from userinfo.
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_CLIENTUSERNAME: drop
+      # Its liveness, on an entrypoint of its own that only the container's
+      # loopback reaches, so /ping is not a route on the origin.
+      TRAEFIK_PING: "true"
+      TRAEFIK_PING_ENTRYPOINT: ping
+      TRAEFIK_ENTRYPOINTS_PING_ADDRESS: "127.0.0.1:8082"
+      # Nothing leaves the box for Traefik's own sake.
+      TRAEFIK_GLOBAL_CHECKNEWVERSION: "false"
+      TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false"
+    configs:
+      - source: proxy-routes
+        target: /etc/traefik/routes.yaml
+    # The route table again, as a label nothing reads: compose copies an
+    # inline config into the container when it creates it, and a changed
+    # config alone does not recreate it (measured on Compose 5.5, docker/compose
+    # #11900) — so an `up` after a release that changes a route would go on
+    # serving the old table. A changed label does recreate it, so the two copies
+    # move together; CI holds them equal.
+    labels:
+      ob1.proxy-routes: *proxy-routes
+    ports:
+      # Loopback unless SERVER_BIND says otherwise: the one published port of
+      # the stack without its opt-in profiles. The knobs keep the server's
+      # names, which they were until SMD-1846, so a deploy/.env written
+      # before it publishes the same address and port and every client's URL
+      # still answers. A remote client — a claude.ai connector, another
+      # machine — goes through a TLS proxy or a tunnel; one on this host dials
+      # 127.0.0.1 and needs no change here. `SERVER_BIND=0.0.0.0` is for a
+      # proxy on another machine, and puts the key on the wire in clear on
+      # every request: the header is as visible as `?key=` over plain HTTP
+      # (SMD-1844).
+      - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # Started after the server, so `up proxy` brings the brain; not held for
+    # the server's health: while the server is down or in preflight the proxy
+    # answers 502, and it answers again when the server does. The direction is
+    # what hands the port over on the first `up` after SMD-1846: compose
+    # recreates the old server, which held the port, before it creates this.
+    # The other way round, this would bind while the old server still held it.
+    # It also means `up server` alone never starts the proxy: name both
+    # (deploy/README.md, "One origin").
+    depends_on:
+      server:
+        condition: service_started
+    restart: unless-stopped
 
   # Keeps the brain in lockstep with the Linear board (SMD-1954). Optional —
   # `--profile board-sync`; a brain that is not the fork's own never runs it.
@@ -753,11 +913,11 @@ services:
   # deploy/.env and `bun deploy/auth/provision.ts` checks the file; set
   # OB1_PUBLIC_ORIGIN yourself (deploy/README.md, "Authorization server").
   #
-  # Nothing routes to it yet. The proxy that serves `/auth` and the
-  # well-known paths comes with SMD-1846, so for now it publishes no port and
+  # Nothing routes to it yet. The proxy's `/auth` and well-known routes come
+  # with SMD-1846's PR 2, so for now it publishes no port and
   # answers only on the mesh as auth.ob1.internal. It joins two networks of
   # its own and not the default one, so it cannot reach Postgres, Ollama or
-  # n8n until SMD-1846 moves them onto the mesh: `mesh`, internal, where the
+  # n8n until that PR moves them onto the mesh: `mesh`, internal, where the
   # proxy, the MCP server and the GUI will meet it; and `egress`, for the
   # client metadata documents it fetches (each through its fetch guard, which
   # refuses private and *.ob1.internal targets).
@@ -819,7 +979,8 @@ services:
 networks:
   # The ADR's two networks (docs/operator-surface-tiers.md, "Two networks"),
   # joined by the authorization server alone so far: the rest of the stack is
-  # still on compose's default network until SMD-1846's proxy moves it.
+  # still on compose's default network, the proxy included, until SMD-1846's
+  # PR 2 moves it.
   mesh:
     internal: true
   egress: {}
@@ -830,3 +991,8 @@ volumes:
   jev-models:
   n8n-data:
   auth-data:
+
+configs:
+  # The proxy's route table, inline: x-proxy-routes at the top of this file.
+  proxy-routes:
+    content: *proxy-routes

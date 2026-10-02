@@ -306,12 +306,19 @@ export const MATCH_COUNT_CEILING: number;
 /** 037's gate on match_thoughts' routing count: the heap pages it samples, and the heap size in pages under which it does not sample. */
 export const ROUTE_SAMPLE_PAGES: number;
 export const ROUTE_ESTIMATE_MIN_PAGES: number;
-/** The signature the servers call, as regprocedure text (020: six arguments). */
+/** match_thoughts' signature, as regprocedure text (074: seven arguments; the servers send six and min_trust defaults). */
 export const MATCH_THOUGHTS_SIGNATURE: string;
+/** 020's form, the one 074 replaced (SMD-1724). */
+export const MATCH_THOUGHTS_SIGNATURE_6: string;
+/** search_thoughts_keyword since 074: 012's four arguments and p_min_trust. */
+export const SEARCH_THOUGHTS_KEYWORD_SIGNATURE: string;
 /** The signature the servers call, as regprocedure text (020: seven arguments). */
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE: string;
 /** The signature search_thoughts' prefer_current calls, as regprocedure text (059: the hybrid's seven arguments). */
 export const SEARCH_THOUGHTS_CURRENT_SIGNATURE: string;
+/** The 7-argument forms the servers call, beside 075's 8-argument ones (SMD-1724). */
+export const SEARCH_THOUGHTS_HYBRID_SIGNATURE_7: string;
+export const SEARCH_THOUGHTS_CURRENT_SIGNATURE_7: string;
 /** The signature the servers and reembed.ts call, as regprocedure text (061: eleven arguments, the lineage envelope last). */
 export const UPDATE_THOUGHT_SIGNATURE: string;
 /** 032's nine-argument form, the one 046 replaced (SMD-1730). */

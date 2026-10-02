@@ -891,7 +891,13 @@ jobs:
       # (review pass 1). The stub runs from the image just built, which has
       # Bun, so nothing is pulled. The stop lands once the stub logs the
       # server's request, so the call is in flight however loaded the runner
-      # is (the dashboards build beside this step, SMD-2251).
+      # is (the dashboards build beside this step, SMD-2251). The verdict is the
+      # exit code under docker's 10 s grace, the answered call (the proof the
+      # stop waited for it) and the server's own `stopped in N s` line, N under
+      # 5 — not `docker stop`'s return, which is printed: on 18 of 221 attempts
+      # from 2026-09-27 to 10-02 it came back 5.0–10.6 s after a stop the
+      # server logged at 1.9 s, exit 0 (about 2 s on a passing run), and a
+      # 1–5 s window on it failed every one (SMD-2316).
       - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
         run: |
           KEY=$(openssl rand -hex 32)
@@ -908,16 +914,19 @@ jobs:
           t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
           wait
           code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
+          fin=$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' ob1-k8s-stop)" +%s%3N 2> /dev/null) || fin=""
           log=$(docker logs ob1-k8s-stop 2>&1)
           docker rm -f ob1-k8s-stop ob1-k8s-embed > /dev/null
           docker network rm ob1-k8s-stop > /dev/null
           echo "$log"
-          echo "docker stop: ${ms} ms, exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
+          echo "docker stop: returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
           [ -n "$up" ] || { echo "the Kubernetes image never answered" >&2; exit 1; }
           [ -n "$seen" ] || { echo "the server never called the embedding stub, so no call was in flight when the stop landed" >&2; exit 1; }
-          if ! { [ "$code" = 0 ] && [ "$ms" -ge 1000 ] && [ "$ms" -lt 5000 ]; }; then echo "expected exit 0 once the call in flight answered, in 1–5 s (137 near 10 s is the grace period's kill; under 1 s it did not wait)" >&2; exit 1; fi
+          [ "$code" = 0 ] || { echo "expected exit 0 once the call in flight answered (137 is the 10 s grace period's kill, 1 a stop cut off at the drain bound)" >&2; exit 1; }
           grep -q '^SIGTERM: no longer accepting; 1 in flight' <<< "$log" || { echo "the handler did not count the call in flight" >&2; exit 1; }
           grep -q '"id":1' /tmp/k8s-call.out || { echo "the call in flight got no answer" >&2; exit 1; }
+          stopped=$(grep '^SIGTERM: stopped in ' <<< "$log" || true)
+          if ! [[ "$stopped" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "expected the server's own line, stopped in under 5 s; exit 0 — it was: ${stopped:-none}" >&2; exit 1; fi
 
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
@@ -962,7 +971,10 @@ jobs:
           # 30%, under the canary smoke's 50% floor, on every run. While
           # /tmp/provider-stub-slow exists GET /models answers after 2 s, inside
           # preflight's 2.5 s probe, so a server started then is still in
-          # preflight 2 s on (the SIGTERM step, SMD-2250).
+          # preflight 2 s on (the SIGTERM step, SMD-2250). While
+          # /tmp/provider-stub-slow-embed exists an embedding answers after
+          # 6 s, so a search's SSE stream carries the server's 5 s keepalive
+          # frame before its result (the proxy step, SMD-1846).
           nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
           import json, math, os, re, time, zlib
           from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -988,6 +1000,7 @@ jobs:
                   req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
                   if not self.path.endswith("/embeddings"):
                       self.send_error(404); return
+                  if os.path.exists("/tmp/provider-stub-slow-embed"): time.sleep(6)
                   inputs = req.get("input"); inputs = inputs if isinstance(inputs, list) else [inputs]
                   f = wrong if os.path.exists("/tmp/provider-stub-wrong") else embed
                   data = [{"object": "embedding", "index": i, "embedding": f(t)} for i, t in enumerate(inputs)]
@@ -1064,8 +1077,10 @@ jobs:
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own
       # rendering rather than the file: the base file publishes exactly one port
-      # (the server) and, with the host-ports overlay and the local-models
-      # profile, three — every one on loopback; and SERVER_BIND opens the server
+      # (the proxy, SMD-1846 — the server publishes none, the proxy's image is
+      # pinned by digest, and its route table's label copy, which makes a
+      # changed route recreate it, is the config's) and, with the host-ports overlay and the local-models
+      # profile, three — every one on loopback; and SERVER_BIND opens the proxy
       # by name, the other two still on loopback (a sorted multiset passed with
       # Ollama opened instead — the second review pass); and no service sets
       # network_mode, since `host` reaches the host's interfaces with no port
@@ -1075,15 +1090,15 @@ jobs:
         working-directory: deploy
         run: |
           docker compose -f compose.yaml --profile local-models config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and ([.services[] | select(.network_mode != null)] | length == 0)'
+            | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.proxy.ports | length == 1) and (.services.server | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and ([.services[] | select(.network_mode != null)] | length == 0)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
-            | jq -e '([.services[].ports[]?] | length == 3) and .services.server.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
+            | jq -e '([.services[].ports[]?] | length == 3) and .services.proxy.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
           # SMD-2210: the orchestration profile adds n8n's one port, also on
           # loopback, with its image pinned by digest. Its import runner
-          # (SMD-2212) publishes none. Without the profile a plain config
-          # names exactly the three services it did before.
+          # (SMD-2212) publishes none. Without a profile a plain config
+          # names exactly the four services it should: SMD-1846 added the proxy.
           docker compose -f compose.yaml --profile orchestration config --format json \
             | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
           # SMD-2285: the authorization server publishes nothing, joins only
@@ -1091,7 +1106,7 @@ jobs:
           # Postgres credential, no plain password and not the POC's switch.
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
-          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "migrate postgres server " ]
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "migrate postgres proxy server " ]
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a
@@ -1265,9 +1280,17 @@ jobs:
 
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.
+      # Through the proxy (SMD-1846): smoke.sh's default URL is the stack's
+      # endpoint, http://127.0.0.1:8010/mcp. Then again at the origin root,
+      # the URL every client configured before the proxy holds: the legacy
+      # router must answer it as the server did, the SDK's `GET /` probe's 405
+      # included (review pass 1: the proxy's 404 there made SDK clients report
+      # an error on every connect).
       - name: Smoke-test it over MCP
         working-directory: deploy
-        run: ./smoke.sh
+        run: |
+          ./smoke.sh
+          ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY"
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
 
@@ -1299,7 +1322,7 @@ jobs:
           q openbrain "SELECT upsert_thought('tier refresh probe: the quokka ledger', '{\"metadata\": {\"source\": \"ci-tier\"}}'::jsonb, '$(vec 'tier refresh probe: the quokka ledger')'::vector)"
           curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts_keyword","arguments":{"query":"quokka"}}}' \
-            http://127.0.0.1:8010/ | grep -F 'quokka ledger'
+            http://127.0.0.1:8010/mcp | grep -F 'quokka ledger'
           docker compose -f compose.yaml exec -T postgres createdb -U postgres ob1_tier_ci
           ./tier.sh --refresh --from postgres --to postgres/ob1_tier_ci --tier working
           COUNTS="SELECT (SELECT count(*) FROM schema_migrations) || '/' || (SELECT count(*) FROM thoughts) || '/' || (SELECT count(embedding) FROM thoughts) || '/' || (SELECT count(*) FROM query_log)"
@@ -1401,7 +1424,8 @@ jobs:
       # SMD-2038. The canary's life beside this stack, in two `up`s. canary.sh
       # runs compose.yaml again as the project open-brain-canary: its
       # Postgres, a refresh from this stack's through tier.sh on both
-      # networks, its server on 8011 built from this checkout, then the smoke.
+      # networks, its server built from this checkout behind its own proxy on
+      # 8011 (SMD-1846), then the smoke.
       # The first `up --connect` runs over a stable carrying the protective
       # mark `stable` (not a refresh's) and under SERVER_BIND=0.0.0.0; it
       # stamps stable, stays on loopback, registers the connector, and its
@@ -1437,8 +1461,8 @@ jobs:
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
           grep -F "returns it first: $LITERAL_ID at" /tmp/canary-up.out
-          grep -F 'mcp add --transport http --scope user open-brain-canary http://127.0.0.1:8011/' /tmp/fake-claude.log
-          [ "$(docker compose -p open-brain-canary -f compose.yaml port server 8000)" = 127.0.0.1:8011 ] || { echo "the canary is not on loopback only" >&2; exit 1; }
+          grep -F 'mcp add --transport http --scope user open-brain-canary http://127.0.0.1:8011/mcp -H' /tmp/fake-claude.log
+          [ "$(docker compose -p open-brain-canary -f compose.yaml port proxy 8000)" = 127.0.0.1:8011 ] || { echo "the canary is not on loopback only" >&2; exit 1; }
           [ "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" = stable ] || { echo "stable is not stamped tier=stable" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the canary did not get the tier step's thought" >&2; exit 1; }
           seed 'canary re-sync probe: the numbat almanac' > /dev/null
@@ -1480,6 +1504,65 @@ jobs:
           [ "$(docker compose -f compose.yaml ps -q postgres)" = "$BEFORE" ] || { echo "stable's Postgres container changed" >&2; exit 1; }
           [ "$(q "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%' OR content LIKE '%numbat almanac%' OR content LIKE '%wombat register%'")" = 3 ] || { echo "the brain lost a thought" >&2; exit 1; }
           [ "$(curl -s --max-time 5 http://127.0.0.1:8010/health)" = ok ] || { echo "stable's server stopped answering" >&2; exit 1; }
+
+      # SMD-1846. What the proxy itself owes, beside the smoke:
+      # - /.well-known, bare and under it, is answered by the proxy, not the
+      #   server — Traefik's 404 body, where the server's would be "Not
+      #   Found" — so a claude.ai connector's discovery at the root gets its
+      #   404 whatever the server does;
+      # - the connector form clients hold today still answers at the root:
+      #   `POST /?key=` (the legacy router, until SMD-2306 closes it);
+      # - the access log never holds a query string or userinfo: after calls
+      #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
+      #   part of an absolute-form target, no log line carries it, and the
+      #   callback's own line is there with its bare path, so the log is on;
+      # - an SSE stream passes through as it is written: with the stub's
+      #   embedding held 6 s, the server's 5 s keepalive frame must arrive a
+      #   good second before the result. A buffering proxy delivers both
+      #   together.
+      # After the tier and canary steps: its search_thoughts is a semantic
+      # search the query log keeps, and the tier step's --replay re-embeds
+      # every logged query from tier.sh's container, which has no
+      # host.docker.internal to reach the stub by (the first CI run, caught:
+      # getaddrinfo ENOTFOUND host.docker.internal).
+      - name: The proxy answers discovery itself, logs no key and streams unbuffered
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          for u in "$B/.well-known" "$B/.well-known/oauth-protected-resource" "$B/.well-known/oauth-protected-resource/mcp"; do
+            code=$(curl -s --max-time 10 -o /tmp/proxy-body -w '%{http_code}' "$u")
+            if ! { [ "$code" = 404 ] && [ "$(cat /tmp/proxy-body)" = "404 page not found" ]; }; then echo "GET $u → HTTP $code '$(head -c 80 /tmp/proxy-body)', expected the proxy's own 404" >&2; exit 1; fi
+          done
+          stats=$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' "$B/?key=$OB1_SMOKE_KEY")
+          grep -qF 'Total thoughts: ' <<<"$stats" || { echo "POST /?key= at the root no longer reaches the brain: ${stats:0:200}" >&2; exit 1; }
+          curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
+          # Answered by the server, so Traefik took the absolute form and logged it:
+          # a refusal before the log would leave the userinfo half untested.
+          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' --request-target "http://ci-$OB1_SMOKE_KEY@127.0.0.1:8010/mcp?key=$OB1_SMOKE_KEY" "$B/")
+          [ "$code" = 200 ] || { echo "the absolute-form probe got HTTP $code, not the server's 200, so its log line proves nothing" >&2; exit 1; }
+          sleep 1
+          LOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
+          if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the proxy's access log holds the smoke key from a query string or userinfo" >&2; exit 1; fi
+          grep -qF '"RequestPath":"/auth/callback"' <<<"$LOG" || { echo "no access-log line for the callback with its bare path, so the absence of the key proves nothing:" >&2; tail -5 <<<"$LOG" >&2; exit 1; }
+          touch /tmp/provider-stub-slow-embed
+          trap 'rm -f /tmp/provider-stub-slow-embed' EXIT
+          python3 - "$B/mcp" "$OB1_SMOKE_KEY" <<'PY'
+          import json, sys, time, urllib.request
+          url, key = sys.argv[1], sys.argv[2]
+          body = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "search_thoughts", "arguments": {"query": "proxy stream probe"}}}).encode()
+          req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "x-brain-key": key})
+          t0 = time.monotonic(); keepalive = result = None
+          with urllib.request.urlopen(req, timeout=60) as r:
+              for line in r:
+                  t = time.monotonic() - t0
+                  if line.startswith(b": keepalive") and keepalive is None: keepalive = t
+                  if line.startswith(b"data: ") and b'"id":7' in line: result = t
+          print(f"keepalive frame at {keepalive}, result at {result} (seconds after the request)")
+          if keepalive is None or result is None: sys.exit("the stream lacked a keepalive frame or the result")
+          if result - keepalive < 0.5: sys.exit("the keepalive frame arrived with the result: the proxy buffered the stream")
+          PY
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
@@ -1562,7 +1645,7 @@ jobs:
       - name: The SvelteKit dashboard, driven against the stack
         working-directory: dashboards/open-brain-dashboard
         env:
-          MCP_URL: http://127.0.0.1:8010/
+          MCP_URL: http://127.0.0.1:8010/mcp
         run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
 
       # SMD-2250. The server stops on SIGTERM once what is in flight is
@@ -1570,35 +1653,42 @@ jobs:
       # ends the container (the Dockerfile's traps): before, each waited out
       # the 10 s grace period and was killed, exit 137 — about 30 s of this
       # job, over the canary's stops and the teardown. Last of the steps that
-      # use the server: it is left stopped. The serving stop is given 5 s:
-      # on the PR's first run the server logged `stopped in 0.0 s` and
-      # `docker compose stop` still took 2,476 ms on the runner, against a
-      # 10 s kill the gate exists to tell apart. The second stop lands inside
-      # preflight because the stub holds GET /models 2 s, and must end inside
-      # 1 s: the traps alone, with preflight in the foreground, end it only
-      # when the 2 s hold does (review pass 1). The log is read once, into a
-      # variable: `grep -q` on a pipe closes it early, which pipefail fails.
+      # use the server: it is left stopped. The serving stop is judged by its
+      # exit code under the 10 s grace and by its own `stopped in N s` line, N
+      # under 5 — not by `docker compose stop`'s return, which is printed: it
+      # took 2,476 ms on the PR's first run, and 5.1–7.9 s four times on
+      # 2026-09-27 after a server that logged `stopped in 0.0 s` (SMD-2316).
+      # The second stop lands inside preflight because the stub holds GET
+      # /models 2 s, and must end inside 1 s: the traps alone, with preflight
+      # in the foreground, end it only when the 2 s hold does (review pass 1).
+      # Preflight logs no time of its own, so that deadline is docker's kill
+      # timer, `stop -t 1`: a stop that ends in time exits 143 by itself, one
+      # that does not is killed, 137. The log is read once, into a variable:
+      # `grep -q` on a pipe closes it early, which pipefail fails.
       - name: The server stops on SIGTERM, serving and in preflight
         working-directory: deploy
         run: |
           stop() {
-            t0=$(date +%s%3N); docker compose -f compose.yaml stop server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
-            code=$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose -f compose.yaml ps -aq server)")
-            echo "$1: stopped in ${ms} ms, exit $code"
-            if ! { [ "$code" = "$2" ] && [ "$ms" -lt "$3" ]; }; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 within $3 ms (137 near 10 s is the grace period's kill)" >&2; exit 1; fi
+            if [ -n "${3:-}" ]; then t=(-t "$3"); else t=(); fi
+            t0=$(date +%s%3N); docker compose -f compose.yaml stop "${t[@]}" server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
+            id=$(docker compose -f compose.yaml ps -aq server)
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$id")
+            fin=$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' "$id")" +%s%3N 2> /dev/null) || fin=""
+            echo "$1: docker compose stop returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code"
+            if [ "$code" != "$2" ]; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 (137 is the kill at the end of the grace period: ${3:-10} s)" >&2; exit 1; fi
           }
           # A keyed call first, so the pool this stop closes is this step's to
           # open, whatever ran before it (review pass 2).
           curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/
-          stop serving 0 5000
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp
+          stop serving 0
           last=$(docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: stopped' | tail -1 || true)
           echo "$last"
-          [[ "$last" =~ ^SIGTERM:\ stopped\ in\ [0-9.]+\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || { echo "the stop's line does not say the pool closed and exit 0" >&2; exit 1; }
+          if ! [[ "$last" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "the stop's line does not say it stopped in under 5 s, the pool closed and exit 0" >&2; exit 1; fi
           touch /tmp/provider-stub-slow
           docker compose -f compose.yaml start server > /dev/null 2>&1
           sleep 0.5
-          stop "in preflight" 143 1000
+          stop "in preflight" 143 1
           rm -f /tmp/provider-stub-slow
 
       - name: Logs on failure
