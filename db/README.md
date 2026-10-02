@@ -991,8 +991,11 @@ their signatures, defaults and privileges (each new form is created with its
 fewer to the old form, eight to the new. Not 074's shape (a defaulted argument,
 the shorter form dropped): 059's `search_thoughts_current` is `LANGUAGE sql`,
 resolved when `--reapply` re-creates it, and a defaulted 8-argument hybrid
-beside 027's 7 would make its call "not unique". test-schema [68], test-upgrade
-[20z].
+beside 027's 7 would make its call "not unique". A call by name that names `min_trust` names
+all eight. 075 refuses to apply without 074, and preflight reads the pair by the
+7's body. An operator's REVOKE on the 7-argument `search_thoughts_current` does
+not survive a `--reapply` (059 drops and re-creates it — as on main), while its
+8's does. test-schema [68], test-upgrade [20z].
 
 ## What changed relative to the guide
 

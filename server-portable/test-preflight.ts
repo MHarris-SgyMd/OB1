@@ -774,7 +774,7 @@ else {
   // Everything shipped again: both estimates and the clause, reported as ok.
   const shipped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 \(019\), match_thoughts jit = off \(040\) and enable_nestloop = on with enable_tidscan = on \(041\)/s.test(shipped.out), "with every migration re-applied, the candidate-scan check reports 019's clause, both row estimates, 040's clause and 041's two pins");
-  assert(shipped.code === 0 && /search signatures.*one of each/s.test(shipped.out), "…and the signature check is satisfied");
+  assert(shipped.code === 0 && /search signatures.*one of each/s.test(shipped.out), "…and the signature check reads one form of each (a warning at 073, min_trust missing — the block's brain)");
   // 039: the walk's cast and the index's expression are one contract in two
   // halves, and each half moves by hand without the other — 037 re-applied
   // alone puts a raw-column body over the halfvec indexes; 001's DDL re-run
@@ -965,22 +965,37 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("027") || f.startsWith("074") });
   assert((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).code === 0, "…and 074 re-applied (027 for the hybrid 020 replaced) is one form again");
   // 075's pair (SMD-1724): the hybrid's 7-argument form the servers call and
-  // min_trust's 8-argument one. The 7 alone is a brain before 075 — a warning
-  // naming it; the 8 alone a 7 dropped by hand — a failure, the servers' call
-  // gone; 075 re-applied puts either back.
+  // min_trust's 8-argument one. Three states beside it, each built as it
+  // arises: a brain before 075 (the 8 absent, the 7 027's body — 027
+  // re-applied over 075's wrapper) is a warning naming 075; 075's wrapper with
+  // its 8 dropped, and the 8 with its 7 dropped, are each a failure — every
+  // search the servers send fails; 075 re-applied puts the pair back (first
+  // review pass: the wrapper alone was read, by count, as the first).
   const pair = new SQL({ url: LIVE, max: 1 });
   await pair.unsafe(`DROP FUNCTION ${SEARCH_THOUGHTS_HYBRID_SIGNATURE}`);
-  const no8 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("027") });
+  const pre075 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("075") });
+  await pair.unsafe(`DROP FUNCTION ${SEARCH_THOUGHTS_HYBRID_SIGNATURE}`);
+  const wrapperAlone = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("075") });
   await pair.unsafe(`DROP FUNCTION ${SEARCH_THOUGHTS_HYBRID_SIGNATURE_7}`);
   const no7 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   await pair.close();
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("075") });
+  // 027 re-applied over the pair: its body under the 7 beside 075's 8.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("027") });
+  const stale7 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("075") });
   const bothBack = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(no8.code === 0 && /search signatures[^\n]*search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075: every search answers/.test(no8.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql\./.test(no8.out),
-    "the hybrid's 7-argument form alone — a brain before 075 — starts with a warning naming 075");
+  assert(pre075.code === 0 && /search signatures[^\n]*search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075: every search answers, and min_trust \(SMD-1724\) does not reach the hybrid the search tools read/.test(pre075.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql\./.test(pre075.out),
+    "a brain before 075 — the hybrid's 7-argument form alone, 027's body — starts with a warning naming 075");
+  assert(wrapperAlone.code === 1 && /search signatures[^\n]*is 075's 7-argument search_thoughts_hybrid, which calls its 8-argument form, and that form is missing/.test(wrapperAlone.out),
+    "…075's wrapper with its 8-argument form dropped fails the start: every search would fail");
   assert(no7.code === 1 && /search signatures[^\n]*the 7-argument search_thoughts_hybrid the servers call is missing beside 075's 8-argument form/.test(no7.out) && bothBack.code === 0 && /search signatures[^\n]*with min_trust's 8-argument hybrid beside them \(075\)/.test(bothBack.out),
     "…its 8-argument form alone fails the start, the servers' call gone; 075 re-applied is the shipped pair again");
+  assert(stale7.code === 0 && /search signatures[^\n]*search_thoughts_hybrid's 7-argument form is not 075's — an earlier migration re-applied by hand over it — so the servers' call runs that body/.test(stale7.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql\./.test(stale7.out),
+    "…and a 7-argument form that is not 075's wrapper beside the 8 — 027 re-applied by hand — is a warning naming 075 (first review pass, run-it)");
 
   /**
    * The trigram flag is read only when 011 APPLIES. Migrations run once, so a

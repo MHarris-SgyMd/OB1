@@ -11822,7 +11822,7 @@ console.log("\n[68] Migration 075: min_trust on search_thoughts_hybrid and searc
     `the 8-argument forms take every argument, none defaulted, min_trust last — so no 7-argument call is ambiguous (${h8.args.slice(-60)})`);
   assert(/search_thoughts_hybrid\(query_embedding, query_text, match_threshold, match_count,\s+filter, recency_weight, half_life_days, NULL::text\)/.test(h7.src)
       && /search_thoughts_current\(query_embedding, query_text, match_threshold, match_count,\s+filter, recency_weight, half_life_days, NULL::text\)/.test(c7.src)
-      && /ob1:relative-floor/.test(h8.src) && !/ob1:relative-floor/.test(h7.src),
+      && /ob1:relative-floor/.test(h8.src) && !/ob1:relative-floor/.test(h7.src) && /ob1:seven-calls-eight/.test(h7.src) && /ob1:seven-calls-eight/.test(c7.src),
     "the 7-argument forms are one statement each, the 8-argument form with NULL — one body, 027's and 068's, in the 8");
   assert(h8.rows === 100 && h7.rows === 100, `both hybrid forms declare ROWS 100, 068's estimate (${h8.rows}, ${h7.rows})`);
   assert(/search_thoughts_keyword\(p\.needle, 100, 0, v_filter, min_trust\)/.test(h8.src) && /v_count, v_filter, recency_weight, half_life_days, min_trust\) AS m/.test(h8.src)
@@ -11831,8 +11831,7 @@ console.log("\n[68] Migration 075: min_trust on search_thoughts_hybrid and searc
 
   // A corpus: twenty operator notes and 150 ingested pages share a needle,
   // so without min_trust the needle is common (past the probe's 100) and with
-  // min_trust operator it is the operator's five-and-twenty — used, its page
-  // whole.
+  // min_trust operator it is the operator's twenty — used, its page whole.
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
   await db.exec(`SELECT set_agent_kind('op-key', 'operator'); SELECT set_agent_kind('imp-key', 'ingested')`);
@@ -11858,7 +11857,7 @@ console.log("\n[68] Migration 075: min_trust on search_thoughts_hybrid and searc
   const cur7 = await q<{ id: string }>(`SELECT id FROM search_thoughts_current($1::vector, 'ZQX-77', 0.0, 25, '{}'::jsonb)`, [qv]);
   const cur8 = await q<{ id: string }>(`SELECT id FROM search_thoughts_current($1::vector, 'ZQX-77', 0.0, 25, '{}'::jsonb, 0.0, 90.0, NULL)`, [qv]);
   assert(cur.length === 20 && cur.every((r) => r.t === "operator") && cur7.length > 0 && JSON.stringify(cur7) === JSON.stringify(cur8),
-    `search_thoughts_current passes min_trust to the hybrid (${cur.length} operator rows), and its 5-argument call resolves to the 8-argument form with NULL, row for row (${cur7.length})`);
+    `search_thoughts_current passes min_trust to the hybrid (${cur.length} operator rows), and its 5-argument call — the 7-argument form, calling the 8 with NULL — answers as the 8 with NULL, row for row (${cur7.length})`);
   const bad = await refused(`SELECT * FROM search_thoughts_hybrid($1::vector, 'x', 0.0, 10, '{}'::jsonb, 0.0, 90.0, 'admin')`, [qv]);
   assert(/min_trust must be operator, agent or ingested/.test(bad), "a min_trust off the ladder is refused by the hybrid before either arm runs");
 

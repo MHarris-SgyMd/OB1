@@ -47,9 +47,39 @@
 --   * The servers' argument and the tools' label — SMD-1724's PR 3, which
 --     sends all eight.
 --
+--   * A call by name follows the same rule: one naming all seven of the
+--     7-argument form's arguments, or fewer, resolves to it; one naming
+--     min_trust must name all eight (no defaults), or it finds no function.
+--     PostgREST is the same — it leaves out a function whose required
+--     arguments are not all named.
+--
 -- Idempotent: CREATE OR REPLACE throughout; a re-run finds the 8-argument
 -- forms and replays nothing.
 -- ============================================================================
+
+-- The prerequisites, by name: 074's min_trust on both arms and the rank it
+-- reads, and 068's node_state. A plpgsql body binds its calls when it runs,
+-- so without this a hand apply ahead of 074 would succeed and every search
+-- through the 7-argument forms fail at its first call (first review pass).
+DO $qc$
+BEGIN
+  IF to_regprocedure('ob1_min_trust_rank(text)') IS NULL
+     OR to_regprocedure('match_thoughts(vector, float, int, jsonb, float, float, text)') IS NULL
+     OR to_regprocedure('search_thoughts_keyword(text, int, int, jsonb, text)') IS NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'migration 075 needs 074 (ob1_min_trust_rank, match_thoughts and search_thoughts_keyword with min_trust); this schema lacks it',
+      -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
+      HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
+      ERRCODE = 'invalid_schema_definition';
+  END IF;
+  IF to_regprocedure('node_state(uuid[])') IS NULL OR to_regclass('public.ob1_superseded_by') IS NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'migration 075 needs 068 (node_state, ob1_superseded_by); this schema lacks it',
+      HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
+      ERRCODE = 'invalid_schema_definition';
+  END IF;
+END
+$qc$;
 
 -- ---------------------------------------------------------------------------
 -- 1. search_thoughts_hybrid(…, min_trust) — 027's body, min_trust passed on.
@@ -377,8 +407,12 @@ RETURNS TABLE (
 )LANGUAGE plpgsql
 STABLE
 ROWS 100
+SET jit = off
 AS $$
 BEGIN
+  -- ob1:seven-calls-eight — a CONTRACT SENTINEL, not prose (the 014
+  -- convention); preflight's `search signatures` reads it: this form is
+  -- 075's, and without the 8-argument form beside it every call fails.
   -- 075: 027's function, as the 8-argument form with no min_trust — one body,
   -- not two to keep in step.
   RETURN QUERY SELECT * FROM search_thoughts_hybrid(query_embedding, query_text, match_threshold, match_count,
@@ -387,7 +421,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float, text) IS
-  'match_thoughts and search_thoughts_keyword fused: reciprocal rank on the vector arm (in match_thoughts'' own order — its `score`, the recency blend at recency_weight, similarity alone at 0), presence per matched needle on the keyword arm, each hit''s own blended score as the tiebreak. Admission is RELATIVE (SMD-1300, migration 027): a scored row is kept when its raw cosine is within half of the top candidate''s (v_relfloor 0.5) and clears match_threshold, which the tools send as 0 so the relative cutoff governs; a keyword hit is exempt, and a negative match_threshold disables the relative cutoff (the raw ranked list). `similarity` stays the raw cosine. Needles come from extract_search_needles(query_text). min_trust (075) is passed to both arms (074: at or above that trust, a row with none below every word; NULL no constraint, any other word refused). Every argument required; the 7-argument form, with its defaults, is this with min_trust NULL. Fixed top-N (no paging). See the 017, 020, 027, 074 and 075 headers.';
+  'match_thoughts and search_thoughts_keyword fused: reciprocal rank on the vector arm (in match_thoughts'' own order — its `score`, the recency blend at recency_weight, similarity alone at 0), presence per matched needle on the keyword arm, each hit''s own blended score as the tiebreak. Admission is RELATIVE (SMD-1300, migration 027): a scored row is kept when its raw cosine is within half of the top candidate''s (v_relfloor 0.5) and clears match_threshold, which the tools send as 0 so the relative cutoff governs; a keyword hit is exempt, and a negative match_threshold disables the relative cutoff (the raw ranked list). `similarity` stays the raw cosine. Needles come from extract_search_needles(query_text). min_trust (075) is passed to both arms (074: at or above that trust, a row with none below every word; NULL no constraint, any other word refused). Every argument required — a call by name naming min_trust names all eight; the 7-argument form, with its defaults, is this with min_trust NULL. Fixed top-N (no paging). See the 017, 020, 027, 074 and 075 headers.';
 
 COMMENT ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float) IS
   'search_thoughts_hybrid with no min_trust: the 8-argument form called with NULL, under the defaults 020 gave this signature. The form the servers call (they send seven). See the 8-argument form and the 075 header.';
@@ -529,7 +563,9 @@ STABLE
 SET jit = off
 AS $$
 BEGIN
-  -- 075: 068's function, as the 8-argument form with no min_trust.
+  -- ob1:seven-calls-eight — a CONTRACT SENTINEL, not prose (the 014
+  -- convention). 075: 068's function, as the 8-argument form with no
+  -- min_trust.
   RETURN QUERY SELECT * FROM search_thoughts_current(query_embedding, query_text, match_threshold, match_count,
                                                      filter, recency_weight, half_life_days, NULL::text);
 END
