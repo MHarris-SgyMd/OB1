@@ -1285,60 +1285,6 @@ jobs:
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
 
-      # SMD-1846. What the proxy itself owes, beside the smoke:
-      # - /.well-known, bare and under it, is answered by the proxy, not the
-      #   server — Traefik's 404 body, where the server's would be "Not
-      #   Found" — so a claude.ai connector's discovery at the root gets its
-      #   404 whatever the server does;
-      # - the connector form clients hold today still answers at the root:
-      #   `POST /?key=` (the legacy router, until SMD-2306 closes it);
-      # - the access log never holds a query string or userinfo: after calls
-      #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
-      #   part of an absolute-form target, no log line carries it, and the
-      #   callback's own line is there with its bare path, so the log is on;
-      # - an SSE stream passes through as it is written: with the stub's
-      #   embedding held 6 s, the server's 5 s keepalive frame must arrive a
-      #   good second before the result. A buffering proxy delivers both
-      #   together.
-      - name: The proxy answers discovery itself, logs no key and streams unbuffered
-        working-directory: deploy
-        run: |
-          B=http://127.0.0.1:8010
-          for u in "$B/.well-known" "$B/.well-known/oauth-protected-resource" "$B/.well-known/oauth-protected-resource/mcp"; do
-            code=$(curl -s --max-time 10 -o /tmp/proxy-body -w '%{http_code}' "$u")
-            if ! { [ "$code" = 404 ] && [ "$(cat /tmp/proxy-body)" = "404 page not found" ]; }; then echo "GET $u → HTTP $code '$(head -c 80 /tmp/proxy-body)', expected the proxy's own 404" >&2; exit 1; fi
-          done
-          stats=$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' "$B/?key=$OB1_SMOKE_KEY")
-          grep -qF 'Total thoughts: ' <<<"$stats" || { echo "POST /?key= at the root no longer reaches the brain: ${stats:0:200}" >&2; exit 1; }
-          curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
-          # Answered by the server, so Traefik took the absolute form and logged it:
-          # a refusal before the log would leave the userinfo half untested.
-          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' --request-target "http://ci-$OB1_SMOKE_KEY@127.0.0.1:8010/mcp?key=$OB1_SMOKE_KEY" "$B/")
-          [ "$code" = 200 ] || { echo "the absolute-form probe got HTTP $code, not the server's 200, so its log line proves nothing" >&2; exit 1; }
-          sleep 1
-          LOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
-          if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the proxy's access log holds the smoke key from a query string or userinfo" >&2; exit 1; fi
-          grep -qF '"RequestPath":"/auth/callback"' <<<"$LOG" || { echo "no access-log line for the callback with its bare path, so the absence of the key proves nothing:" >&2; tail -5 <<<"$LOG" >&2; exit 1; }
-          touch /tmp/provider-stub-slow-embed
-          trap 'rm -f /tmp/provider-stub-slow-embed' EXIT
-          python3 - "$B/mcp" "$OB1_SMOKE_KEY" <<'PY'
-          import json, sys, time, urllib.request
-          url, key = sys.argv[1], sys.argv[2]
-          body = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "search_thoughts", "arguments": {"query": "proxy stream probe"}}}).encode()
-          req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "x-brain-key": key})
-          t0 = time.monotonic(); keepalive = result = None
-          with urllib.request.urlopen(req, timeout=60) as r:
-              for line in r:
-                  t = time.monotonic() - t0
-                  if line.startswith(b": keepalive") and keepalive is None: keepalive = t
-                  if line.startswith(b"data: ") and b'"id":7' in line: result = t
-          print(f"keepalive frame at {keepalive}, result at {result} (seconds after the request)")
-          if keepalive is None or result is None: sys.exit("the stream lacked a keepalive frame or the result")
-          if result - keepalive < 0.5: sys.exit("the keepalive frame arrived with the result: the proxy buffered the stream")
-          PY
-
       # SMD-2036. db/tier.ts --refresh runs under Bun and shells to pg_dump /
       # pg_restore, which no image in the stack carries together, so the
       # snapshot half of the tier pipeline ran nowhere in CI (db-live's runner
@@ -1549,6 +1495,65 @@ jobs:
           [ "$(docker compose -f compose.yaml ps -q postgres)" = "$BEFORE" ] || { echo "stable's Postgres container changed" >&2; exit 1; }
           [ "$(q "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%' OR content LIKE '%numbat almanac%' OR content LIKE '%wombat register%'")" = 3 ] || { echo "the brain lost a thought" >&2; exit 1; }
           [ "$(curl -s --max-time 5 http://127.0.0.1:8010/health)" = ok ] || { echo "stable's server stopped answering" >&2; exit 1; }
+
+      # SMD-1846. What the proxy itself owes, beside the smoke:
+      # - /.well-known, bare and under it, is answered by the proxy, not the
+      #   server — Traefik's 404 body, where the server's would be "Not
+      #   Found" — so a claude.ai connector's discovery at the root gets its
+      #   404 whatever the server does;
+      # - the connector form clients hold today still answers at the root:
+      #   `POST /?key=` (the legacy router, until SMD-2306 closes it);
+      # - the access log never holds a query string or userinfo: after calls
+      #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
+      #   part of an absolute-form target, no log line carries it, and the
+      #   callback's own line is there with its bare path, so the log is on;
+      # - an SSE stream passes through as it is written: with the stub's
+      #   embedding held 6 s, the server's 5 s keepalive frame must arrive a
+      #   good second before the result. A buffering proxy delivers both
+      #   together.
+      # After the tier and canary steps: its search_thoughts is a semantic
+      # search the query log keeps, and the tier step's --replay re-embeds
+      # every logged query from tier.sh's container, which has no
+      # host.docker.internal to reach the stub by (the first CI run, caught:
+      # getaddrinfo ENOTFOUND host.docker.internal).
+      - name: The proxy answers discovery itself, logs no key and streams unbuffered
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          for u in "$B/.well-known" "$B/.well-known/oauth-protected-resource" "$B/.well-known/oauth-protected-resource/mcp"; do
+            code=$(curl -s --max-time 10 -o /tmp/proxy-body -w '%{http_code}' "$u")
+            if ! { [ "$code" = 404 ] && [ "$(cat /tmp/proxy-body)" = "404 page not found" ]; }; then echo "GET $u → HTTP $code '$(head -c 80 /tmp/proxy-body)', expected the proxy's own 404" >&2; exit 1; fi
+          done
+          stats=$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' "$B/?key=$OB1_SMOKE_KEY")
+          grep -qF 'Total thoughts: ' <<<"$stats" || { echo "POST /?key= at the root no longer reaches the brain: ${stats:0:200}" >&2; exit 1; }
+          curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
+          # Answered by the server, so Traefik took the absolute form and logged it:
+          # a refusal before the log would leave the userinfo half untested.
+          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' --request-target "http://ci-$OB1_SMOKE_KEY@127.0.0.1:8010/mcp?key=$OB1_SMOKE_KEY" "$B/")
+          [ "$code" = 200 ] || { echo "the absolute-form probe got HTTP $code, not the server's 200, so its log line proves nothing" >&2; exit 1; }
+          sleep 1
+          LOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
+          if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the proxy's access log holds the smoke key from a query string or userinfo" >&2; exit 1; fi
+          grep -qF '"RequestPath":"/auth/callback"' <<<"$LOG" || { echo "no access-log line for the callback with its bare path, so the absence of the key proves nothing:" >&2; tail -5 <<<"$LOG" >&2; exit 1; }
+          touch /tmp/provider-stub-slow-embed
+          trap 'rm -f /tmp/provider-stub-slow-embed' EXIT
+          python3 - "$B/mcp" "$OB1_SMOKE_KEY" <<'PY'
+          import json, sys, time, urllib.request
+          url, key = sys.argv[1], sys.argv[2]
+          body = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "search_thoughts", "arguments": {"query": "proxy stream probe"}}}).encode()
+          req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "x-brain-key": key})
+          t0 = time.monotonic(); keepalive = result = None
+          with urllib.request.urlopen(req, timeout=60) as r:
+              for line in r:
+                  t = time.monotonic() - t0
+                  if line.startswith(b": keepalive") and keepalive is None: keepalive = t
+                  if line.startswith(b"data: ") and b'"id":7' in line: result = t
+          print(f"keepalive frame at {keepalive}, result at {result} (seconds after the request)")
+          if keepalive is None or result is None: sys.exit("the stream lacked a keepalive frame or the result")
+          if result - keepalive < 0.5: sys.exit("the keepalive frame arrived with the result: the proxy buffered the stream")
+          PY
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
