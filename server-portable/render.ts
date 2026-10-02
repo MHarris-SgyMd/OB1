@@ -23,9 +23,9 @@ import type { AuditChange, LoggedSearchPage, ThoughtHybridMatch, ThoughtIdPage, 
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY } from "./core/filter.ts";
-import { failure, ok, type Outcome, type Refusal } from "./core/refusal.ts";
+import { failure, META_KEYS_MAX, META_VALUE_MAX, ok, type Outcome, type Refusal } from "./core/refusal.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
-import { META_KEYS_MAX, META_VALUE_MAX, type Captured, type Deleted, type HeadWindow, type Updated } from "./core/writes.ts";
+import type { Captured, Deleted, HeadWindow, Updated } from "./core/writes.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
 export type Reply = { content: { type: "text"; text: string }[]; isError?: true; structuredContent: Record<string, unknown> };
@@ -84,10 +84,11 @@ function safeRefusal(r: Refusal): object {
     ...(r.code === "REFUSED_EGRESS" ? { rule: r.rule } : {}),
     // The derived_from indices to drop — present only for a caller allowed to
     // know they exist (SMD-1978); what the session hook mends by.
-    ...(r.code === "DERIVED_FROM_MISSING" && r.positions ? { positions: r.positions } : {}),
+    ...(r.code === "DERIVED_FROM_MISSING" && r.named.length ? { positions: r.named.map((n) => n.position) } : {}),
     // The thought that was saved without its vector: the server's own id.
     ...(r.code === "EMBEDDING_NOT_ATTACHED" ? { id: r.id } : {}),
     ...(r.code === "REFUSED_CITED" && r.citedBy !== undefined ? { citedBy: r.citedBy } : {}),
+    ...(r.code === "REFUSED_STALE_READ" && r.currentUpdatedAt ? { currentUpdatedAt: r.currentUpdatedAt } : {}),
   };
 }
 
@@ -102,22 +103,19 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
  * non-Error (a string, undefined, an object that cannot be printed) is said as
  * itself where it can be, and never throws here.
  */
-export function failed(err: unknown, hint?: (msg: string) => string, lead = "Error: "): Reply {
+export function failed(err: unknown, hint?: (msg: string) => string, lead = "Error: ", verdict: { code: string; retryable?: boolean } = { code: "FAILED" }): Reply {
   const f = failure(err);
   const text = `${lead}${f.message}${hint ? hint(f.message) : ""}`;
-  return { content: [{ type: "text", text }], isError: true, structuredContent: { code: f.code, text } };
+  return { content: [{ type: "text", text }], isError: true, structuredContent: { ...verdict, text } };
 }
 
 /**
  * capture_thought's fault: the store did not answer as itself — down, a
  * missing function, a front returning 401 — a transient the caller keeps and
  * retries (SMD-1978). The session hook keys on this code; it stays retryable
- * until SMD-2461's one classifier reads every fault.
+ * until SMD-2461's one classifier reads every fault. The words are failed()'s.
  */
-export function storeUnavailable(err: unknown): Reply {
-  const text = `Error: ${failure(err).message}`;
-  return { content: [{ type: "text", text }], isError: true, structuredContent: { code: "STORE_UNAVAILABLE", retryable: true, text } };
-}
+export const storeUnavailable = (err: unknown): Reply => failed(err, undefined, "Error: ", { code: "STORE_UNAVAILABLE", retryable: true });
 
 /** An enum the store reads from a constrained column, kept only when it is one of the words it may be. */
 const oneOf = <W extends string>(words: readonly W[], v: unknown): W | null => (words as readonly unknown[]).includes(v) ? v as W : null;
@@ -874,7 +872,7 @@ export function renderCapture(o: Outcome<Captured>): Reply {
  * A stale read is not a fault — it is a race the caller can resolve by
  * refetching — so the message says what to do rather than only what went wrong.
  */
-function mutationRefusal(r: Refusal): string {
+function mutationRefusalText(r: Refusal): string {
   switch (r.code) {
     case "REFUSED_NOTHING_TO_UPDATE": return "Provide `content`, `metadata_patch`, `supersedes`, or any of them — an update with none would do nothing.";
     case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
@@ -959,7 +957,7 @@ export function renderUpdate(o: Outcome<Updated>): Reply {
       v.noVectorReason !== undefined
         ? `\n\nNote: saved WITHOUT a vector — ${v.noVectorReason}. It is findable by exact text and joins semantic search after a re-embed pass (db/reembed.ts) against an endpoint the gate allows.`
         : ""}`;
-  }, mutationRefusal, safeUpdate);
+  }, mutationRefusalText, safeUpdate);
 }
 
 /**
@@ -976,5 +974,5 @@ function explainDetached(r: Deleted): string {
 
 export function renderDelete(o: Outcome<Deleted>): Reply {
   return render(o, (v) => `Deleted ${v.id}. Its previous content is preserved in the audit trail.${explainDetached(v)}`,
-    mutationRefusal, (v) => ({ id: v.id, detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
+    mutationRefusalText, (v) => ({ id: v.id, detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
 }

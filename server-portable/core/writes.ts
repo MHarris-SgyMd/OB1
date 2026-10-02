@@ -14,7 +14,7 @@ import { decideCalls, type EgressSubject } from "../egress.ts";
 import { UUID_RE, type Citation, type ThoughtStore } from "../store.ts";
 import { canRead, type Principal } from "../auth.ts";
 import { citeRows, type Ctx } from "./context.ts";
-import { ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
+import { META_KEYS_MAX, META_VALUE_MAX, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 
 // A caller-set metadata key (SMD-2014): lower-case, starts with a letter, 2-40
@@ -29,8 +29,6 @@ import type { Input } from "./schemas.ts";
 // caller's to add.
 const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
 const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed"]);
-export const META_VALUE_MAX = 200;
-export const META_KEYS_MAX = 8;
 
 /** The refusal for a bad `metadata` argument, or null when it is clean (or absent). Checked before the model calls, as the other shape refusals are. */
 function metadataProblem(metadata: Record<string, unknown> | undefined): Refusal | null {
@@ -154,21 +152,26 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // an id met by a principal with one is not this key's to replace: a
       // later key minted under the same name would otherwise own every
       // thought captured while the registry was down (fourth review pass).
-      // The registry away NOW while the row is attributed: nothing can be
-      // said either way, and that is the server's condition, not the
-      // caller's — an error to retry, not a refusal (fifth review pass).
-      // Unless the registry ANSWERED and refused this key's argument (a
-      // label the SQL rejects): that will not heal on a retry, so it is a
-      // refusal, and the caller posts without the pointer (sixth review pass).
-      if (writer !== null && writer.agentId !== null && principal.agentId === undefined) {
-        if (principal.agentUnresolved === "refused") return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: true });
-        return refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
+      if (principal.agentId !== undefined) {
+        const own = writer !== null && writer.agentId !== null && writer.agentId === principal.agentId;
+        if (!own) return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: false });
+      } else {
+        // This key's id is not to hand. Its own row from an outage — no id,
+        // its name — is still provably its own. Anything else is not
+        // provable either way: an attributed row may be this key's, so that
+        // is the server's condition, an error to retry (fifth review pass);
+        // unless the registry ANSWERED and refused this key's argument,
+        // which will not heal on a retry (sixth review pass). And it is the
+        // SAME answer whatever the target is — a missing thought, another
+        // key's unattributed row, an attributed one — or the answer is an
+        // existence oracle on a key that cannot read (SMD-2283 PR 2 review:
+        // a missing thought was refused while an attributed one was retried).
+        const own = writer !== null && writer.agentId === null && writer.actorName === principal.name;
+        if (!own) {
+          if (principal.agentUnresolved === "refused") return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: true });
+          return refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
+        }
       }
-      const own = writer !== null && (
-        writer.agentId !== null && principal.agentId !== undefined ? writer.agentId === principal.agentId
-          : writer.agentId === null && principal.agentId === undefined ? writer.actorName === principal.name
-            : false);
-      if (!own) return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: false });
     }
     // What may leave the box (SMD-1903): asked once, for both calls, and
     // only the allowed ones are made — a refused capture costs no request
@@ -342,11 +345,11 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
           missingAt = sent.map((d, i) => (have.has(d.toLowerCase()) ? -1 : i)).filter((i) => i >= 0);
         } catch { /* the store could not say: the list alone, then */ }
       }
-      // The positions ride the refusal only when they may be NAMED — a caller
-      // allowed to know a source exists (the existence-oracle rule); a capture
-      // key gets the code with no positions (SMD-1978).
+      // The positions are named only to a caller allowed to know a source
+      // exists (the existence-oracle rule); a capture key gets the code with
+      // none, and so no `positions` beside it (SMD-1978).
       const named = reader && missingAt.length ? missingAt : [];
-      return refuse({ code: "DERIVED_FROM_MISSING", retryable: false, ...(named.length ? { positions: named } : {}), named: named.map((i) => ({ position: i, id: sent[i] })) });
+      return refuse({ code: "DERIVED_FROM_MISSING", retryable: false, named: named.map((i) => ({ position: i, id: sent[i] })) });
     }
     // The store did not answer as itself — down, a missing function, a front
     // returning 401: the MCP layer says STORE_UNAVAILABLE (SMD-1978).
@@ -373,7 +376,7 @@ export type Updated = {
 };
 
 /** A store's refusal of an edit or a delete (018, 032, 042) as a typed refusal. */
-function mutationRefusal(r: { error: string; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] }, id: string): Refusal {
+function storeRefusal(r: { error: string; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] }, id: string): Refusal {
   switch (r.error) {
     case "NOT_FOUND": return { code: "NOT_FOUND", retryable: false, id };
     case "STALE_READ": return { code: "REFUSED_STALE_READ", retryable: false, id, ...(r.currentUpdatedAt ? { currentUpdatedAt: r.currentUpdatedAt } : {}) };
@@ -432,7 +435,7 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id, conten
     provenance: supersedes !== undefined ? { supersedes } : undefined,
   });
 
-  if (!result.ok) return refuse(mutationRefusal(result, id));
+  if (!result.ok) return refuse(storeRefusal(result, id));
 
   // Click-through relevance (034): the caller edited this id after a
   // search. Only on a written edit, not a refusal. SMD-1719: an edit that
@@ -470,7 +473,7 @@ export async function deleteThought(ctx: Ctx, principal: Principal, { id, detach
     // 042: the refusal is the default; the way through is named here.
     detach: detach_citations === true,
   });
-  if (!result.ok) return refuse(mutationRefusal(result, id));
+  if (!result.ok) return refuse(storeRefusal(result, id));
 
   // Click-through relevance (034): the caller deleted this id after a
   // search — a strong signal it was the one they meant. Only on success.

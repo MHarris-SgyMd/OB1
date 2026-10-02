@@ -30,7 +30,7 @@ export type Refusal =
   | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "registry_away" }  // the row is attributed and this key's id is not to hand
   | { code: "REFUSED_SUPERSEDES_OWNERSHIP"; retryable: false; registryRefused: boolean } // a capture key named a supersedes it did not write
   | { code: "REFUSED_SUPERSEDES_UNKNOWN"; retryable: false }          // the supersedes names no thought
-  | { code: "DERIVED_FROM_MISSING"; retryable: false; positions?: number[]; named: { position: number; id: string }[] } // derived_from ids that name no thought; positions only for a reader (the existence-oracle rule)
+  | { code: "DERIVED_FROM_MISSING"; retryable: false; named: { position: number; id: string }[] } // derived_from entries that name no thought — empty for a key that cannot read (the existence-oracle rule)
   | { code: "EMBEDDING_NOT_ATTACHED"; retryable: true; id: string; detail: string } // saved, but its vector did not attach (the PostgREST two-step)
   // update_thought and delete_thought: the store's refusals (018, 032, 042).
   | { code: "REFUSED_NOTHING_TO_UPDATE"; retryable: false }           // none of content, metadata_patch, supersedes
@@ -42,6 +42,9 @@ export type Refusal =
 
 /** What is wrong with a caller's `metadata` argument (SMD-2014). */
 export type MetadataProblem = "too_many_keys" | "bad_key" | "reserved_key" | "bad_value" | "value_too_long";
+/** The bounds a caller's `metadata` is held to (SMD-2014): here, beside the refusal that names them, so its words need not load the write path. */
+export const META_VALUE_MAX = 200;
+export const META_KEYS_MAX = 8;
 
 export type RefusalCode = Refusal["code"];
 
