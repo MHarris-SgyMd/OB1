@@ -19,11 +19,12 @@
 
 import { displayDate } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
-import type { AuditChange, ThoughtHybridMatch, ThoughtStats } from "./store.ts";
+import type { AuditChange, LoggedSearchPage, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
+import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY } from "./core/filter.ts";
 import { failure, ok, type Outcome, type Refusal } from "./core/refusal.ts";
-import type { ChangesResult, KeywordResult, ListThoughtsResult, ProposalsResult, SearchThoughtsResult } from "./core/reads.ts";
+import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
 export type Reply = { content: { type: "text"; text: string }[]; isError?: true; structuredContent: Record<string, unknown> };
@@ -263,9 +264,9 @@ export function currentSearchHint(msg: string): string {
 // ── The read tools ───────────────────────────────────────────────────────────
 
 /** `search` and `fetch`: ChatGPT reads the text as JSON, so the text is the value. */
-export const renderSearch = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), searchRefusal, AS_JSON);
+export const renderSearch = (o: Outcome<SearchResult>): Reply => render(o, (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
-export const renderFetch = (o: Outcome<object>): Reply =>
+export const renderFetch = (o: Outcome<FetchedThought>): Reply =>
   render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)), AS_JSON);
 
 export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
@@ -634,11 +635,11 @@ export const changesHint = (msg: string): string =>
     : "";
 
 /** list_thought_ids: the page itself is the text, a JSON object a script reads. */
-export const renderThoughtIds = (o: Outcome<object>): Reply =>
+export const renderThoughtIds = (o: Outcome<ThoughtIdPage>): Reply =>
   render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_CURSOR" ? "Error: `after` must be a thought id (a uuid) — pass the previous page's `cursor`." : unknownRefusal(r)), AS_JSON);
 
 /** list_logged_searches: the page itself is the text. */
-export const renderLoggedSearches = (o: Outcome<object>): Reply =>
+export const renderLoggedSearches = (o: Outcome<LoggedSearchPage>): Reply =>
   render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_SINCE" ? "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." : unknownRefusal(r)), AS_JSON);
 
 export const loggedSearchesHint = (msg: string): string =>
@@ -647,14 +648,14 @@ export const loggedSearchesHint = (msg: string): string =>
     : "";
 
 /** worker_status: the text is the bare array it has always been; the value keys it (a result is an object). */
-export const renderWorkerStatus = (o: Outcome<{ pools: unknown[] }>): Reply => render(o, (v) => JSON.stringify(v.pools), unknownRefusal, AS_JSON);
+export const renderWorkerStatus = (o: Outcome<WorkerStatusResult>): Reply => render(o, (v) => JSON.stringify(v.pools), unknownRefusal, AS_JSON);
 
 /** job_status: the job record is the text; NOT_FOUND covers an unknown id, another key's job and a pruned one alike. */
-export const renderJobStatus = (o: Outcome<object>): Reply =>
+export const renderJobStatus = (o: Outcome<PublicJob>): Reply =>
   render(o, (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `No job ${JSON.stringify(r.id)} for this key — an unknown id, another key's job, or one pruned from the registry.` : unknownRefusal(r)), AS_JSON);
 
 /** brain_info: the short table (brain-info.ts), and the record the keyed /health body answers as JSON beside it — whole: it holds the server's and the database's own facts, no word a thought, a key or a judge wrote. */
 export const renderBrainInfoReply = (info: BrainInfo): Reply => render(ok(info), renderBrainInfo, unknownRefusal, AS_RECORD);
 
 /** scan_thoughts: the handle is the text. */
-export const renderJobHandle = (o: Outcome<object>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);
+export const renderJobHandle = (o: Outcome<JobHandle>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);

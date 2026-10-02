@@ -542,12 +542,12 @@ The core's values are whole, for the REST core. The write tools move into
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 344 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
-bun test-auth.ts          # 120 — scoped, hashed, named keys
-bun run test:local        # 52 — fully local provider, no credential
-bun run test:sql          # 180 — store conformance, real Postgres in a container
-bun run test:e2e          # 265 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-bun run cf:build          # ~342 KiB gzipped (measured 2026-09-20 at change 97; the PostgREST store and supabase-js are in it)
+bun test-server.ts        # 374 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-auth.ts          # 124 — scoped, hashed, named keys
+bun run test:local        # 170 — fully local provider, no credential
+bun run test:sql          # 196 — store conformance, real Postgres in a container
+bun run test:e2e          # 344 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run cf:build          # ~351 KiB gzipped (measured 2026-10-01, SMD-2283; the PostgREST store and supabase-js are in it)
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`

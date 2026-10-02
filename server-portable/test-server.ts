@@ -1327,6 +1327,29 @@ console.log("\n[16d] A fault an operation throws is said as it always was, typed
   assert(faults.every((e) => failed(e).structuredContent.code === "FAILED" && !("retryable" in failed(e).structuredContent)), "a fault is FAILED and states no verdict, whatever its shape — neither final nor retryable until SMD-2461 classifies it (review pass 4)");
 }
 
+console.log("\n[16e] Two cores over one store share one brain-info read in flight (SMD-2283, review pass 2)");
+{
+  const { createCore } = await import("./core/index.ts");
+  let reads = 0;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const stub = () => ({ kind: "sql", databaseFacts: async () => { reads++; await gate; throw new Error("stub: no database"); } });
+  const store = stub();
+  const env = () => ({});
+  // Two readers of ONE store — `db` and `() => db()` in a composition root (review pass 3: pass 2 keyed by the reader).
+  const [a, b] = [createCore({ env, store: () => Promise.resolve(store as never) }), createCore({ env, store: async () => store as never })];
+  const elsewhere = stub();
+  const other = createCore({ env, store: () => Promise.resolve(elsewhere as never) });
+  const answers = [a.brainInfo("health"), b.brainInfo("health")];
+  await Bun.sleep(10);
+  const shared = reads;
+  const separate = other.brainInfo("health");
+  await Bun.sleep(10);
+  release();
+  await Promise.all([...answers, separate]);
+  assert(shared === 1 && reads === 2, `two cores over one store, through different readers, run one read; a core over another store runs its own (${shared} then ${reads})`);
+}
+
 console.log("\n[16f] A prose value holds each string to the shape its field promises: a sentence planted in a timestamp-typed field is null (SMD-2283, review pass 6)");
 {
   const { renderSearchThoughts, failed } = await import("./render.ts");
@@ -1349,29 +1372,6 @@ console.log("\n[16f] A prose value holds each string to the shape its field prom
   let threw = false;
   try { failed(Object.create(null)); } catch { threw = true; }
   assert(!threw && failed(Object.create(null)).content[0].text === "Error: a fault that could not be printed", "a fault String() cannot print is said as a fixed phrase");
-}
-
-console.log("\n[16e] Two cores over one store share one brain-info read in flight (SMD-2283, review pass 2)");
-{
-  const { createCore } = await import("./core/index.ts");
-  let reads = 0;
-  let release: () => void = () => {};
-  const gate = new Promise<void>((r) => { release = r; });
-  const stub = () => ({ kind: "sql", databaseFacts: async () => { reads++; await gate; throw new Error("stub: no database"); } });
-  const store = stub();
-  const env = () => ({});
-  // Two readers of ONE store — `db` and `() => db()` in a composition root (review pass 3: pass 2 keyed by the reader).
-  const [a, b] = [createCore({ env, store: () => Promise.resolve(store as never) }), createCore({ env, store: async () => store as never })];
-  const elsewhere = stub();
-  const other = createCore({ env, store: () => Promise.resolve(elsewhere as never) });
-  const answers = [a.brainInfo("health"), b.brainInfo("health")];
-  await Bun.sleep(10);
-  const shared = reads;
-  const separate = other.brainInfo("health");
-  await Bun.sleep(10);
-  release();
-  await Promise.all([...answers, separate]);
-  assert(shared === 1 && reads === 2, `two cores over one store, through different readers, run one read; a core over another store runs its own (${shared} then ${reads})`);
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
