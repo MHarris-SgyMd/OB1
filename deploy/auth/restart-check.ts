@@ -84,7 +84,13 @@ if (process.argv.includes("--register")) {
       }
     }
     if (r.status >= 300 && r.status < 400) {
-      url = local(r.headers.get("location") ?? "");
+      const location = r.headers.get("location") ?? "";
+      // Back at the client before any session: the server refused the request, and says why in the query.
+      if (location.startsWith("https://client.example/callback")) {
+        console.error(`the authorization request came back to the client with no session cookie set: ${new URL(location).search}`);
+        process.exit(1);
+      }
+      url = local(location);
       init = {};
       continue;
     }
