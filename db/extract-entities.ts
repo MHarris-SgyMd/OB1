@@ -108,8 +108,9 @@
  * thought's own share is not judged: a reference list is its text's fault,
  * not the model's. A
  * rate limit, a server error or a lost connection is neither: the worker
- * pauses and retries, and stops if the provider stays down, leaving its leases
- * to return to the pool rather than marking thoughts failed for it. A content
+ * pauses and retries — a stop wakes the pause, and the thought goes back to
+ * the pool (SMD-2401) — and stops if the provider stays down, leaving its
+ * leases to return to the pool rather than marking thoughts failed for it. A content
  * edit that lands while a thought is being extracted makes
  * `record_thought_entities` refuse with stale=true; the trigger has already
  * re-queued the thought, so the worker moves on and the pool redoes it.
@@ -649,13 +650,13 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    */
   let hardStopped = false;
   /**
-   * Aborted by the first stop and by the hard stop: a follower's sleep wakes
-   * on the first, a transient pause on the hard, so neither holds run() — nor
-   * sends the thought again after the leases are gone (review pass 2) —
-   * through db/lease.ts's sleepUnless, which keeps nothing per sleep (pass 3).
+   * Aborted by the first stop (the hard stop finds it aborted, or aborts it):
+   * a follower's sleep and a transient pause wake on it, so neither holds
+   * run() — nor sends the thought again on a stopping pass (review pass 2,
+   * SMD-2401) — through db/lease.ts's sleepUnless, which keeps nothing per
+   * sleep (pass 3).
    */
   const onStop = new AbortController();
-  const onHardStop = new AbortController();
   let done = 0;
   /** Of `done`, the thoughts extracted over a prefix only (SMD-2240), and those with windows left out as malformed, a prefix of one included, with how many windows (SMD-2260). */
   let partial = 0;
@@ -937,17 +938,25 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   stopping = true;
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
                   return;
-                } else if (attempt < TRANSIENT_PAUSES_MS.length && !stopping) {
+                } else if (stopping) {
+                  // A transient error on a stopping pass: neither called again
+                  // nor recorded failed — the thought goes back to the pool with
+                  // the leases the finally returns (SMD-2401).
+                  return;
+                } else if (attempt < TRANSIENT_PAUSES_MS.length) {
                   err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
-                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onHardStop.signal);
-                  if (hardStopped) return;
+                  // A first stop wakes the pause too, and the thought goes back
+                  // the same way: main slept the pause out, called again, and
+                  // recorded the thought failed "after 3 retries" after one (SMD-2401).
+                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onStop.signal);
+                  if (stopping) return;
                 } else {
                   // Still failing after the pauses. This row is recorded failed
                   // with the error — if the provider is down it is one row per
                   // worker, and if this thought is what draws the error every
                   // time it is now visible instead of cycling for ever — and the
                   // worker stops, its other leases going back to the pool.
-                  outcome = { outcome: "failed", error: `provider error after ${TRANSIENT_PAUSES_MS.length} retries: ${msg}` };
+                  outcome = { outcome: "failed", error: `provider error after ${attempt} retries: ${msg}` };
                   stopAfter = true;
                 }
               }
@@ -1056,7 +1065,6 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (detach.aborted) return null;
     if (stopping) {
       hardStopped = true;
-      onHardStop.abort();
       onStop.abort();
       // Started before the line is written: a Writer that throws does not keep the leases.
       const release = Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
