@@ -223,7 +223,7 @@ Extract thoughts from raw text with optional dry-run preview.
 | `reprocess` | boolean | false | Force re-extraction even if identical input was processed before |
 | `skip_classification` | boolean | false | Skip LLM metadata classification during execution (faster, less metadata) |
 | `source_metadata` | object | null | Ambient provenance data (source_client, capture_mode, session_id, import_key, etc.) |
-| `trust` | string | null | What the text is — `operator`, `agent` or `ingested` — forwarded as each thought's declared trust, kept on the job for a dry run's execute; any other word is a 400. The thought's trust is the lower of this and the key's kind (migration 073, SMD-1724) |
+| `trust` | string | (absent) | What the text is — `operator`, `agent` or `ingested` — forwarded as each thought's declared trust, kept on the job for a dry run's execute; `null` is no declaration; any other word is a 400; a `source_metadata.trust` is dropped. The thought's trust is the lower of this and the key's kind (migration 073, SMD-1724) |
 
 **Deduplication:** If `source_metadata.import_key` is provided, the function first checks for an existing job with that key. This prevents duplicate ingestion from the same session even if the text content differs slightly.
 

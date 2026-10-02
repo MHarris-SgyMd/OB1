@@ -756,6 +756,11 @@ async function recordItemResult(itemDbId: number, resultThoughtId: string | null
 
 /** The three trust words (migration 073's ladder): an ingest's `trust` is one of them, or absent (SMD-1724). */
 const TRUST_WORDS = ["operator", "agent", "ingested"];
+/** A metadata object without a `trust` key: a declaration is the event's, never a metadata key's (SMD-1724). */
+const withoutTrust = (m: Record<string, unknown> | null | undefined): Record<string, unknown> => {
+  const { trust: _dropped, ...rest } = m ?? {};
+  return rest;
+};
 
 /**
  * A capture through the 3-argument upsert_thought — the fork's shape for every server (SMD-1228; db/migrations/004,
@@ -1034,8 +1039,9 @@ async function handleExecuteJob(req: Request): Promise<Response> {
   const skipClassification = body.skip_classification === true || jobMeta.skip_classification === true;
   // SMD-1724: the trust the ingest declared, kept on the job for its execute.
   const jobTrust = TRUST_WORDS.includes(jobMeta.trust as string) ? jobMeta.trust as string : undefined;
+  // The job's own keys are not the thought's: its declared trust rides the event, not metadata (first review pass).
   const jobSourceMetadata = (jobMeta.source_client || jobMeta.capture_mode)
-    ? jobMeta as Record<string, unknown>
+    ? withoutTrust(jobMeta)
     : null;
 
   for (const item of items) {
@@ -1167,13 +1173,17 @@ const handler = async (req: Request) => {
   const dryRun = body.dry_run === true;
   const reprocess = body.reprocess === true;
   const skipClassification = body.skip_classification === true;
+  // SMD-1724: without a `trust` key — a declaration is the `trust` argument's, carried by the write event,
+  // never a source key: one here would reach the thought's metadata and be read as a declaration past the
+  // argument's refusal (first review pass).
   const sourceMetadata = (typeof body.source_metadata === "object" && body.source_metadata !== null)
-    ? body.source_metadata as Record<string, unknown>
+    ? withoutTrust(body.source_metadata as Record<string, unknown>)
     : null;
   // SMD-1724: what the text is, as the caller declares it — one of the three
   // words, or absent (the key's); anything else is refused before extraction.
-  if (body.trust !== undefined && !TRUST_WORDS.includes(body.trust as string)) return json({ error: "trust must be operator, agent or ingested" }, 400);
-  const trust = body.trust as string | undefined;
+  // JSON null is no declaration, as absence is (first review pass: one server refused it, another took it).
+  if (body.trust != null && !TRUST_WORDS.includes(body.trust as string)) return json({ error: "trust must be operator, agent or ingested" }, 400);
+  const trust = body.trust == null ? undefined : body.trust as string;
 
   // Session-level dedup via import_key (separate from content-hash dedup)
   const importKey = sourceMetadata?.import_key;
@@ -1218,8 +1228,7 @@ const handler = async (req: Request) => {
     job,
     {
       skip_classification: skipClassification,
-      ...(sourceMetadata ?? {}),
-      // After the spread: the declaration is the ingest's argument, not a source key.
+      ...(sourceMetadata ?? {}), // without a trust key (above)
       ...(trust ? { trust } : {}),
     },
     text.length,

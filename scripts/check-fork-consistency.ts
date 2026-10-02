@@ -5134,18 +5134,24 @@ checkPostgrestClients();
 // Scanned: every .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.py/.sh under the
 // seven category directories (docs/ holds no capture path; a README's sample
 // is prose).
-/** A capture through the function: an `upsert_thought` RPC by any client, the name a string literal. */
-const UPSERT_RPC = /\b\w*rpc\s*\(\s*(["'`])upsert_thought\1\s*,/gi;
-/** A JSON-RPC tools/call of capture_thought: its params object. */
-const MCP_CAPTURE_PARAMS = /\bname\s*:\s*(["'`])capture_thought\1\s*,\s*arguments\b/g;
+/** A capture through the function: an `upsert_thought` RPC by any client, the name a string literal — or its PostgREST path, `rpc/upsert_thought`, which a port of the Python importers would POST to (first review pass). */
+const UPSERT_RPC = [/\b\w*rpc\s*\(\s*(["'`])upsert_thought\1\s*,/gi, /\brpc\/upsert_thought\b/g];
+/** A JSON-RPC tools/call of capture_thought: its params object, keys quoted or not, in either order (first review pass). */
+const MCP_CAPTURE_PARAMS = [/(["']?)name\1\s*:\s*(["'`])capture_thought\2\s*,\s*(["']?)arguments\3\s*:/g, /(["']?)arguments\1\s*:[^{}\n]*,\s*(["']?)name\2\s*:\s*(["'`])capture_thought\3/g];
 /** A call whose first argument is the tool's name and second its arguments object — a client's, unless the callee registers a tool. */
 const MCP_CAPTURE_CALL = /(?<![\w$])([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(\s*(["'`])capture_thought\2\s*,\s*\{/g;
 /** The callees that register a tool rather than call one: the SDK's two, reached as a method. */
 const REGISTERS_TOOL = /\.\s*(?:registerTool|tool)$/;
-/** A trust declaration: a `trust` key with a value (quoted or not), or a shorthand `{ trust }` / `, trust,`. */
-const TRUST_DECLARED = /(?<![\w$])(["'`]?)trust\1\s*:|[{,]\s*trust\s*[,}]/;
-/** A raw capture over PostgREST: the table's own path, closed (a `?` query is a read or an edit), or a helper's `.post("thoughts", …)`. */
-const RAW_CAPTURE_FORMS = [/\brest\/v1\/thoughts["'`]/g, /\.post\(\s*(["'`])thoughts\1\s*,/g];
+/**
+ * A declaration in the shape a write reads it. upsert_thought's is the payload's write event — `event: { trust … }`,
+ * a key or a shorthand, Python's `"event": {"trust": …}` — and capture_thought's is the arguments' `trust:` key. Not
+ * any `trust` in the file: a schema's key, a parameter or a positional argument passed for the call site's deleted
+ * declaration in five files (first review pass), so the RPC's form is the event object alone.
+ */
+const EVENT_TRUST_DECLARED = /(["']?)event\1\s*:\s*\{\s*(["']?)trust\2\s*[:,}]/;
+const TOOL_TRUST_DECLARED = /(?<![\w$.])(["'`]?)trust\1\s*:\s*(?!z\.|string\b|Trust\b)/;
+/** A raw capture over PostgREST: the table's own path, closed (a `?` query is a read or an edit), a helper's `.post("thoughts", …)`, or a helper's `.patch("thoughts?…", { content … })` — a raw rewrite of the text, stamped from the key's kind (first review pass). */
+const RAW_CAPTURE_FORMS = [/\brest\/v1\/thoughts["'`]/g, /\.post\(\s*(["'`])thoughts\1\s*,/g, /\.patch\(\s*["'`]thoughts\?[^,\n]*,\s*\{[^}\n]*\bcontent\b/g];
 
 /** A file's capture call sites and raw captures, by line, comments blanked by its kind (check 24's blankers). */
 function capturePathsIn(text: string, rel: string): { calls: number[]; raw: number[]; declares: boolean } {
@@ -5153,16 +5159,20 @@ function capturePathsIn(text: string, rel: string): { calls: number[]; raw: numb
   const code = hash ? hashCommentsBlanked(text, SHELL_FILE.test(rel)) : blanked(text, false);
   const lineOf = lineIndexer(code);
   const calls = new Set<number>();
-  for (const m of code.matchAll(UPSERT_RPC)) calls.add(lineOf(m.index!));
-  if (!hash) {
-    for (const m of code.matchAll(MCP_CAPTURE_PARAMS)) calls.add(lineOf(m.index!));
-    for (const m of code.matchAll(MCP_CAPTURE_CALL)) if (!REGISTERS_TOOL.test(m[1])) calls.add(lineOf(m.index!));
+  let rpc = false, tool = false;
+  for (const re of UPSERT_RPC) for (const m of code.matchAll(re)) { calls.add(lineOf(m.index!)); rpc = true; }
+  // Python's MCP clients too (`session.call_tool("capture_thought", {…})`, a dict's `"name"`); shell's curl is not read.
+  if (!SHELL_FILE.test(rel)) {
+    for (const re of MCP_CAPTURE_PARAMS) for (const m of code.matchAll(re)) { calls.add(lineOf(m.index!)); tool = true; }
+    for (const m of code.matchAll(MCP_CAPTURE_CALL)) if (!REGISTERS_TOOL.test(m[1])) { calls.add(lineOf(m.index!)); tool = true; }
   }
   const raw = new Set<number>();
   for (const re of RAW_CAPTURE_FORMS) for (const m of code.matchAll(re)) raw.add(lineOf(m.index!));
   // Check 10's raw insert, read on the file's own text (it blanks SQL comments itself).
   if (!hash) for (const line of thoughtWritesAroundIn(text)) raw.add(line);
-  return { calls: [...calls].sort((a, b) => a - b), raw: [...raw].sort((a, b) => a - b), declares: TRUST_DECLARED.test(code) };
+  // A file that does both answers both: each kind of call its own declaration.
+  const declares = (rpc || tool) && (!rpc || EVENT_TRUST_DECLARED.test(code)) && (!tool || TOOL_TRUST_DECLARED.test(code));
+  return { calls: [...calls].sort((a, b) => a - b), raw: [...raw].sort((a, b) => a - b), declares };
 }
 
 /** [text, file name, calls, raw, declares] — the shapes in the tree, and the neighbours the rule must not reach. */
@@ -5198,6 +5208,20 @@ const TRUST_PROBES: [string, string, number, number, boolean][] = [
   ['throw new Error(`upsert_thought failed: ${error.message}`);', "x.ts", 0, 0, false],
   ['if (/\\brpc\\/upsert_thought\\b/.test(msg)) retry();', "x.mjs", 0, 0, false],
   ['// the trust: the key decides\nawait supabase.rpc("upsert_thought", { p_content: c });', "x.ts", 1, 0, false],
+  // The first review pass: a `trust` that is not the write's — a schema key, a parameter, a positional argument, a
+  // string — declares nothing; the PostgREST path, JSON-quoted params, reversed keys and Python's MCP call are calls.
+  ['const schema = z.object({ trust: z.enum(["agent"]).optional() });\nawait supabase.rpc("upsert_thought", { p_payload: { metadata } });', "x.ts", 1, 0, false],
+  ['function f(trust: string) { return run(a, trust, b); }\nawait supabase.rpc("upsert_thought", { p_payload: { metadata } });', "x.ts", 1, 0, false],
+  ['const note = "trust: none";\nawait supabase.rpc("upsert_thought", { p_payload: {} });', "x.ts", 1, 0, false],
+  ['resp = httpx.post(f"{URL}/rest/v1/rpc/upsert_thought", json={"p_content": c, "p_payload": {"event": {"trust": "ingested"}}})', "x.py", 1, 0, true],
+  ["const r = await fetch(`${BASE}/rest/v1/rpc/upsert_thought`, { method: 'POST', body });", "x.ts", 1, 0, false],
+  ['const body = { "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "capture_thought", "arguments": a } };', "x.ts", 1, 0, false],
+  ['send({ method: "tools/call", params: { arguments: args, name: "capture_thought" } });', "x.mjs", 1, 0, false],
+  ['result = await session.call_tool("capture_thought", {"content": text, "trust": "ingested"})', "x.py", 1, 0, true],
+  ['const args = { content, trust: "agent" };\nawait supabase.rpc("upsert_thought", { p_payload: {} });\nrpc(cfg, "tools/call", { name: "capture_thought", arguments: args });', "x.mjs", 2, 0, false],
+  // A raw rewrite of the text through a helper's PATCH; a vector-only or metadata-only patch is not one.
+  ["await sb.patch(`thoughts?id=eq.${id}`, { content, metadata, embedding });", "x.mjs", 0, 1, false],
+  ["await sb.patch(`thoughts?id=eq.${id}`, { embedding });", "x.mjs", 0, 0, false],
 ];
 
 const RAW_IMPORT = (ticket: string): CountedException["why"] =>
@@ -5214,7 +5238,7 @@ const TRUST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/perplexity-conversation-import/import-perplexity.py", { why: RAW_IMPORT("SMD-2148"), lines: 1 }],
   ["recipes/google-activity-import/import-google-activity.mjs", { why: RAW_IMPORT("SMD-2150"), lines: 1 }],
   ["recipes/email-history-import/pull-gmail.ts", { why: `${RAW_IMPORT("SMD-2021")}; the second line is the retry`, lines: 2 }],
-  ["recipes/entity-wiki/generate-wiki.mjs", { why: RAW_FALLBACK, lines: 1 }],
+  ["recipes/entity-wiki/generate-wiki.mjs", { why: "a rerun rewrites an existing dossier's text with a raw PATCH, and a failed upsert_thought call (any error, not only a missing function) falls back to a raw insert: both stamped from the key's kind, so a regenerated dossier reads as the key's and not `agent`; only the first capture's call declares (SMD-2143 moves the script onto the shim, through update_thought and upsert_thought)", lines: 2 }],
   ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", { why: RAW_FALLBACK, lines: 1 }],
   ["integrations/kubernetes-deployment/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
   ["recipes/vercel-neon-telegram/src/lib/db.ts", { why: RAW_OWN_DATABASE, lines: 1 }],

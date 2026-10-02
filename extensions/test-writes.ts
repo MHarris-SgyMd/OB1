@@ -1244,12 +1244,15 @@ try {
     && appendedItems[0].matched_thought_id === row?.id && appendedItems[0].result_thought_id === row?.id && appendedItems[0].similarity > 0.85 && appendedItems[0].similarity < 0.92
     && Array.isArray(evidence?.list) && evidence.list.length === 1 && evidence.list[0].source_label === "test-writes" && evidence.list[0].source === "smart_ingest",
     `a shorter text 0.88 from the first thought appends evidence to it: the item an append_evidence for existing_is_richer with the thought as matched and result, and the thought's metadata.evidence one entry from this source — append_thought_evidence(uuid, jsonb) (${appended.status} ${JSON.stringify(appended.json).slice(0, 120)}; items ${JSON.stringify(appendedItems).slice(0, 220)}; evidence ${JSON.stringify(evidence?.list).slice(0, 120)})`);
-  const revised = await send(h, "POST", "/", { text: longer, dry_run: false, skip_classification: true, source_label: "test-writes" });
+  // Declared ingested (SMD-1724): the revision's write carries the declaration too — under this unclassified key an
+  // ingested declaration is the trust it stamps, and a dropped one leaves none (first review pass, run-it: the branch
+  // forwarded it untested).
+  const revised = await send(h, "POST", "/", { text: longer, dry_run: false, skip_classification: true, source_label: "test-writes", trust: "ingested" });
   const revisedItems = await jobItems(Number(revised.json?.job_id));
-  const revision = (await sql`SELECT id, embedding IS NOT NULL AS has_vec, embedding_model, supersedes, type, metadata->>'supersedes' AS meta_supersedes FROM thoughts WHERE content = ${longer}`)[0];
+  const revision = (await sql`SELECT id, embedding IS NOT NULL AS has_vec, embedding_model, supersedes, type, metadata->>'supersedes' AS meta_supersedes, metadata->>'trust' AS trust FROM thoughts WHERE content = ${longer}`)[0];
   assert(revised.status === 200 && revised.json?.revised_count === 1 && revisedItems.length === 1 && revisedItems[0].action === "create_revision" && revisedItems[0].reason === "new_has_more_info" && revisedItems[0].status === "executed"
-    && revisedItems[0].matched_thought_id === row?.id && revision !== undefined && revisedItems[0].result_thought_id === revision.id && revision.supersedes === row?.id && revision.has_vec === true && revision.embedding_model === MODEL && revision.type === "idea" && revision.meta_supersedes === null,
-    `a longer text 0.88 from the first thought is a revision: a new row with its vector and label whose supersedes is the first thought (025's pointer, not metadata.supersedes), the item a create_revision with the first as matched and the new row as result (${revised.status} ${JSON.stringify(revised.json).slice(0, 120)}; items ${JSON.stringify(revisedItems).slice(0, 220)}; row ${JSON.stringify(revision).slice(0, 200)})`);
+    && revisedItems[0].matched_thought_id === row?.id && revision !== undefined && revisedItems[0].result_thought_id === revision.id && revision.supersedes === row?.id && revision.has_vec === true && revision.embedding_model === MODEL && revision.type === "idea" && revision.meta_supersedes === null && revision.trust === "ingested",
+    `a longer text 0.88 from the first thought is a revision: a new row with its vector and label whose supersedes is the first thought (025's pointer, not metadata.supersedes) and the declared trust, the item a create_revision with the first as matched and the new row as result (${revised.status} ${JSON.stringify(revised.json).slice(0, 120)}; items ${JSON.stringify(revisedItems).slice(0, 220)}; row ${JSON.stringify(revision).slice(0, 200)})`);
   judgeActor("smart-ingest revision", await auditRow(revision?.id, "capture"), "smart-ingest");
   // A revision parked by a dry run whose text is captured meanwhile: the function writes `supersedes` on a fresh row only
   // and keeps the existing row's provenance (035), so the pointer is not written — the item fails saying so, where it was
@@ -1525,6 +1528,9 @@ try {
         `rest-api POST /capture forwards the client's trust: undeclared the key's (${await trustOf(plain)}), declared ingested (${await trustOf(declared)})`);
       assert(bad.status === 400 && /trust must be operator, agent or ingested/.test(String(bad.json?.error)) && await trustOf("a capture declaring a word off the ladder") === null,
         `…and refuses a word off the ladder before it writes (${bad.status})`);
+      const nulled = "a note sent to rest-api with trust null";
+      const n = await send(h, "POST", "/capture", { content: nulled, trust: null });
+      assert(n.status === 200 && await trustOf(nulled) === "operator", `…and takes a JSON null as no declaration: the key's (${n.status}; ${await trustOf(nulled)}; first review pass)`);
     }
     // open-brain-rest's POST /capture and POST /ingest.
     {
@@ -1535,9 +1541,11 @@ try {
       const plain = "a note typed into open-brain-rest, trust undeclared";
       await send(h, "POST", "/capture", { content: plain });
       const bad = await send(h, "POST", "/ingest", { text: "an ingest declaring a word off the ladder", trust: "Operator" });
+      const badCap = await send(h, "POST", "/capture", { content: "a capture declaring a word off the ladder, open-brain-rest", trust: "root" });
       assert(a.status === 200 && b.status === 200 && await trustOf(cap) === "ingested" && await trustOf(ing) === "ingested" && await trustOf(plain) === "operator",
         `open-brain-rest forwards the client's trust on /capture and /ingest, the key's when undeclared (${await trustOf(cap)}, ${await trustOf(ing)}, ${await trustOf(plain)})`);
-      assert(bad.status === 400 && await trustOf("an ingest declaring a word off the ladder") === null, `…and refuses a word off the ladder (${bad.status})`);
+      assert(bad.status === 400 && await trustOf("an ingest declaring a word off the ladder") === null && badCap.status === 400 && await trustOf("a capture declaring a word off the ladder, open-brain-rest") === null,
+        `…and refuses a word off the ladder on both routes (${bad.status}, ${badCap.status})`);
     }
     // enhanced-mcp's brain_capture_thought.
     {
@@ -1556,7 +1564,19 @@ try {
         schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" }, trust: "ingested",
         memory_payload: { decisions: [decision] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
       });
-      assert(r.status === 200 && await trustOf(decision) === "ingested", `agent-memory-api's /writeback forwards the runtime's trust to each memory's thought (${r.status}; ${await trustOf(decision)})`);
+      const plain = "We decided the runtime keeps its own cache, trust undeclared.";
+      const p2 = await send(h, "POST", "/writeback", {
+        schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" },
+        memory_payload: { decisions: [plain] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
+      });
+      const offLadder = "We decided nothing, declaring a word off the ladder.";
+      const bad = await send(h, "POST", "/writeback", {
+        schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" }, trust: "root",
+        memory_payload: { decisions: [offLadder] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
+      });
+      assert(r.status === 200 && await trustOf(decision) === "ingested" && p2.status === 200 && await trustOf(plain) === "operator",
+        `agent-memory-api's /writeback forwards the runtime's trust to each memory's thought, the key's when undeclared (${r.status}; ${await trustOf(decision)}, ${await trustOf(plain)})`);
+      assert(bad.status === 400 && await trustOf(offLadder) === null, `…and refuses a word off the ladder (${bad.status}; first review pass)`);
     }
     // smart-ingest: an ingest executed at once, and a dry run executed later — the job carries the declaration.
     {
@@ -1570,6 +1590,12 @@ try {
       assert(a.status === 200 && await trustOf(now) === "ingested", `smart-ingest forwards the ingest's trust to the thought it writes (${a.status}; ${await trustOf(now)})`);
       assert(d.status === 200 && x.status === 200 && await trustOf(later) === "ingested", `…and a dry run's execute writes it from the job's record (${x.status}; ${await trustOf(later)})`);
       assert(bad.status === 400 && await trustOf("An ingest declaring a word off the ladder.") === null, `…and a word off the ladder is refused before extraction (${bad.status})`);
+      // A `source_metadata.trust` is not the argument: dropped, so it neither declares nor slips past the refusal into a claim.
+      const smuggled = "A page whose source metadata names a trust of its own.";
+      const sm = await send(h, "POST", "/", { text: smuggled, dry_run: false, skip_classification: true, source_label: "test-trust", source_metadata: { source_client: "test", trust: "root" } });
+      const [claim] = await sql`SELECT a.actor_context->'claimed' AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE t.content = ${smuggled} AND a.action = 'capture'`;
+      assert(sm.status === 200 && await trustOf(smuggled) === "operator" && (claim?.c ?? null) === null,
+        `…and a source_metadata.trust is dropped: the key's trust, no claim filed (${sm.status}; ${await trustOf(smuggled)}; claimed ${JSON.stringify(claim?.c ?? null)}; first review pass)`);
     }
   } finally {
     for (const label of labels) await sql`UPDATE ob1_agents SET kind = NULL WHERE label = ${label}`;

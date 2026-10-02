@@ -120,7 +120,7 @@ const writebackSchema = z.object({
   // SMD-1724: what the memories are, as the runtime declares it — forwarded as
   // each write's event trust, which the database clamps to the key's kind (a
   // lowering stands, a raise is filed). Absent: the key's. Another word is a 400.
-  trust: z.enum(["operator", "agent", "ingested"]).optional(),
+  trust: z.enum(["operator", "agent", "ingested"]).nullish(), // null is no declaration, as absence is
   channel: channelSchema.default({}),
   runtime: runtimeSchema.default({ name: "unknown" }),
   models_used: z.array(z.object({

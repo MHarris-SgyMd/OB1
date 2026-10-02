@@ -204,9 +204,10 @@ export const captureLearningArtifact = async ({
   // model to preflight and the re-embed (FORK.md change 69, SMD-1228).
   const { data, error } = await supabase.rpc('upsert_thought', {
     p_content: artifactContent,
-    // SMD-1724: the learner's own takeaway, typed — declared as the operator's;
-    // the database clamps it to what the key supports.
-    p_payload: { metadata, embedding_model: APP_ENV.openrouterEmbeddingModel, event: { trust: 'operator' } },
+    // SMD-1724: what the learner typed is theirs; a summary with nothing typed
+    // is the course's own text (buildArtifactContent) — an agent's, declared
+    // so (first review pass). The database clamps either to the key's kind.
+    p_payload: { metadata, embedding_model: APP_ENV.openrouterEmbeddingModel, event: { trust: kind === 'summary' && content.trim() === '' ? 'agent' : 'operator' } },
     p_embedding: embedding,
   })
 

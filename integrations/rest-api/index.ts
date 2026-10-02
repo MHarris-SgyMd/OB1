@@ -664,7 +664,9 @@ async function handleCapture(req: Request): Promise<Response> {
   // SMD-1724: what the content is, as the caller declares it — one of the three
   // words, or absent (the key's). Forwarded as the write event's trust, which
   // the database clamps to the key's kind: a lowering stands, a raise is filed.
-  const trust = body.trust === undefined ? undefined : String(body.trust);
+  // JSON null is no declaration, as absence is; a non-string is refused, not stringified — `["agent"]` read as
+  // `agent` (first review pass, run-it).
+  const trust = body.trust == null ? undefined : body.trust;
   if (trust !== undefined && trust !== "operator" && trust !== "agent" && trust !== "ingested") return json({ error: "trust must be operator, agent or ingested" }, 400);
 
   const detectedSensitivity = detectSensitivity(content);

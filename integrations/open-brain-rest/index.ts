@@ -90,7 +90,7 @@ const captureSchema = z.object({
   // SMD-1724: what the content is, as the caller declares it — forwarded as the
   // write event's trust, which the database clamps to the key's kind: a
   // lowering stands, a raise is filed. Absent: the key's. Another word is a 400.
-  trust: TRUST_WORD.optional(),
+  trust: TRUST_WORD.nullish(), // null is no declaration, as absence is (first review pass)
 });
 
 const updateSchema = z.object({
@@ -714,9 +714,9 @@ app.post("/ingest", requireWrite, async (c) => {
   const text = String(body.text || "").trim();
   if (!text) return c.json({ error: "text is required" }, 400, corsHeaders);
   // SMD-1724: an ingest's `trust`, forwarded as /capture's is — one of the three words, or absent.
-  const trust = TRUST_WORD.optional().safeParse(body.trust ?? undefined);
+  const trust = TRUST_WORD.nullish().safeParse(body.trust);
   if (!trust.success) return c.json({ error: "trust must be operator, agent or ingested" }, 400, corsHeaders);
-  const result = await createThought({ content: text, source_type: "dashboard_ingest", trust: trust.data }, c.get("principal").name);
+  const result = await createThought({ content: text, source_type: "dashboard_ingest", trust: trust.data ?? undefined }, c.get("principal").name);
   return c.json({ job_id: 0, status: "complete", extracted_count: 1, thought_id: result.thought_id }, 200, corsHeaders);
 });
 
