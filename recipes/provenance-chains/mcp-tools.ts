@@ -419,12 +419,17 @@ server.registerTool(
         "How it was produced. 'synthesis' is the only value a stock install accepts; defaults to 'synthesis' when derived_from is provided"),
       supersedes: z.string().uuid().optional().describe(
         "UUID of a prior thought this one replaces (e.g. a regenerated digest replacing yesterday's)"),
+      trust: z.enum(["agent", "ingested"]).optional().describe(
+        "What the artifact is: `agent` (the default — a synthesis is an agent's output) or `ingested` when it carries outside text copied in. The thought's trust is the lower of this and what the key allows"),
     }),
   },
   async (params) => {
     try {
       const raw = params as Record<string, unknown>;
       const content = String(raw.content ?? "").trim();
+      // SMD-1724: a derived artifact is an agent's output unless the caller
+      // says it carries outside text; declared as the write event's trust.
+      const trust = raw.trust === "ingested" ? "ingested" : "agent";
       if (!content) {
         return {
           content: [{ type: "text", text: "content is required" }],
@@ -528,6 +533,7 @@ server.registerTool(
             embedding_model: EMBEDDING_MODEL,
             ...(derivedFrom.length ? { derived_from: derivedFrom } : {}),
             ...(supersedes ? { supersedes } : {}),
+            event: { trust },
           },
           p_embedding: embedding,
         },

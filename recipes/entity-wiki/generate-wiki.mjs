@@ -742,7 +742,8 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
   try {
     const rpcRes = await sb.rpc("upsert_thought", {
       p_content: content,
-      p_payload: { metadata },
+      // SMD-1724: a dossier is a model's synthesis — an agent's output, declared so.
+      p_payload: { metadata, event: { trust: "agent" } },
     });
     const thoughtId = Array.isArray(rpcRes) ? rpcRes[0]?.id : rpcRes?.id;
     if (!thoughtId) {

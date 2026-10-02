@@ -490,7 +490,8 @@ async function upsertProfile(
   const embedding = await embedText(profileContent);
   const { data, error: insertError } = await supabase.rpc("upsert_thought", {
     p_content: profileContent,
-    p_payload: { metadata: profileMetadata, embedding_model: embeddingModelUsed(), actor },
+    // SMD-1724: the profile is a model's synthesis — an agent's output, declared so.
+    p_payload: { metadata: profileMetadata, embedding_model: embeddingModelUsed(), actor, event: { trust: "agent" } },
     p_embedding: embedding,
   });
   if (insertError) {

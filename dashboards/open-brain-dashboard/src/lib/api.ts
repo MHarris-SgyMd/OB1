@@ -210,7 +210,9 @@ function parseListResults(text: string): Thought[] {
 }
 
 export async function captureThought(content: string): Promise<Thought> {
-	const result = await callMcpTool('capture_thought', { content });
+	// SMD-1724: what the operator typed into the capture box, declared as theirs;
+	// the server clamps it to the key's kind.
+	const result = await callMcpTool('capture_thought', { content, trust: 'operator' });
 	const text = result.content[0]?.text || '';
 	
 	// Response: "Captured as observation — topic1, topic2"
