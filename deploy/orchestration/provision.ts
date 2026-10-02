@@ -74,14 +74,18 @@
  * Nothing secret is printed. The eval kit imports this module and provisions
  * through it (evals/orchestration/n8n.ts), so the kit tests these bytes.
  */
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "../../db/env.ts";
+import { setEnvValue, setEnvValues, singleQuoted } from "../env-file.ts";
 import { hashKey, parseKeyRecords, type Scope } from "../../server-portable/auth.ts";
 import { DEFAULT_TIMEOUT_S, loadPipelines, PIPELINES_FILE, scheduleOf, type Pipeline } from "./runner.ts";
+
+// The env writer lives in ../env-file.ts, shared with the authorization server's provisioning (SMD-2285); importers of this module keep these names.
+export { setEnvValue, setEnvValues, singleQuoted };
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 /** The profile's own credentials — the keys its templates reference by placeholder id. */
@@ -129,52 +133,6 @@ export type Options = {
 };
 
 export type KeyResult = { key: string; minted: boolean; revoked: number; expiresAt: number | null };
-
-/**
- * Replace or append one KEY=value line, written beside the file and renamed
- * over it so a crash cannot truncate the operator's secrets. A value holding
- * `$`, `#` or whitespace is single-quoted. Compose reads a quoted value
- * literally, and an unquoted bcrypt hash reached the container mangled
- * (measured). A new file is 0600.
- */
-export function setEnvValue(file: string, key: string, value: string): void {
-  setEnvValues(file, { [key]: value });
-}
-
-/**
- * Several lines in one write, so values that must agree (the key, its id,
- * its scopes, its tag) are never left half-written. A run killed between
- * separate writes left a key beside another key's id, and the next run's
- * sweep deleted the working key (review pass 2, measured). A line to replace
- * may carry `export ` or spaces around `=`.
- */
-export function setEnvValues(given: string, values: Record<string, string>): void {
-  // Written through a symlink to the file it names, so the link stays a link
-  // and the secrets land where the operator keeps them (review pass 4: the
-  // rename replaced the link with a regular file, and the target kept a dead
-  // key and no encryption key).
-  const file = existsSync(given) ? realpathSync(given) : given;
-  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-  const keys = Object.keys(values);
-  const lines = text.split("\n").filter((l) => !keys.some((k) => new RegExp(`^\\s*(export\\s+)?${k}\\s*=`).test(l)));
-  if (lines.at(-1) === "") lines.pop();
-  const mode = existsSync(file) ? statSync(file).mode & 0o777 : 0o600;
-  const added = keys.map((k) => {
-    const v = values[k];
-    if (v.includes("'") || /[\r\n]/.test(v)) throw new Error(`setEnvValue: ${k}'s value holds a single quote or a line break, which the env file cannot carry`);
-    return /[$#\s"]/.test(v) ? `${k}='${v}'` : `${k}=${v}`;
-  });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, [...lines, ...added, ""].join("\n"), { mode });
-  renameSync(tmp, file);
-}
-
-/** Is KEY's line in the env file single-quoted? Compose interpolates a bare or double-quoted value, and a bcrypt hash's `$`s are then read as variables. */
-export function singleQuoted(file: string, key: string): boolean {
-  // The LAST such line, as parseEnv and compose read it (review pass 3: the first was read, and a later bare line won).
-  const line = (existsSync(file) ? readFileSync(file, "utf8") : "").split("\n").filter((l) => new RegExp(`^\\s*(export\\s+)?${key}\\s*=`).test(l)).at(-1);
-  return line === undefined || /=\s*'[^']*'\s*$/.test(line);
-}
 
 /** bcrypt reads 72 bytes. Bun pre-hashes a longer password and n8n's bcrypt truncates it, so the two would never agree. */
 const MAX_PASSWORD_BYTES = 72;

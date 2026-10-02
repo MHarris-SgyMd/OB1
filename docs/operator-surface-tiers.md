@@ -1,6 +1,6 @@
 # Three servers and an authorization server behind the proxy (SMD-2282)
 
-An architecture decision record. **Decided 2026-09-27 by the maintainer.** Amended 2026-09-29 with the authorization server's selection and identity rules (SMD-2285, decisions 13–16).
+An architecture decision record. **Decided 2026-09-27 by the maintainer.** Amended 2026-09-29 with the authorization server's selection and identity rules (SMD-2285, decisions 13–16). Amended 2026-10-01: the authorization server keeps its state in SQLite in its own volume, not in a database on the brain's Postgres (SMD-2285, "What else this touches").
 
 The brain's deployed surface becomes three servers and an authorization server, all behind one reverse proxy:
 
@@ -199,8 +199,8 @@ Read against the tree on 2026-09-27.
 | Release images and CI | `ob1-server` becomes one image per server; the full-stack job goes through the proxy; the Workers build retires | SMD-2296, SMD-2288 |
 | Docs and skills with the one-process `?key=` URL shape | One bring-up path and the new URLs | SMD-2288 |
 | `chrome-capture-extension`, `recipes/*` MCP callers, agent-memory plugins | New URLs; the extension needs `/api` or a move to `/mcp` once `rest-api` retires | SMD-1931 |
-| Secrets in `deploy/.env` | The authorization server's signing key, each service's client secret, the `ob1_auth` role's password and the operator's argon2 password hash, with the backup note | SMD-2285 |
-| Postgres, backup and restore | The authorization server's own `ob1_auth` database, under its own role rather than the superuser, created by an idempotent provision step. `pg_dump openbrain` misses it, so backup and restore gain a second dump. `db/tier.ts --refresh` never touches it | SMD-2285, SMD-2294 |
+| Secrets in `deploy/.env` | The authorization server's signing key, its cookie keys, each static client's secret, and the operator's password (which the operator may remove once hashed) and its argon2id hash, written by `deploy/auth/provision.ts --init`, with the backup note (`deploy/README.md`, "Authorization server"). The container is given the hash, never the password | SMD-2285 |
+| The authorization server's store, backup and restore | One SQLite file in the `auth` service's own volume, through an oidc-provider adapter of ours (`deploy/auth/store.ts`), backed up with `VACUUM INTO` beside the running server. Decided 2026-10-01 in place of an `ob1_auth` role and database on the brain's Postgres: the internet-facing server then holds no Postgres credential (once SMD-1846 puts Postgres on the mesh beside it, a credential is still all that stands between them), and `pg_dump openbrain` and `db/tier.ts --refresh` are unchanged | SMD-2285 |
 | `docs/01-getting-started.md` (quick tunnel first) | OAuth and passkeys need a stable origin: a named tunnel, Tailscale Funnel or your own domain. The quick tunnel stays key-only | SMD-2382 |
 
 ## Retirement conditions
@@ -229,7 +229,7 @@ Read against the tree on 2026-09-27.
 
 - **The authorization server's remaining details**, each in its own ticket:
   - token lifetimes and refresh-token rotation (SMD-2286);
-  - the client-metadata fetch policy (resolve-and-refuse, or an allowlist) and whether `openbrain` revokes PUBLIC's CONNECT, which would need `db/migrate.ts --grant` to grant CONNECT explicitly (SMD-2285);
+  - the client-metadata fetch policy (resolve-and-refuse, or an allowlist) (SMD-2285). Whether `openbrain` revokes PUBLIC's CONNECT went with the `ob1_auth` role: the authorization server reaches no database (2026-10-01);
   - how the canary tier reaches `auth.ob1.internal` across compose projects (SMD-2294).
 
   The survey behind decision 13 (eight candidates at the versions checked on 2026-09-28) is on SMD-2285.

@@ -2,9 +2,15 @@
   "name": "ob1-auth",
   "private": true,
   "type": "module",
-  "comment": "The authorization server (SMD-2285). oidc-provider is pinned EXACTLY: its experimental features (CIMD, ack draft-02) take breaking changes in minor releases, and an unacknowledged one stops the server starting. A bump is a PR that runs the proof of concept against this directory's image: `bun evals/eval-auth.ts --up oidc-provider` builds it, `--verify oidc-provider` checks it (CI's auth-poc job does both).",
+  "comment": "The authorization server (SMD-2285). oidc-provider is pinned EXACTLY: its experimental features (CIMD, ack draft-02) take breaking changes in minor releases, and an unacknowledged one stops the server starting. A bump is a PR that runs the proof of concept against this directory's image: `bun evals/eval-auth.ts --up oidc-provider` builds it, `--verify oidc-provider` checks it (CI's auth-poc job does both). The devDependencies are the typecheck's (CI's portable-server job; the image installs --production): @types/oidc-provider moves with oidc-provider, the other three with server-portable's (check 18).",
   "dependencies": {
     "jose": "6.2.12",
     "oidc-provider": "9.12.2"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "@types/node": "26.6.2",
+    "@types/oidc-provider": "9.12.1",
+    "typescript": "5.9.3"
   }
 }
