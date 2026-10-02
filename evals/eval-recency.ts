@@ -117,6 +117,10 @@ const m019 = readdirSync(MIGRATIONS).filter((f) => f.startsWith("019") && f.ends
 const text019 = substituteMigration(readFileSync(join(MIGRATIONS, m019), "utf8"), migrationValues({ dim: DIM, model: spec.name }));
 if (text019.split("FUNCTION match_thoughts(").length !== 2) throw new Error(`${m019} does not define match_thoughts exactly once`);
 await sql.unsafe(text019.replace("FUNCTION match_thoughts(", "FUNCTION match_thoughts_019("));
+// 019's file also re-creates its 4-argument search_thoughts_keyword, which
+// since 074 (SMD-1724) stands beside the 5-argument form and makes every
+// 4-argument call — the hybrid's — ambiguous: dropped at once.
+await sql.unsafe("DROP FUNCTION IF EXISTS search_thoughts_keyword(text, int, int, jsonb)");
 
 // ── Per query: the function at every cell, 019's function, the oracles ──────
 

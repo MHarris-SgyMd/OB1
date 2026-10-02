@@ -43,7 +43,7 @@ const REFUSED_CODES = new Set([-32601, -32602]);
 /** MCP_URL, or a clear refusal — the value is the operator's, not the visitor's. */
 export function mcpUrl(env: Record<string, string | undefined>): string {
 	const url = env.MCP_URL;
-	if (!url) throw new Error('MCP_URL is not set: the URL your Open Brain server answers MCP on (SETUP.md; http://127.0.0.1:8000/ for the compose stack)');
+	if (!url) throw new Error('MCP_URL is not set: the URL your Open Brain server answers MCP on (SETUP.md; http://127.0.0.1:8000/mcp for the compose stack)');
 	return url;
 }
 

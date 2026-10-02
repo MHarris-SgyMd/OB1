@@ -1,0 +1,166 @@
+/**
+ * config.ts — everything the authorization server reads from its environment
+ * (SMD-2285), checked at once: a deploy missing three settings hears about all
+ * three on its first start, not one per restart.
+ *
+ * - OB1_PUBLIC_ORIGIN, OB1_AUTH_TIERS and OB1_AUTH_SERVICES: the layout
+ *   (layout.ts);
+ * - OB1_AUTH_JWKS: the signing keys, a JSON `{ "keys": [...] }` of P-256
+ *   private JWKs (the server signs ES256 only);
+ * - OB1_AUTH_COOKIE_KEYS: comma-separated, each at least 32 characters, the
+ *   first signing and the rest still accepted (rotation);
+ * - OB1_AUTH_OPERATOR_PASSWORD_HASH: the operator's password, argon2id;
+ * - OB1_AUTH_SECRET_<ID>: each static client's secret, at least 32
+ *   characters;
+ * - OB1_AUTH_DB: the store's file, /data/auth.sqlite (the compose volume)
+ *   unless set;
+ * - OB1_AUTH_MAX_CLIENTS: how many registered clients the store may hold, 200
+ *   unless set (1 to 100,000);
+ * - OB1_AUTH_POC_ERROR_DETAIL: the proof of concept's switch (server.ts).
+ *
+ * `bun deploy/auth/provision.ts --init` writes every secret here into
+ * deploy/.env; `bun deploy/auth/provision.ts` reads that file through this
+ * module and says what the server would refuse.
+ *
+ * Dependency-free, so provision.ts runs from a checkout with no install.
+ */
+import { clientIds, layout, originFromEnv, secretName, servicesFromEnv, tiersFromEnv, type Layout, type Service, type TierName } from "./layout.ts";
+
+type Env = Record<string, string | undefined>;
+
+/** A P-256 private JWK, as oidc-provider and jose take it. */
+export type SigningKey = { kty: "EC"; crv: "P-256"; x: string; y: string; d: string; kid?: string; [k: string]: unknown };
+
+export type Config = {
+  layout: Layout;
+  jwks: { keys: SigningKey[] };
+  cookieKeys: string[];
+  passwordHash: string;
+  /** Each static client's secret, by client id. */
+  secrets: Record<string, string>;
+  dbPath: string;
+  /** The most registered clients the store may hold: a registration past it is refused until the purge frees room. */
+  maxClients: number;
+  pocErrorDetail: boolean;
+};
+
+export const MIN_SECRET = 32;
+/**
+ * An argon2id hash as Bun.password writes it: version 19, its costs, a 32-byte
+ * salt and a 32-byte digest in unpadded base64 (43 characters each). The
+ * lengths are what catch a hash cut short: cut inside its digest, a hash can
+ * still verify, as false, and every sign-in would fail in silence.
+ */
+export const ARGON2ID = /^\$argon2id\$v=19\$m=(\d+),t=(\d+),p=(\d+)\$[A-Za-z0-9+/]{43}\$[A-Za-z0-9+/]{43}$/;
+
+/** The most a hash may cost (memory in KiB, passes, lanes): it is paid at start and on every sign-in POST, which anyone starting a sign-in can send. */
+export const MAX_COST = { m: 262_144, t: 10, p: 16 };
+
+const NOT_WHOLE = "is not a whole argon2id hash as Bun writes it (version 19, a 43-character salt and digest; one cut short, or another tool's, is refused)";
+
+/**
+ * Why `hash` is not one the server can use, or "": its form and lengths, its
+ * costs (checked before any verify, so a hostile cost is never paid), then a
+ * verify that must not throw, for characters the form allows and the decoder
+ * does not. One verify, about 70 ms at the defaults.
+ */
+export function argon2idProblem(hash: string): string {
+  const m = ARGON2ID.exec(hash);
+  if (!m) return NOT_WHOLE;
+  const [mem, t, p] = m.slice(1).map(Number);
+  if (mem > MAX_COST.m || t > MAX_COST.t || p > MAX_COST.p) {
+    const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
+    return `costs more than the server allows (${mem} KiB of memory, ${n(t, "pass", "passes")}, ${n(p, "lane", "lanes")}; at most ${MAX_COST.m} KiB, ${MAX_COST.t} passes and ${MAX_COST.p} lanes), and every sign-in pays it`;
+  }
+  try {
+    Bun.password.verifySync("a-probe-not-the-password", hash);
+    return "";
+  } catch {
+    return NOT_WHOLE;
+  }
+}
+
+export const wholeArgon2id = (hash: string) => argon2idProblem(hash) === "";
+export const DEFAULT_DB = "/data/auth.sqlite";
+export const DEFAULT_MAX_CLIENTS = 200;
+const MAX_CLIENTS_CEILING = 100_000;
+const INIT = "run `bun deploy/auth/provision.ts --init`, which writes it into deploy/.env";
+const INIT_THEM = "run `bun deploy/auth/provision.ts --init`, which writes them into deploy/.env";
+
+/** The signing keys, or why not. */
+function jwksProblem(raw: string | undefined): string | { keys: SigningKey[] } {
+  if (!raw) return `OB1_AUTH_JWKS is not set — ${INIT}`;
+  let doc: unknown;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    return `OB1_AUTH_JWKS is not JSON (${(e as Error).message}) — in deploy/.env it is one single-quoted line, '{"keys":[…]}'`;
+  }
+  const keys = (doc as { keys?: unknown } | null)?.keys;
+  if (!Array.isArray(keys) || !keys.length) return `OB1_AUTH_JWKS has no "keys" array, or an empty one — ${INIT}`;
+  const bad = keys.findIndex((k) => !k || typeof k !== "object" || k.kty !== "EC" || k.crv !== "P-256" || ![k.x, k.y, k.d].every((v) => typeof v === "string" && v));
+  if (bad >= 0) return `OB1_AUTH_JWKS key ${bad} is not a P-256 private key (kty EC, crv P-256, with x, y and d): the server signs ES256 only`;
+  return { keys: keys as SigningKey[] };
+}
+
+/**
+ * The server's configuration from `env`, or one Error naming every problem,
+ * one per line. Where the tiers cannot be read, the static clients checked
+ * are `gui` and `mcp`, which every layout has.
+ */
+export function configFromEnv(env: Env = process.env): Config {
+  const problems: string[] = [];
+  const attempt = <T>(f: () => T): T | undefined => {
+    try {
+      return f();
+    } catch (e) {
+      problems.push((e as Error).message);
+      return undefined;
+    }
+  };
+  const origin = attempt(() => originFromEnv(env));
+  const tiers = attempt(() => tiersFromEnv(env));
+  const services = tiers ? attempt(() => servicesFromEnv(tiers, env)) : undefined;
+  const ids = clientIds(tiers ?? ["stable"], services ?? {});
+
+  const jwks = jwksProblem(env.OB1_AUTH_JWKS);
+  if (typeof jwks === "string") problems.push(jwks);
+
+  const cookieRaw = env.OB1_AUTH_COOKIE_KEYS?.trim();
+  const cookieKeys = cookieRaw ? cookieRaw.split(",").map((k) => k.trim()) : [];
+  if (!cookieRaw) problems.push(`OB1_AUTH_COOKIE_KEYS is not set — ${INIT}`);
+  else if (cookieKeys.some((k) => k.length < MIN_SECRET)) problems.push(`OB1_AUTH_COOKIE_KEYS has a key shorter than ${MIN_SECRET} characters, or an empty one — ${INIT} after removing the line`);
+
+  const passwordHash = env.OB1_AUTH_OPERATOR_PASSWORD_HASH?.trim() ?? "";
+  if (!passwordHash) problems.push(`OB1_AUTH_OPERATOR_PASSWORD_HASH is not set — ${INIT}`);
+  else if (argon2idProblem(passwordHash)) problems.push(`OB1_AUTH_OPERATOR_PASSWORD_HASH ${argon2idProblem(passwordHash)} — run \`bun deploy/auth/provision.ts --init\` to derive it again from OB1_AUTH_OPERATOR_PASSWORD`);
+
+  const secrets: Record<string, string> = {};
+  const missing = ids.filter((id) => !env[secretName(id)]);
+  const serviceMissing = missing.some((id) => Object.hasOwn(services ?? {}, id));
+  if (missing.length) {
+    const where = serviceMissing ? "; a service client's secret also needs a line of its own in the auth service's environment (deploy/compose.yaml)" : "";
+    problems.push(`${missing.map(secretName).join(", ")} ${missing.length === 1 ? `is not set — ${INIT}` : `are not set — ${INIT_THEM}`}${where}`);
+  }
+  const short = ids.filter((id) => env[secretName(id)] && env[secretName(id)]!.length < MIN_SECRET);
+  if (short.length) problems.push(`${short.map(secretName).join(", ")} ${short.length === 1 ? "is" : "are"} shorter than ${MIN_SECRET} characters`);
+  for (const id of ids) secrets[id] = env[secretName(id)] ?? "";
+
+  const maxRaw = env.OB1_AUTH_MAX_CLIENTS?.trim();
+  const maxClients = maxRaw ? Number(maxRaw) : DEFAULT_MAX_CLIENTS;
+  if (maxRaw && !(/^\d+$/.test(maxRaw) && maxClients >= 1 && maxClients <= MAX_CLIENTS_CEILING)) {
+    problems.push(`OB1_AUTH_MAX_CLIENTS is not a whole number from 1 to ${MAX_CLIENTS_CEILING} ("${maxRaw}"; unset, it is ${DEFAULT_MAX_CLIENTS})`);
+  }
+
+  if (problems.length) throw new Error(`the authorization server cannot start:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
+  return {
+    layout: layout(origin!, tiers as TierName[], services as Record<string, Service>),
+    jwks: jwks as { keys: SigningKey[] },
+    cookieKeys,
+    passwordHash,
+    secrets,
+    dbPath: env.OB1_AUTH_DB?.trim() || DEFAULT_DB,
+    maxClients,
+    pocErrorDetail: env.OB1_AUTH_POC_ERROR_DETAIL === "1",
+  };
+}

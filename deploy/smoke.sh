@@ -6,7 +6,11 @@
 # check works for every deployment target.
 #
 #   ./smoke.sh                                    # reads deploy/.env
-#   ./smoke.sh https://ob1.example.com "$KEY"
+#   ./smoke.sh https://ob1.example.com/mcp "$KEY"
+#
+# Given no URL it smokes the compose stack's endpoint, http://127.0.0.1:<SERVER_PORT>/mcp:
+# the proxy's port and the server's path on it (SMD-1846). The URL is the
+# endpoint a client is given, not the origin: check 2 derives the origin from it.
 #
 # Exit 0 if the deployment is serving correctly, 1 otherwise. Read-only: it never
 # captures a thought, so it is safe against production.
@@ -21,7 +25,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 if [ $# -ge 2 ]; then
   BASE="$1"; KEY="$2"
 elif [ -f "$HERE/.env" ]; then
-  BASE="http://127.0.0.1:$(grep -E '^SERVER_PORT=' "$HERE/.env" | cut -d= -f2 || echo 8000)"
+  BASE="http://127.0.0.1:$(grep -E '^SERVER_PORT=' "$HERE/.env" | cut -d= -f2 || echo 8000)/mcp"
   # deploy/.env holds key HASHES, not keys — by design. A raw key has to be
   # supplied, so read it from OB1_SMOKE_KEY or take it as an argument.
   KEY="${OB1_SMOKE_KEY:-}"
