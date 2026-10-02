@@ -2232,7 +2232,11 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
     assert(status === "lost", `the job a prior process left running is reconciled to lost (${status})`);
   } finally {
     child.kill();
+    // Its stop drains for at most the grace period less 2 s (shutdown.ts); one
+    // stuck past that is killed, so the suite never waits on it unbounded.
+    const hung = setTimeout(() => child.kill("SIGKILL"), 10_000);
     await child.exited;
+    clearTimeout(hung);
     // What the entry said, when it did not do what was asked of it.
     if (status !== "lost") console.log((await new Response(child.stderr).text()).split("\n").slice(-10).map((l) => `      ${l}`).join("\n"));
     await sql`DELETE FROM jobs WHERE id = ${jobId}::uuid`;

@@ -514,14 +514,15 @@ MCP tools do rather than a copy of it:
 - **`render.ts`** — the words: each tool's reply rendered from that value, the text the
   tools have always said.
 - **`index.ts`** — the Hono app, authentication, and the registration that joins the
-  two: validate (the SDK runs the spec's schema), call the operation, render. It holds
-  no store wiring and no egress or embedding call.
+  two: validate (the SDK runs the spec's schema), call the operation, render. It
+  builds no store and makes no egress or embedding call: it hands root.ts's readers to
+  the core, says it serves (`serveHere()`) and closes the store at a stop.
 - **`root.ts`** — the process root a serving entry builds on (SMD-2284): `type Env`,
   the one list of what the container's process reads; `initEnv()` and `env()`; the
   store's wiring — `db()` builds it and wires the job sink, `closeStore()` closes it at a
   stop; and the agent registry the keys are looked up through. `sse.ts` keeps an event
-  stream alive while a call runs (SMD-1864). Both are shared with the REST core
-  (SMD-2284), so neither server carries a copy.
+  stream alive while a call runs (SMD-1864). Both are moved out of `index.ts` so the
+  REST core (SMD-2284) can build on them rather than on a copy.
 
 `scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts` and `root.ts`
 for what a move would leave behind: an import outside the file's list, a SQL call or

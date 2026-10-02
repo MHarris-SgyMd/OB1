@@ -136,7 +136,7 @@ let sink: JobSink | null = null;
 /** How often a running job's progress is written through to the sink; the running-transition and every terminal state are always written. */
 const PERSIST_THROTTLE_MS = 1_000;
 
-/** index.ts sets the durable store once at startup (SQL server) or clears it (a suite). */
+/** root.ts sets the durable store once, in the serving process (SQL server), or a suite sets or clears it. */
 export function setJobSink(s: JobSink | null): void {
   sink = s;
 }

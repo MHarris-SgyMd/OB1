@@ -255,12 +255,13 @@
  *      core/reads.ts, core/filter.ts and db/config.mjs by name), and nothing
  *      is imported for effect or dynamically; with comments and strings
  *      blanked, no `sql` template, `new SQL`, `.unsafe(` or `fetch(`, bare or
- *      on globalThis; the store's builder `db` named only in an import, at
- *      root.ts's declaration, as createCore's `store:`, in
+ *      on globalThis; the store's builder `db` named only in the root's
+ *      import, at root.ts's declaration, as createCore's `store:`, in
  *      `agents().resolve(db(), …)` and as an object key; and the store itself
  *      (`_store`, `createStore`) named only in root.ts's STORE_WIRING bodies,
- *      db() and closeStore(), and the store module's import — a second db()
- *      or closeStore() anywhere else is a hit. A value passed on (the agent
+ *      db() and closeStore() (the factory in db() alone), and the store
+ *      module's import — a second db() or closeStore(), in root.ts or
+ *      elsewhere, is a hit. A value passed on (the agent
  *      registry's lookups) and a global's alias are not followed;
  *      transportLeaksIn is a pure function its probes run on in-memory text;
  *      no exceptions
@@ -5130,15 +5131,15 @@ checkPostgrestClients();
 //     or require;
 //   - strings blanked too: no `sql` template, `new SQL`, `.unsafe(`, or
 //     `fetch(` bare or on globalThis (a provider call is the core's);
-//   - the store's builder `db` named only in an import, where root.ts declares
-//     it, handed to the core (`createCore({ …, store: db })`), called for the
-//     agent registry (`agents().resolve(db(), …)`), or as an object key — an
-//     alias, `(db)()`, another caller or another `store:` is a hit;
+//   - the store's builder `db` named only in the root's import, where root.ts
+//     declares it, handed to the core (`createCore({ …, store: db })`), called
+//     for the agent registry (`agents().resolve(db(), …)`), or as an object
+//     key — an alias, `(db)()`, another caller or another `store:` is a hit;
 //   - the store itself (`_store`, `createStore`, called or not) named only in
 //     root.ts, inside STORE_WIRING's bodies — db() builds it and wires the job
-//     sink to it, closeStore() closes it at a stop — at its declaration and in
-//     the store module's import. A transport file that declares db() or
-//     closeStore() again is a hit.
+//     sink to it, closeStore() closes it at a stop; the factory in db() alone —
+//     at its declaration and in the store module's import. A second db() or
+//     closeStore(), in root.ts or a transport file, is a hit.
 // What it does not see: a store method reached through a value it cannot name
 // (a parameter, the agent registry's own lookups, a context the core hands
 // back), an alias of a global (`Bun.sql`), and a module the allowlist admits
@@ -5206,11 +5207,15 @@ function transportLeaksIn(text: string, role: TransportRole = INDEX_ROLE): { lin
   /**
    * Each import statement's span by its module: `db` may be named in the
    * root's, the store in the store module's — and nowhere else for being in a
-   * statement, since a statement without a semicolon reads on to the next
-   * `from` (review pass 1).
+   * statement (review pass 1).
    */
   const imports: [spec: string, start: number, end: number][] = [];
-  for (const m of bare.matchAll(/\b(import|export)\s+(?:type\s+)?([^;"'`]*?)\s*\bfrom\s*["']/g)) {
+  // A statement's keyword stands alone — not a member (`cfg.import`) or part of
+  // a name — and its clause holds no `=`, `(` or `)`, which no import or
+  // export clause has: without them a line with no semicolon (`export const
+  // PORT = 8080`, `import X = NS.y`) read on to the next `from "` and made the
+  // lines between one statement (review pass 2).
+  for (const m of bare.matchAll(/(?<![.\w$])(import|export)\s+(?:type\s+)?([^;"'`=()]*?)\s*\bfrom\s*["']/g)) {
     const spec = specAt(m.index + m[0].length - 1);
     const reexport = m[1] === "export";
     if (!reexport) imports.push([spec, m.index, m.index + m[0].length]);
@@ -5233,25 +5238,29 @@ function transportLeaksIn(text: string, role: TransportRole = INDEX_ROLE): { lin
   for (const m of bare.matchAll(/\b(?:import|require)\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a dynamic import" });
   for (const m of bare.matchAll(/\bsql\s*`|\bnew\s+(?:Bun\s*\.\s*)?SQL\b|\.unsafe\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a SQL call" });
   for (const m of bare.matchAll(/(?<![.\w$])fetch\s*\(|\bglobalThis\s*\.\s*fetch\b/g)) hits.push({ line: lineAt(m.index), what: "a fetch (a provider call is the core's)" });
-  const spans = role.wiring ? [...wiringSpans(bare).values()] : [];
-  if (!role.wiring) {
-    for (const name of STORE_WIRING) {
-      for (const m of bare.matchAll(new RegExp(`\\bfunction\\s+${name}\\b`, "g"))) hits.push({ line: lineAt(m.index), what: `a second ${name}() — the store's wiring is root.ts's` });
-    }
+  const wiring = role.wiring ? wiringSpans(bare) : new Map<string, [number, number]>();
+  const spans = [...wiring.values()];
+  // In a transport file every declaration of db() or closeStore() is a second
+  // one; in the root, every one after the first (review pass 2).
+  for (const name of STORE_WIRING) {
+    const declared = [...bare.matchAll(new RegExp(`\\bfunction\\s+${name}\\b`, "g"))];
+    for (const m of declared.slice(role.wiring ? 1 : 0)) hits.push({ line: lineAt(m.index), what: `a second ${name}() — the store's wiring is root.ts's db() and closeStore()` });
   }
   for (const m of bare.matchAll(/(?<![.\w$])db\b/g)) {
     const before = bare.slice(0, m.index), after = bare.slice(m.index + 2);
     if (inImportOf("./root.ts", m.index)) continue; // named in the root's import — the list above holds which
-    if (role.wiring && /\bfunction\s+$/.test(before)) continue; // its declaration, in the root
     if (/\bcreateCore\(\s*\{[^{}]*\bstore\s*:\s*$/.test(before) && /^\s*[,}]/.test(after)) continue; // handed to the core, uncalled
     if (/\bagents\(\)\s*\.\s*resolve\(\s*$/.test(before) && /^\s*\(\s*\)/.test(after)) continue; // the agent registry's lookup
     if (/[{,]\s*$/.test(before) && /^\s*:/.test(after)) continue; // an object key, not the builder
-    if (!role.wiring && /\bfunction\s+$/.test(before)) continue; // a second db(): said once, above
+    if (/\bfunction\s+$/.test(before)) continue; // a second db(): said once, above
     hits.push({ line: lineAt(m.index), what: "the store's builder db named past the core" });
   }
   const inWiring = (i: number) => spans.some(([s, e]) => i >= s && i < e);
+  // The factory builds the store in db() alone; closeStore() closes what db() built.
+  const inDb = (i: number) => { const span = wiring.get("db"); return span !== undefined && i >= span[0] && i < span[1]; };
   for (const m of bare.matchAll(/(?<![.\w$])(?:_store|createStore)\b/g)) {
-    if (inImportOf("./store.ts", m.index) || inWiring(m.index) || (role.wiring && /\blet\s+$/.test(bare.slice(0, m.index)))) continue;
+    const allowed = m[0] === "createStore" ? inDb(m.index) : inWiring(m.index);
+    if (inImportOf("./store.ts", m.index) || allowed || (role.wiring && /\blet\s+$/.test(bare.slice(0, m.index)))) continue;
     hits.push({ line: lineAt(m.index), what: role.wiring ? `the store (${m[0]}) named outside ${STORE_WIRING.map((n) => `${n}()`).join(" and ")}` : `the store (${m[0]}) named outside root.ts` });
   }
   return hits;
@@ -5304,6 +5313,16 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   // …and a builder or a factory of the same name from another module the file may import whole.
   ['import { db } from "./jobs.ts";\n', true],
   ['import { createStore } from "./agents.ts";\n', true, ROOT_ROLE],
+  // Review pass 2: a keyword that is a member, a line with no semicolon, a second declaration in the root, the factory in closeStore().
+  ['const ldr = cfg.import\nconst leaked = db\nimport { initEnv } from "./root.ts";\n', true],
+  ['void cfg.import\nvoid db\nimport { env } from "./root.ts";\n', true],
+  ['const ldr = cfg.import\nconst s = createStore(env())\nimport { setJobSink } from "./jobs.ts";\nimport { storeKind } from "./store.ts";\n', true, ROOT_ROLE],
+  ['import X = NS.y\nconst q = db\nimport { env } from "./root.ts";\n', true],
+  ['export function db(): Promise<ThoughtStore> {\n  return _store!;\n}\nexport function closeStore(): Promise<boolean> {\n  function closeStore() { return Promise.resolve(true); }\n  return closeStore();\n}\n', true, ROOT_ROLE],
+  ['export function db(): Promise<ThoughtStore> {\n  return _store!;\n}\nexport function closeStore(): Promise<boolean> {\n  return createStore(env()).then(() => true);\n}\n', true, ROOT_ROLE],
+  ['export const PORT = 8080\nimport { db } from "./root.ts";\nconst core = createCore({ env, store: db, door });\n', false],
+  ['export const X = 1\nimport { createStore, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
+  // Review pass 1's root probe: a store call past the wiring, in the root itself.
   ["const r = await (await db()).retryFailed(workType);\n", true, ROOT_ROLE],
   ['import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";\n', false],
   ["drainOnSignal({ server: () => bunServer, close: closeStore });\n", false],
