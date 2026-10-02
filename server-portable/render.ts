@@ -13,9 +13,9 @@
 // booleans, enum codes (review pass 5: passes 2–5 each found another field the
 // value showed more of, or less cleanly, than the text). A refusal or a fault
 // answers the same way. A tool whose text is its value's JSON (the ChatGPT
-// shapes, the pages, the job records) answers the value itself, which says
-// exactly what its text does. The core's values keep everything, for the REST
-// core (SMD-2284).
+// shapes, the pages, the job records, the worker actions) answers the value
+// itself, which says exactly what its text does. The core's values keep
+// everything, for the REST core (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";

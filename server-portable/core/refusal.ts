@@ -106,7 +106,9 @@ export function refusalValue(r: Refusal): Record<string, unknown> {
 export type Outcome<T, C extends RefusalCode = RefusalCode> = { ok: true; value: T } | { ok: false; refusal: Extract<Refusal, { code: C }> };
 
 export const ok = <T>(value: T): Outcome<T, never> => ({ ok: true, value });
-export const refuse = <T = never, R extends Refusal = Refusal>(refusal: R): Outcome<T, R["code"]> => ({ ok: false, refusal } as unknown as Outcome<T, R["code"]>);
+// The parameter is the refusal's own member, not a type parameter of it, so a
+// field it does not declare (`citeBy` for `citedBy`) is an excess property.
+export const refuse = <T = never, C extends RefusalCode = RefusalCode>(refusal: Extract<Refusal, { code: C }> & { code: C }): Outcome<T, C> => ({ ok: false, refusal } as unknown as Outcome<T, C>);
 
 /**
  * A fault an operation threw, typed for a caller that wants a code: FAILED,

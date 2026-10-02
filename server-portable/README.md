@@ -507,9 +507,9 @@ MCP tools do rather than a copy of it:
   shapes, a capture-only key's trimmed provenance and owned pointers, the egress gate,
   the model calls, the write and its cites. `core/workers.ts` holds the worker actions
   (`retry_failed`, `release_stale_leases`, `run_worker`'s dry run), which the keyed REST
-  POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too. Each returns its typed value or a typed
-  refusal (`core/refusal.ts`: a `code`, whether it is `retryable`, and the facts to say
-  it with), and throws a fault. `core/context.ts` is what they run against: the store,
+  POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too. Each
+  returns its typed value or a typed refusal (`core/refusal.ts`: a `code`, whether it is
+  `retryable`, and the facts to say it with), and throws a fault. `core/context.ts` is what they run against: the store,
   the provider settings and the one embedder, the query log, the door a write records.
 - **`render.ts`** — the words: each tool's reply rendered from that value, the text the
   tools have always said.
@@ -526,9 +526,8 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
 
 - A tool whose text is its value's JSON (`search`, `fetch`, `list_thought_ids`,
   `list_logged_searches`, `worker_status`, `job_status`, `scan_thoughts`, the three
-  worker actions) answers
-  the value itself. A value is always an object, so `worker_status`'s rows ride
-  under `pools` while its text stays the bare array.
+  worker actions) answers the value itself. A value is always an object, so
+  `worker_status`'s rows ride under `pools` while its text stays the bare array.
 - A tool whose text is prose answers its `text` plus fields that cannot carry a
   word a thought, a key or a judge wrote: ids, timestamps, counts, scores, booleans,
   enum codes (a search hit's id, scores, `supersededBy` and demotion reasons; a
@@ -572,7 +571,7 @@ bun test-server.ts        # 374 — transport, auth, tool surface, OAuth discove
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 196 — store conformance, real Postgres in a container
-bun run test:e2e          # 381 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 392 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 bun run cf:build          # ~353 KiB gzipped (measured 2026-10-01, SMD-2283 PR 2; the PostgREST store and supabase-js are in it)
 ```
 

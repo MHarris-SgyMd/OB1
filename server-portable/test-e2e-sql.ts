@@ -2027,20 +2027,46 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
   // The refusals, each in the words it always had, its code and `retryable` beside them.
   const refusals: [string, Record<string, unknown>, string, string][] = [
     ["retry_failed", { work_type: "  " }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to retry."],
-    ["release_stale_leases", { work_type: "  " }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type was given but blank — omit it to reap across all pools"],
-    ["release_stale_leases", { include_live: true }, "REFUSED_LIVE_LEASE_NEEDS_WORKER", "Refused: include_live releases a lease that has not lapsed"],
+    ["release_stale_leases", { work_type: "  " }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type was given but blank — omit it to reap across all pools, or pass a real `workType`."],
+    ["release_stale_leases", { include_live: true }, "REFUSED_LIVE_LEASE_NEEDS_WORKER", "Refused: include_live releases a lease that has not lapsed, which risks the holder double-processing — name the worker_id whose live lease to release (worker_status reports the holder)."],
     ["run_worker", { work_type: "  ", dry_run: true }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain."],
-    ["run_worker", { work_type: WT }, "RUN_WORKER_DRAIN_NOT_AVAILABLE", "Refused: the executing drain is not yet available"],
+    ["run_worker", { work_type: WT }, "RUN_WORKER_DRAIN_NOT_AVAILABLE", "Refused: the executing drain is not yet available — the server does not run the bulk LLM passes, and the drain will land on a callable worker core (SMD-2304). Call with dry_run: true to preview what a pass would claim."],
   ];
-  for (const [tool, args, code, lead] of refusals) {
+  for (const [tool, args, code, words] of refusals) {
     const r = await result(tool, args);
-    assert(r.isError && r.text.startsWith(lead) && r.sc?.code === code && r.sc?.retryable === false, `${tool} refuses ${JSON.stringify(args)} as ${code}, final, in its old words (${r.text.slice(0, 60)})`);
+    assert(r.isError && r.text === words && r.sc?.code === code && r.sc?.retryable === false, `${tool} refuses ${JSON.stringify(args)} as ${code}, final, in its old words (${r.text.slice(0, 60)})`);
     holds(`${tool}'s ${code}`, r);
+  }
+
+  // The keyed REST POSTs call the same operations and say a refusal in their
+  // own words, as a 400 body {error, code} byte for byte; a body field that is
+  // not a string reads as blank for retry and run, and as its String() for
+  // release (a pool named "5" holds nothing here) — each as it always was
+  // (review pass 3: only an uncommitted differential held these).
+  const post = (path: string, body: unknown) =>
+    fetch(`${BASE}${path}`, { method: "POST", headers: H, body: JSON.stringify(body) });
+  const retryBlank = "work_type is required — pass the exact workType worker_status reports.";
+  const runBlank = "work_type is required — pass the exact workType worker_status reports for the pool to drain.";
+  const rest: [string, Record<string, unknown>, number, unknown][] = [
+    ["/worker-retry-failed", { work_type: "  " }, 400, { error: retryBlank, code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-retry-failed", { work_type: 5 }, 400, { error: retryBlank, code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-run", { work_type: "  ", dry_run: true }, 400, { error: runBlank, code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-run", { work_type: 3, dry_run: true }, 400, { error: runBlank, code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-run", { work_type: WT, dry_run: "true" }, 400, { error: "the executing drain is not yet available — the server does not run the bulk LLM passes; the drain will land on a callable worker core (SMD-2304). Send dry_run: true to preview what a pass would claim.", code: "RUN_WORKER_DRAIN_NOT_AVAILABLE" }],
+    ["/worker-release-leases", { work_type: "  " }, 400, { error: "work_type was given but blank — omit it to reap across all pools, or pass a real workType.", code: "REFUSED_EMPTY_WORK_TYPE" }],
+    ["/worker-release-leases", { include_live: true, worker_id: " " }, 400, { error: "include_live requires worker_id — releasing a live lease risks the holder double-processing.", code: "REFUSED_LIVE_LEASE_NEEDS_WORKER" }],
+    ["/worker-release-leases", { work_type: 5 }, 200, { released: 0, ids: [], workers: [] }],
+  ];
+  for (const [path, body, status, want] of rest) {
+    const r = await post(path, body);
+    const text = await r.text();
+    assert(r.status === status && text === JSON.stringify(want), `POST ${path} ${JSON.stringify(body)} answers ${status} ${JSON.stringify(want).slice(0, 60)} (${r.status} ${text.slice(0, 80)})`);
   }
 
   // A fault: the claim table is away, so the store throws. Each action keeps
   // its lead, FAILED beside it with no retryable — on a PostgREST deploy the
-  // store throws the SQL-only reason, which a retry does not mend. Put the
+  // store throws the SQL-only reason, which a retry does not mend — and each
+  // POST answers the reason as a 200 {error}, as /worker-status does. Put the
   // table back whatever the assertions do; a lock held elsewhere fails the
   // rename within seconds rather than hanging the suite.
   const sql = new SQL({ url: URL_, max: 1 });
@@ -2051,6 +2077,12 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
       const fault = await result(tool, args);
       assert(fault.isError && fault.text.startsWith(`${tool} failed: `) && fault.sc?.code === "FAILED" && !("retryable" in fault.sc) && fault.sc?.text === fault.text,
         `${tool}'s fault is FAILED under its lead, its words beside it (${JSON.stringify(fault.sc)?.slice(0, 120)})`);
+    }
+    const reason = JSON.stringify({ error: 'relation "thought_work_claims" does not exist' });
+    for (const [path, body] of [["/worker-retry-failed", { work_type: WT }], ["/worker-release-leases", {}], ["/worker-run", { work_type: WT, dry_run: true }]] as const) {
+      const r = await post(path, body);
+      const text = await r.text();
+      assert(r.status === 200 && text === reason, `POST ${path}'s fault is a 200 carrying the store's reason (${r.status} ${text.slice(0, 80)})`);
     }
   } finally {
     try {
