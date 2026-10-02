@@ -51,6 +51,12 @@ export type Service = { scope: string; tiers: TierName[] };
 /** The environment variable holding a static client's secret. */
 export const secretName = (clientId: string) => `OB1_AUTH_SECRET_${clientId.toUpperCase().replace(/-/g, "_")}`;
 
+/** A tier's MCP server's exchange client: `mcp` for stable, `mcp-<tier>` for the others. */
+export const mcpClientId = (tier: TierName) => (tier === "stable" ? "mcp" : `mcp-${tier}`);
+
+/** Every static client's id, in the layout's order: what --init writes a secret for and the server refuses to start without. */
+export const clientIds = (tiers: TierName[], services: Record<string, Service>) => ["gui", ...tiers.map(mcpClientId), ...Object.keys(services)];
+
 export function layout(origin: string, tiers: TierName[], services: Record<string, Service>) {
   const issuer = `${origin}/auth`;
   const prefixes = tiers.map((t) => TIER_PREFIX[t]);
@@ -59,7 +65,7 @@ export function layout(origin: string, tiers: TierName[], services: Record<strin
   const clients: Record<string, ClientPolicy> = {
     gui: { kind: "gui", resources: [api("")], redirect: `${origin}/dashboard/auth/callback` },
   };
-  for (const t of tiers) clients[t === "stable" ? "mcp" : `mcp-${t}`] = { kind: "exchange", from: mcp(TIER_PREFIX[t]), to: api(TIER_PREFIX[t]) };
+  for (const t of tiers) clients[mcpClientId(t)] = { kind: "exchange", from: mcp(TIER_PREFIX[t]), to: api(TIER_PREFIX[t]) };
   for (const [id, s] of Object.entries(services)) clients[id] = { kind: "service", resources: s.tiers.map((t) => api(TIER_PREFIX[t])), scope: s.scope };
   const mcpResources = prefixes.map(mcp);
   return {
@@ -89,11 +95,32 @@ export function layout(origin: string, tiers: TierName[], services: Record<strin
 }
 export type Layout = ReturnType<typeof layout>;
 
-/** OB1_PUBLIC_ORIGIN, without a trailing slash. */
+/** The hosts an `http:` origin may name: OAuth 2.1 allows plain HTTP for loopback alone. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * OB1_PUBLIC_ORIGIN, without a trailing slash: a scheme, a host and an
+ * optional port, nothing else. Every URL the server names starts with it, so
+ * a path, a query, a fragment or credentials would leak into the issuer and
+ * every endpoint. `https:`, or `http:` on a loopback host.
+ */
 export function originFromEnv(env: Record<string, string | undefined> = process.env): string {
-  const origin = env.OB1_PUBLIC_ORIGIN;
-  if (!origin) throw new Error("OB1_PUBLIC_ORIGIN is not set");
-  return origin.replace(/\/$/, "");
+  const given = env.OB1_PUBLIC_ORIGIN?.trim();
+  if (!given) throw new Error("OB1_PUBLIC_ORIGIN is not set");
+  // An `@` is never echoed, whether it parses or not (`user:pw@host` with no
+  // scheme reads as the scheme `user:`): the value would carry a password
+  // into the log. No origin holds one.
+  if (given.includes("@")) throw new Error("OB1_PUBLIC_ORIGIN holds an @, so it may hold credentials (not shown): give the origin alone, e.g. https://brain.example.com");
+  let url: URL;
+  try {
+    url = new URL(given);
+  } catch {
+    throw new Error(`OB1_PUBLIC_ORIGIN is not a URL ("${given}"): give the origin, e.g. https://brain.example.com`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(`OB1_PUBLIC_ORIGIN must be https:// ("${given}")`);
+  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) throw new Error(`OB1_PUBLIC_ORIGIN must be https:// unless its host is loopback ("${given}")`);
+  if (given.replace(/\/$/, "") !== url.origin) throw new Error(`OB1_PUBLIC_ORIGIN must be an origin alone, with no path, query, fragment or credentials ("${given}" — the origin is ${url.origin})`);
+  return url.origin;
 }
 
 /** A list's parts, refusing an empty one or a repeat in words: `what` names the list in the message. */

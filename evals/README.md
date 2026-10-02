@@ -6706,14 +6706,15 @@ turning its checks red:
 The consent-page mutants above hold its pages too.
 
 **Not proven here, and where it goes:**
-- **Work step 3:**
-  - storage in its own `ob1_auth` database (the library's in-memory adapter
-    runs here);
+- **Work step 3, done in the deploy:** the store is SQLite in the `auth`
+  service's own volume (`../deploy/auth/store.ts`; this kit's image runs it
+  too, in the container's own layer), the service is `deploy/compose.yaml`'s
+  `auth` profile, and compose does not pass `OB1_AUTH_POC_ERROR_DETAIL`, so
+  the POC's `error_detail` stays off there. CI's full-stack job holds the
+  service across a restart (`../deploy/README.md`, "Authorization server").
+- **Work step 3, still to come:**
   - passkeys and the loopback break-glass;
-  - the service in `deploy/compose.yaml`;
-  - the TTL or purge for DCR rows;
-  - leaving `OB1_AUTH_POC_ERROR_DETAIL` unset, so the POC's `error_detail`
-    stays off.
+  - the TTL or purge for DCR rows and expired ones.
 - **Also Work step 3:**
   - the guard's 64 KiB body cap is never exercised live (the oversize case
     stops at the library's 5 KiB limit first); it matters for `jwks_uri`, which

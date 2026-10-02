@@ -17,7 +17,8 @@
 # is a working reference for what the pieces are once Supabase is gone.
 #
 # What the host can reach: only the server (and n8n, under --profile
-# orchestration), and only from the host itself. Every
+# orchestration), and only from the host itself; the authorization server
+# (--profile auth) publishes nothing. Every
 # published port here names its address, `127.0.0.1` unless the operator sets
 # the `*_BIND` knob, because an address-less `"8000:8000"` binds 0.0.0.0 — every
 # interface — and this stack holds a brain (personal data at rest) behind one
@@ -745,8 +746,86 @@ services:
     # gives it two SIGTERMs and up to 5 s (review pass 4).
     stop_grace_period: 15s
 
+  # The authorization server (SMD-2285; docs/operator-surface-tiers.md,
+  # decisions 13-16): oidc-provider in a small Bun service of ours
+  # (auth/server.ts), off unless the `auth` profile is on. Before its first
+  # start, `bun deploy/auth/provision.ts --init` writes its secrets into
+  # deploy/.env and `bun deploy/auth/provision.ts` checks the file; set
+  # OB1_PUBLIC_ORIGIN yourself (deploy/README.md, "Authorization server").
+  #
+  # Nothing routes to it yet. The proxy that serves `/auth` and the
+  # well-known paths comes with SMD-1846, so for now it publishes no port and
+  # answers only on the mesh as auth.ob1.internal. It joins two networks of
+  # its own and not the default one, so it cannot reach Postgres, Ollama or
+  # n8n until SMD-1846 moves them onto the mesh: `mesh`, internal, where the
+  # proxy, the MCP server and the GUI will meet it; and `egress`, for the
+  # client metadata documents it fetches (each through its fetch guard, which
+  # refuses private and *.ob1.internal targets).
+  #
+  # Its state (sessions, grants, refresh tokens, registered clients) is one
+  # SQLite file in the auth-data volume, and it holds no Postgres credential
+  # (so the mesh, later, gives it no way into the brain's database). Back the
+  # volume up with deploy/.env (deploy/README.md).
+  auth:
+    build:
+      context: ./auth
+    profiles: ["auth"]
+    # No `:?` for the reason n8n's block gives: compose interpolates every
+    # service, profile or not. The server checks every setting at start and
+    # exits 2 naming each one missing or malformed (auth/config.ts); the
+    # restart policy brings it back, and its log says why each time.
+    #
+    # Exactly these, and no env_file: the container never sees the rest of
+    # deploy/.env (the Postgres password, the brain's keys) or the operator's
+    # plain password, only its hash. The POC's OB1_AUTH_POC_ERROR_DETAIL is
+    # not passed, so deploy/.env cannot turn it on. A service client named in
+    # OB1_AUTH_SERVICES needs its secret's line added here
+    # (OB1_AUTH_SECRET_<ID>: ${OB1_AUTH_SECRET_<ID>:-}); provision.ts names it.
+    environment:
+      OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
+      OB1_AUTH_TIERS: ${OB1_AUTH_TIERS:-}
+      OB1_AUTH_SERVICES: ${OB1_AUTH_SERVICES:-}
+      OB1_AUTH_JWKS: ${OB1_AUTH_JWKS:-}
+      OB1_AUTH_COOKIE_KEYS: ${OB1_AUTH_COOKIE_KEYS:-}
+      OB1_AUTH_OPERATOR_PASSWORD_HASH: ${OB1_AUTH_OPERATOR_PASSWORD_HASH:-}
+      OB1_AUTH_SECRET_GUI: ${OB1_AUTH_SECRET_GUI:-}
+      OB1_AUTH_SECRET_MCP: ${OB1_AUTH_SECRET_MCP:-}
+      OB1_AUTH_SECRET_MCP_CANARY: ${OB1_AUTH_SECRET_MCP_CANARY:-}
+      OB1_AUTH_SECRET_MCP_WORKING: ${OB1_AUTH_SECRET_MCP_WORKING:-}
+    networks:
+      mesh:
+        aliases: [auth.ob1.internal]
+      egress: {}
+    volumes:
+      - auth-data:/data
+    # The image's own files are read-only and the server keeps no capability:
+    # it writes nothing but its store, and listens on an unprivileged port.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # The server stops on SIGTERM, closing its store (auth/server.ts); init
+    # forwards the signal and reaps, as n8n's runner has it.
+    init: true
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  # The ADR's two networks (docs/operator-surface-tiers.md, "Two networks"),
+  # joined by the authorization server alone so far: the rest of the stack is
+  # still on compose's default network until SMD-1846's proxy moves it.
+  mesh:
+    internal: true
+  egress: {}
+
 volumes:
   pgdata:
   ollama:
   jev-models:
   n8n-data:
+  auth-data:

@@ -41,9 +41,11 @@
 # it embeds each logged query with the brain's model through the egress gate —
 # SMD-2290), POSTGRES_PASSWORD, which builds the URLs, and the key the replay's
 # embed falls back to when OB1_LLM_API_KEY is unset (OPENROUTER_API_KEY). Access
-# keys, LINEAR_API_KEY and the rest stay behind (OLLAMA_BASE too, now that the
-# replay reads OB1_LLM_BASE_URL through resolveEmbedConfig, not evals/lib.ts). The values travel in a mode-600 temporary env file, so they are
-# not on this command line or the runtime's; they are in the container's
+# keys, LINEAR_API_KEY, the authorization server's OB1_AUTH_* settings (its
+# signing key, client secrets and password; SMD-2285) and the rest stay
+# behind (OLLAMA_BASE too, now that the replay reads OB1_LLM_BASE_URL through
+# resolveEmbedConfig, not evals/lib.ts). The values travel in a mode-600
+# temporary env file, so they are not on this command line or the runtime's; they are in the container's
 # environment (`inspect` shows it while it runs), and the URLs are on the
 # argument lists inside it (bun's, pg_dump's, pg_restore's, migrate.ts's), which
 # a Linux host's `ps` shows (SMD-2119).
@@ -167,11 +169,14 @@ done
 # are its to set, below. A quoted value spanning lines is not supported: compose
 # prints its lines raw, so the first is carried cut short and a later one shaped
 # like an allowed NAME=… reads as that name (none of the stack's knobs is one).
+# The authorization server's settings (OB1_AUTH_*: its signing key, client
+# secrets and the operator's password) are not tier.ts's, and stay behind
+# (SMD-2285; deploy/auth/provision.ts --self-check runs this loop).
 POSTGRES_PASSWORD=""
 while IFS= read -r line; do
   name="${line%%=*}"
   case "$name" in
-    OB1_ALLOW_REMOTE_DB|OB1_ENV_FILE|OB1_ENV_FILES) continue ;;
+    OB1_ALLOW_REMOTE_DB|OB1_ENV_FILE|OB1_ENV_FILES|OB1_AUTH_*) continue ;;
     OB1_*|POSTGRES_PASSWORD|OPENROUTER_API_KEY) ;;
     *) continue ;;
   esac

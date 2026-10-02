@@ -150,6 +150,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
+| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which nothing in the stack dials until the proxy (SMD-1846); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres` until SMD-1846 moves the stack onto the mesh, and it holds no Postgres credential | Nothing. `compose exec auth …` for the backup below | Not yet: the proxy that routes `/auth` comes with SMD-1846 |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -412,10 +413,11 @@ for the stack. A variable set in the shell wins over the file, as it does
 there. Only what `tier.ts` and `migrate.ts` read is handed to the container:
 - the `OB1_*` knobs (`migrate.ts` reads `OB1_EMBEDDING_*` on a refresh);
 - `POSTGRES_PASSWORD`;
-- the provider settings the replay's embed reads (`OPENROUTER_API_KEY`,
-  `OLLAMA_BASE`).
+- the key the replay's embed falls back to when `OB1_LLM_API_KEY` is unset
+  (`OPENROUTER_API_KEY`).
 
-Access keys and `LINEAR_API_KEY` stay behind. The values travel in a temporary
+Access keys, `LINEAR_API_KEY`, `OLLAMA_BASE` and the authorization server's
+`OB1_AUTH_*` settings stay behind. The values travel in a temporary
 env file (mode 600, removed on exit), so they are not on the wrapper's command
 line or the runtime's. They are in the container's environment, which
 `inspect` shows while it runs, and the URLs are on the argument lists of bun,
@@ -1066,6 +1068,124 @@ inside both: n8n's FAQ permits consulting and installing on a client's
 server. Hosting the profile for others is outside n8n's licence. A
 commercial product built on OB1 that competes with it is outside OB1's.
 
+## Authorization server
+
+OAuth for the brain (SMD-2285; `../docs/operator-surface-tiers.md`, decisions
+13–16): oidc-provider 9.12.2 in a small Bun service of the fork's own
+(`auth/server.ts`), which won the proof of concept (`../evals/README.md`). The
+`auth` profile runs it. **Nothing routes to it yet:** it publishes no port,
+and the proxy that serves `/auth` and the discovery paths on the public origin
+comes with SMD-1846. Until then the profile is for standing the server up and
+holding its state, not for signing a client in.
+
+Below, `compose` stands for `podman compose -f deploy/compose.yaml --profile
+auth`, or docker compose, with whatever other `-f` files the stack was
+started with. It assumes the stack of step 1: compose reads the whole of
+`deploy/.env` for every service, so `POSTGRES_PASSWORD` and `MCP_ACCESS_KEYS`
+must be set even to start this one.
+
+```bash
+# deploy/.env: OB1_PUBLIC_ORIGIN=https://brain.example.com (yours; --init does not write it)
+bun deploy/auth/provision.ts --init   # once: the profile's secrets into deploy/.env (it keeps every value it finds)
+bun deploy/auth/provision.ts          # what the server would refuse, read from deploy/.env
+compose up -d --wait --wait-timeout 60 auth   # builds and starts this one service, and waits for it to be healthy
+```
+
+`--wait` matters: a server that refuses its settings exits 2 and is
+restarted, and `up` without it returns 0 all the same; with it, `up` fails
+naming the exit (measured: 4 s). It needs Docker Compose v2 or `podman
+compose` backed by it, as the canary's section says; the Python
+podman-compose has no `--wait`. With `auth` in `COMPOSE_PROFILES` instead,
+every `up` of the stack starts it.
+
+`--init` writes the signing key `OB1_AUTH_JWKS` (one P-256 key), two cookie
+keys `OB1_AUTH_COOKIE_KEYS`, the operator's password
+`OB1_AUTH_OPERATOR_PASSWORD` and its argon2id hash
+`OB1_AUTH_OPERATOR_PASSWORD_HASH` (single-quoted, since compose would read
+its `$`s as variables), and a secret `OB1_AUTH_SECRET_<ID>` for each static
+client: the GUI's, each tier's MCP server's and each service's. It writes
+only what the file lacks, so run it again after adding a tier to
+`OB1_AUTH_TIERS` or a service to `OB1_AUTH_SERVICES`. Once the hash is
+written you may keep the password elsewhere and remove its line: `--init`
+then keeps the hash. It warns when anyone but you may read or write
+`deploy/.env` (`chmod 600` it). A password holding `#` or `$` goes on a single-quoted
+line (`OB1_AUTH_OPERATOR_PASSWORD='…'`), and no password may hold a `'`, which
+compose cannot read inside single quotes (and then reads none of the file).
+Unquoted, the script that hashes it
+keeps a ` # note` as part of the password, and compose reads every `$` in
+the file as a variable, so `--init` and the check refuse such a line. The container is given
+the hash, never the password, and none of the rest of `deploy/.env`. To
+change the password, edit it, run `--init` (which re-derives a hash that no
+longer matches), and recreate the service with `compose up -d --wait auth`; a
+`compose restart` keeps the old hash.
+
+The server checks every setting at start and, if any is missing or
+malformed, exits 2 naming them all; the restart policy brings it back and
+its log (`compose logs auth`) says why each time. `OB1_PUBLIC_ORIGIN` must be
+an origin alone, `https://`, or `http://` on a loopback host. A service
+client named in `OB1_AUTH_SERVICES` needs its secret's line added to the
+`auth` service's environment in `deploy/compose.yaml`, since compose cannot
+pass a variable it does not name: `provision.ts` says which line.
+
+**Its state** — sessions, grants, refresh tokens and dynamically registered
+clients — is one SQLite file in the `auth-data` volume, so a restart keeps
+it, and so does an upgrade, which rebuilds and recreates the container. The server holds
+no Postgres credential, and until the proxy moves the stack onto the mesh
+(SMD-1846) it shares no network with Postgres either. On a stop it finishes
+what is in flight, closes the store and exits. The library's in-memory store,
+which the proof of concept first ran on, forgot all of it at every restart.
+
+**Custody and backups.**
+- **The signing key** signs every token the server issues: a new key
+  invalidates them all, and a lost one cannot be recovered.
+- **The client secrets** are shared with each client; a new one locks out
+  every client holding the old one.
+- **The password** is the operator's sign-in on the public origin.
+
+Keep all of them with `POSTGRES_PASSWORD` in `deploy/.env`'s backup. The
+store is worth keeping too, but losing it costs a sign-in, not data: every
+client registers and asks for consent again, and nothing in the brain
+changes. It can be copied while the server runs:
+
+```bash
+umask 077   # the copy holds refresh tokens and sessions
+compose exec -T auth bun -e "const { Database } = require('bun:sqlite'); require('node:fs').rmSync('/data/backup.sqlite', { force: true }); new Database('/data/auth.sqlite').exec(\"VACUUM INTO '/data/backup.sqlite'\")"
+compose exec -T auth sh -c 'cat /data/backup.sqlite && rm /data/backup.sqlite' > auth-backup.sqlite
+# restore: stop the server first (compose stop auth), then write the file as the
+# image's own user, removing the old WAL, which SQLite would otherwise replay onto the copy
+compose run --rm --no-deps -T --entrypoint sh auth -c 'rm -f /data/auth.sqlite-wal /data/auth.sqlite-shm && cat > /data/auth.sqlite' < auth-backup.sqlite
+compose up -d --wait --no-deps auth
+```
+
+A restored store brings back every grant and refresh token as it was when
+the copy was taken, including any revoked since. After a compromise, remove
+every `OB1_AUTH_*` line from `deploy/.env` but `OB1_AUTH_TIERS` and
+`OB1_AUTH_SERVICES` (the signing key, the cookie keys, the password, its hash
+and the client secrets; a kept password would be hashed again as it was),
+run `--init` for new ones, hand each client its new secret, and drop the store
+(`compose rm -sf auth`, then `podman volume rm <project>_auth-data`, or
+`docker volume rm`; `open-brain_auth-data` for the stack of step 1) before
+`compose up -d --wait auth`: every client signs in again. Both shapes were measured:
+the backup above restored into a fresh volume brings a registered client back
+with its registration token, and the fresh volume alone does not.
+
+**Upgrades.** The service is built from the checkout, so after pulling a new
+one rebuild it: `compose up -d --build --wait auth`. A plain `up` keeps the
+old image. oidc-provider is pinned exactly (`auth/package.json`). A bump
+re-runs the proof of concept against the new image
+(`bun evals/eval-auth.ts --up oidc-provider`, then `--verify`); CI's auth-poc
+job does the same.
+
+**Not yet.** The `/auth` route and the discovery paths (SMD-1846); passkey
+sign-in, which needs the public origin (SMD-2382, SMD-2286); the MCP server
+and the GUI as its clients (SMD-2286, SMD-2287); and pruning expired rows and
+idle registered clients from the store, with a limit on registration
+itself, an initial access token or a cap on registered clients (SMD-2285's
+next cut). Registration is open today and each one is a row kept until that
+pruning, so the route (SMD-1846) must not open before the limit does. The release
+overlay does not pin an image for it yet, so the profile builds from a
+checkout.
+
 ## What this does not cover
 
 - **TLS, backups, resource limits, log shipping.** Reference topology only. One
@@ -1115,6 +1235,8 @@ commercial product built on OB1 that competes with it is outside OB1's.
   what it proposes.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
+  The `auth` profile's authorization server runs, but nothing routes to it
+  until the proxy ("Authorization server", above).
 
 ## Related
 

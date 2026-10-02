@@ -1,10 +1,12 @@
 /**
  * server.ts — the brain's authorization server (SMD-2285, ADR decision 13): a
  * small Bun service of our own around oidc-provider 9.12.2, served through
- * node:http, with its issuer at `<origin>/auth`. Its resources and clients
- * come from layout.ts, read from the environment (OB1_PUBLIC_ORIGIN,
- * OB1_AUTH_TIERS, OB1_AUTH_SERVICES). It won the proof of concept, which runs
- * this file's image: `bun evals/eval-auth.ts --verify oidc-provider`.
+ * node:http, with its issuer at `<origin>/auth`. It runs as deploy/compose.yaml's
+ * `auth` profile. Its resources and clients come from layout.ts, read from the
+ * environment (OB1_PUBLIC_ORIGIN, OB1_AUTH_TIERS, OB1_AUTH_SERVICES), and
+ * every setting it reads is checked at start by config.ts, which names every
+ * problem at once and stops it starting. It won the proof of concept, which
+ * runs this file's image: `bun evals/eval-auth.ts --verify oidc-provider`.
  *
  * What is ours, beside the library's configuration:
  * - the token-exchange grant (RFC 8693). Only an `exchange` client from
@@ -42,7 +44,9 @@
  *   file alone): error replies carry the library's `error_detail`, so the
  *   verifier can tell one refusal's cause from another's. The library withholds
  *   it on purpose: it says what a name resolves to and whether a client id
- *   exists. Off unless that variable is set; the deploy never sets it.
+ *   exists. Off unless that variable is set, and the start logs a warning when
+ *   it is. deploy/compose.yaml does not pass it, so deploy/.env cannot turn it
+ *   on, and CI holds the rendered service to that.
  *
  * The routes it answers, all through the proxy:
  * - `/auth/*`, the provider itself, mounted under the issuer's path;
@@ -53,42 +57,53 @@
  *   OpenID document, whose `issuer` is `<origin>/auth`;
  * - `/healthz`, for compose.
  *
- * State is the library's in-memory adapter, so a restart forgets every grant,
- * session and registered client; a store that survives one is next.
+ * State is one SQLite file (store.ts) in the `auth` service's own volume, so a
+ * restart keeps every session, grant, refresh token and registered client.
+ * It holds no Postgres credential and reaches no database.
  */
 import http from "node:http";
-import Provider, { errors, type KoaContextWithOIDC } from "oidc-provider";
+import Provider, { errors, type ClientMetadata, type KoaContextWithOIDC, type ResourceServer } from "oidc-provider";
 import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
-import { ACCESS_TOKEN_TYPE, layoutFromEnv, SCOPES, secretName, TOKEN_EXCHANGE } from "./layout.ts";
+import { configFromEnv, type Config } from "./config.ts";
+import { ACCESS_TOKEN_TYPE, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
+import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
 
-function need(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`${name} is not set`);
-  return v;
+let C: Config;
+try {
+  C = configFromEnv();
+} catch (e) {
+  // Exit 2, the restart policy brings it back, and its log says why each time (the n8n pattern in deploy/compose.yaml).
+  console.error((e as Error).message);
+  process.exit(2);
 }
-
-const L = layoutFromEnv();
+const L = C.layout;
+let store: ReturnType<typeof sqliteAdapter>;
+try {
+  store = sqliteAdapter(C.dbPath);
+} catch (e) {
+  console.error((e as Error).message);
+  process.exit(2);
+}
 const OPERATOR = "operator";
 const ACCESS_TTL = 600;
-const PASSWORD_HASH = need("OB1_AUTH_OPERATOR_PASSWORD_HASH");
-const jwks = JSON.parse(need("OB1_AUTH_JWKS")) as { keys: JWK[] };
 /** The public half of the signing keys, to verify a subject token without a network hop. */
-const ownKeys = createLocalJWKSet({ keys: jwks.keys.map(({ d, p, q, dp, dq, qi, ...pub }) => pub) });
+const ownKeys = createLocalJWKSet({ keys: C.jwks.keys.map(({ d, ...pub }) => pub as JWK) });
 
 /** The only grant types a client without a policy entry (DCR, CIMD) may register. */
 const THIRD_PARTY_GRANTS = new Set(["authorization_code", "refresh_token"]);
 
-const clients = Object.entries(L.clients).map(([client_id, p]) => {
-  const base = { client_id, client_secret: need(secretName(client_id)), token_endpoint_auth_method: "client_secret_basic" };
+const clients = Object.entries(L.clients).map(([client_id, p]): ClientMetadata => {
+  const base = { client_id, client_secret: C.secrets[client_id], token_endpoint_auth_method: "client_secret_basic" as const };
   if (p.kind === "gui") return { ...base, grant_types: ["authorization_code"], response_types: ["code"], redirect_uris: [p.redirect] };
   if (p.kind === "service") return { ...base, grant_types: ["client_credentials"], response_types: [], redirect_uris: [], scope: p.scope };
   return { ...base, grant_types: [TOKEN_EXCHANGE], response_types: [], redirect_uris: [] };
 });
 
 /** POC ONLY (see the header): the library's internal reason for a refusal, which it never sends itself. */
-const POC_ERROR_DETAIL = process.env.OB1_AUTH_POC_ERROR_DETAIL === "1";
+const POC_ERROR_DETAIL = C.pocErrorDetail;
+if (POC_ERROR_DETAIL) console.warn("WARNING: OB1_AUTH_POC_ERROR_DETAIL is on — error replies name their cause (whether a client id exists, what a name resolves to). The proof of concept's switch; never a deploy's.");
 function detailOf(error: unknown): { error_detail?: string } {
   if (!POC_ERROR_DETAIL) return {};
   const detail = (error as { error_detail?: unknown } | undefined)?.error_detail;
@@ -97,14 +112,17 @@ function detailOf(error: unknown): { error_detail?: string } {
   return text ? { error_detail: text } : {};
 }
 
-function resourceInfo(resource: string) {
-  return { scope: SCOPES.join(" "), audience: resource, accessTokenTTL: ACCESS_TTL, accessTokenFormat: "jwt" as const, jwt: { sign: { alg: "ES256" } } };
+function resourceInfo(resource: string): ResourceServer {
+  return { scope: SCOPES.join(" "), audience: resource, accessTokenTTL: ACCESS_TTL, accessTokenFormat: "jwt", jwt: { sign: { alg: "ES256" } } };
 }
 
 const provider = new Provider(L.issuer, {
+  adapter: store,
+  // The library's default, named: the store keeps each row this long past its expiry, as the memory adapter did.
+  clockTolerance: CLOCK_TOLERANCE,
   clients,
-  jwks: jwks as never,
-  cookies: { keys: need("OB1_AUTH_COOKIE_KEYS").split(",") },
+  jwks: C.jwks,
+  cookies: { keys: C.cookieKeys },
   async findAccount(_ctx, id) {
     return id === OPERATOR ? { accountId: id, claims: async () => ({ sub: id }) } : undefined;
   },
@@ -179,6 +197,11 @@ const provider = new Provider(L.issuer, {
 provider.proxy = true;
 
 // POC ONLY (see the header): token-endpoint refusals carry their detail too.
+// A fault of the server's own (the store full or locked, a bug) answers
+// `server_error` with nothing internal in the body, and the library reports it
+// only on this event: logged here, or `compose logs` would show nothing.
+provider.on("server_error", (_ctx, error) => console.error(`server error: ${(error as Error).stack ?? (error as Error).message}`));
+
 provider.on("grant.error", (ctx, error) => {
   if (ctx.body && typeof ctx.body === "object") Object.assign(ctx.body, detailOf(error));
 });
@@ -220,7 +243,10 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   const now = Math.floor(Date.now() / 1000);
   const exp = Math.min(now + ACCESS_TTL, claims.exp ?? 0);
   if (exp - now < 1) throw new errors.InvalidGrant("subject_token has expired");
-  const token = new provider.AccessToken({ accountId: claims.sub, client: ctx.oidc.client, scope: asked.join(" "), gty: "token_exchange", expiresIn: exp - now });
+  // No grantId: the token stands on its subject token, not on a grant of its
+  // own. The library takes none here; its published types insist on one.
+  const fields = { accountId: claims.sub, client: ctx.oidc.client!, scope: asked.join(" "), gty: "token_exchange", expiresIn: exp - now };
+  const token = new provider.AccessToken(fields as typeof fields & { grantId: string });
   token.resourceServer = new provider.ResourceServer(policy.to, resourceInfo(policy.to));
   token.exp = exp;
   ctx.oidc.entity("AccessToken", token);
@@ -241,7 +267,7 @@ async function readForm(req: http.IncomingMessage): Promise<URLSearchParams> {
   let size = 0;
   for await (const c of req) {
     size += (c as Buffer).length;
-    if (size > 16 * 1024) throw new Error("form too large");
+    if (size > 16 * 1024) throw new errors.InvalidRequest("form too large");
     chunks.push(c as Buffer);
   }
   return new URLSearchParams(Buffer.concat(chunks).toString());
@@ -278,7 +304,7 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
   if (action === "login") {
     if (prompt.name !== "login") return page(res, 400, "none", "not a sign-in step");
     const form = await readForm(req);
-    if (!(await Bun.password.verify(form.get("password") ?? "", PASSWORD_HASH).catch(() => false))) {
+    if (!(await Bun.password.verify(form.get("password") ?? "", C.passwordHash).catch(() => false))) {
       return send(res, 401, loginPage(asking, `${base}/login`, true));
     }
     return provider.interactionFinished(req, res, { login: { accountId: OPERATOR, amr: ["pwd"] } }, { mergeWithLastSubmission: false });
@@ -313,7 +339,7 @@ function mount(req: http.IncomingMessage, inner: string) {
 
 const ORIGIN = new URL(L.origin);
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   // The provider builds every URL from the request's host and protocol (it
   // trusts X-Forwarded-* with proxy = true). Pin both to the configured origin.
   req.headers.host = ORIGIN.host;
@@ -330,8 +356,12 @@ http.createServer((req, res) => {
   }
   if (url.pathname.startsWith("/auth/interaction/")) {
     return interaction(req, res, url.pathname).catch((e: Error) => {
-      console.error(`interaction failed: ${e.message}`);
-      if (!res.headersSent) page(res, 400, "none", esc(e.message));
+      console.error(`interaction failed: ${e instanceof errors.OIDCProviderError ? (e.error_description ?? e.message) : (e.stack ?? e.message)}`);
+      if (res.headersSent) return;
+      // The library's own refusals (an expired or unknown interaction) say what
+      // went wrong; anything else is the server's fault and says nothing of it.
+      if (e instanceof errors.OIDCProviderError) return page(res, e.status, "none", esc(e.error_description ?? e.message));
+      page(res, 500, "none", "something went wrong on the server; try again, and see its log");
     });
   }
   if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {
@@ -341,3 +371,24 @@ http.createServer((req, res) => {
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("not found");
 }).listen(3000, "0.0.0.0", () => console.log(`oidc-provider on Bun ${Bun.version}: issuer ${L.issuer}`));
+
+// A stop (compose's SIGTERM) closes the listener, lets the requests in flight
+// finish for up to 5 s, closes the store and exits; without a handler Bun
+// ignored the signal and every stop waited out the grace period for SIGKILL
+// (server-portable/shutdown.ts measured the same). A second signal, or the
+// bound, cuts the wait short with exit 1.
+let stopping = false;
+function stop(signal: string) {
+  const done = (code: number) => {
+    store.close();
+    console.log(`stopped on ${signal}${code ? ", requests still in flight cut off" : ""}`);
+    process.exit(code);
+  };
+  if (stopping) return done(1);
+  stopping = true;
+  server.close(() => done(0));
+  server.closeIdleConnections();
+  setTimeout(() => done(1), 5000).unref();
+}
+process.on("SIGTERM", () => stop("SIGTERM"));
+process.on("SIGINT", () => stop("SIGINT"));
