@@ -7,6 +7,7 @@
 import { createContext, type CoreDeps, type Ctx } from "./context.ts";
 import * as reads from "./reads.ts";
 import * as writes from "./writes.ts";
+import * as workers from "./workers.ts";
 
 export type { CoreDeps, CoreEnv, Ctx } from "./context.ts";
 export type { Outcome, Refusal, RefusalCode, Failure } from "./refusal.ts";
@@ -17,8 +18,6 @@ export { SPECS, type Input, type ToolSpec } from "./schemas.ts";
 export function createCore(deps: CoreDeps) {
   const ctx: Ctx = createContext(deps);
   return {
-    /** The context, for the tools whose logic has not yet moved here (the worker actions: SMD-2283 PR 3). */
-    ctx,
     search: bind(ctx, reads.search),
     fetch: bind(ctx, reads.fetchThought),
     searchThoughts: bind(ctx, reads.searchThoughts),
@@ -36,6 +35,9 @@ export function createCore(deps: CoreDeps) {
     capture: bind(ctx, writes.capture),
     updateThought: bind(ctx, writes.updateThought),
     deleteThought: bind(ctx, writes.deleteThought),
+    retryFailed: bind(ctx, workers.retryFailed),
+    releaseStaleLeases: bind(ctx, workers.releaseStaleLeases),
+    runWorker: bind(ctx, workers.runWorker),
   };
 }
 
