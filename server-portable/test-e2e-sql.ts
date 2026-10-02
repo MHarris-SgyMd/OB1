@@ -1246,6 +1246,13 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // supersedes through a capture key (first review pass): only what it wrote.
   const steal = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — a later ending — claims to replace eta", source: "claude-code", supersedes: retrieved } });
   assert(steal.result?.isError === true && /only a thought it captured itself/.test(textOf(steal)) && sc(steal)?.code === "REFUSED_SUPERSEDES_OWNERSHIP" && sc(steal)?.retryable === false, `a capture key may not supersede another key's thought — refused, code and all (${sc(steal)?.code})`);
+  // With its agent id to hand, a capture key's supersedes naming no thought
+  // reads exactly as one naming another key's thought: the same code and the
+  // same words, so the refusal says nothing of whether the target exists
+  // (SMD-1298; SMD-2283 PR 2 review pass 2 — no test held it). The cases with
+  // the registry away or refusing are SMD-2473's.
+  const ghostSteal = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — a later ending — claims to replace a thought that is not there", source: "claude-code", supersedes: "00000000-0000-4000-8000-0000000000bb" } });
+  assert(sc(ghostSteal)?.code === sc(steal)?.code && textOf(ghostSteal) === textOf(steal), `…and a supersedes naming no thought is refused word for word alike (${sc(ghostSteal)?.code})`);
   // The words ride the value too: a client that shows the model structuredContent alone still reads which pointer to drop (SMD-2283 review pass 3).
   assert(sc(steal)?.text === textOf(steal), "a coded capture refusal carries its words in the value");
   const [[untouched]] = [await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE 'Session summary — a later ending%'`];
@@ -1339,22 +1346,12 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     assert(awayId !== undefined && awayAudit?.actor_name === "hook-two" && awayAudit?.canonical_agent_id === null, "with the registry away a capture lands under the key's name and no agent id");
     const away2 = await rpc2({ content: "Session summary — codex — the same session, ended again, registry still away", source: "codex", supersedes: awayId });
     assert(away2.result?.isError !== true && idIn(textOf(away2)) !== undefined, `…and the key supersedes it by NAME (${textOf(away2).split("\n")[0].slice(0, 60)})`);
-    // Another key with no id names hook-two's outage-time row: not provably its
-    // own, so the same retry every unprovable target gets (SMD-2283 PR 2: it
-    // was refused by name, and a missing thought was refused, while an
-    // attributed one was retried — the difference was an existence oracle).
     const byOtherName = await captureAs(CAPTURE_KEY)({ content: "Session summary — claude-code — session-hook claims hook-two's outage-time thought", source: "claude-code", supersedes: awayId });
-    assert(byOtherName.result?.isError === true && /could not be attributed while the agent registry is unavailable/.test(textOf(byOtherName)) && sc(byOtherName)?.code === "SUPERSEDES_UNJUDGED",
-      "…and another key with no id is not given the row: told to retry, as every target it cannot prove its own is (fifth review pass's negative case)");
+    assert(byOtherName.result?.isError === true && /only a thought it captured itself/.test(textOf(byOtherName)),
+      "…and another key with no id either is refused BY NAME (fifth review pass: the name path had no negative case)");
     const away3 = await rpc2({ content: "Session summary — codex — a claim on the other key's thought", source: "codex", supersedes: id });
     assert(away3.result?.isError === true && /^Error: .*could not be attributed while the agent registry is unavailable/.test(textOf(away3)) && sc(away3)?.code === "SUPERSEDES_UNJUDGED" && sc(away3)?.retryable === true,
       `…while an ATTRIBUTED row met by a key with no id is the server's error to retry, not a refusal — SUPERSEDES_UNJUDGED, retryable (${sc(away3)?.code})`);
-    // No existence oracle while the registry is away: a thought that does not
-    // exist, an attributed one and another key's unattributed one read alike —
-    // the same code and the same words (SMD-2283 PR 2 review, finding 1).
-    const ghost = await rpc2({ content: "Session summary — codex — a claim on a thought that is not there", source: "codex", supersedes: "00000000-0000-4000-8000-0000000000aa" });
-    assert(sc(ghost)?.code === sc(away3)?.code && textOf(ghost) === textOf(away3) && textOf(ghost) === textOf(byOtherName),
-      `…and a supersedes naming no thought gets that same answer, word for word, so the answer says nothing of whether the thought exists (${sc(ghost)?.code})`);
   } finally {
     await sql`ALTER FUNCTION resolve_agent_away(text, text, text) RENAME TO resolve_agent`;
   }

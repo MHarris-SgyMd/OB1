@@ -363,7 +363,7 @@ function buildServer(principal: Principal): McpServer {
   // words in render.ts, for a key that may read; a fault is `Error: <message>`
   // with the tool's hint where it has one, FAILED beside it.
   const readTool = <K extends ToolName>(name: K, run: (input: Input<K>) => Promise<say.Reply>, hint?: (input: Input<K>) => ((msg: string) => string) | undefined): void =>
-    registerOp(name, canRead(principal), run, (err, input) => say.failed(err, hint?.(input)));
+    registerOp(name, canRead(principal), run, (err, input) => say.failed(err, { hint: hint?.(input) }));
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and
   // deep research look for exact read-only `search` and `fetch` tool shapes. Why
@@ -467,11 +467,11 @@ function buildServer(principal: Principal): McpServer {
    */
   registerOp("update_thought", canWrite(principal),
     async (input) => say.renderUpdate(await core.updateThought(principal, input)),
-    (err) => say.failed(err, undefined, "update_thought failed: "));
+    (err) => say.failed(err, { lead: "update_thought failed: " }));
 
   registerOp("delete_thought", canWrite(principal),
     async (input) => say.renderDelete(await core.deleteThought(principal, input)),
-    (err) => say.failed(err, undefined, "delete_thought failed: "));
+    (err) => say.failed(err, { lead: "delete_thought failed: " }));
 
   // Tool 12 & 13: the write half of worker_status (SMD-2132). Both mutate
   // thought_work_claims and consume nothing on the model — they are the control

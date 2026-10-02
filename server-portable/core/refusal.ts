@@ -28,7 +28,7 @@ export type Refusal =
   // capture_thought's pointers (SMD-1298, SMD-1978).
   | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "check_failed"; detail: string; noPrivilege: boolean } // the target's capture record could not be read
   | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "registry_away" }  // the row is attributed and this key's id is not to hand
-  | { code: "REFUSED_SUPERSEDES_OWNERSHIP"; retryable: false; registryRefused: boolean } // a capture key named a supersedes it did not write
+  | { code: "REFUSED_SUPERSEDES_OWNERSHIP"; retryable: false; registryRefused: boolean } // a capture key named a supersedes it cannot show it wrote — another key's thought, or none at all (what it may learn here is SMD-2473's)
   | { code: "REFUSED_SUPERSEDES_UNKNOWN"; retryable: false }          // the supersedes names no thought
   | { code: "DERIVED_FROM_MISSING"; retryable: false; named: { position: number; id: string }[] } // derived_from entries that name no thought — empty for a key that cannot read (the existence-oracle rule)
   | { code: "EMBEDDING_NOT_ATTACHED"; retryable: true; id: string; detail: string } // saved, but its vector did not attach (the PostgREST two-step)

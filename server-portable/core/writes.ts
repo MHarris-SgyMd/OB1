@@ -152,26 +152,23 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // an id met by a principal with one is not this key's to replace: a
       // later key minted under the same name would otherwise own every
       // thought captured while the registry was down (fourth review pass).
-      if (principal.agentId !== undefined) {
-        const own = writer !== null && writer.agentId !== null && writer.agentId === principal.agentId;
-        if (!own) return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: false });
-      } else {
-        // This key's id is not to hand. Its own row from an outage — no id,
-        // its name — is still provably its own. Anything else is not
-        // provable either way: an attributed row may be this key's, so that
-        // is the server's condition, an error to retry (fifth review pass);
-        // unless the registry ANSWERED and refused this key's argument,
-        // which will not heal on a retry (sixth review pass). And it is the
-        // SAME answer whatever the target is — a missing thought, another
-        // key's unattributed row, an attributed one — or the answer is an
-        // existence oracle on a key that cannot read (SMD-2283 PR 2 review:
-        // a missing thought was refused while an attributed one was retried).
-        const own = writer !== null && writer.agentId === null && writer.actorName === principal.name;
-        if (!own) {
-          if (principal.agentUnresolved === "refused") return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: true });
-          return refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
-        }
+      // The registry away NOW while the row is attributed: nothing can be
+      // said either way, and that is the server's condition, not the
+      // caller's — an error to retry, not a refusal (fifth review pass).
+      // Unless the registry ANSWERED and refused this key's argument (a
+      // label the SQL rejects): that will not heal on a retry, so it is a
+      // refusal, and the caller posts without the pointer (sixth review pass).
+      // (The answers here still tell a key that cannot read more than they
+      // should — SMD-2473 designs the check whole.)
+      if (writer !== null && writer.agentId !== null && principal.agentId === undefined) {
+        if (principal.agentUnresolved === "refused") return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: true });
+        return refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
       }
+      const own = writer !== null && (
+        writer.agentId !== null && principal.agentId !== undefined ? writer.agentId === principal.agentId
+          : writer.agentId === null && principal.agentId === undefined ? writer.actorName === principal.name
+            : false);
+      if (!own) return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: false });
     }
     // What may leave the box (SMD-1903): asked once, for both calls, and
     // only the allowed ones are made — a refused capture costs no request

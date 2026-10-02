@@ -103,7 +103,7 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
  * non-Error (a string, undefined, an object that cannot be printed) is said as
  * itself where it can be, and never throws here.
  */
-export function failed(err: unknown, hint?: (msg: string) => string, lead = "Error: ", verdict: { code: string; retryable?: boolean } = { code: "FAILED" }): Reply {
+export function failed(err: unknown, { hint, lead = "Error: ", verdict = { code: "FAILED" } }: { hint?: (msg: string) => string; lead?: string; verdict?: { code: string; retryable?: boolean } } = {}): Reply {
   const f = failure(err);
   const text = `${lead}${f.message}${hint ? hint(f.message) : ""}`;
   return { content: [{ type: "text", text }], isError: true, structuredContent: { ...verdict, text } };
@@ -115,7 +115,7 @@ export function failed(err: unknown, hint?: (msg: string) => string, lead = "Err
  * retries (SMD-1978). The session hook keys on this code; it stays retryable
  * until SMD-2461's one classifier reads every fault. The words are failed()'s.
  */
-export const storeUnavailable = (err: unknown): Reply => failed(err, undefined, "Error: ", { code: "STORE_UNAVAILABLE", retryable: true });
+export const storeUnavailable = (err: unknown): Reply => failed(err, { verdict: { code: "STORE_UNAVAILABLE", retryable: true } });
 
 /** An enum the store reads from a constrained column, kept only when it is one of the words it may be. */
 const oneOf = <W extends string>(words: readonly W[], v: unknown): W | null => (words as readonly unknown[]).includes(v) ? v as W : null;

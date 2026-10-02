@@ -1309,7 +1309,7 @@ console.log("\n[16d] A fault an operation throws is said as it always was, typed
   const plain = failed(new Error("connection refused"));
   assert(plain.isError === true && plain.content[0].text === "Error: connection refused" && plain.structuredContent.code === "FAILED" && plain.structuredContent.text === "Error: connection refused" && Object.keys(plain.structuredContent).sort().join() === "code,text",
     `the text is \`Error: <message>\`; the value is FAILED and that text, nothing else — no verdict, and the message, a store's words, only in the text (review pass 5) (${JSON.stringify(plain.structuredContent)})`);
-  const hinted = failed(new Error("function search_thoughts_current(vector) does not exist"), (m) => (m.includes("search_thoughts_current") ? " — a hint" : ""));
+  const hinted = failed(new Error("function search_thoughts_current(vector) does not exist"), { hint: (m) => (m.includes("search_thoughts_current") ? " — a hint" : "") });
   assert(hinted.content[0].text === "Error: function search_thoughts_current(vector) does not exist — a hint" && hinted.structuredContent.text === hinted.content[0].text,
     "a tool's hint follows the message in the text, and the value carries that text (review passes 1 and 5)");
   // A thrown non-Error: said as itself, and no throw from inside the catch (review pass 1).
