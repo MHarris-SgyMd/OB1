@@ -16,7 +16,13 @@
  *   unless set;
  * - OB1_AUTH_MAX_CLIENTS: how many registered clients the store may hold, 200
  *   unless set (1 to 100,000);
- * - OB1_AUTH_POC_ERROR_DETAIL: the proof of concept's switch (server.ts).
+ * - OB1_AUTH_POC_ERROR_DETAIL: the proof of concept's switch (server.ts);
+ * - COMPOSE_PROFILES: deploy/.env's (or the shell's, which compose prefers),
+ *   interpolated into the container, which must name `auth`. That is the stack's *configured* state (ADR decision 16,
+ *   SMD-2382): a server started by `--profile auth` on the command line alone
+ *   is refused, since the proxy publishes `/auth` while this server answers
+ *   (SMD-1846) and the services that key their rules on configured read
+ *   deploy/.env, not the command line.
  *
  * `bun deploy/auth/provision.ts --init` writes every secret here into
  * deploy/.env; `bun deploy/auth/provision.ts` reads that file through this
@@ -103,6 +109,9 @@ function jwksProblem(raw: string | undefined): string | { keys: SigningKey[] } {
   return { keys: keys as SigningKey[] };
 }
 
+/** Whether `env`'s COMPOSE_PROFILES names `auth`: the stack is configured (ADR decision 16). */
+export const configuredIn = (env: Env) => (env.COMPOSE_PROFILES ?? "").split(",").some((p) => p.trim() === "auth");
+
 /**
  * The server's configuration from `env`, or one Error naming every problem,
  * one per line. Where the tiers cannot be read, the static clients checked
@@ -145,6 +154,10 @@ export function configFromEnv(env: Env = process.env): Config {
   const short = ids.filter((id) => env[secretName(id)] && env[secretName(id)]!.length < MIN_SECRET);
   if (short.length) problems.push(`${short.map(secretName).join(", ")} ${short.length === 1 ? "is" : "are"} shorter than ${MIN_SECRET} characters`);
   for (const id of ids) secrets[id] = env[secretName(id)] ?? "";
+
+  if (!configuredIn(env)) {
+    problems.push(`COMPOSE_PROFILES does not name auth ("${env.COMPOSE_PROFILES ?? ""}") — add auth to COMPOSE_PROFILES in deploy/.env (comma-separated with any other profiles), so every \`up\` starts this server and the stack reads as configured; \`--profile auth\` on the command line alone is refused, and a COMPOSE_PROFILES set in the shell takes compose's precedence over the file's (unset it, or have it name auth too)`);
+  }
 
   const maxRaw = env.OB1_AUTH_MAX_CLIENTS?.trim();
   const maxClients = maxRaw ? Number(maxRaw) : DEFAULT_MAX_CLIENTS;

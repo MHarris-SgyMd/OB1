@@ -83,21 +83,34 @@ import { ACCESS_TOKEN_TYPE, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
 import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
 
-let C: Config;
+/**
+ * A start that is refused: said, and after 30 s exit 2, which the restart
+ * policy retries with the reason in the log each time (the n8n pattern in
+ * deploy/compose.yaml) and without a hot loop. Exiting at once restarted it
+ * about three times a second for as long as nobody stopped it (SMD-1846 PR
+ * 2's review, measured on podman), the import runner's 229 restarts in 30 s
+ * again (deploy/orchestration/runner.ts, refuseStart). A stop in the 30 s ends
+ * it at once.
+ */
+async function refuseStart(why: string): Promise<never> {
+  console.error(`${why}\n(exiting in 30 s; the restart policy retries)`);
+  await Bun.sleep(30_000);
+  process.exit(2);
+}
+
+// Definitely assigned: a refused start never returns.
+let C!: Config;
 try {
   C = configFromEnv();
 } catch (e) {
-  // Exit 2, the restart policy brings it back, and its log says why each time (the n8n pattern in deploy/compose.yaml).
-  console.error((e as Error).message);
-  process.exit(2);
+  await refuseStart((e as Error).message);
 }
 const L = C.layout;
-let store: ReturnType<typeof sqliteAdapter>;
+let store!: ReturnType<typeof sqliteAdapter>;
 try {
   store = sqliteAdapter(C.dbPath);
 } catch (e) {
-  console.error((e as Error).message);
-  process.exit(2);
+  await refuseStart((e as Error).message);
 }
 const OPERATOR = "operator";
 const ACCESS_TTL = 600;
@@ -135,7 +148,14 @@ const provider = new Provider(L.issuer, {
   clockTolerance: CLOCK_TOLERANCE,
   clients,
   jwks: C.jwks,
-  cookies: { keys: C.cookieKeys },
+  // The session cookie on the issuer's path. The library sets the short-lived
+  // interaction cookies on their own paths, but the session on `/` by
+  // default, and behind the proxy `/` is the whole origin: an operator signed
+  // in here would send it with every `/mcp`, root and later `/dashboard` and
+  // `/api` request, and it alone completes a grant (SMD-1846 PR 2's review).
+  // Every endpoint that reads it is under `/auth`; the discovery paths
+  // outside it read none. The library's defaults beside the path, named.
+  cookies: { keys: C.cookieKeys, long: { httpOnly: true, sameSite: "lax", path: "/auth" } },
   async findAccount(_ctx, id) {
     return id === OPERATOR ? { accountId: id, claims: async () => ({ sub: id }) } : undefined;
   },

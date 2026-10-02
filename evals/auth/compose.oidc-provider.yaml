@@ -32,6 +32,10 @@ services:
       OB1_AUTH_SECRET_MCP: ${OB1_AUTH_SECRET_MCP:?}
       OB1_AUTH_SECRET_MCP_CANARY: ${OB1_AUTH_SECRET_MCP_CANARY:?}
       NODE_EXTRA_CA_CERTS: /poc/cimd.pem
+      # The deploy's server refuses to start unless its stack is configured
+      # (deploy/auth/config.ts; ADR decision 16). The POC's stack is, by
+      # definition.
+      COMPOSE_PROFILES: auth
       # POC only: error replies name their cause, for the verifier. The deploy never sets it.
       OB1_AUTH_POC_ERROR_DETAIL: "1"
     volumes:
