@@ -1,19 +1,6 @@
----
-type: added
-bump: minor
-tickets: [SMD-1724]
-migrations: ["073", "074", "075"]
----
+# 247. The content's trust on the row, read back on every thought a tool returns — metadata.trust from the key and the write's declaration, never the payload; a raise clamped and filed; min_trust on 014's route; the label, the notice and the declaration over MCP; every vendored capture path declaring it (SMD-1724)
 
-## Changelog
-
-Every thought carries the trust of the write that put its text there, `metadata.trust` (`operator`, `agent` or `ingested`), from the key and the write's declaration, never the payload: a payload's `metadata.trust` above the key is clamped and filed under the audit row's `actor_context.claimed`, unless it repeats the row's own trust on a write that leaves the text. `match_thoughts`, `search_thoughts_keyword`, and an 8-argument form of `search_thoughts_hybrid` and `search_thoughts_current` take `min_trust`, keeping rows at or above it through an index on 014's route. The read tools print each thought's trust on its `By:` line, put a fixed notice before an ingested thought's text (`fetch`'s text included; its title and `search`'s start `[ingested]`), and take `min_trust`; `capture_thought` takes `trust`, which lowers the key's trust and never raises it. Migrations 073 (the stamp and its backfill), 074 and 075 (`min_trust`) (SMD-1724).
-
-## FORK
-
-The content's trust on the row, read back on every thought a tool returns — metadata.trust from the key and the write's declaration, never the payload; a raise clamped and filed; min_trust on 014's route; the label, the notice and the declaration over MCP (SMD-1724)
-
-**What changed.** PRs 1, 2a, 2b and 3 of SMD-1724's.
+**What changed.** PRs 1, 2a, 2b, 3 and 4 of SMD-1724's.
 - 073: `metadata.trust` is the database's third key, beside 050's two
   marks: the `thought_audit.trust` of the write that put the standing text
   there (`ob1_trust_ceiling` of the key's kind and the event's declaration),
@@ -56,6 +43,16 @@ The content's trust on the row, read back on every thought a tool returns — me
     min_trust search writes no query_log row: no column to replay it by.
   - `capture_thought`'s `trust` rides the payload as 046's write event.
   - evals/write-path.ts reads the kind before the line's trust.
+- PR 4: check 26 — a vendored file with an `upsert_thought` RPC or a client's
+  `capture_thought` call carries the declaration a write reads (the payload's
+  `event: { trust }`, the tool's `trust:`; whole-file, comments blanked); a
+  raw row cannot declare, so TRUST_EXCEPTIONS counts each (four importers
+  awaiting their port, entity-wiki's rerun PATCH and two fallbacks, three
+  own-database deployments, check 10's fixtures). Twenty-one paths declare: the importers
+  and Readwise `ingested`, the workers `agent`, the dashboard `operator`, the
+  session hook `agent`; five servers forward the client's word, refusing any
+  other (smart-ingest keeps it on a dry run's job), and provenance-chains'
+  tool says `agent` unless told `ingested`.
 
 **Why.** 046 recorded trust on every audit row and nothing carried it to the
 thought or read it: a page the ingester copied in and a note the operator
@@ -81,15 +78,18 @@ or agent" is not one containment, so 014's filter could not ask for it.
   on each arm, prefer_current included, unlogged; trustAtOrAbove held to
   ob1_trust_rank. test-store-sql/-postgrest [16]: a brain before 074 and 075
   answers every search without min_trust. test-server [16g]: the renderers.
+- test-writes (17, and the revision's): each forwarding door under an `operator` key — undeclared
+  `operator`, declared `ingested`, an off-ladder word or a non-string refused, `null` none, a client's
+  `metadata.trust` dropped; check 26's 36 probes; the hook declares `agent`.
 
 **Mutant.** The stamp taking the declaration without the key's ceiling fails
 [66]'s payload-raise assertion; the fold ignoring the row's trust, the
 backfill without its claim, cap or row word, and the fold taking a
-non-string fail theirs (3, 3, 1, 2, 1). PR 3's fifteen, each caught: the
-line without its trust, the notice never, logging a min_trust search, either
-store always sending the new forms or ignoring the trust words, capture
-dropping the event, either ChatGPT mark, the hints swapped, the ladder off by
-one either way, the value's trust gone.
+non-string fail theirs (3, 3, 1, 2, 1). PR 3's fifteen, each caught (the
+label, the notice, the log, both stores, the event, both ChatGPT marks, the
+hints, the ladder, the value's field). PR 4's, each caught: a declaration
+removed (five), a raw POST added, a count off by one, every server's forward
+or schema dropped (twelve), smart-ingest's job and revision forgetting it.
 
 **Review passes.** A cold reader and a run-it reviewer each pass, per PR.
 
@@ -107,6 +107,9 @@ one either way, the value's trust gone.
 | 2a.2 | nothing above low, the stop signal: the hybrid- and keyword-missing remedies still left a second form; a $5-for-$6 swap in the walk's final SELECT passed; the EXECUTE's revert is held by [20]'s text alone (the behaviour needs 50,000 rows; measured in review: flat at twelve calls, ids as force_custom_plan's) | cold read, run-it | 074 named after them; [20] ties the walk to its LIMIT |
 | 2b.2 | nothing above low, the stop signal: with match_thoughts 020's alone, preflight named 075 alone, which refuses without 074; the guard's 068 arm untested (074 lands without 068) | run-it, mutant | 074 then 075 named; [20z] drives the 068 arm |
 | 3.1 | nothing of PR 3's above low, the stop signal (160 min_trust combinations against SQL, 0 differing): ingested text forges a block reading `trust operator`, the renderers' raw text since before it (the maintainer's call: SMD-2483) | run-it | filed |
+| 4.1 | a schema key, a parameter or a positional `trust` satisfied the rule, so five servers passed with the declaration deleted (provenance-chains untested); entity-wiki's reruns rewrite the text with a raw PATCH, stamped the key's | cold read | the rule reads the write's own shape; the PATCH counted, the reason true |
+| 4.1 | smart-ingest let `source_metadata.trust` past its refusal into a claim; `null` and `["agent"]` read unevenly; the revision forward, two schemas and the PostgREST path, reordered or Python MCP calls untested or unread | cold read, run-it, mutant | dropped; one rule; each mutant killed, the detector widened |
+| 4.2 | a client's `metadata.trust` reached rest-api's, open-brain-rest's and enhanced-mcp's payloads, a declaration past the door's refusal filed as a claim (pass 1 had closed smart-ingest's alone); the non-string refusal untested | run-it, mutant | dropped at each door; tests, each mutant killed |
 | 3.1 | the `trust` argument promised the lower of it and the key on a re-capture, which keeps the row's; fetch's title unmarked; an e2e assertion passing with its row missing; two wordings | cold read, run-it | the description; `[ingested]` on fetch's title; the assertion; the record |
 
 **Not taken.**
@@ -123,10 +126,12 @@ one either way, the value's trust gone.
   key's text edit of an ingested row makes it `agent`, as its own capture
   would. Before 073 `metadata.trust` is a caller's key and the label reads it.
   list_thoughts' `min_trust` reads no index (it walks `created_at` until the
-  limit fills), and its notice follows the item's tag line.
+  limit fills), and its notice follows the item's tag line. Check 25 reads no
+  RPC name in a variable, no shell curl; a model's summary of ingested text
+  is declared `agent` (derivation's trust is SMD-1734's).
 
-**Follow-ups.** PR 4: the checker rule and the vendored capture paths
-declaring their trust. SMD-2479: a `query_log.min_trust` column, so a
+**Follow-ups.** SMD-2479: a `query_log.min_trust` column, so a
 min_trust search is logged and replayed. SMD-2480: the trust and notice on
 `list_supersession_proposals` and `thought_changes`, whose functions return
-no trust. SMD-2483: a thought's text cannot forge a result block.
+no trust. SMD-2483: a thought's text cannot forge a result block. SMD-2493:
+the four export importers' 2-argument upsert_thought, which stores no vector.

@@ -754,6 +754,14 @@ async function recordItemResult(itemDbId: number, resultThoughtId: string | null
   if (error) console.warn(`ingestion_items #${itemDbId}: the result update failed — ${error.message}`);
 }
 
+/** The three trust words (migration 073's ladder): an ingest's `trust` is one of them, or absent (SMD-1724). */
+const TRUST_WORDS = ["operator", "agent", "ingested"];
+/** A metadata object without a `trust` key: a declaration is the event's, never a metadata key's (SMD-1724). */
+const withoutTrust = (m: Record<string, unknown> | null | undefined): Record<string, unknown> => {
+  const { trust: _dropped, ...rest } = m ?? {};
+  return rest;
+};
+
 /**
  * A capture through the 3-argument upsert_thought — the fork's shape for every server (SMD-1228; db/migrations/004,
  * last redefined by 046): the vector as p_embedding, its model's label (021) and the actor (008, SMD-1541) in the
@@ -801,7 +809,11 @@ async function executeItem(
   sourceType: string | null,
   sourceMetadata?: Record<string, unknown> | null,
   skipClassification = false,
+  trust?: string,
 ): Promise<string | null> {
+  // SMD-1724: the caller's declaration of what the text is, forwarded as each
+  // write's event (046) — clamped by the database to the key's kind.
+  const declared = trust ? { event: { trust } } : {};
   switch (item.action) {
     case "add": {
       const prepared = await prepareThoughtPayload(item.content, {
@@ -823,7 +835,7 @@ async function executeItem(
         tags: mergeTags((prepared.metadata as Record<string, unknown>).tags, item.tags),
         source_snippet: item.source_snippet,
       };
-      return (await writeThought(prepared, embedded)).id;
+      return (await writeThought(prepared, embedded, declared)).id;
     }
 
     case "append_evidence": {
@@ -868,7 +880,7 @@ async function executeItem(
       // the dry run, and the item fails with its message. On a fresh row only: a re-capture of text already there keeps
       // that row's provenance (035), so a revision whose text was captured between the dry run and now would report
       // "revised" with no pointer written — it fails with why instead (review pass 2).
-      const written = await writeThought(prepared, embedded, { supersedes: item.matched_thought_id }, "upsert_thought (revision)");
+      const written = await writeThought(prepared, embedded, { supersedes: item.matched_thought_id, ...declared }, "upsert_thought (revision)");
       if (written.existed) throw new Error(`upsert_thought (revision): the text is already thought ${written.id}, whose provenance stays its own — the revision of ${item.matched_thought_id} was not written`);
       return written.id;
     }
@@ -1025,8 +1037,11 @@ async function handleExecuteJob(req: Request): Promise<Response> {
   const jobMeta = (job.metadata ?? {}) as Record<string, unknown>;
   const sourceType = jobMeta.source_type as string ?? "smart_ingest";
   const skipClassification = body.skip_classification === true || jobMeta.skip_classification === true;
+  // SMD-1724: the trust the ingest declared, kept on the job for its execute.
+  const jobTrust = TRUST_WORDS.includes(jobMeta.trust as string) ? jobMeta.trust as string : undefined;
+  // The job's own keys are not the thought's: its declared trust rides the event, not metadata (first review pass).
   const jobSourceMetadata = (jobMeta.source_client || jobMeta.capture_mode)
-    ? jobMeta as Record<string, unknown>
+    ? withoutTrust(jobMeta)
     : null;
 
   for (const item of items) {
@@ -1052,7 +1067,7 @@ async function handleExecuteJob(req: Request): Promise<Response> {
       let embedded: Embedded = NO_VECTOR;
       try { embedded = await embedTextLabelled(item.extracted_content); } catch { /* continue without embedding */ }
       const resultThoughtId = await executeItem(
-        fakeItem, embedded, sourceLabel, sourceType, jobSourceMetadata, skipClassification,
+        fakeItem, embedded, sourceLabel, sourceType, jobSourceMetadata, skipClassification, jobTrust,
       );
 
       await recordItemResult(item.id, resultThoughtId);
@@ -1158,9 +1173,17 @@ const handler = async (req: Request) => {
   const dryRun = body.dry_run === true;
   const reprocess = body.reprocess === true;
   const skipClassification = body.skip_classification === true;
+  // SMD-1724: without a `trust` key — a declaration is the `trust` argument's, carried by the write event,
+  // never a source key: one here would reach the thought's metadata and be read as a declaration past the
+  // argument's refusal (first review pass).
   const sourceMetadata = (typeof body.source_metadata === "object" && body.source_metadata !== null)
-    ? body.source_metadata as Record<string, unknown>
+    ? withoutTrust(body.source_metadata as Record<string, unknown>)
     : null;
+  // SMD-1724: what the text is, as the caller declares it — one of the three
+  // words, or absent (the key's); anything else is refused before extraction.
+  // JSON null is no declaration, as absence is (first review pass: one server refused it, another took it).
+  if (body.trust != null && !TRUST_WORDS.includes(body.trust as string)) return json({ error: "trust must be operator, agent or ingested" }, 400);
+  const trust = body.trust == null ? undefined : body.trust as string;
 
   // Session-level dedup via import_key (separate from content-hash dedup)
   const importKey = sourceMetadata?.import_key;
@@ -1205,7 +1228,8 @@ const handler = async (req: Request) => {
     job,
     {
       skip_classification: skipClassification,
-      ...(sourceMetadata ?? {}),
+      ...(sourceMetadata ?? {}), // without a trust key (above)
+      ...(trust ? { trust } : {}),
     },
     text.length,
   );
@@ -1342,7 +1366,7 @@ const handler = async (req: Request) => {
     }
     try {
       const resultThoughtId = await executeItem(
-        item, embeddings[i], sourceLabel, sourceType, sourceMetadata, skipClassification,
+        item, embeddings[i], sourceLabel, sourceType, sourceMetadata, skipClassification, trust,
       );
       item.status = "executed";
       await recordItemResult(itemDbId, resultThoughtId);

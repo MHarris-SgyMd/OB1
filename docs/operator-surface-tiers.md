@@ -92,6 +92,12 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   - `/.well-known/oauth-authorization-server/auth` goes to the authorization server (RFC 8414).
   - The bare `/.well-known/oauth-authorization-server` goes to the authorization server too. Claude Code 2.1.275 fetches only that URL and ignores the issuer's path (anthropics/claude-code#95270). With one authorization server (decision 14) the route conflicts with nothing. Its document names the issuer `…/auth`, not the bare origin, so whether Claude Code accepts it is a proof-of-concept check.
   The first two use the path-inserted form those RFCs define for a resource or issuer that lives under a path.
+  - **As built (SMD-1846 PR 2, 2026-10-02):**
+    - The proxy routes the authorization server's paths while it *answers*. Otherwise Traefik's 502 is rewritten to a 404, so an origin without it reads as "no OAuth here".
+    - The server's start is where *configured* is enforced: it exits 2 unless deploy/.env's `COMPOSE_PROFILES` names `auth` (`deploy/auth/config.ts`). So a server started with `--profile auth` on the command line alone never answers, and answering means configured and reachable.
+    - Its session cookie is `Path=/auth`, so on the shared origin it rides no other route.
+    - OIDC's `/.well-known/openid-configuration/auth` is routed beside the two above; the server serves it.
+    - The protected-resource path stays the proxy's 404 until the MCP server serves that document (SMD-2382, SMD-2286).
 - **Path-based public routes carry obligations:**
   - The GUI sets SvelteKit's `paths.base` and scopes its cookie to `Path=/dashboard`, so the cookie never reaches another route.
   - The authorization server's issuer is `${OB1_PUBLIC_ORIGIN}/auth`, set from configuration and never derived from request headers (SMD-2382).

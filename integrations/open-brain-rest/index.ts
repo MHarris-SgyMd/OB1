@@ -75,6 +75,9 @@ type NormalizedThought = {
   status_updated_at: string | null;
 };
 
+/** The three trust words (migration 073's ladder): a capture's `trust` is one of them, or absent. */
+const TRUST_WORD = z.enum(["operator", "agent", "ingested"]);
+
 const captureSchema = z.object({
   content: z.string().min(1),
   metadata: z.record(z.string(), z.unknown()).optional(),
@@ -84,6 +87,10 @@ const captureSchema = z.object({
   quality_score: z.number().min(0).max(100).optional(),
   sensitivity_tier: z.string().optional(),
   status: z.string().nullable().optional(),
+  // SMD-1724: what the content is, as the caller declares it — forwarded as the
+  // write event's trust, which the database clamps to the key's kind: a
+  // lowering stands, a raise is filed. Absent: the key's. Another word is a 400.
+  trust: TRUST_WORD.nullish(), // null is no declaration, as absence is (first review pass)
 });
 
 const updateSchema = z.object({
@@ -415,7 +422,12 @@ async function textSearch(body: z.infer<typeof searchSchema>) {
 /** `actorName` is the authenticated key's name, for 008's audit row (SMD-1541). */
 async function createThought(body: z.infer<typeof captureSchema>, actorName: string) {
   const content = body.content.trim();
-  const extracted = body.metadata ? body.metadata : await extractMetadata(content);
+  // SMD-1724: a client's metadata carries no `trust` — the declaration is the
+  // `trust` argument's, refused above when it is not a word; a metadata.trust
+  // would reach the payload and be read as one past that refusal (second
+  // review pass).
+  const { trust: _metadataTrust, ...given } = body.metadata ?? {};
+  const extracted = body.metadata ? given : await extractMetadata(content);
   const type = body.type || stringMeta(extracted, "type") || "observation";
   const sourceType = body.source_type || stringMeta(extracted, "source") || "dashboard";
   const metadata = {
@@ -434,7 +446,11 @@ async function createThought(body: z.infer<typeof captureSchema>, actorName: str
   const upsert = await supabase.rpc("upsert_thought", {
     p_content: content,
     // 008's actor, read from the payload: the key's name, this server as `via`, no source (SMD-1541; FORK.md change 103 has the why).
-    p_payload: { metadata, embedding_model: EMBEDDING_MODEL, actor: { name: actorName, via: "open-brain-rest" } },
+    p_payload: {
+      metadata, embedding_model: EMBEDDING_MODEL, actor: { name: actorName, via: "open-brain-rest" },
+      // SMD-1724: the caller's declaration, forwarded as 046's write event.
+      ...(body.trust ? { event: { trust: body.trust } } : {}),
+    },
     p_embedding: embedding,
   });
   if (upsert.error) throw new Error(upsert.error.message);
@@ -702,7 +718,10 @@ app.post("/ingest", requireWrite, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const text = String(body.text || "").trim();
   if (!text) return c.json({ error: "text is required" }, 400, corsHeaders);
-  const result = await createThought({ content: text, source_type: "dashboard_ingest" }, c.get("principal").name);
+  // SMD-1724: an ingest's `trust`, forwarded as /capture's is — one of the three words, or absent.
+  const trust = TRUST_WORD.nullish().safeParse(body.trust);
+  if (!trust.success) return c.json({ error: "trust must be operator, agent or ingested" }, 400, corsHeaders);
+  const result = await createThought({ content: text, source_type: "dashboard_ingest", trust: trust.data ?? undefined }, c.get("principal").name);
   return c.json({ job_id: 0, status: "complete", extracted_count: 1, thought_id: result.thought_id }, 200, corsHeaders);
 });
 

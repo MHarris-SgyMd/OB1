@@ -134,7 +134,7 @@ import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
-import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
+import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
 
@@ -264,6 +264,13 @@ function numbers(opts: ExtractOptions): Numbers | string {
  */
 export async function run(opts: ExtractOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
+  // A blank value where the CLI's scanner refuses one first, in its words and
+  // with its flag list: `--job ""` reaches no run (SMD-2425, as reembed's).
+  const blank = blankProblem(FLAGS, { dump: opts.dump, job: opts.job });
+  if (blank !== null) {
+    err(`${blank}\n${flagList(FLAGS, HINTS)}`);
+    return 2;
+  }
   // databaseUrl's two refusals without its exit, then the numbers. A URL beside
   // a caller's client is the worker key's (above), so it is held to the rule too.
   const noUrl = opts.url == null || opts.url.trim() === "";
@@ -973,6 +980,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 err(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
               }
               if (recorded) failed++;
+              // The hard stop's release beat this one: the caller's own stop, not a lapse (SMD-2425).
+              else if (hardStopped) return;
               else {
                 // Not ours to record: the lease lapsed during the pauses, or the
                 // row was returned by hand. Counted with the rows this worker lost.
@@ -1019,6 +1028,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             continue;
           }
           if (!ok) {
+            // The hard stop's release beat this one to the row: not a lapse to
+            // report, the caller's own stop; a release that went through first
+            // is counted below as any is — as reembed's (SMD-2425).
+            if (hardStopped) return;
             // Either the lease expired, or the content was edited and migration
             // 016's trigger put the row back in the pool to be extracted from the
             // new text. Not ours to finish either way: counted with the rows this

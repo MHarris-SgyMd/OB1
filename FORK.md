@@ -170,7 +170,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**242 numbered changes** on top of the pin: 1–17 are the table above; 18–242 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**254 numbered changes** on top of the pin: 1–17 are the table above; 18–254 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -399,6 +399,18 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 240 | [migrate.ts and extract-entities.ts are engines: import one and call run()](changes/240-migrate-ts-and-extract-entities-ts-are-engines.md) | SMD-2304, SMD-2134 |
 | 241 | [node_state's dependency columns read the ids asked for: the gate stored, the links probed](changes/241-node-state-s-dependency-columns-read-the-ids.md) | SMD-2267 |
 | 242 | [The authorization server's proof of concept: oidc-provider on Bun proves criteria 1–5. Its outbound fetches go through a guard of our own, because the library's SSRF protection does not load under Bun, and the library's open defaults are closed](changes/242-the-authorization-server-s-proof-of-concept-oidc.md) | SMD-2285 |
+| 243 | [consolidate.ts and reembed.ts are engines: import one and call run(); the workers' numbers held to what the database takes](changes/243-consolidate-ts-and-reembed-ts-are-engines-import.md) | SMD-2304, SMD-2134 |
+| 244 | [The weekly-digest sink becomes a `db/` verb behind the egress gate](changes/244-the-weekly-digest-sink-becomes-a-db-verb-behind.md) | SMD-2239 |
+| 245 | [The authorization server's proof of concept, second leg: the runner-up, Better Auth 1.7.6, through the same 32 checks as oidc-provider, the winner's pages made unframeable, and the winning server moved to `deploy/auth/` and deployed as the `auth` compose profile with a SQLite store, its registration capped and purged](changes/245-the-authorization-server-s-proof-of-concept.md) | SMD-2285 |
+| 246 | [brain-smoke-test retires into deploy/smoke.sh, whose first check now reads the refusal instead of trusting the 200](changes/246-brain-smoke-test-retires-into-deploy-smoke-sh.md) | SMD-2103 |
+| 247 | [The content's trust on the row, read back on every thought a tool returns](changes/247-the-content-s-trust-on-the-row-read-back.md) | SMD-1724 |
+| 248 | [Every tool runs on a transport-free core and answers a typed result beside its text](changes/248-every-tool-runs-on-a-transport-free-core.md) | SMD-2283 |
+| 249 | [The SIGTERM steps judge the stop, not the runner's `docker stop`](changes/249-the-sigterm-steps-judge-the-stop-not-the-runner.md) | SMD-2316 |
+| 250 | [One origin for the stack](changes/250-one-origin-for-the-stack.md) | SMD-1846 |
+| 251 | [A stop during a provider-error pause returns the thought to the pool, not as a failed row](changes/251-a-stop-during-a-provider-error-pause-returns.md) | SMD-2401 |
+| 252 | [Blank options and the hard-stop lapse in extract and consolidate, as reembed since SMD-2304 PR 4](changes/252-blank-options-and-the-hard-stop-lapse-in-extract.md) | SMD-2425 |
+| 253 | [The pass's report beside a review is refused](changes/253-the-pass-s-report-beside-a-review-is-refused.md) | SMD-2405 |
+| 254 | [A thought's text is fenced in the prose read tools, so it cannot forge a result block](changes/254-a-thought-s-text-is-fenced-in-the-prose-read.md) | SMD-2483 |
 
 Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->

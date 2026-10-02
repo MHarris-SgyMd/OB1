@@ -162,6 +162,39 @@ export function snipText(text: string, max: number): string {
 }
 
 /**
+ * Every break a reader may take as a new line: CRLF, CR, LF, VT, FF, the three
+ * information separators Python's splitlines() breaks on (FS, GS, RS), NEL,
+ * and Unicode's line and paragraph separators (review pass 1).
+ */
+const LINE_BREAK = /\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/;
+/**
+ * What a line of fenced text may not keep: the C0 and C1 controls but the tab
+ * (an ESC sequence or a backspace moves a terminal's cursor back over the
+ * fence), DEL, and the bidirectional controls, which lay a line out
+ * right-to-left with its fence at the far end (review pass 1).
+ */
+// eslint-disable-next-line no-control-regex
+const UNSHOWN = /[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * A thought's whole text in a block of a reply (SMD-2483): every line starts
+ * with `│` (`│ ` and the line; an empty one `│` alone), and no line the
+ * renderer writes itself does — so no line of the text can stand as a
+ * `--- Result` header, an `ID:` or a `By:` line, or the next list item,
+ * whatever its trust. Every row, not only an ingested one (the maintainer's
+ * call): an agent's summary quoting a page, or a row with no trust recorded,
+ * could forge `trust operator` too. Unlike snipText the text keeps its lines
+ * and is not cut; each break is said as LF, and the controls and marks that
+ * would hide the fence are dropped (cleanForDisplay's rule, wider, applied
+ * after the split so a VT or FF still breaks). `indent` is what each line
+ * takes before the fence (list_thoughts' three spaces). Exported for the
+ * unit test.
+ */
+export function fenceText(text: string, indent = ""): string {
+  return text.split(LINE_BREAK).map((l) => l.replace(UNSHOWN, "")).map((l) => (l === "" ? `${indent}│` : `${indent}│ ${l}`)).join("\n");
+}
+
+/**
  * A search the egress gate refused (SMD-1903): the query text would leave for
  * its embedding, and the policy says it may not. The caller's way through is
  * the keyword tool, which makes no model call; the operator's are named.
@@ -379,7 +412,8 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
           parts.push(`People: ${(m.people as string[]).join(", ")}`);
         if (Array.isArray(m.action_items) && m.action_items.length)
           parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
-        parts.push(`\n${t.content}`);
+        // SMD-2483: the text fenced, so no line of it reads as this reply's own.
+        parts.push(`\n${fenceText(t.content)}`);
         return parts.join("\n");
       }
     );
@@ -454,7 +488,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
       if (notice) parts.push(notice);
       if (Array.isArray(m.topics) && m.topics.length)
         parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
-      parts.push(`\n${t.content}`);
+      parts.push(`\n${fenceText(t.content)}`);
       return parts.join("\n");
     });
 
@@ -494,7 +528,10 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         const warn = notice ? `\n   ${notice}` : "";
         // SMD-1328: the date bracket is structural here, so an undated row
         // reads `[undated]` (never `[1/1/1970]`); a sentinel shows its text.
-        return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})${warn}\n   ${t.content}\n   ID: ${t.id}${who}${mark}`;
+        // SMD-2483: the text fenced and indented as the block is, every line
+        // of it — no blank line inside an item, and no line of the text a
+        // next item or an `ID:` line.
+        return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})${warn}\n${fenceText(t.content, "   ")}\n   ID: ${t.id}${who}${mark}`;
       }
     );
     return `${data.length} recent thought(s):\n\n${results.join("\n\n")}`;

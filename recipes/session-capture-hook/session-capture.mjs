@@ -114,8 +114,10 @@ const GENERIC_TOOLS = ["search", "fetch"];
 const BRAIN_TOOL_RE = new RegExp(`(?:(?:^|__|[/.:])(?:${BRAIN_TOOLS.join("|")})|^(?:[^]*[^a-z0-9])?brain(?:[^a-z0-9][^]*)?(?:__|[/.:])(?:${GENERIC_TOOLS.join("|")}))$`, "i");
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 // `ID: <uuid>` is how every read tool prints a thought's id (SMD-1248); a capture answers `Captured as … — id <uuid>` or `Thought saved (id <uuid>)`.
-const RETRIEVED_ID_RE = new RegExp(`\\bID:\\s*(${UUID})\\b`, "gi");
-const CAPTURED_ID_RE = new RegExp(`(?:Captured as [^\\n]*?\\bid |Thought saved \\(id )(${UUID})\\b`, "gi");
+// Each at a line's start, as the server prints it: a thought's text is fenced (`│ ` before its every
+// line, SMD-2483), so an id line its text quotes is not one, and is never claimed as provenance.
+const RETRIEVED_ID_RE = new RegExp(`^[ \\t]*ID:\\s*(${UUID})\\b`, "gim");
+const CAPTURED_ID_RE = new RegExp(`^(?:Captured as [^\\n]*?\\bid |Thought saved \\(id )(${UUID})\\b`, "gim");
 /** Tool names whose input names a file the session changed (Claude Code). */
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
@@ -387,6 +389,23 @@ export function sniffHarness(firstLines) {
   return "claude-code";
 }
 
+/** One of the brain's prose tools by name — not a generic `search`/`fetch`, whose JSON text is a thought's own, unfenced. */
+const PROSE_TOOL_RE = new RegExp(`(?:^|__|[/.:])(?:${BRAIN_TOOLS.join("|")})$`, "i");
+
+/**
+ * A brain tool's reply as the harness recorded it: its text, or — where a
+ * prose tool's record is the JSON of its result (structuredContent,
+ * `{ …, text }`, or a content-block list, SMD-2283) — the text inside it, with
+ * its real line breaks, which the line-anchored id patterns need (SMD-2483,
+ * review pass 2). A generic `fetch`'s JSON is left as it was: its `text` is
+ * the thought's own, which no fence guards.
+ */
+function replyText(text, name) {
+  const t = text.trimStart();
+  if ((t[0] !== "{" && t[0] !== "[") || !PROSE_TOOL_RE.test(name)) return text;
+  try { return textOfBlocks(JSON.parse(t)) || text; } catch { return text; }
+}
+
 function textOfBlocks(content) {
   if (typeof content === "string") return content;
   if (content && typeof content === "object" && !Array.isArray(content) && typeof content.text === "string") return content.text; // one block, not a list
@@ -470,7 +489,7 @@ export function parseClaudeCode(lines, s) {
     for (const r of results) {
       const name = toolNames.get(r.tool_use_id) ?? "";
       if (!BRAIN_TOOL_RE.test(name)) continue;
-      events.push({ t: "ids", text: textOfBlocks(r.content) });
+      events.push({ t: "ids", text: replyText(textOfBlocks(r.content), name) });
     }
     if (results.length) continue;
     // The compaction summary: the harness's own flag — read before the origin
@@ -528,7 +547,7 @@ export function parseCodex(lines, s) {
     if (p.type === "function_call_output" || p.type === "custom_tool_call_output") {
       const call = calls.get(p.call_id);
       if (!call || !BRAIN_TOOL_RE.test(call.name)) continue;
-      events.push({ t: "ids", text: textOfBlocks(p.output) || String(p.output ?? "") });
+      events.push({ t: "ids", text: replyText(textOfBlocks(p.output) || String(p.output ?? ""), call.name) });
     }
   }
   return segment(events, s);
@@ -1430,7 +1449,10 @@ export function verdictOf(result, text) {
  * the session forever, since the state kept naming it.)
  */
 export async function postCapture(cfg, payload) {
-  const args = { content: payload.text, source: payload.harness };
+  // SMD-1724: a session summary is an agent's output — derived from the
+  // session, written by the hook or its model — declared so; the server clamps
+  // it to the key's kind. A server from before the argument strips it unread.
+  const args = { content: payload.text, source: payload.harness, trust: "agent" };
   if (payload.derived_from?.length) args.derived_from = payload.derived_from;
   if (payload.supersedes) args.supersedes = payload.supersedes;
   // What rides in metadata.* beside the row's own source (which stays the
