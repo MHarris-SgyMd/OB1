@@ -505,23 +505,29 @@ MCP tools do rather than a copy of it:
   egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
   `core/writes.ts` holds `capture_thought`, `update_thought` and `delete_thought`: the
   shapes, a capture-only key's trimmed provenance and owned pointers, the egress gate,
-  the model calls, the write and its cites. Each returns its typed value or a typed
-  refusal (`core/refusal.ts`: a `code`, whether it is `retryable`, and the facts to say
-  it with), and throws a fault. `core/context.ts` is what they run against: the store,
+  the model calls, the write and its cites. `core/workers.ts` holds the worker actions
+  (`retry_failed`, `release_stale_leases`, `run_worker`'s dry run), which the keyed REST
+  POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too. Each
+  returns its typed value or a typed refusal (`core/refusal.ts`: a `code`, whether it is
+  `retryable`, and the facts to say it with), and throws a fault. `core/context.ts` is what they run against: the store,
   the provider settings and the one embedder, the query log, the door a write records.
 - **`render.ts`** — the words: each tool's reply rendered from that value, the text the
   tools have always said.
 - **`index.ts`** — the Hono app, authentication, and the registration that joins the
-  two: validate (the SDK runs the spec's schema), call the operation, render.
+  two: validate (the SDK runs the spec's schema), call the operation, render. Of the
+  store it holds only the wiring — `db()` builds it and wires the job sink, `closeStore()`
+  closes it at a stop, the agent registry looks keys up through it — and no egress or
+  embedding call. `scripts/check-fork-consistency.ts` check 25 is a tripwire for what a
+  move would leave behind: an import outside its list, a SQL call or `fetch`, the store
+  named outside that wiring.
 
-Every tool's reply carries a typed answer as `structuredContent` beside the text
-(the worker actions' from SMD-2283's last pull request). Claude Code, VS Code and
-Codex show the model `structuredContent` alone when it is present, so:
+Every tool's reply carries a typed answer as `structuredContent` beside the text.
+Claude Code, VS Code and Codex show the model `structuredContent` alone when it is present, so:
 
 - A tool whose text is its value's JSON (`search`, `fetch`, `list_thought_ids`,
-  `list_logged_searches`, `worker_status`, `job_status`, `scan_thoughts`) answers
-  the value itself. A value is always an object, so `worker_status`'s rows ride
-  under `pools` while its text stays the bare array.
+  `list_logged_searches`, `worker_status`, `job_status`, `scan_thoughts`, the three
+  worker actions) answers the value itself. A value is always an object, so
+  `worker_status`'s rows ride under `pools` while its text stays the bare array.
 - A tool whose text is prose answers its `text` plus fields that cannot carry a
   word a thought, a key or a judge wrote: ids, timestamps, counts, scores, booleans,
   enum codes (a search hit's id, scores, `supersededBy` and demotion reasons; a
@@ -548,22 +554,24 @@ Codex show the model `structuredContent` alone when it is present, so:
   `currentUpdatedAt`, to retry from without a re-read), `REFUSED_DUPLICATE_CONTENT`,
   `REFUSED_SUPERSEDES_UNKNOWN`, `REFUSED_WOULD_CYCLE`, `REFUSED_CITED` (with
   `citedBy`), and `REFUSED` for a refusal the store names that this server does not
-  know.
+  know. The worker actions': `REFUSED_EMPTY_WORK_TYPE`, `REFUSED_LIVE_LEASE_NEEDS_WORKER`,
+  `RUN_WORKER_DRAIN_NOT_AVAILABLE` — the codes their REST POSTs answer as a 400. Which
+  facts a refusal carries is declared beside its code (`core/refusal.ts`'s `FACTS`),
+  so a new code does not compile until they are.
 - A fault answers `{ code: "FAILED", text }`, with no `retryable` yet —
   classifying faults is SMD-2461 — except capture's, `STORE_UNAVAILABLE` and
   retryable, which the session hook keys on (SMD-1978).
 
-The core's values are whole, for the REST core. The worker actions move into
-`core/` in SMD-2283's last pull request; until then they keep their own codes.
+The core's values are whole, for the REST core.
 
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 374 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-server.ts        # 390 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun run test:local        # 170 — fully local provider, no credential
-bun run test:sql          # 196 — store conformance, real Postgres in a container
-bun run test:e2e          # 364 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:sql          # 203 — store conformance, real Postgres in a container
+bun run test:e2e          # 412 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 bun run cf:build          # ~353 KiB gzipped (measured 2026-10-01, SMD-2283 PR 2; the PostgREST store and supabase-js are in it)
 ```
 
