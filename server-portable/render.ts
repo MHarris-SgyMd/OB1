@@ -19,11 +19,11 @@
 
 import { displayDate } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
-import type { AuditChange, LoggedSearchPage, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
+import type { AuditChange, DryRunClaimResult, LoggedSearchPage, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY } from "./core/filter.ts";
-import { failure, META_KEYS_MAX, META_VALUE_MAX, ok, type Outcome, type Refusal } from "./core/refusal.ts";
+import { failure, META_KEYS_MAX, META_VALUE_MAX, ok, refusalValue, type Outcome, type Refusal } from "./core/refusal.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, Updated } from "./core/writes.ts";
 
@@ -41,7 +41,7 @@ const AS_RECORD = Symbol("the value is the server's own record");
 function render<T extends object>(o: Outcome<T>, value: (v: T) => string, refusal: (r: Refusal) => string, safe: Safe<T> | typeof AS_JSON | typeof AS_RECORD): Reply {
   if (!o.ok) {
     const text = refusal(o.refusal);
-    return { content: [{ type: "text", text }], isError: true, structuredContent: { ...(guard(safeRefusal(o.refusal)) as object), text } };
+    return { content: [{ type: "text", text }], isError: true, structuredContent: { ...(guard(refusalValue(o.refusal)) as object), text } };
   }
   const text = value(o.value);
   const v = o.value as Record<string, unknown>;
@@ -70,26 +70,6 @@ function guard(v: unknown, key = ""): unknown {
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
   return v;
-}
-
-/**
- * A refusal's safe fields: its code, whether a retry can help, and the egress
- * rule's token. The facts a sentence was built from — a caller's own `since`
- * or id, a filter's message, the gate's reason — are in the text, bounded.
- */
-function safeRefusal(r: Refusal): object {
-  return {
-    code: r.code,
-    retryable: r.retryable,
-    ...(r.code === "REFUSED_EGRESS" ? { rule: r.rule } : {}),
-    // The derived_from indices to drop — present only for a caller allowed to
-    // know they exist (SMD-1978); what the session hook mends by.
-    ...(r.code === "DERIVED_FROM_MISSING" && r.named.length ? { positions: r.named.map((n) => n.position) } : {}),
-    // The thought that was saved without its vector: the server's own id.
-    ...(r.code === "EMBEDDING_NOT_ATTACHED" ? { id: r.id } : {}),
-    ...(r.code === "REFUSED_CITED" && r.citedBy !== undefined ? { citedBy: r.citedBy } : {}),
-    ...(r.code === "REFUSED_STALE_READ" && r.currentUpdatedAt ? { currentUpdatedAt: r.currentUpdatedAt } : {}),
-  };
 }
 
 /** A refusal a tool's renderer has no sentence for — a code it does not return. Not reached; said rather than thrown. */
@@ -978,3 +958,26 @@ export function renderDelete(o: Outcome<Deleted>): Reply {
   return render(o, (v) => `Deleted ${v.id}. Its previous content is preserved in the audit trail.${explainDetached(v)}`,
     mutationRefusalText, (v) => ({ id: v.id, detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
 }
+
+// ── The worker actions (SMD-2283 PR 3) ───────────────────────────────────────
+// Each answers its result as JSON, the value itself beside it; a refusal its
+// sentence, the code and `retryable` beside it, as it always did.
+
+export const renderRetryFailed = (o: Outcome<RetryFailedResult>): Reply =>
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_EMPTY_WORK_TYPE"
+    ? "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to retry."
+    : unknownRefusal(r)), AS_JSON);
+
+export const renderReleaseStaleLeases = (o: Outcome<ReleaseLeasesResult>): Reply =>
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_EMPTY_WORK_TYPE"
+    ? "Refused: work_type was given but blank — omit it to reap across all pools, or pass a real `workType`."
+    : r.code === "REFUSED_LIVE_LEASE_NEEDS_WORKER"
+      ? "Refused: include_live releases a lease that has not lapsed, which risks the holder double-processing — name the worker_id whose live lease to release (worker_status reports the holder)."
+      : unknownRefusal(r)), AS_JSON);
+
+export const renderRunWorker = (o: Outcome<DryRunClaimResult>): Reply =>
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_EMPTY_WORK_TYPE"
+    ? "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain."
+    : r.code === "RUN_WORKER_DRAIN_NOT_AVAILABLE"
+      ? "Refused: the executing drain is not yet available — the server does not run the bulk LLM passes, and the drain will land on a callable worker core (SMD-2304). Call with dry_run: true to preview what a pass would claim."
+      : unknownRefusal(r)), AS_JSON);

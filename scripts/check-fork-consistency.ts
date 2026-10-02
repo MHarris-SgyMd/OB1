@@ -246,6 +246,13 @@
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
  *      remaining size (SMD-2126)
+ *  25. server-portable/index.ts is transport: comments blanked, it imports
+ *      only TRANSPORT_IMPORTS (never egress.ts, embed.ts, metadata.ts or a
+ *      store backend); strings blanked too, it holds no dynamic import, no
+ *      `sql` template, and no call of the store's builder `db()` but the
+ *      agent registry's — the store, the egress gate and the model calls are
+ *      server-portable/core/'s (SMD-2283); transportLeaksIn is a pure
+ *      function its probes run on in-memory text; no exceptions
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20 and 23 parse YAML with Bun.YAML)
@@ -5089,6 +5096,83 @@ function checkPostgrestClients() {
   for (const rel of POSTGREST_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 24's exception names a file the scan does not reach — stale, or the file is gone: remove the entry");
 }
 checkPostgrestClients();
+
+// ── 25: the MCP server's index.ts is transport; the logic is core/'s (SMD-2283) ──
+//
+// SMD-2283 moved every tool's logic — the store reads and writes, the egress
+// gate, the embedding and extraction calls, the action log — into
+// server-portable/core/, so index.ts validates (the SDK runs core/schemas.ts's
+// zod), calls a core operation and renders its answer (render.ts), and the REST
+// core (SMD-2284) calls the same operations: one gateway, not two (SMD-1931).
+// This holds the split. In server-portable/index.ts, comments blanked, every
+// import and re-export names a module in TRANSPORT_IMPORTS — the wiring, the
+// key check, the agent registry, the core and the renderer; never egress.ts,
+// embed.ts, metadata.ts or a store backend, so no egress decision, embedding
+// or extraction call can be made there. With strings blanked as well: no
+// dynamic import or require, no `sql` template, and the store's builder
+// `db()` called only by the agent registry (`.resolve(db(), …)`) — the core
+// takes the builder itself (`store: db`) — so `await db()` and a method on
+// what it returns, a store call the core did not make, is a hit.
+const TRANSPORT_FILE = "server-portable/index.ts";
+const TRANSPORT_IMPORTS = new Set([
+  "@modelcontextprotocol/server", "hono",
+  "./store.ts", "../db/config.mjs", "./auth.ts", "./agents.ts", "./version.ts", "./shutdown.ts", "./jobs.ts", "./tools.ts",
+  "./core/index.ts", "./core/reads.ts", "./core/filter.ts", "./render.ts",
+]);
+/** The lines of `text` (the server's index.ts) that reach past the core, each with what it reached. Pure over a text. */
+function transportLeaksIn(text: string): { line: number; what: string }[] {
+  const hits: { line: number; what: string }[] = [];
+  const lineAt = (i: number) => text.slice(0, i).split("\n").length;
+  const code = blanked(text, false);
+  for (const m of code.matchAll(/\bfrom\s*["']([^"'\n]+)["']|\bimport\s*["']([^"'\n]+)["']/g)) {
+    const spec = m[1] ?? m[2];
+    if (!TRANSPORT_IMPORTS.has(spec)) hits.push({ line: lineAt(m.index), what: `imports ${spec}` });
+  }
+  const bare = blanked(text, true);
+  for (const m of bare.matchAll(/\b(?:import|require)\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a dynamic import" });
+  for (const m of bare.matchAll(/\bsql\s*`/g)) hits.push({ line: lineAt(m.index), what: "a sql template" });
+  for (const m of bare.matchAll(/\bdb\s*\(\s*\)/g)) {
+    const before = bare.slice(0, m.index);
+    if (/\bfunction\s+$/.test(before) || /\.resolve\(\s*$/.test(before)) continue;
+    hits.push({ line: lineAt(m.index), what: "a store call past the core" });
+  }
+  return hits;
+}
+/** [text, hit] — what check 25 must catch, and what it must not. */
+const TRANSPORT_PROBES: [string, boolean][] = [
+  ['import { decideCalls } from "./egress.ts";\n', true],
+  ["import type { EmbedConfig } from './embed.ts'\n", true],
+  ['export { extractMetadata } from "./metadata.ts";\n', true],
+  ['import "./store-sql.ts";\n', true],
+  ['const egress = await import("./egress.ts");\n', true],
+  ['const t = require("./thoughts.ts");\n', true],
+  ["const r = await (await db()).retryFailed(workType);\n", true],
+  ["const s = await db();\nawait s.retryFailed(workType);\n", true],
+  ["void db().then((s) => s.logActions(rows));\n", true],
+  ["const rows = await sql`select 1`;\n", true],
+  ['import { createCore, SPECS } from "./core/index.ts";\n', false],
+  ['import type { ToolName } from "./tools.ts";\nexport { parseFilter } from "./core/filter.ts";\n', false],
+  ['// import { decideCalls } from "./egress.ts";\n', false],
+  ["function db(): Promise<ThoughtStore> {\n  return _store;\n}\n", false],
+  ["const identity = await agents().resolve(db(), principal);\n", false],
+  ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],
+  ['// (await db()).retryFailed(workType) — said in a comment\nconst s = "await db() and sql`x` in a string";\n', false],
+];
+function checkTransportOnly() {
+  for (const [probe, hit] of TRANSPORT_PROBES) {
+    const n = transportLeaksIn(probe).length;
+    if (hit && n === 0) fail(SELF, `check 25 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
+    if (!hit && n > 0) fail(SELF, `check 25 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
+  }
+  const path = join(ROOT, TRANSPORT_FILE);
+  if (!existsSync(path)) { fail(TRANSPORT_FILE, "check 25's file is gone — move the check with it"); return; }
+  const text = readFileSync(path, "utf8");
+  if (!/\bfrom\s*["']\.\/core\/index\.ts["']/.test(blanked(text, false))) fail(TRANSPORT_FILE, "check 25 reads no import of ./core/index.ts — the reader is broken, not the file clean");
+  for (const { line, what } of transportLeaksIn(text)) {
+    fail(`${TRANSPORT_FILE}:${line}`, `${what} — the MCP server's index.ts validates, calls a core operation and renders its answer (SMD-2283); the store, the egress gate and the model calls are server-portable/core/'s, so the REST core (SMD-2284) makes the same calls: move the logic into core/, or add a module that holds no logic to TRANSPORT_IMPORTS`);
+  }
+}
+checkTransportOnly();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

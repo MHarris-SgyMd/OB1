@@ -1996,6 +1996,56 @@ console.log("\n[16] Every write tool answers its typed result beside the text, a
   assert(delGone.isError && delGone.sc?.code === "NOT_FOUND", "a delete of a deleted thought is NOT_FOUND");
 }
 
+console.log("\n[17] Every worker action answers its result beside the text, and each refusal its code (SMD-2283 PR 3)");
+{
+  // A pool no thought is in: each action answers its JSON, and the value is
+  // that JSON — the result is counts, a pool name and ids, nothing a thought wrote.
+  const WT = "smd2283-no-such-pool";
+  const answers: [string, Record<string, unknown>, string][] = [
+    ["retry_failed", { work_type: WT }, "retried"],
+    ["release_stale_leases", { work_type: WT }, "released"],
+    ["run_worker", { work_type: WT, dry_run: true }, "pending"],
+  ];
+  for (const [tool, args, field] of answers) {
+    const r = await result(tool, args);
+    assert(!r.isError && r.sc?.[field] === 0 && JSON.stringify(r.sc) === JSON.stringify(JSON.parse(r.text)), `${tool}: the value is the JSON its text is (${r.text.slice(0, 80)})`);
+  }
+
+  // The refusals, each in the words it always had, its code and `retryable` beside them.
+  const refusals: [string, Record<string, unknown>, string, string][] = [
+    ["retry_failed", { work_type: "  " }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to retry."],
+    ["release_stale_leases", { work_type: "  " }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type was given but blank — omit it to reap across all pools"],
+    ["release_stale_leases", { include_live: true }, "REFUSED_LIVE_LEASE_NEEDS_WORKER", "Refused: include_live releases a lease that has not lapsed"],
+    ["run_worker", { work_type: "  ", dry_run: true }, "REFUSED_EMPTY_WORK_TYPE", "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain."],
+    ["run_worker", { work_type: WT }, "RUN_WORKER_DRAIN_NOT_AVAILABLE", "Refused: the executing drain is not yet available"],
+  ];
+  for (const [tool, args, code, lead] of refusals) {
+    const r = await result(tool, args);
+    assert(r.isError && r.text.startsWith(lead) && r.sc?.code === code && r.sc?.retryable === false, `${tool} refuses ${JSON.stringify(args)} as ${code}, final, in its old words (${r.text.slice(0, 60)})`);
+    holds(`${tool}'s ${code}`, r);
+  }
+
+  // A fault: the claim table is away, so the store throws. Each action keeps
+  // its lead, FAILED beside it with no retryable — on a PostgREST deploy the
+  // store throws the SQL-only reason, which a retry does not mend. Put the
+  // table back whatever the assertions do.
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`ALTER TABLE thought_work_claims RENAME TO thought_work_claims_away`;
+  try {
+    for (const [tool, args] of answers) {
+      const fault = await result(tool, args);
+      assert(fault.isError && fault.text.startsWith(`${tool} failed: `) && fault.sc?.code === "FAILED" && !("retryable" in fault.sc) && fault.sc?.text === fault.text,
+        `${tool}'s fault is FAILED under its lead, its words beside it (${JSON.stringify(fault.sc)?.slice(0, 120)})`);
+    }
+  } finally {
+    try {
+      await sql`ALTER TABLE thought_work_claims_away RENAME TO thought_work_claims`;
+    } finally {
+      await sql.close();
+    }
+  }
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 
