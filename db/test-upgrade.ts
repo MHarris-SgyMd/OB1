@@ -517,8 +517,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-1812; the entity name gate's allowlist, SMD-2300; a derivation never
   // paired with its inputs, SMD-2292; the pass settling stale proposals,
   // SMD-2297), 068 (the node_state projection kept current on write,
-  // SMD-2256) and 071 (node_state's dependency columns keyed, the gate
-  // stored, SMD-2267) stay recorded and
+  // SMD-2256), 071 (node_state's dependency columns keyed, the gate
+  // stored, SMD-2267) and 073 (the content's trust on the row, SMD-1724)
+  // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -597,10 +598,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // node_dependencies and node_state and 068's drift on their own signatures,
   // refusing by name without 053 or 068
   // ([20w]); 072 upserts ob1_config.schema_version for the 1.4.0 cut, needing
-  // only 006's table — all recorded by the baseline with their prerequisites
-  // present, so none becomes the plain-run failure point above).
+  // only 006's table; 073 redefines 055's two stamp arms and 050's stamp
+  // trigger and backfill, adds a third stamp form and the trust fold, and
+  // redefines the 2- and 3-argument upsert_thought and update_thought on 060's
+  // and 061's bodies, refusing by name without 061 ([20x]) — all recorded by
+  // the baseline with their prerequisites present, so none becomes the
+  // plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 43, `030 is among the last forty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 44, `030 is among the last forty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2549,7 +2554,10 @@ console.log("\n[20p] Migration 064 onto a populated brain at the file before it 
   // A corpus at 063: two thoughts with vectors (each with a vector lineage row).
   const a = (await sql`SELECT upsert_thought('upgrade 064: evidence a', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string; fingerprint: string };
   await sql`SELECT upsert_thought('upgrade 064: evidence b', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(1)}::vector)`;
-  const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, derived_from, updated_at::text AS u FROM thoughts ORDER BY id`);
+  // metadata.trust left out: the re-apply below applies the files after 064
+  // as pending, and 073's backfill stamps trust onto these rows on its first
+  // apply — 073's own move, held by [20x], not 064's.
+  const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata - 'trust' AS metadata, embedding::text AS e, embedding_model, derived_from, updated_at::text AS u FROM thoughts ORDER BY id`);
   const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, produced_by, produced_at::text AS at, recipe FROM derivations ORDER BY 1, 2, 3`);
   const before = await stamps(), lineageBefore = await lineage();
   const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
@@ -3105,6 +3113,74 @@ console.log("\n[20w] Migration 071 on a schema without 068 — refused up front,
       && keyed.blocked === true && JSON.stringify(keyed.blockers) === JSON.stringify(["U-11"])
       && state.drift === 0 && state.rows === 4 && state.gating === 3 && /ob1_node_dependencies_of/.test(String(state.body)),
     `…and applied once 068 is there: node_state() and node_dependencies() read what they did row for row, the blocked ticket read by id is blocked by U-11 alone (U-12's link closed), the seed mirrored four source rows, three gating, and drift() is empty (${after.state.length} rows, ${after.deps.length} links, drift ${state.drift}, ${state.gating}/${state.rows})`);
+  await sql.close();
+}
+
+console.log("\n[20x] Migration 073 on a schema without 061 — refused up front, naming 061 and --reapply; applied over a brain at the file before it, every thought takes the trust of the write of its text from the log — the key's kind, a declared ingested, a clamp, an edit's, none for an unclassified key — no text, vector or updated_at moves, and a re-apply writes nothing (SMD-1724)");
+{
+  // 073 redefines 061's writers on their bodies (the lineage writer among
+  // their calls): without the guard a schema stopping before 061 would take
+  // the bodies and fail at the first capture, not at the migration.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "061" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-061 schema (exit ${baselined.code})`);
+  let sql = new SQL({ url: URL_, max: 1 });
+  const the073 = MIGRATIONS.find((f) => f.endsWith("_thought_trust_on_the_row.sql"))!;  // by name: renumbered when main takes its number
+  await sql`DELETE FROM schema_migrations WHERE name = ${the073}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /073_thought_trust_on_the_row\.sql\s+FAILED: migration 073 needs 061 \(derivations, ob1_record_derivation\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 073 naming 061 and --reapply, not at the first capture after it (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the073}`)[0].c) === 0, "…073 records nothing");
+  await sql.close();
+
+  // A brain at the file before 073, written through its own writers.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the073 });
+  sql = new SQL({ url: URL_, max: 1 });
+  await sql`SELECT set_agent_kind('op-key', 'operator'), set_agent_kind('bot-key', 'agent'), set_agent_kind('imp-key', 'ingested')`;
+  const cap = async (content: string, envelope: Record<string, unknown>) =>
+    ((await sql`SELECT upsert_thought(${content}, ${JSON.stringify(envelope)}::text::jsonb) AS r`)[0].r as { id: string }).id;
+  const OP = { name: "op-key", via: "open-brain" }, BOT = { name: "bot-key", via: "open-brain" }, IMP = { name: "imp-key", via: "ingest-records" };
+  const typed = await cap("[20x] typed by the operator", { metadata: { source: "mcp" }, actor: OP });
+  const pasted = await cap("[20x] a page the operator pasted", { metadata: {}, event: { trust: "ingested" }, actor: OP });
+  const clamped = await cap("[20x] a page claiming the operator's trust", { metadata: {}, event: { trust: "operator" }, actor: IMP });
+  const planted = await cap("[20x] a page whose payload says operator", { metadata: { trust: "operator" }, actor: IMP });
+  const edited = await cap("[20x] an agent's note", { metadata: {}, actor: BOT });
+  await sql`SELECT update_thought(${edited}::uuid, '[20x] the agent''s note, rewritten by the operator', NULL, NULL, NULL, NULL, ${JSON.stringify(OP)}::text::jsonb)`;
+  const ghost = await cap("[20x] an unclassified key", { metadata: {}, actor: { name: "ghost-key" } });
+  // A writer before 073 that set metadata.trust below its key: 072 stored the
+  // word as sent, and the backfill, which never raises, keeps it (run-it,
+  // first review pass: the first draft raised it to the key's kind).
+  const lowered = await cap("[20x] a page the operator marked ingested before 073", { metadata: { trust: "ingested" }, actor: OP });
+  const rowsOf = async () => (await sql`SELECT id::text AS id, content, embedding IS NULL AS no_vec, updated_at::text AS u, metadata FROM thoughts ORDER BY id`) as { id: string; content: string; no_vec: boolean; u: string; metadata: Record<string, unknown> }[];
+  const before = await rowsOf();
+  // At 072 a payload's trust is kept as sent — the gap 073 closes.
+  assert(before.find((r) => r.id === planted)?.metadata.trust === "operator" && before.find((r) => r.id === lowered)?.metadata.trust === "ingested"
+      && before.every((r) => r.id === planted || r.id === lowered || !("trust" in r.metadata)),
+    "before 073 no writer stamps trust, and a payload's metadata.trust is stored as the caller said it");
+  const audits = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  // The ingester's key reclassified up before the upgrade: the clamped row's
+  // log says ingested and its claim operator, and the backfill takes the
+  // log's word under the new kind, never the claim — a recorded trust is not
+  // raised (run-it, second review pass: the claim read over it survived).
+  await sql`SELECT set_agent_kind('imp-key', 'agent')`;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the073 });
+  const after = await rowsOf();
+  const trustOf = (id: string) => after.find((r) => r.id === id)?.metadata.trust ?? "-";
+  const got = [typed, pasted, clamped, planted, edited, ghost, lowered].map(trustOf).join(",");
+  assert(got === "operator,ingested,ingested,ingested,operator,-,ingested",
+    `the backfill stamps each thought from the log: the operator's kind, a declared ingested, a clamp to the key, a planted raise lowered to the key, the editor's for a rewritten text, none for an unclassified key, and a lowering a writer set before 073 kept (${got})`);
+  assert(after.length === before.length && after.every((r, i) => r.id === before[i].id && r.content === before[i].content && r.no_vec === before[i].no_vec && r.u === before[i].u),
+    "…no text, vector or updated_at moved (a stamp is not an edit)");
+  const wrote = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) - audits;
+  assert(wrote === 5, `…and each of the five rows the pass wrote — every one but the unclassified key's and the one already carrying its word — left one audit row under its door (${wrote})`);
+  const n = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the073 });
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === n && JSON.stringify(await rowsOf()) === JSON.stringify(after),
+    "a re-apply of 073 is a no-op: no audit row, no row moved — its backfill finds the rows agreeing with the log");
   await sql.close();
 }
 

@@ -23,7 +23,7 @@
  */
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-import { ACCESS_TOKEN_TYPE, INTERNAL, layout, originFromEnv, SCOPES, TIERS, TOKEN_EXCHANGE, type Tier } from "./policy.ts";
+import { ACCESS_TOKEN_TYPE, INTERNAL, layout, originFromEnv, SCOPES, secretName, TIERS, TOKEN_EXCHANGE, type Tier } from "./policy.ts";
 
 const L = layout(originFromEnv());
 const keys = createRemoteJWKSet(new URL(`${INTERNAL.auth}/auth/jwks`));
@@ -86,7 +86,7 @@ function tokenEndpoint(): Promise<string> {
 
 async function exchange(tier: Tier, subjectToken: string): Promise<{ status: number; body: Record<string, unknown> }> {
   const id = tier === "" ? "mcp" : "mcp-canary";
-  const secret = process.env[`OB1_AUTH_SECRET_${id.toUpperCase().replace(/-/g, "_")}`] ?? "";
+  const secret = process.env[secretName(id)] ?? "";
   const r = await fetch(await tokenEndpoint(), {
     method: "POST",
     headers: { authorization: `Basic ${btoa(`${encodeURIComponent(id)}:${encodeURIComponent(secret)}`)}`, "content-type": "application/x-www-form-urlencoded" },

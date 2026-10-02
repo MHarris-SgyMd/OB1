@@ -81,8 +81,8 @@ export const CROSS_SOURCE_FACETS = ["issue", "ticket", "linear_updated_at"] as c
 /** How far ahead of now an item's createdAt may be: a clock's skew. Recency would read a row dated later still as new for as long as that (review pass 7). */
 export const CREATED_AT_SKEW_MS = 24 * 60 * 60 * 1000;
 
-/** The metadata keys the pipeline owns: `source` is the system's, the two actor keys are 050's trigger's. A watermark under one of them would be overwritten and the clock guard inert. */
-export const PIPELINE_META_KEYS = ["source", "actor_kind", "actor_name"] as const;
+/** The metadata keys the pipeline owns: `source` is the system's, the two actor keys are 050's trigger's and `trust` 073's. A watermark under one of them would be overwritten and the clock guard inert. */
+export const PIPELINE_META_KEYS = ["source", "actor_kind", "actor_name", "trust"] as const;
 /** normaliseMentions' bound on a name. */
 export const MENTION_NAME_MAX = 200;
 /** A media type as RFC 6838 spells one: `type/subtype`, the two in the token alphabet. */
@@ -288,7 +288,7 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   // facets
   if (!isObject(value.facets)) return refuse("facets", "an object — the row's metadata (tags, a title, dates); {} when the item has none");
   // `source` is the pipeline's and is overwritten with the system (the contract says so); the two actor keys are 050's trigger's and the pipeline deletes them before the INSERT — refused rather than dropped without a word (fifth review pass, cold read).
-  for (const k of PIPELINE_META_KEYS) if (k !== "source" && k in value.facets) return refuse(`facets.${k}`, `the pipeline's own metadata key — 050's trigger stamps it from the ingester's envelope, and a facet under it would be dropped; a source's author belongs under another name`);
+  for (const k of PIPELINE_META_KEYS) if (k !== "source" && k in value.facets) return refuse(`facets.${k}`, `the pipeline's own metadata key — 050's trigger (073's for trust) stamps it from the ingester's envelope, and a facet under it would be dropped; a source's author belongs under another name`);
   for (const k of CROSS_SOURCE_FACETS) if (k in value.facets) return refuse(`facets.${k}`, `names another source's ticket — node_state, source_thought and the board sync read a row carrying it as that ticket's, whatever its source; name the ticket as a link or a mention`);
 
   // createdAt — `null` is absent, as a Python emitter spells None.

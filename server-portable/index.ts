@@ -405,12 +405,13 @@ function explainRefusal(
 // `metadata`, and a caller naming one is refused rather than silently overruled
 // by the merge below: `source` (the origin label, set from the `source` arg),
 // the extractor's tag set (TAG_KEYS: type, topics, people…), the actor columns
-// migration 050 stamps from the key, the embedding model migration 021 records,
+// migration 050 stamps from the key and the trust migration 073 stamps beside
+// them (SMD-1724), the embedding model migration 021 records,
 // and the extractor's own failure marker. Everything else — `summary_model`,
 // which the session hook sets when a local model wrote the summary — is the
 // caller's to add.
 const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
-const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "embedding_model", "metadata_extraction_failed"]);
+const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed"]);
 const META_VALUE_MAX = 200;
 const META_KEYS_MAX = 8;
 /** The refusal for a bad `metadata` argument, or null when it is clean (or absent). Checked before the model calls, as the other shape refusals are. */

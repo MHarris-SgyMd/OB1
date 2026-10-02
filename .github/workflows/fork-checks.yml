@@ -291,8 +291,9 @@ jobs:
         working-directory: evals
         run: bun eval-orchestration.ts --self-check
 
-      # The authorization POC's fetch guard, proxy route table and resource
-      # policy (SMD-2285), with no stack; the auth-poc job runs the stack.
+      # The authorization server's fetch guard, the POC's proxy route table and
+      # resource policy, and the deploy's two layout settings (SMD-2285), with
+      # no stack; the auth-poc job runs the stack.
       - name: Authorization POC rules
         working-directory: evals
         run: bun eval-auth.ts --self-check
@@ -1523,9 +1524,10 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml down -v
 
-  # SMD-2285: the authorization server's proof of concept, evals/auth/. The
-  # upstream of oidc-provider declines Bun support, so the server runs on Bun
-  # only while this job holds every criterion: discovery under /auth,
+  # SMD-2285: the authorization server's proof of concept, evals/auth/, run
+  # against the deploy's own server image (deploy/auth/). The upstream of
+  # oidc-provider declines Bun support, so the server runs on Bun only while
+  # this job holds every criterion: discovery under /auth,
   # registration by metadata document and by DCR from the SDK v2 client, the
   # fetch guard (the library's own SSRF protection does not load under Bun),
   # PKCE and client credentials, one audience per token, and token exchange.

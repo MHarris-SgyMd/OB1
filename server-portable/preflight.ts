@@ -158,6 +158,13 @@ const THEN_055 = " Then apply db/migrations/055_capture_event_payload.sql and db
  * ob1.projecting — so every remedy that names 055 names 060 after it.
  */
 const THEN_060 = " Then apply db/migrations/060_append_then_project.sql — it last defines the audit trigger 055 also holds, so 055 alone puts its 055 body back (bun migrate.ts --reapply runs every file in order).";
+/**
+ * 060 and 061 also hold the write functions, which 073 last defines
+ * (SMD-1724): either applied by hand alone puts its bodies back, which
+ * stamp no declared trust on the row — so every remedy that names 060 or
+ * 061 names 073 after it.
+ */
+const THEN_073 = " Then apply db/migrations/073_thought_trust_on_the_row.sql — it last defines the write functions 060 and 061 also hold, so one of them applied alone puts its bodies back, which stamp no declared trust (bun migrate.ts --reapply runs every file in order).";
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
@@ -166,6 +173,7 @@ const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
 const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
 const APPLY_070 = "Apply db/migrations/070_listing_flags_lineage_pair.sql.";
+const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -1376,11 +1384,25 @@ if (configFailed) {
           // over 055's (SMD-2115): every remedy that names 046 names 055 after
           // it — before the "or, if the ledger…" clause, which is the whole
           // re-apply and needs no second step (second review pass).
-          const applied = migration === "046" ? `${apply}${THEN_055}` : migration === "055" ? `${apply}${THEN_060}` : apply;
+          const applied = migration === "046" ? `${apply}${THEN_055}` : migration === "055" ? `${apply}${THEN_060}`
+            // Not on a brain whose ledger stops before 073: the migrator applies
+            // 073 after the file named anyway, and 073's guard would refuse a
+            // hand apply ahead of 061 for the wrong reason (first review pass).
+            : (migration === "060" || migration === "061") && !(ledgerRead && !ledger.has("073")) ? `${apply}${THEN_073}` : apply;
           return ledgerRead || !ledgerPresent
             ? applied
             : `${applied} — or, if the ledger already records ${migration} (${whyUnread}): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}${reapplied ? ` ${reapplied}` : ""}`;
         };
+        /**
+         * The write functions' remedy: 073, their last definer — except on a
+         * brain whose ledger stops before 061, where 073's guard refuses (it
+         * needs 061's lineage writer) and the remedy is 061's file, which the
+         * migrator follows with the rest, 073 among them (second review pass).
+         */
+        const writersRemedy = (apply073: string, reapplied = ""): string =>
+          ledgerRead && !ledger.has("061")
+            ? ledgerRemedy("061", `${APPLY_061} The migrator applies the files after it, 073 — the write functions' last definer — among them.`)
+            : ledgerRemedy("073", apply073, reapplied);
         // By signature, not arity: a vendored bootstrap's upsert_thought(text,
         // vector, jsonb) is a third 3-argument form, and reading whichever the
         // catalog returned first judged a healthy brain by the wrong body
@@ -1412,12 +1434,13 @@ if (configFailed) {
         // the getting-started guide pasted again, a vendored schema or recipe
         // (SMD-1250) — replaces a body with no error when the signature
         // matches; this is where the operator learns which body is there, and
-        // which migration owns it. 060 is the last definer of BOTH forms
-        // (046's bodies up to the write — 035's, each with the write event —
-        // appending the event first and projecting the row: SMD-2116; the
-        // recognisers below still tell every earlier shape, which 060
-        // carries), so one file is the remedy for every stale state.
-        const LAST = "061_derivations.sql";
+        // which migration owns it. 073 is the last definer of BOTH forms
+        // (061's and 060's bodies — 046's up to the write, 035's, each with
+        // the write event, appending the event first and projecting the row:
+        // SMD-2116 — with the trust stamp: SMD-1724; the recognisers below
+        // still tell every earlier shape, which 073 carries), so one file is
+        // the remedy for every stale state.
+        const LAST = "073_thought_trust_on_the_row.sql";
         const LOCKED = /ob1:capture-takes-fingerprint-lock/;
         const NO_FILL = /ob1:re-capture-writes-no-provenance/;
         // 060's own sentinel: the body appends the event and projects the row
@@ -1430,7 +1453,12 @@ if (configFailed) {
         // derived row without lineage, which the `lineage` check fails on
         // (SMD-1731).
         const RECORDS_LINEAGE = /ob1:derivation-recorded-with-its-artifact/;
-        const applyLast = (why: string) => ledgerRemedy("061", `Apply db/migrations/${LAST}${why}`);
+        // 073's own sentinel: the body folds a payload's metadata.trust into
+        // the write event and stamps the new text with the event's trust.
+        // Without it — 060 or 061 re-applied by hand — a declared trust never
+        // reaches the row and a payload's raise is dropped unfiled (SMD-1724).
+        const STAMPS_TRUST = /ob1:write-stamps-trust/;
+        const applyLast = (why: string) => writersRemedy(`Apply db/migrations/${LAST}${why}`);
         // The 2-argument body is judged on its own and said beside whichever
         // 3-argument state fires, so a brain with both replaced hears it once
         // rather than on the run after the first remedy (first review pass).
@@ -1445,6 +1473,7 @@ if (configFailed) {
         const EVENT_SET = /ob1:capture-sets-write-event/;
         const twoNoEvent = two !== undefined && !twoStale && !twoUnlocked && !EVENT_SET.test(two.src);
         const twoNoProject = two !== undefined && !twoStale && !twoUnlocked && !twoNoEvent && !PROJECTS.test(two.src);
+        const twoNoTrust = two !== undefined && !twoStale && !twoUnlocked && !twoNoEvent && !twoNoProject && !STAMPS_TRUST.test(two.src);
         const TWO_STALE_WHY = "it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again";
         // Why a body predates the migration that added what it lacks (`stage`:
         // 033 for the lock, 035 for the fill): the ordinary state on a brain
@@ -1459,8 +1488,8 @@ if (configFailed) {
           // — 046 alone when `stage` is 046 or the ledger has it (a brain at
           // 032 lacks 033, 035 and 046).
           const list = (fs: string[]) => fs.length === 1 ? `migration ${fs[0]} is` : `migrations ${fs.slice(0, -1).join(", ")} and ${fs[fs.length - 1]} are`;
-          const files = ["033", "035", "046", "060", "061"].filter((f) => f >= stage);
-          return ledger.has("061") ? `${earlier} re-applied by hand puts it back`
+          const files = ["033", "035", "046", "060", "061", "073"].filter((f) => f >= stage);
+          return ledger.has("073") ? `${earlier} re-applied by hand puts it back`
             : ledgerRead && ledger.has(stage) ? `${earlier} re-applied by hand puts it back, and ${list(files.slice(1))} not yet applied`
             : ledgerRead ? `${list(files)} not yet applied`
               : `${list(files)} not yet applied, or ${earlier} was re-applied by hand`;
@@ -1470,10 +1499,11 @@ if (configFailed) {
         // re-apply is named (run-it, seventh review pass).
         const TWO_NO_EVENT_WHY = `it is from before migration 046 (${pre("046", "033 or 035")}): it sets no write event beside the actor, so a stance, cites or a window a PostgREST caller declares in the payload reaches no audit row`;
         const TWO_NO_PROJECT_WHY = `it is from before migration 060 (${pre("060", "046")}): it writes the row first and the trigger derives the event after it — the log describes the write, it does not decide it`;
-        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 060's either — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body is not 060's either — ${TWO_NO_EVENT_WHY}` : twoNoProject ? `; and the 2-argument body is not 060's either — ${TWO_NO_PROJECT_WHY}` : "";
+        const TWO_NO_TRUST_WHY = `it is from before migration 073 (${pre("073", "060")}): the trust a capture declares never reaches the row, and a payload's metadata.trust above the key is dropped without being filed`;
+        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 073's either — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body is not 073's either — ${TWO_NO_EVENT_WHY}` : twoNoProject ? `; and the 2-argument body is not 073's either — ${TWO_NO_PROJECT_WHY}` : twoNoTrust ? `; and the 2-argument body is not 073's either — ${TWO_NO_TRUST_WHY}` : "";
         if (!three) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 060's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body present is not 060's — ${TWO_NO_EVENT_WHY}` : twoNoProject ? `; and the 2-argument body present is not 060's — ${TWO_NO_PROJECT_WHY}` : ""}${andOthers}`,
-              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033, 035, 046, 060 and 061 redefined it, and an earlier file's body alone would drop what every later one added)."));
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 073's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body present is not 073's — ${TWO_NO_EVENT_WHY}` : twoNoProject ? `; and the 2-argument body present is not 073's — ${TWO_NO_PROJECT_WHY}` : twoNoTrust ? `; and the 2-argument body present is not 073's — ${TWO_NO_TRUST_WHY}` : ""}${andOthers}`,
+              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033, 035, 046, 060, 061 and 073 redefined it, and an earlier file's body alone would drop what every later one added)."));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
           // name and the two-step fallback do. A warning.
@@ -1481,7 +1511,7 @@ if (configFailed) {
               applyLast(" — the last definer of the 2-argument form as well."));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 061 after them): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 073 after them): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
               applyLast(" — the last definer; 022's or 025's file alone would leave what the later ones added out."));
         } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
           add("atomic capture", "warn",
@@ -1518,12 +1548,19 @@ if (configFailed) {
           add("atomic capture", "warn",
               `the 2- and 3-argument upsert_thought present, and the 3-argument body appends the event first and projects the row (060), but it is from before migration 061 (${pre("061", "060")}): the tags' recipe a capture declares reaches no lineage row and a replaced window set keeps its old row — derived rows without lineage, which the lineage check fails on, and stale rows left behind (SMD-1731)${andTwo}${andOthers}`,
               applyLast("."));
-        } else if (twoStale || twoUnlocked || twoNoEvent || twoNoProject) {
+        } else if (!STAMPS_TRUST.test(three.src)) {
+          // 061's body: recording lineage — and stamping no declared trust.
+          // It calls the 1-argument stamp, so the row takes the key's kind
+          // whatever the event declared. The 2-argument body is 060's.
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present and the 3-argument body is 061's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `not 060's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `not 060's — ${TWO_NO_EVENT_WHY}` : `not 060's — ${TWO_NO_PROJECT_WHY}`}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body records the tags' lineage with the write (061), but it is from before migration 073 (${pre("073", "061")}): the trust a capture declares never reaches the row — a page the operator's key declares ingested reads as the operator's — and a payload's metadata.trust above the key is dropped without being filed (SMD-1724)${andTwo}${andOthers}`,
+              applyLast("."));
+        } else if (twoStale || twoUnlocked || twoNoEvent || twoNoProject || twoNoTrust) {
+          add("atomic capture", "warn",
+              `the 2- and 3-argument upsert_thought present and the 3-argument body is 073's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `not 073's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `not 073's — ${TWO_NO_EVENT_WHY}` : twoNoProject ? `not 073's — ${TWO_NO_PROJECT_WHY}` : `not 073's — ${TWO_NO_TRUST_WHY}`}${andOthers}`,
               applyLast(" — the last definer of the 2-argument form as well."));
         } else {
-          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both shipped — the 3-argument body (061's) carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event (046) and append it first, projecting the row from it (060); the 3-argument body records the tags' lineage with the write (061); the 2-argument body (060's) refuses a non-object payload (005) and takes the lock${andOthers}`);
+          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both shipped — the 3-argument body (073's) carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event (046) and append it first, projecting the row from it (060); the 3-argument body records the tags' lineage with the write (061); both stamp the trust the write declares, never above the key (073); the 2-argument body (073's) refuses a non-object payload (005) and takes the lock${andOthers}`);
         }
 
         // The privileges the capture path's SECURITY INVOKER writers need to run
@@ -2734,9 +2771,16 @@ if (configFailed) {
             // a hand edit of 061's body, since 061 carries 060's.
             add("edit signature", "warn",
                 `${current[0].sig}: the form the servers and reembed.ts call since migration 061, alone, but its body is not 060's (edited by hand?): the row is written first and the trigger derives the event after it — the log describes the edit, it does not decide it (SMD-1997, step 2)`,
-                ledgerRemedy("061", APPLY_061));
+                writersRemedy(APPLY_073));
+          } else if (current.length && extra.length === 0 && !/ob1:write-stamps-trust/.test(current[0].src)) {
+            // 073's sentinel (SMD-1724): the body folds the patch's trust into
+            // the event and stamps a new text with it. An 11-argument body
+            // without it is 061's re-applied by hand, or a hand edit.
+            add("edit signature", "warn",
+                `${current[0].sig}: the form the servers and reembed.ts call since migration 061, alone, but its body is from before migration 073 (061 re-applied by hand?): the trust an edit declares never reaches the row, and a patch's metadata.trust above the key is dropped without being filed (SMD-1724)`,
+                writersRemedy(APPLY_073));
           } else if (current.length && extra.length === 0) {
-            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 061's body — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061)`);
+            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 073's body — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061), the declared trust stamped on a new text (073)`);
           } else if (current.length) {
             add("edit signature", "fail",
                 `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 061 — so every call that sends fewer than eleven arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional call, fails with "function is not unique"`,
@@ -2744,7 +2788,7 @@ if (configFailed) {
           } else if (tenAlone || nineAlone) {
             add("edit signature", "fail",
                 `${ut[0].sig} is the form from before migration ${tenAlone ? "061 (046's, which 060 kept)" : "046"}; the servers send p_lineage (the windows' and the tags' recipes), which only 061's form takes — so every edit would fail, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
-                ledgerRemedy("061", `${APPLY_061} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 061's DROP chain reaches every older form and leaves the one the servers call."));
+                writersRemedy(`${APPLY_073} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 073's DROP chain (061's, carried) reaches every older form and leaves the one the servers call."));
           } else if (ut.some((r) => Number(r.nargs) === ARITY - 1) || ut.some((r) => Number(r.nargs) === ARITY - 2)) {
             // A 10- or 9-argument form among the leftovers and no 11: 046 or
             // 032 re-applied would drop the older forms and leave its own to be
@@ -2752,7 +2796,7 @@ if (configFailed) {
             // review pass of SMD-1730, one form later).
             add("edit signature", "fail",
                 `${extra.join(" and ")} are forms from before migration 061 with none the servers call — every call with fewer than eleven arguments is "function is not unique"`,
-                ledgerRemedy("061", `${APPLY_061} Its DROP chain reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form.`, "Re-applied, 061's DROP chain reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form."));
+                writersRemedy(`${APPLY_073} Its DROP chain reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form.`, "Re-applied, 073's DROP chain (061's, carried) reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form."));
           } else {
             // 061 is the remedy here too: its DROP chain reaches the 8- and
             // 7-argument forms and leaves the one form the servers call, where
@@ -2760,7 +2804,7 @@ if (configFailed) {
             // start (run-it, third review pass of SMD-1730).
             add("edit signature", "fail",
                 `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db/reembed.ts refuses to run`,
-                ledgerRemedy("061", `${APPLY_061} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 061's DROP chain reaches every older form and leaves the one the servers call."));
+                writersRemedy(`${APPLY_073} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 073's DROP chain (061's, carried) reaches every older form and leaves the one the servers call."));
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");

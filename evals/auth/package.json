@@ -2,7 +2,7 @@
   "name": "ob1-auth-poc",
   "private": true,
   "type": "module",
-  "comment": "The authorization-server POC's container side (SMD-2285): oidc-provider is pinned EXACTLY, because its experimental features (CIMD, ack draft-02) take breaking changes in minor releases and its grants helpers are outside semver — a bump is a PR that runs `eval-auth.ts --verify`. Better Auth and its two plugins (the runner-up) are pinned exactly as well, for its 2026 advisory record. The MCP packages match server-portable's (SMD-2278).",
+  "comment": "The authorization-server POC's container side (SMD-2285): the stand-ins, the CIMD host, the bait and the runner-up. The winner is the deploy's own image (deploy/auth/package.json pins oidc-provider). Better Auth and its two plugins (the runner-up) are pinned exactly, for its 2026 advisory record. The MCP packages match server-portable's (SMD-2278).",
   "dependencies": {
     "@better-auth/cimd": "1.7.6",
     "@better-auth/oauth-provider": "1.7.6",
@@ -10,7 +10,6 @@
     "@modelcontextprotocol/server": "2.1.0",
     "better-auth": "1.7.6",
     "jose": "6.2.12",
-    "oidc-provider": "9.12.2",
     "zod": "4.6.5"
   }
 }

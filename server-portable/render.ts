@@ -538,8 +538,8 @@ export function renderThoughtStats(o: Outcome<ThoughtStats>): Reply {
   }, unknownRefusal, safeStats);
 }
 
-/** The two metadata keys 050's trigger owns (SMD-1726): the writer's kind and name, stamped as the content moves. */
-const ACTOR_MARKS: ReadonlySet<string> = new Set(["actor_kind", "actor_name"]);
+/** The metadata keys the stamp owns: the writer's kind and name (050, SMD-1726) and the content's trust (073, SMD-1724), stamped as the content moves. */
+const ACTOR_MARKS: ReadonlySet<string> = new Set(["actor_kind", "actor_name", "trust"]);
 
 /**
  * One change as a client reads it: when, what and who on the first line with
@@ -562,7 +562,8 @@ function renderChange(c: AuditChange, n: number): string {
     : c.origin !== null ? `by ${snipText(c.origin, 80)} (no key)`
     : "from outside the server";
   // 050's stamp is not an edit (it holds the updated_at trigger): a row whose
-  // only change is the two marks is "marked" — the backfill's row above all.
+  // only change is the marks — 050's two, 073's trust — is "marked", the
+  // backfill's row above all.
   const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every((k) => ACTOR_MARKS.has(k));
   const verb = c.action === "capture" ? "captured" : c.action === "update" ? (marksOnly ? "marked" : "edited") : "deleted";
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";

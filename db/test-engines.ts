@@ -180,6 +180,20 @@ ok(!censusSees(code("/** prints with console.log(line) and exits via process.exi
 ok(censusSees(code(`const g = "migrations/*.sql";\nprocess.exit(2);\n/** doc */\nconst t = \`--url \${g} // bad\`; process.exit(3);\n`)), "…and a /* or a // inside a string hides no code after it");
 ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late() {}\n")?.after.trim() === "function late() {}", "…and code after the CLI block is found, a brace in a string not counted");
 
+/**
+ * The scanner's words for a number past its flag's bound (SMD-2304 PR 5): a
+ * bound case must open with them, not with a later rule both paths fall
+ * through to when a bound is dropped from the CLI and run() at once — the
+ * egress gate, the lease pair (review pass 1: five of six such doubles passed).
+ */
+const BOUND_WORDS: [RegExp, string][] = [
+  [/^--batch past/, "--batch must be a decimal integer >= 1 and <= 2147483647"],
+  [/^--timeout past/, "--timeout must be a decimal integer >= 1 and <= 9007199254740"],
+  [/^--stale past/, "--stale must be a decimal integer >= 1 and <= 2000000"],
+  [/^--workers past/, "--workers must be a decimal integer >= 1 and <= 2147483647"],
+];
+const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re]) => re.test(what))?.[1];
+
 // ---------------------------------------------------------------------------
 // run() refuses in the CLI's words, before connecting.
 // ---------------------------------------------------------------------------
@@ -268,15 +282,27 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["a short lease and --limit 0", { url: AT, ttl: 3, heartbeat: 2, limit: 0 }, ["--url", AT, "--ttl", "3", "--heartbeat", "2", "--limit", "0"], {}],
     ["--timeout 0 and a short lease", { url: AT, timeout: 0, ttl: 1 }, ["--url", AT, "--timeout", "0", "--ttl", "1"], {}],
     ["--follow 0", { url: AT, follow: 0 }, ["--url", AT, "--follow", "0"], {}],
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, Bun's pool max, and AbortSignal.timeout's range.
+    ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
+    ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
+    // …each where the script read its number, before the lease pair the CLI checks after them.
+    ["--batch past its bound and a short lease", { url: AT, batch: 2147483648, ttl: 3, heartbeat: 2 }, ["--url", AT, "--batch", "2147483648", "--ttl", "3", "--heartbeat", "2"], {}],
+    ["--timeout past its bound and a short lease", { url: AT, timeout: 9007199254741, ttl: 3, heartbeat: 2 }, ["--url", AT, "--timeout", "9007199254741", "--ttl", "3", "--heartbeat", "2"], {}],
     ["--decide without the Jev tier", { url: AT, decide: true }, ["--url", AT, "--decide"], {}],
     // The banner on stdout, then the blanket gate (SMD-1903): the default policy with nothing declared local.
     ["an egress policy that refuses every row", { url: AT }, ["--url", AT], {}],
     // …under a model named in the environment run() is given: its banner names it, as the CLI's does.
     ["the gate's refusal under OB1_METADATA_MODEL from env", { url: AT }, ["--url", AT], { OB1_METADATA_MODEL: "env-model" }],
   ];
+  // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
+  const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
+  ok(boundCases === 5, `extract's bound cases all meet BOUND_WORDS (${boundCases} of 5)`);
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["extract-entities.ts", ...argv], env);
+    const words = boundWords(what);
+    if (words) ok(cli.err.startsWith(words) && r.err.startsWith(words), `…refused for its bound, in the scanner's words (${JSON.stringify(cli.err.split("\n")[0].slice(0, 80))})`);
     ok(r.code === 2 && cli.code === 2, `extract run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
     ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
     ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
@@ -350,13 +376,26 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["--force without --accept", { url: AT, force: true }, ["--url", AT, "--force"], {}],
     ["--limit beside --list", { url: AT, limit: 5, list: "pending" }, ["--url", AT, "--limit", "5", "--list"], {}],
     ["--note alone", { url: AT, note: "hm" }, ["--url", AT, "--note", "hm"], {}],
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int, Bun's pool max, a call signal's range, and --stale's reach back.
+    ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
+    ["--timeout past a call signal's range", { url: AT, timeout: 9007199254741 }, ["--url", AT, "--timeout", "9007199254741"], {}],
+    // …each where the script read its number, before the lease pair the CLI checks after them.
+    ["--batch past its bound and a short lease", { url: AT, batch: 2147483648, ttl: 3, heartbeat: 2 }, ["--url", AT, "--batch", "2147483648", "--ttl", "3", "--heartbeat", "2"], {}],
+    ["--timeout past its bound and a short lease", { url: AT, timeout: 9007199254741, ttl: 3, heartbeat: 2 }, ["--url", AT, "--timeout", "9007199254741", "--ttl", "3", "--heartbeat", "2"], {}],
+    ["--stale past the timestamp floor", { url: AT, stale: 2000001 }, ["--url", AT, "--stale", "2000001"], {}],
     ["--note with the pass's marker", { url: AT, reject: ID, note: "settled by the pass: mine" }, ["--url", AT, "--reject", ID, "--note", "settled by the pass: mine"], {}],
     // The banner on stdout, then the blanket gate (SMD-1903), under a judge model named in env.
     ["the egress gate's refusal under OB1_JUDGE_MODEL from env", { url: AT }, ["--url", AT], { OB1_JUDGE_MODEL: "env-judge" }],
   ];
+  // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
+  const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
+  ok(boundCases === 6, `consolidate's bound cases all meet BOUND_WORDS (${boundCases} of 6)`);
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["consolidate.ts", ...argv], env);
+    const words = boundWords(what);
+    if (words) ok(cli.err.startsWith(words) && r.err.startsWith(words), `…refused for its bound, in the scanner's words (${JSON.stringify(cli.err.split("\n")[0].slice(0, 80))})`);
     ok(r.code === 2 && cli.code === 2, `consolidate run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
     ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
     ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
@@ -424,6 +463,10 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     ["--accept-failed with --retry-failed", { url: AT, acceptFailed: [], retryFailed: true }, ["--url", AT, "--accept-failed", "--retry-failed"], {}],
     ["--retire with --switch-model", { url: AT, retire: "reembed:x@1024", switchModel: true }, ["--url", AT, "--retire", "reembed:x@1024", "--switch-model"], {}],
     ["--all alone", { url: AT, all: true }, ["--url", AT, "--all"], {}],
+    // The bounds the CLI never had (SMD-2304 PR 5): claim_thoughts' int and Bun's pool max — read before the modes' rule.
+    ["--batch past claim_thoughts' int", { url: AT, batch: 2147483648 }, ["--url", AT, "--batch", "2147483648"], {}],
+    ["--workers past the pool's max", { url: AT, workers: 2147483648 }, ["--url", AT, "--workers", "2147483648"], {}],
+    ["--batch past its bound and two modes", { url: AT, batch: 2147483648, status: true, retire: "k" }, ["--url", AT, "--batch", "2147483648", "--status", "--retire", "k"], {}],
     // Every number before the modes, the modes before the configuration, as the script judged them.
     ["--workers 0 and two modes", { url: AT, workers: 0, status: true, acceptFailed: [ID] }, ["--url", AT, "--workers", "0", "--status", "--accept-failed", ID], {}],
     ["two modes and a configuration refused", { url: AT, status: true, retire: "k" }, ["--url", AT, "--status", "--retire", "k"], BADDIM],
@@ -438,9 +481,14 @@ ok(mainBlock("x;\nif (import.meta.main) {\n  a({ b: \"}\" });\n}\nfunction late(
     // …under a model named in the environment run() is given: its key and banner name it, as the CLI's do.
     ["the gate's refusal under OB1_EMBEDDING_MODEL from env", { url: AT }, ["--url", AT], { OB1_EMBEDDING_MODEL: "  env-model ", OB1_EMBEDDING_DIM: "768" }],
   ];
+  // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
+  const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
+  ok(boundCases === 3, `reembed's bound cases all meet BOUND_WORDS (${boundCases} of 3)`);
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess({ ...opts, env: { ...BASE_ENV, ...env } });
     const cli = await counted(["reembed.ts", ...argv], env);
+    const words = boundWords(what);
+    if (words) ok(cli.err.startsWith(words) && r.err.startsWith(words), `…refused for its bound, in the scanner's words (${JSON.stringify(cli.err.split("\n")[0].slice(0, 80))})`);
     ok(r.code === 2 && cli.code === 2, `reembed run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
     ok(r.out === cli.out && r.err === cli.err && r.err !== "", `…in the CLI's words, the whole of both streams (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
     ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
@@ -548,6 +596,15 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   ok(wholeOutcome === boom && calls === 1 && fell.wholeContentRefused && fellBack.some((l) => l.startsWith("embedCapture: stub-embed refused the whole content (413)")),
      `…and on the whole content's fallback line, where the same call with a quiet log falls back and says so (${wholeOutcome === boom ? "the error" : String(wholeOutcome)})`);
   stub.stop(true);
+}
+
+// worker-bootstrap.ts's MAX_CALL_TIMEOUT_S is AbortSignal.timeout's edge in
+// seconds: the largest --timeout makes a signal, one more throws (SMD-2304 PR 5).
+{
+  const { MAX_CALL_TIMEOUT_S } = await import("./worker-bootstrap.ts");
+  const atMax = (() => { try { AbortSignal.timeout(MAX_CALL_TIMEOUT_S * 1000); return "made"; } catch (e) { return (e as Error).message; } })();
+  const past = (() => { try { AbortSignal.timeout((MAX_CALL_TIMEOUT_S + 1) * 1000); return "made"; } catch (e) { return (e as Error).message; } })();
+  ok(atMax === "made" && past !== "made", `MAX_CALL_TIMEOUT_S (${MAX_CALL_TIMEOUT_S} s) makes a call's timeout signal and one second more throws (${past.slice(0, 60)})`);
 }
 
 // cli.ts's numberProblem: the scanner's words, judged by value — the engines'
