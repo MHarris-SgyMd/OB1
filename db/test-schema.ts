@@ -2113,15 +2113,19 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const casts = (src: string) => src.split(CAST).length - 1;
   const uncast = (src: string) => src.split(CAST).join("embedding <=> query_embedding");
   // 074 adds a fourth, min_trust's walk, after 041's three: 041's walk with
-  // the rank beside the containment and the filter as v_filter.
+  // the rank beside the containment, EXECUTEd with the locals as parameters
+  // (a plan per call — as a static statement it fell to the generic plan's
+  // bitmap scan; 074's header), so its cast reads `$1::halfvec`.
   const blocks = cteBlocks(mt.prosrc);
-  assert(blocks.length === 4 && casts(blocks[0]) === 2 && casts(blocks[1]) === 0 && casts(blocks[2]) === 2 && casts(blocks[3]) === 2 && casts(mt.prosrc) === 6,
-         "039's cast is on both sides of each walk branch's two ORDER BYs — the unfiltered, the broad-filter and min_trust's CTEs, thoughts and chunks — and nowhere in the exact branch");
+  assert(blocks.length === 4 && casts(blocks[0]) === 2 && casts(blocks[1]) === 0 && casts(blocks[2]) === 2 && casts(blocks[3]) === 0 && casts(mt.prosrc) === 4,
+         "039's cast is on both sides of each walk branch's two ORDER BYs — the unfiltered and the broad-filter CTEs, thoughts and chunks — and nowhere in the exact branch");
   assert(cteBlocks(uncast(mt.prosrc)).slice(0, 3).join("\n---\n") === cteBlocks(mt014.prosrc).join("\n---\n"),
          "with 039's cast taken out, the first three candidate CTEs of the shipped body are 014's, byte for byte");
-  const RANK_LINE = /\n\s+AND ob1_trust_rank\((t|p)\.metadata->>'trust'\) >= v_min/g;
-  assert((blocks[3].match(RANK_LINE) ?? []).length === 2 && blocks[3].replace(RANK_LINE, "").replaceAll("@> v_filter", "@> filter") === blocks[2],
-         "…and the fourth, min_trust's walk (074), is the broad-filter walk with the rank beside the containment in both CTEs and nothing else moved");
+  const RANK_LINE = /\n\s+AND ob1_trust_rank\((t|p)\.metadata->>'trust'\) >= \$3/g;
+  const asLocals = (b: string) => b.replace(RANK_LINE, "").replaceAll("$1", "query_embedding").replaceAll("$2", "filter").replaceAll("$4", "v_fetch");
+  assert(/RETURN QUERY EXECUTE \$walk\$\s+WITH direct AS/.test(mt.prosrc) && /\$walk\$ USING query_embedding, v_filter, v_min, v_fetch, match_threshold, v_weight, v_half, v_count;/.test(mt.prosrc)
+      && (blocks[3].match(RANK_LINE) ?? []).length === 2 && asLocals(blocks[3]) === blocks[2],
+         "…and the fourth, min_trust's walk (074), is the broad-filter walk EXECUTEd with its locals as parameters and the rank beside the containment in both CTEs, nothing else moved");
   assert(routing(mt.prosrc).length > 0 && routing(mt.prosrc) === routing(mt014.prosrc), "…and so is the routing statement");
   assert(Number(mt014.prorows) === 1000 && !("enable_seqscan" in mt014.settings),
          `014's function has the estimate 1,000 and no plan setting (prorows ${mt014.prorows}, proconfig ${JSON.stringify(mt014.settings)}) — the trap that puts both in the defining statement`);
@@ -2145,6 +2149,20 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   // and 041 re-applied land BESIDE it, and are read by their own signature.
   await reapply("041");
   const mt041 = await proc(MATCH_THOUGHTS_SIGNATURE_6);
+  const SAMPLES = new RegExp(SAMPLE_STATEMENT.source, "g");
+  const samples = [...mt.prosrc.matchAll(SAMPLES)].map((m) => m[0]);
+  // The exact branch: from the RETURN QUERY that opens it — the last one before
+  // its `ANY (v_ids)` — to its LIMIT.
+  const exactOf = (src: string) => {
+    const at = src.indexOf("ANY (v_ids)");
+    const from = src.lastIndexOf("RETURN QUERY", at);
+    const to = src.indexOf("LIMIT v_count;", at);
+    return at < 0 || from < 0 || to < 0 ? "" : src.slice(from, to + "LIMIT v_count;".length);
+  };
+  assert(samples.length === 2 && samples[0] === SAMPLE_STATEMENT.exec(mt041.prosrc)?.[0] && exactOf(mt.prosrc) !== "" && exactOf(mt.prosrc) === exactOf(mt041.prosrc),
+    "074's gate sample and its exact branch are 041's, byte for byte (two samples in the body: 041's and min_trust's)");
+  assert(samples[1] === samples[0].replace("SELECT (t.metadata @> filter AND t.embedding IS NOT NULL) AS hit", "SELECT (t.metadata @> v_filter AND ob1_trust_rank(t.metadata->>'trust') >= v_min AND t.embedding IS NOT NULL) AS hit"),
+    "…and min_trust's gate is that sample counting a row that passes the filter (an empty one when none was given) and the rank");
   await reapply("039");
   const mt039 = await proc(MATCH_THOUGHTS_SIGNATURE_6);
   assert(mt039.prosrc === mt041.prosrc, "041's body is 039's byte for byte — 040's clause and 041's two are the whole change");
@@ -11688,6 +11706,9 @@ console.log("\n[67] Migration 074: min_trust — match_thoughts and search_thoug
   const ingRows = await call(plainQ, "ingested", "{}", 200);
   assert(allRows.length === 160 && ingRows.length === 120 && ingRows.every((r) => r.t !== null),
     `NULL is no constraint (all ${allRows.length}); 'ingested' is "labelled": the forty unmarked rows are below every min_trust (${ingRows.length})`);
+  const nullFilter = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, NULL, 0.0, 90.0, 'agent')`, [plainQ]);
+  const emptyFilter = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.0, 90.0, 'agent')`, [plainQ]);
+  assert(nullFilter.length === 10 && JSON.stringify(nullFilter) === JSON.stringify(emptyFilter), "a NULL filter with a min_trust is no filter, as an empty one is — not a filter matching nothing (first review pass, run)");
   const nullCall = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [plainQ]);
   const sevenNull = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.0, 90.0, NULL)`, [plainQ]);
   assert(JSON.stringify(nullCall) === JSON.stringify(sevenNull) && nullCall.length === 10, "a 4-argument call still resolves, to the same rows as min_trust NULL — the default, not a second overload");
@@ -11704,8 +11725,19 @@ console.log("\n[67] Migration 074: min_trust — match_thoughts and search_thoug
       for (const [k, qv] of walkQs.entries()) await tx.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{}'::jsonb, $2::vector)`, [`074 planted at walk query ${k}`, qv]);
     });
   });
+  // …and a chunk-only ingested thought — no vector of its own — whose chunk
+  // sits at the second query: the walk's chunk side must judge it by its
+  // parent's trust (first review pass: no test put chunks under this walk).
+  const [chunky] = await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "imp-key", via: "test-schema" })]);
+    return (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('074 a chunk-only ingested page', '{}'::jsonb) RETURNING id::text AS id`)).rows;
+  });
+  await db.query(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1::uuid, 0, 'the page''s one window', $2::vector)`, [chunky.id, walkQs[1]]);
   const opCount = (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'trust' = 'operator'`)).c;
   assert(opCount > 1000, `${opCount} operator rows, above the 1,000-row exact threshold: min_trust operator takes the walk`);
+  const viaChunk = await call(walkQs[1], null, "{}", 3);
+  assert(viaChunk.some((r) => r.id === chunky.id) && !(await call(walkQs[1], "operator", "{}")).some((r) => r.id === chunky.id),
+    "the chunk-only ingested page is found through its chunk without min_trust, and the min_trust walk's chunk side leaves it out");
   const nearest = await call(walkQs[0], null, "{}", 1);
   assert(nearest[0]?.t === "ingested", "without min_trust each walk query's nearest row is the ingested one planted at it");
   let walkOverlap = 0, walkReturned = 0, walkBelow = 0;

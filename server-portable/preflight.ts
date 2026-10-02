@@ -140,7 +140,7 @@ const APPLY_074 = "Apply db/migrations/074_min_trust.sql.";
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 074 last define search_thoughts_hybrid and match_thoughts, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/074_min_trust.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 074 last define search_thoughts_hybrid and match_thoughts, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
 /** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
 const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
@@ -3214,7 +3214,7 @@ if (configFailed) {
             } else {
               add("walk index", "warn",
                   `match_thoughts orders its walk by ${bodyCasts ? "embedding::halfvec" : "the vector column"} but ${problems.join("; ")}${ledgerHas039 ? " — although migration 039 is recorded as applied: an earlier definer re-applied by hand, or an index rebuilt by hand" : ""} — the planner has no index path for the walk, so every unfiltered and broad-filter search sequentially scans both tables (exact; 019's latency back)`,
-                  `Apply db/migrations/039_match_thoughts_halfvec_index.sql — \`bun db/migrate.ts\` where the ledger does not record it, \`--reapply\` or the file alone against the direct connection where it does — which swaps a vector index under the name for the halfvec one, builds where the name is free, rebuilds an INVALID one and restores the body's cast; on a brain past a million rows build the staging indexes CONCURRENTLY first, as its header says.`);
+                  `Apply db/migrations/039_match_thoughts_halfvec_index.sql — \`bun db/migrate.ts\` where the ledger does not record it, \`--reapply\` or the file alone against the direct connection where it does — which swaps a vector index under the name for the halfvec one, builds where the name is free, rebuilds an INVALID one and restores the body's cast; then db/migrations/074_min_trust.sql, the last definer of match_thoughts — 039's file alone re-creates the 6-argument form beside 074's, and every 6-argument call is then "function is not unique" (SMD-1724); on a brain past a million rows build the staging indexes CONCURRENTLY first, as 039's header says.`);
             }
           }
         } catch (e) {

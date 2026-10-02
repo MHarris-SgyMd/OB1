@@ -171,7 +171,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2379 assertions: 2379 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2383 assertions: 2383 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports seventy-four (74) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -972,8 +972,12 @@ A min_trust takes the filtered path whatever the filter, and its statements
 stand beside 041's — the gate's sample, a collection by
 `thoughts_trust_rank_idx` (a btree over `ob1_trust_rank(metadata->>'trust')`)
 alone or beside the GIN index when a filter is given too, and the walk with the
-rank inside both candidate scans; the exact answer is 041's over the ids
-collected. The hybrid and `search_thoughts_current` call both through their
+rank inside both candidate scans, EXECUTEd so each call is planned with its
+values known (as a static statement it fell to plpgsql's cached generic plan
+on a connection's sixth call, a bitmap scan and a sort instead of the walk —
+SMD-2468 tracks the same exposure in 041's own walk); the exact answer is
+041's over the ids collected. The index is built inside the migrator's
+transaction, so writes to `thoughts` wait for it. The hybrid and `search_thoughts_current` call both through their
 defaults and gain the argument in a later PR. test-schema [67], test-live [21b],
 test-upgrade [20y].
 
@@ -3184,7 +3188,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2379 assertions, PGlite, no container
+bun test-schema.ts                          # 2383 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1048 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

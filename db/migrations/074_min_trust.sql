@@ -101,7 +101,11 @@ COMMENT ON FUNCTION ob1_min_trust_rank(text) IS
 -- ---------------------------------------------------------------------------
 -- A whole-table btree: a row of rank 0 is one entry, and a partial index
 -- (rank > 0) would need every query's predicate to imply it, which a
--- parameter compared with >= does not prove to the planner.
+-- parameter compared with >= does not prove to the planner. Built inside the
+-- migrator's transaction, so writes to thoughts wait for it (SHARE): one read
+-- of every row's metadata, seconds on a brain of a few hundred thousand
+-- thoughts. A brain far past that can build it by hand first, CONCURRENTLY
+-- under this name, and this statement then finds it.
 CREATE INDEX IF NOT EXISTS thoughts_trust_rank_idx ON thoughts (ob1_trust_rank(metadata->>'trust'));
 
 -- ---------------------------------------------------------------------------
@@ -324,7 +328,7 @@ BEGIN
   -- branches to the exact answer on the same rows; [8e] and db/test-live.ts
   -- [5d] hold the gate.
   -- ob1:min-trust-inside-scan — a CONTRACT SENTINEL, not prose (the 014
-  -- convention); db/test-schema.ts and preflight read it. 074: a min_trust
+  -- convention); db/test-schema.ts [67] reads it. 074: a min_trust
   -- makes the call filtered whatever the filter, and each filtered statement
   -- below has its min_trust twin beside it — the gate's sample, the
   -- collection (by thoughts_trust_rank_idx, beside the GIN index when a
@@ -567,25 +571,36 @@ BEGIN
     ELSE
       -- 074: a min_trust's walk — 041's, the rank beside the containment
       -- inside both candidate CTEs, so the scan keeps going until v_fetch
-      -- candidates pass both.
-      RETURN QUERY
+      -- candidates pass both. EXECUTEd, so every call is planned with its
+      -- values known: as a static statement plpgsql moved it to the cached
+      -- generic plan on a connection's sixth call, and that plan is a
+      -- BitmapAnd of the GIN and rank indexes and a top-N sort over every
+      -- passing row, not the HNSW walk — 20 ms to 450 ms a call at 50,000
+      -- rows, its rows changing with it (first review pass, run on
+      -- PostgreSQL 16; under plan_cache_mode = force_custom_plan it stayed at
+      -- 10–36 ms). 041's own walk can take the same turn under a selective
+      -- filter, SMD-2468; its statements stay as they shipped here. The
+      -- text is 041's walk with the locals as parameters: $1 the query, $2
+      -- the filter, $3 the rank, $4 v_fetch, $5 the threshold, $6 and $7 the
+      -- blend, $8 v_count.
+      RETURN QUERY EXECUTE $walk$
       WITH direct AS (
-        SELECT t.id AS tid, 1 - (t.embedding <=> query_embedding) AS sim
+        SELECT t.id AS tid, 1 - (t.embedding <=> $1) AS sim
         FROM thoughts t
         WHERE t.embedding IS NOT NULL
-          AND t.metadata @> v_filter
-          AND ob1_trust_rank(t.metadata->>'trust') >= v_min
-        ORDER BY t.embedding::halfvec({{EMBEDDING_DIM}}) <=> query_embedding::halfvec({{EMBEDDING_DIM}})
-        LIMIT v_fetch
+          AND t.metadata @> $2
+          AND ob1_trust_rank(t.metadata->>'trust') >= $3
+        ORDER BY t.embedding::halfvec({{EMBEDDING_DIM}}) <=> $1::halfvec({{EMBEDDING_DIM}})
+        LIMIT $4
       ),
       chunked AS (
-        SELECT c.thought_id AS tid, 1 - (c.embedding <=> query_embedding) AS sim
+        SELECT c.thought_id AS tid, 1 - (c.embedding <=> $1) AS sim
         FROM thought_chunks c
         JOIN thoughts p ON p.id = c.thought_id
-        WHERE p.metadata @> v_filter
-          AND ob1_trust_rank(p.metadata->>'trust') >= v_min
-        ORDER BY c.embedding::halfvec({{EMBEDDING_DIM}}) <=> query_embedding::halfvec({{EMBEDDING_DIM}})
-        LIMIT v_fetch
+        WHERE p.metadata @> $2
+          AND ob1_trust_rank(p.metadata->>'trust') >= $3
+        ORDER BY c.embedding::halfvec({{EMBEDDING_DIM}}) <=> $1::halfvec({{EMBEDDING_DIM}})
+        LIMIT $4
       ),
       best AS (
         SELECT u.tid, MAX(u.sim) AS sim
@@ -593,12 +608,13 @@ BEGIN
         GROUP BY u.tid
       )
       SELECT t.id, t.content, t.metadata, b.sim, t.created_at,
-             recency_score(b.sim, t.created_at, v_weight, v_half)
+             recency_score(b.sim, t.created_at, $6, $7)
       FROM best b
       JOIN thoughts t ON t.id = b.tid
-      WHERE b.sim > match_threshold
+      WHERE b.sim > $5
       ORDER BY 6 DESC, t.id
-      LIMIT v_count;
+      LIMIT $8
+      $walk$ USING query_embedding, v_filter, v_min, v_fetch, match_threshold, v_weight, v_half, v_count;
     END IF;
   END IF;
 END;
