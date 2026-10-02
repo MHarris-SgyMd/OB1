@@ -5,7 +5,7 @@
 // MCP registration renders it in the words it always has (render.ts), and the
 // REST core (SMD-2284) answers it as JSON.
 
-import { type EmbeddedCapture } from "../embed.ts";
+import type { EmbeddedCapture } from "../embed.ts";
 import { extractMetadata, metadataRefused, TAG_KEYS } from "../metadata.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
@@ -46,16 +46,31 @@ function metadataProblem(metadata: Record<string, unknown> | undefined): Refusal
   return null;
 }
 
+/** Whether an id of `ids` names a thought: the store's answer, read once, cased as Postgres hands ids back. */
+async function liveIn(store: ThoughtStore, ids: string[]): Promise<(id: string) => boolean> {
+  const have = await store.existingIds(ids);
+  return (id) => have.has(id.toLowerCase());
+}
+
 /**
  * The ids in `ids` that name a thought, or undefined when none does — the one
  * rule for trimming a capture-only key's `derived_from` before the write and
  * again on the retry (thirteenth review pass: it was spelled twice).
  */
 async function liveSubset(store: ThoughtStore, ids: string[]): Promise<string[] | undefined> {
-  const have = await store.existingIds(ids);
-  const kept = ids.filter((d) => have.has(d.toLowerCase()));
+  const live = await liveIn(store, ids);
+  const kept = ids.filter(live);
   return kept.length ? kept : undefined;
 }
+
+/**
+ * The audit trail's actor for a write through this core (SMD-1730): the key's
+ * name — what the agent was CALLED when it wrote, which a later rename would
+ * otherwise erase — the stable id migration 010 resolved it to (absent when
+ * the registry could not answer; see agents.ts), and the door (046's origin).
+ * One place, so a field added to the actor reaches every write.
+ */
+const actorOf = (ctx: Ctx, principal: Principal) => ({ name: principal.name, agentId: principal.agentId, via: ctx.door });
 
 /** A whole-content embedding that fell back to the head window (embed.ts): what an edit or a capture reply says about it. */
 export type HeadWindow = { fellBack: boolean; refused: boolean; error?: string };
@@ -232,18 +247,10 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // extraction failed or was refused: a caller's tags are not a
       // derivation.
       lineage: captureLineage(cfg, embedded, metadata),
-      // The audit trail's actor. `name` is the access key's name from
-      // auth.ts; `agentId` is the stable id migration 010 resolved it to,
-      // and is absent when the registry could not answer — see agents.ts.
-      // Both are recorded: the name is what the agent was CALLED at the time
-      // of writing, which a later rename would otherwise erase. `via` is
-      // this server, the door (046's origin column); the row's source is
-      // its own metadata.source, "mcp" above, which the trigger reads
-      // itself (SMD-1730).
+      // The audit trail's actor (actorOf); the row's source is its own
+      // metadata.source, "mcp" above, which the trigger reads itself (SMD-1730).
       actor: {
-        name: principal.name,
-        agentId: principal.agentId,
-        via: ctx.door,
+        ...actorOf(ctx, principal),
         // The gate's decisions for this write, on the audit row (SMD-1903);
         // absent when both endpoints are declared local and nothing was judged.
         ...(gate.record ? { egress: gate.record } : {}),
@@ -338,8 +345,8 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       let missingAt: number[] = [];
       if (reader) { // a non-reader is told no position, so the store is not asked (tenth review pass)
         try {
-          const have = await (await ctx.store()).existingIds(sent);
-          missingAt = sent.map((d, i) => (have.has(d.toLowerCase()) ? -1 : i)).filter((i) => i >= 0);
+          const live = await liveIn(await ctx.store(), sent);
+          missingAt = sent.map((d, i) => (live(d) ? -1 : i)).filter((i) => i >= 0);
         } catch { /* the store could not say: the list alone, then */ }
       }
       // The positions are named only to a caller allowed to know a source
@@ -421,7 +428,7 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id, conten
     embedding: embedded?.embedding,
     chunks: embedded?.chunks,
     ifUnchangedSince: if_unchanged_since,
-    actor: { name: principal.name, agentId: principal.agentId, via: ctx.door, ...(gate?.record ? { egress: gate.record } : {}) },
+    actor: { ...actorOf(ctx, principal), ...(gate?.record ? { egress: gate.record } : {}) },
     // Read by update_thought only with content, when the vector moves (021).
     embeddingModel: embedded?.model,
     // 061: the windows' recipe when the new text made windows; the patch
@@ -466,7 +473,7 @@ export type Deleted = { id: string; detached?: number; inactive?: number };
 export async function deleteThought(ctx: Ctx, principal: Principal, { id, detach_citations }: Input<"delete_thought">): Promise<Outcome<Deleted>> {
   const result = await (await ctx.store()).deleteThought({
     id,
-    actor: { name: principal.name, agentId: principal.agentId, via: ctx.door },
+    actor: actorOf(ctx, principal),
     // 042: the refusal is the default; the way through is named here.
     detach: detach_citations === true,
   });
