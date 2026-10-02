@@ -2162,7 +2162,7 @@ side's `derived_from` names the other, a page and its evidence — is tagged
 naming the reject unless `--force` says the pointer is meant — a guard on the
 one accept door, not a verdict — and a row accepted before the pair became one
 is tagged under `--list accepted` with `--reject <id>`, which clears the pointer
-(029), as the repair. `--limit` is the pass's cap and is refused beside `--list`. Such a pair is never proposed since 066, and a
+(029), as the repair. `--limit` is the pass's cap and is refused beside `--list`. `--dry-run` and `--status` are refused beside a decision, which they never stopped from being written (`--accept <id> --dry-run` accepted the proposal), and beside `--list` or `--stale`, which take the pass's place (SMD-2405); `--list` and `--stale` beside a decision read after it is written. Such a pair is never proposed since 066, and a
 standing row is the reviewer's alone: the pass never replaces a pending one,
 and settles a stale one on its next run (067). `--accept` writes the pointer
 on the thought the verdict names as current (or the one `--direction` names — required for an
@@ -3208,7 +3208,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2396 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1053 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1055 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

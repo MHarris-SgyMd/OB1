@@ -4818,6 +4818,19 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const needDirC = await consolidateInProcess({ accept: undirected.id });
   assert(same(needDirC, needDir), `…and run() in-process refuses it in the same words, on the same streams (exit ${needDirC.code})`);
   assert((await supersedesOf(green)) === null, "…and nothing was written");
+  // The pass's report beside a decision is refused before anything opens: the
+  // review path never read it, so `--accept <id> --dry-run` accepted the
+  // proposal for real, under the key (SMD-2405). The same accept without it is
+  // made next, so each of these would have written.
+  const auditRows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id IN (${green}::uuid, ${blue}::uuid)`)[0].c);
+  const auditsBeforeDry = await auditRows();
+  for (const report of ["--dry-run", "--status"]) {
+    const dryAccept = await consolidate("--accept", undirected.id, "--direction", "newer", report);
+    const [{ status: dryStatus }] = await sql`SELECT status FROM supersession_proposals WHERE id = ${undirected.id}::uuid`;
+    assert(dryAccept.code === 2 && dryAccept.stdout === "" && dryAccept.stderr.startsWith(`${report} writes nothing, and --accept writes a decision; pass one`)
+           && dryStatus === "pending" && (await supersedesOf(green)) === null && (await auditRows()) === auditsBeforeDry,
+           `--accept <id> ${report} is refused with exit 2, the proposal still pending, no pointer and no audit row written (exit ${dryAccept.code}, ${dryStatus}, ${(await auditRows()) - auditsBeforeDry} audit row(s))`);
+  }
   const accUndirected = await consolidate("--accept", undirected.id, "--direction", "newer");
   assert(accUndirected.code === 0 && new RegExp(`accepted ${undirected.id}: ${green} now supersedes ${blue}`).test(accUndirected.out), "…with a direction it is accepted");
   assert((await supersedesOf(green)) === blue, "…and green supersedes blue");
