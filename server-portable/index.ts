@@ -892,7 +892,7 @@ if (SERVES_ON_BUN) {
 
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
-  // No `idleTimeout`: a tool call outlives the default by the keepalive above,
+  // No `idleTimeout`: a tool call outlives the default by the keepalive (sse.ts),
   // and the default is the right reaper for a dead socket (SMD-1864).
   // An empty PORT is unset, not port 0 (a random port, silently) — `||`, the rule the vendored servers' tails share (SMD-1799).
   port: Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.PORT || 8000),

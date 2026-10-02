@@ -2202,16 +2202,18 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
   // serves (serveHere), and only then does the store's first build reconcile
   // the rows a prior process left live. Its first keyed request builds the
   // store (the registry lookup reads it); the reconcile runs detached after.
+  // It reaches every live row in jobs, not only this one's — a section after
+  // this one starts from no live job.
   const sql = new SQL({ url: URL_, max: 1 });
   const jobId = crypto.randomUUID();
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at) VALUES (${jobId}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now())`;
   const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const port = free.port;
   free.stop(true);
-  const child = Bun.spawn(["bun", "index.ts"], {
+  const child = Bun.spawn([process.execPath, "index.ts"], {
     cwd: dirname(fileURLToPath(import.meta.url)),
     env: { ...process.env, PORT: String(port), MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
-    stdout: "pipe", stderr: "pipe",
+    stdout: "ignore", stderr: "pipe",
   });
   let status = "running";
   try {
@@ -2231,6 +2233,8 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
   } finally {
     child.kill();
     await child.exited;
+    // What the entry said, when it did not do what was asked of it.
+    if (status !== "lost") console.log((await new Response(child.stderr).text()).split("\n").slice(-10).map((l) => `      ${l}`).join("\n"));
     await sql`DELETE FROM jobs WHERE id = ${jobId}::uuid`;
     await sql.close();
   }

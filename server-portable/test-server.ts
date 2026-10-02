@@ -153,9 +153,10 @@ console.log("[1] The module is importable at all");
 console.log("\n[2] Runtime neutrality");
 {
   const src = await Bun.file(new URL("./index.ts", import.meta.url)).text();
-  // The process root the server builds on (SMD-2284) runs on Workers too.
+  // The process root the server builds on and its stream keepalive (SMD-2284) run on Workers too.
   const rootSrc = await Bun.file(new URL("./root.ts", import.meta.url)).text();
-  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc]]) {
+  const sseSrc = await Bun.file(new URL("./sse.ts", import.meta.url)).text();
+  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc]]) {
     assert(!/\bDeno\./.test(text), `${file}: no Deno.* references`);
     assert(!/\bBun\./.test(text), `${file}: no Bun.* references`);
     assert(!/jsr:/.test(text), `${file}: no jsr: imports`);
@@ -409,7 +410,7 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
   // composed server sees "" wherever deploy/.env set nothing.
   assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "" }) === QUERY_LOG.retentionDaysDefault,
          "OB1_QUERY_LOG_RETENTION_DAYS='' — what compose forwards for an unset variable — is the default window, not 0 days");
-  // The boundary rule index.ts's initEnv and preflight apply to the whole environment (SMD-1843).
+  // The boundary rule root.ts's initEnv and preflight apply to the whole environment (SMD-1843).
   const trimmed = trimmedEnv({ OB1_LLM_API_KEY: " sk-abc ", OB1_EMBEDDING_DIM: " ", MCP_ACCESS_KEYS: "a:write:h1\nb:read:h2\n", PORT: "8000", n: 3, u: undefined });
   assert(trimmed.OB1_LLM_API_KEY === "sk-abc" && trimmed.OB1_EMBEDDING_DIM === "" && trimmed.MCP_ACCESS_KEYS === "a:write:h1\nb:read:h2" && trimmed.PORT === "8000" && trimmed.n === 3 && trimmed.u === undefined,
          "trimmedEnv trims every string value (a quoted key's trailing space, a dimension of spaces to ''), keeps inner newlines, and passes non-strings through");
@@ -1218,7 +1219,7 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
 
 console.log("\n[17] tierProblem validates OB1_TIER at the boundary initEnv and preflight share (SMD-1953)");
 {
-  // The one validator db/config.mjs owns; index.ts's initEnv throws on it and
+  // The one validator db/config.mjs owns; root.ts's initEnv throws on it and
   // preflight's tier check fails on it, so a wrong OB1_TIER cannot reach the
   // best-effort log write that would silently drop every query_log row.
   assert(tierProblem(undefined) === null && tierProblem("") === null, "unset or empty is fine — a plain brain, not a pipeline tier");

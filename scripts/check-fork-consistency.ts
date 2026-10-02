@@ -5203,23 +5203,32 @@ function transportLeaksIn(text: string, role: TransportRole = INDEX_ROLE): { lin
   const code = blanked(text, false); // comments blanked: a specifier is read here
   const bare = blanked(text, true); // strings too: a statement is found here, so a sentence naming a file is not one
   const specAt = (q: number) => code.slice(q + 1, code.indexOf(code[q], q + 1));
-  const statements: [number, number][] = [];
-  for (const m of bare.matchAll(/\b(?:import|export)\s+(?:type\s+)?([^;"'`]*?)\s*\bfrom\s*["']/g)) {
-    statements.push([m.index, m.index + m[0].length]);
+  /**
+   * Each import statement's span by its module: `db` may be named in the
+   * root's, the store in the store module's — and nowhere else for being in a
+   * statement, since a statement without a semicolon reads on to the next
+   * `from` (review pass 1).
+   */
+  const imports: [spec: string, start: number, end: number][] = [];
+  for (const m of bare.matchAll(/\b(import|export)\s+(?:type\s+)?([^;"'`]*?)\s*\bfrom\s*["']/g)) {
     const spec = specAt(m.index + m[0].length - 1);
+    const reexport = m[1] === "export";
+    if (!reexport) imports.push([spec, m.index, m.index + m[0].length]);
     const allowed = role.imports.get(spec);
     if (!allowed) { hits.push({ line: lineAt(m.index), what: `imports ${spec}` }); continue; }
     if (allowed === "*") continue;
-    const list = /\{([^}]*)\}/.exec(m[1]);
-    if (!list || /\*/.test(m[1]) || /^[\w$]+\s*(?:,|$)/.test(m[1].trim())) { hits.push({ line: lineAt(m.index), what: `imports ${spec} whole, where only ${[...allowed].join(", ")} may be named` }); continue; }
+    const list = /\{([^}]*)\}/.exec(m[2]);
+    if (!list || /\*/.test(m[2]) || /^[\w$]+\s*(?:,|$)/.test(m[2].trim())) { hits.push({ line: lineAt(m.index), what: `imports ${spec} whole, where only ${[...allowed].join(", ")} may be named` }); continue; }
     for (const entry of list[1].split(",").map((s) => s.trim().replace(/^type\s+/, "")).filter(Boolean)) {
       // Under its own name: a rename would hide the name the rules below look for.
       const [name, alias] = entry.split(/\s+as\s+/);
       if (!allowed.has(name)) hits.push({ line: lineAt(m.index), what: `imports ${name} from ${spec}` });
       else if (alias !== undefined && alias !== name) hits.push({ line: lineAt(m.index), what: `imports ${name} from ${spec} as ${alias}` });
+      // Handed on, the store's builder or closer is out of every rule below (review pass 1).
+      else if (reexport && STORE_WIRING.includes(name)) hits.push({ line: lineAt(m.index), what: `re-exports ${name} from ${spec}` });
     }
   }
-  const inStatement = (i: number) => statements.some(([s, e]) => i >= s && i < e);
+  const inImportOf = (spec: string, i: number) => imports.some(([from, s, e]) => from === spec && i >= s && i < e);
   for (const m of bare.matchAll(/\bimport\s*["']/g)) hits.push({ line: lineAt(m.index), what: `a side-effect import of ${specAt(m.index + m[0].length - 1)}` });
   for (const m of bare.matchAll(/\b(?:import|require)\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a dynamic import" });
   for (const m of bare.matchAll(/\bsql\s*`|\bnew\s+(?:Bun\s*\.\s*)?SQL\b|\.unsafe\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a SQL call" });
@@ -5232,7 +5241,7 @@ function transportLeaksIn(text: string, role: TransportRole = INDEX_ROLE): { lin
   }
   for (const m of bare.matchAll(/(?<![.\w$])db\b/g)) {
     const before = bare.slice(0, m.index), after = bare.slice(m.index + 2);
-    if (inStatement(m.index)) continue; // named in an import (the root's reader) — the list above holds which
+    if (inImportOf("./root.ts", m.index)) continue; // named in the root's import — the list above holds which
     if (role.wiring && /\bfunction\s+$/.test(before)) continue; // its declaration, in the root
     if (/\bcreateCore\(\s*\{[^{}]*\bstore\s*:\s*$/.test(before) && /^\s*[,}]/.test(after)) continue; // handed to the core, uncalled
     if (/\bagents\(\)\s*\.\s*resolve\(\s*$/.test(before) && /^\s*\(\s*\)/.test(after)) continue; // the agent registry's lookup
@@ -5242,7 +5251,7 @@ function transportLeaksIn(text: string, role: TransportRole = INDEX_ROLE): { lin
   }
   const inWiring = (i: number) => spans.some(([s, e]) => i >= s && i < e);
   for (const m of bare.matchAll(/(?<![.\w$])(?:_store|createStore)\b/g)) {
-    if (inStatement(m.index) || inWiring(m.index) || (role.wiring && /\blet\s+$/.test(bare.slice(0, m.index)))) continue;
+    if (inImportOf("./store.ts", m.index) || inWiring(m.index) || (role.wiring && /\blet\s+$/.test(bare.slice(0, m.index)))) continue;
     hits.push({ line: lineAt(m.index), what: role.wiring ? `the store (${m[0]}) named outside ${STORE_WIRING.map((n) => `${n}()`).join(" and ")}` : `the store (${m[0]}) named outside root.ts` });
   }
   return hits;
@@ -5286,6 +5295,15 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ["function db(): Promise<ThoughtStore> {\n  return _store!;\n}\n", true],
   ["export function closeStore(): Promise<boolean> {\n  return Promise.resolve(false);\n}\n", true],
   ['import { decideCalls } from "./egress.ts";\n', true, ROOT_ROLE],
+  // SMD-2284 review pass 1: the builder handed on, a statement read on past its line, a second db() naming no store.
+  ['export { db } from "./root.ts";\n', true],
+  ['export { closeStore } from "./root.ts";\n', true],
+  ['export const s = db\nimport { canRead } from "./auth.ts";\n', true],
+  ['export const s = createStore(env())\nimport { setJobSink } from "./jobs.ts";\n', true, ROOT_ROLE],
+  ["function db() {\n  return Promise.reject(new Error(\"elsewhere\"));\n}\n", true],
+  // …and a builder or a factory of the same name from another module the file may import whole.
+  ['import { db } from "./jobs.ts";\n', true],
+  ['import { createStore } from "./agents.ts";\n', true, ROOT_ROLE],
   ["const r = await (await db()).retryFailed(workType);\n", true, ROOT_ROLE],
   ['import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";\n', false],
   ["drainOnSignal({ server: () => bunServer, close: closeStore });\n", false],
