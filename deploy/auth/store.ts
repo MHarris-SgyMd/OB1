@@ -27,6 +27,9 @@
  *   bun deploy/auth/store.ts --self-check   # the adapter's rules, on a scratch file (CI)
  */
 import { Database } from "bun:sqlite";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /** The models whose rows a grant's revocation removes (the memory adapter's list). */
 const GRANTABLE = ["AccessToken", "AuthorizationCode", "RefreshToken", "DeviceCode", "BackchannelAuthenticationRequest", "PreAuthorizedCode"];
@@ -139,9 +142,6 @@ export function sqliteAdapter(path: string, clock: () => number = nowS) {
 
 /** The adapter's rules on a scratch file: each a named probe, the run failing on the first that does not hold. */
 async function selfCheck(): Promise<number> {
-  const { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } = await import("node:fs");
-  const { join } = await import("node:path");
-  const { tmpdir } = await import("node:os");
   const dir = mkdtempSync(join(tmpdir(), "ob1-auth-store-"));
   const file = join(dir, "auth.sqlite");
   let failed = 0;
