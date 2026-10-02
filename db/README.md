@@ -255,7 +255,7 @@ and it stamps `backfilled_at`. Preflight's `audit events` counts the keys and
 rows still waiting. `source` keeps its name and now carries one vocabulary, the
 row's own `metadata.source`. The event rides `p_payload.event` on both
 inserting `upsert_thought` forms and a tenth, defaulted `p_event` on
-`update_thought`; nothing over MCP sends one yet (SMD-1724, 1725, 1733). Since 073 the trust it declares is also the row's (`metadata.trust`, below).
+`update_thought`. Over MCP one key is sent: `capture_thought`'s `trust` (SMD-1724), the content's trust as the write declares it, which since 073 is also the row's (`metadata.trust`, below); nothing sends the rest yet (SMD-1725, 1733).
 
 Migration 049 widens `ob1_agent_keys.scope`'s CHECK from `read, write` to
 `read, write, capture` (dropping every CHECK on the column first, whatever name a
@@ -275,7 +275,7 @@ overwritten or removed. The actor follows the content: a capture and a
 content-changing edit stamp from the key present, a metadata-only edit keeps the
 mark. In metadata rather than columns because 014's `metadata @> filter` route
 over 001's GIN index already reaches it: `said_by` and `actor` on the search and
-list tools are that filter, and every hit prints `By: <key> (<kind>)`.
+list tools are that filter, and every hit prints `By: <key> (<kind>) · trust <word>` (073's trust beside the two).
 `SELECT backfill_thought_actors();` — called once by the file — sets both keys
 on every thought to what the audit row that wrote its current text derives
 (the update row whose after-text is the row's, else the capture when no update
@@ -956,9 +956,10 @@ key was unclassified), the key's kind now, and the row's own word, so a key
 reclassified down takes its rows down, one reclassified up leaves their trust
 where it was (a text-changing edit restamps a row), a lowering a writer set
 before 073 is kept (a word off the ladder is replaced), and a text no audit
-row vouches for loses its trust with its marks. Nothing reads it yet;
-the tools' label and `min_trust` are SMD-1724's later PRs. test-schema [66],
-test-upgrade [20x].
+row vouches for loses its trust with its marks. The read tools print it on
+the `By:` line (`not recorded` for none) and put a fixed notice on an ingested
+row, before its text; `capture_thought`'s `trust` declares it, and
+`min_trust` filters by it (074, 075). test-schema [66], test-upgrade [20x].
 
 Migration 074 reads it (SMD-1724): `match_thoughts` gains a seventh argument,
 `min_trust text DEFAULT NULL`, and `search_thoughts_keyword` a fifth,
@@ -995,7 +996,9 @@ beside 027's 7 would make its call "not unique". A call by name that names `min_
 all eight. 075 refuses to apply without 074, and preflight reads the pair by the
 7's body. An operator's REVOKE on the 7-argument `search_thoughts_current` does
 not survive a `--reapply` (059 drops and re-creates it — as on main), while its
-8's does. test-schema [68], test-upgrade [20z].
+8's does. The server calls the 8-argument forms (and 074's 5-argument keyword)
+only for a search that names `min_trust`, so a brain before them answers every
+other search. test-schema [68], test-upgrade [20z].
 
 ## What changed relative to the guide
 

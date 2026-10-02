@@ -103,7 +103,7 @@ export type Captured = {
   recapture: { derivedNamed: boolean; given?: string; current: string | null } | null;
 };
 
-export async function capture(ctx: Ctx, principal: Principal, { content, derived_from, supersedes, source, metadata: clientMetadata }: Input<"capture_thought">): Promise<Outcome<Captured>> {
+export async function capture(ctx: Ctx, principal: Principal, { content, derived_from, supersedes, source, trust, metadata: clientMetadata }: Input<"capture_thought">): Promise<Outcome<Captured>> {
   // What a key that cannot read is told and allowed — decided once here
   // and read below, in the catch too (fifth review pass: six scattered
   // canRead tests; sixth: one survived in the catch).
@@ -266,6 +266,10 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // derived_from and refuses a bad reference, so a malformed value
       // fails the capture with a clear message rather than storing a lie.
       supersedes,
+      // SMD-1724: the content's trust as this write declares it — the event's
+      // (046), which 073 clamps to the key's kind: a lowering stands, a raise
+      // is filed as a claim on the audit row. Absent: the key's trust.
+      ...(trust !== undefined ? { event: { trust } } : {}),
     };
     let captured;
     try {

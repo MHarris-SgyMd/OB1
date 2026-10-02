@@ -12,7 +12,7 @@ import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFa
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
-import { FilterError, parseFilter, withActorFilter } from "./filter.ts";
+import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 
@@ -43,20 +43,25 @@ interface RunSearch {
   // The hybrid arm hands back the query embedding it computed, so a caller
   // (search_thoughts's zero-result probe) reuses it without a second gate or
   // provider call.
-  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean }):
+  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust }):
     Promise<Refused | { refusal?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] }>;
-  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown> }):
+  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown>; minTrust?: Trust }):
     Promise<{ refusal?: undefined; rows: ThoughtKeywordMatch[] }>;
 }
 const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
-  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean;
+  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust;
 }): Promise<{ refusal?: Refusal; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] }> => {
+  // min_trust (SMD-1724) is no column of query_log, so a search with it is not
+  // logged: a replay (db/tier.ts) would run it without the floor and report
+  // the rows it kept out as a difference (the maintainer's call; the column is
+  // SMD-2479). Every logged row replays as it ran.
+  const logged = opts.minTrust === undefined;
   if (opts.arm === "keyword") {
-    const rows = await (await ctx.store()).keywordThoughts({ query: opts.query, limit: opts.limit, offset: opts.offset ?? 0, filter: opts.filter });
+    const rows = await (await ctx.store()).keywordThoughts({ query: opts.query, limit: opts.limit, offset: opts.offset ?? 0, filter: opts.filter, minTrust: opts.minTrust });
     // A keyword search takes no threshold or recency weight; log them as the
     // compat `search` does its fixed zeros, so the column is a number not a NULL.
-    await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: 0, recencyWeight: 0, filter: opts.filter, arm: "keyword" }, rows);
+    if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: 0, recencyWeight: 0, filter: opts.filter, arm: "keyword" }, rows);
     return { rows };
   }
   // The query text leaves for its embedding as a thought's does (SMD-1903).
@@ -68,9 +73,9 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   const preferCurrent = opts.preferCurrent === true;
   const rows = await (await ctx.store()).hybridThoughts({
     query: opts.query, embedding, threshold: opts.threshold ?? 0, limit: opts.limit,
-    filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0, preferCurrent,
+    filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0, preferCurrent, minTrust: opts.minTrust,
   });
-  await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: preferCurrent ? "current" : "hybrid" }, rows);
+  if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: preferCurrent ? "current" : "hybrid" }, rows);
   return { rows, embedding };
 }) as RunSearch;
 
@@ -112,7 +117,8 @@ function searchFilter(input: { filter?: unknown; said_by?: string; actor?: strin
 const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
 const SEARCH_COMPAT_PREFER_CURRENT = false;
 
-export type SearchResult = { results: { id: string; title: string; url: string }[] };
+/** ChatGPT's search shape, with each result's trust beside it (SMD-1724) — render.ts marks an ingested title with it and sends the shape alone. */
+export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown }[] };
 
 export async function search(ctx: Ctx, principal: Principal, { query }: Input<"search">): Promise<Outcome<SearchResult>> {
   // The one search op, hybrid arm (SMD-1490); this surface is fixed, so it
@@ -127,6 +133,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       id: t.id,
       title: thoughtTitle(t.content, t.created_at),
       url: thoughtUrl(ctx.citationBase(), t.id),
+      trust: t.metadata?.trust,
     })),
   });
 }
@@ -177,13 +184,13 @@ const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
   r ? { needles: r.needles, needleCounts: r.needleCounts, commonNeedles: r.commonNeedles, literalOnly: r.literalOnly } : null;
 
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
-  const { query, limit, threshold, recency_weight, prefer_current } = input;
+  const { query, limit, threshold, recency_weight, prefer_current, min_trust } = input;
   // parseFilter refuses a shape jsonb should not run.
   const f = searchFilter(input);
   if ("refusal" in f) return refuse(f.refusal);
   // The one search op, hybrid arm (SMD-1490): it gates the query
   // (SMD-1903), embeds it, runs the filter and logs.
-  const r = await runSearch(ctx, principal, { tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: f.filter, preferCurrent: prefer_current });
+  const r = await runSearch(ctx, principal, { tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: f.filter, preferCurrent: prefer_current, minTrust: min_trust });
   if (r.refusal) return refuse(r.refusal);
   const data = r.rows;
 
@@ -194,8 +201,8 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     // whenever the brain has any embedded thought at all (review pass:
     // the first version said "no thoughts found" about a literal that
     // 150 thoughts contained, because it was too common to match). Reuses
-    // the arm's embedding, and stays unfiltered so the facts are the
-    // query's, not the filtered scope's.
+    // the arm's embedding, and stays unfiltered — no min_trust either — so
+    // the facts are the query's, not the filtered scope's.
     const probe = await (await ctx.store()).hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} });
     return ok({ query, preferCurrent: prefer_current, hits: [], facts: factsOf(probe[0]), window: null });
   }
@@ -224,14 +231,14 @@ export type KeywordHit = Pick<ThoughtKeywordMatch, "id" | "content" | "metadata"
 export type KeywordResult = { query: string; offset: number; total: number | null; hits: KeywordHit[] };
 
 export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, input: Input<"search_thoughts_keyword">): Promise<Outcome<KeywordResult>> {
-  const { query, limit, offset } = input;
+  const { query, limit, offset, min_trust } = input;
   const f = searchFilter(input);
   if ("refusal" in f) return refuse(f.refusal);
   // The one search op, keyword arm (SMD-1490): no gate (a keyword search
   // embeds nothing, so nothing leaves the box), the filter applied inside
   // the scan, and — new since SMD-1490 — a query_log row written with
   // arm='keyword' (034 logged only the semantic path).
-  const { rows } = await runSearch(ctx, principal, { tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: f.filter });
+  const { rows } = await runSearch(ctx, principal, { tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: f.filter, minTrust: min_trust });
   return ok({
     query,
     offset,
@@ -246,8 +253,10 @@ export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, inpu
 export type ListedThought = ThoughtListItem & { supersededBy: string | null };
 export type ListThoughtsResult = { thoughts: ListedThought[] };
 
-export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, type, topic, person, days, said_by, actor }: Input<"list_thoughts">): Promise<Outcome<ListThoughtsResult>> {
-  const data = await (await ctx.store()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor });
+export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, type, topic, person, days, said_by, actor, min_trust }: Input<"list_thoughts">): Promise<Outcome<ListThoughtsResult>> {
+  // min_trust (SMD-1724) as the ladder's words at or above it: a containment
+  // clause's sibling, which either store can run (no ob1_trust_rank call).
+  const data = await (await ctx.store()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor, trustIn: min_trust === undefined ? undefined : trustAtOrAbove(min_trust) });
   if (!data.length) return ok({ thoughts: [] });
   // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,
   // and name the replacement — the same label search_thoughts prints.
