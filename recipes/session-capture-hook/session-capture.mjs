@@ -1395,8 +1395,12 @@ export function verdictOf(result, text) {
     // pass 2). An empty result falls to the drop-all salvage, as a capture key's
     // position-less refusal does.
     const positions = Array.isArray(sc.positions) ? sc.positions.filter((n) => Number.isInteger(n) && n >= 0) : [];
-    const mend = sc.code === "DERIVED_FROM_MISSING" ? "derived"
-      : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP") ? "supersedes"
+    // The shape refusals took a code in SMD-2283 (before it they were prose the
+    // rules below read): each mends the pointer its prose named, so the hook
+    // drops and retries exactly what it did before.
+    const mend = (sc.code === "DERIVED_FROM_MISSING" || sc.code === "REFUSED_DERIVED_FROM_SHAPE") ? "derived"
+      : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP" || sc.code === "REFUSED_SUPERSEDES_SHAPE") ? "supersedes"
+      : sc.code === "REFUSED_METADATA_SHAPE" ? "metadata"
         : (sc.retryable !== true && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2)
           : null;
     return { code: sc.code, retryable: sc.retryable === true, mend, positions, on: sc.code === "SUPERSEDES_UNJUDGED" ? "supersedes" : undefined };

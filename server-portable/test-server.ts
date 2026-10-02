@@ -1337,9 +1337,9 @@ console.log("\n[16e] Two cores over one store share one brain-info read in fligh
   const store = stub();
   const env = () => ({});
   // Two readers of ONE store — `db` and `() => db()` in a composition root (review pass 3: pass 2 keyed by the reader).
-  const [a, b] = [createCore({ env, store: () => Promise.resolve(store as never) }), createCore({ env, store: async () => store as never })];
+  const [a, b] = [createCore({ env, store: () => Promise.resolve(store as never), door: "test" }), createCore({ env, store: async () => store as never, door: "test" })];
   const elsewhere = stub();
-  const other = createCore({ env, store: () => Promise.resolve(elsewhere as never) });
+  const other = createCore({ env, store: () => Promise.resolve(elsewhere as never), door: "test" });
   const answers = [a.brainInfo("health"), b.brainInfo("health")];
   await Bun.sleep(10);
   const shared = reads;

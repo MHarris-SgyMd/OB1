@@ -503,12 +503,14 @@ MCP tools do rather than a copy of it:
   the manifest's names (`tools.ts`). `core/reads.ts` holds the read operations, each a
   function of the caller's principal and its typed input: the search operation with its
   egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
-  Each returns its typed value or a typed refusal (`core/refusal.ts`: a `code`, whether
-  it is `retryable`, and the facts to say it with), and throws a fault.
-  `core/context.ts` is what they run against: the store, the provider settings and the
-  one embedder, the query log.
-- **`render.ts`** — the words: each read tool's reply rendered from that value, the
-  text the tools have always said.
+  `core/writes.ts` holds `capture_thought`, `update_thought` and `delete_thought`: the
+  shapes, a capture-only key's trimmed provenance and owned pointers, the egress gate,
+  the model calls, the write and its cites. Each returns its typed value or a typed
+  refusal (`core/refusal.ts`: a `code`, whether it is `retryable`, and the facts to say
+  it with), and throws a fault. `core/context.ts` is what they run against: the store,
+  the provider settings and the one embedder, the query log, the door a write records.
+- **`render.ts`** — the words: each tool's reply rendered from that value, the text the
+  tools have always said.
 - **`index.ts`** — the Hono app, authentication, and the registration that joins the
   two: validate (the SDK runs the spec's schema), call the operation, render.
 
@@ -536,8 +538,8 @@ is present, so:
   `{ code: "FAILED", text }`, with no `retryable` yet — classifying faults is
   SMD-2461.
 
-The core's values are whole, for the REST core. The write tools move into
-`core/` in SMD-2283's next two pull requests; until then they keep SMD-1978's codes.
+The core's values are whole, for the REST core. The worker actions move into
+`core/` in SMD-2283's last pull request; until then they keep their own codes.
 
 ## Expected outcome
 
@@ -546,8 +548,8 @@ bun test-server.ts        # 374 — transport, auth, tool surface, OAuth discove
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 196 — store conformance, real Postgres in a container
-bun run test:e2e          # 344 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-bun run cf:build          # ~351 KiB gzipped (measured 2026-10-01, SMD-2283; the PostgREST store and supabase-js are in it)
+bun run test:e2e          # 362 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run cf:build          # ~353 KiB gzipped (measured 2026-10-01, SMD-2283 PR 2; the PostgREST store and supabase-js are in it)
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`

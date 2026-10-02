@@ -23,6 +23,8 @@ export interface CoreDeps {
   env(): CoreEnv;
   /** The store, one instance per process; the caller owns its lifecycle (the pool, the stop). */
   store(): Promise<ThoughtStore>;
+  /** The door every write names in its actor (`via`), which migration 046 stamps as thought_audit.origin (SMD-1730): the server's own name. */
+  door: string;
 }
 
 /** One row of the action log: a tool name and the thought it touched or cited. */
@@ -31,6 +33,8 @@ export type ActionRow = { tool: string; targetId: string };
 export interface Ctx {
   env(): CoreEnv;
   store(): Promise<ThoughtStore>;
+  /** The door a write records as its origin (CoreDeps.door). */
+  door: string;
   embedConfig(): EmbedConfig;
   /** The one embedder: it remembers whether the provider refused a whole-content embedding, a property of the model. */
   embedder: Embedder;
@@ -131,6 +135,7 @@ export function createContext(deps: CoreDeps): Ctx {
   return {
     env: deps.env,
     store: deps.store,
+    door: deps.door,
     embedConfig,
     // How a capture becomes vectors — chunking, the blurb rule, the prompt
     // template, the whole-content-then-head-window fallback, the width check —

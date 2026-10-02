@@ -5,18 +5,43 @@
 // as JSON. A refusal is what the principal may be told: a field the existence-
 // oracle rule (SMD-1298) withholds from a key is left off by the operation.
 
+import type { Citation } from "../store.ts";
+
 /**
  * Every refusal an operation returns. The SMD-1978 codes the session hook keys
- * on keep their names; the rest name the read tools' refusals, which carried no
- * code before SMD-2283.
+ * on keep their names; the rest name refusals that carried no code before
+ * SMD-2283. A shape refusal of capture_thought's carries the code the hook's
+ * verdictOf mends by (recipes/session-capture-hook), so a new code never
+ * changes what the hook drops and retries.
  */
 export type Refusal =
   // The read tools.
-  | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch: no such thought; job_status: no such job for this key
+  | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch, update_thought, delete_thought: no such thought; job_status: no such job for this key
   | { code: "REFUSED_FILTER"; retryable: false; message: string }     // a metadata filter (or said_by/actor) the boundary refuses
   | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
   | { code: "REFUSED_SINCE"; retryable: false; value: string }        // a `since` that is neither a time nor a cursor
-  | { code: "REFUSED_CURSOR"; retryable: false; value: string };      // list_thought_ids' `after` is not a thought id
+  | { code: "REFUSED_CURSOR"; retryable: false; value: string }       // list_thought_ids' `after` is not a thought id
+  // capture_thought's shapes, refused before any model call (032, SMD-2014).
+  | { code: "REFUSED_SUPERSEDES_SHAPE"; retryable: false; value: string; orNull: boolean } // `supersedes` is not a thought id (update_thought's also takes null)
+  | { code: "REFUSED_DERIVED_FROM_SHAPE"; retryable: false; value: string }               // a `derived_from` entry is not a thought id
+  | { code: "REFUSED_METADATA_SHAPE"; retryable: false; problem: MetadataProblem; key?: string; count?: number; length?: number } // a caller `metadata` key or value the boundary refuses
+  // capture_thought's pointers (SMD-1298, SMD-1978).
+  | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "check_failed"; detail: string; noPrivilege: boolean } // the target's capture record could not be read
+  | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "registry_away" }  // the row is attributed and this key's id is not to hand
+  | { code: "REFUSED_SUPERSEDES_OWNERSHIP"; retryable: false; registryRefused: boolean } // a capture key named a supersedes it did not write
+  | { code: "REFUSED_SUPERSEDES_UNKNOWN"; retryable: false }          // the supersedes names no thought
+  | { code: "DERIVED_FROM_MISSING"; retryable: false; positions?: number[]; named: { position: number; id: string }[] } // derived_from ids that name no thought; positions only for a reader (the existence-oracle rule)
+  | { code: "EMBEDDING_NOT_ATTACHED"; retryable: true; id: string; detail: string } // saved, but its vector did not attach (the PostgREST two-step)
+  // update_thought and delete_thought: the store's refusals (018, 032, 042).
+  | { code: "REFUSED_NOTHING_TO_UPDATE"; retryable: false }           // none of content, metadata_patch, supersedes
+  | { code: "REFUSED_STALE_READ"; retryable: false; id: string; currentUpdatedAt?: string } // changed since the if_unchanged_since passed
+  | { code: "REFUSED_DUPLICATE_CONTENT"; retryable: false }           // the text is another thought's
+  | { code: "REFUSED_WOULD_CYCLE"; retryable: false; id: string }     // the supersedes pointer would close a loop
+  | { code: "REFUSED_CITED"; retryable: false; id: string; citedBy?: number; citations?: Citation[] } // statements in other thoughts rest on it (042)
+  | { code: "REFUSED"; retryable: false; error: string };             // a refusal the store named that this server does not know
+
+/** What is wrong with a caller's `metadata` argument (SMD-2014). */
+export type MetadataProblem = "too_many_keys" | "bad_key" | "reserved_key" | "bad_value" | "value_too_long";
 
 export type RefusalCode = Refusal["code"];
 
