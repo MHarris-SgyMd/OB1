@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2317 assertions: 2317 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy-two (72) migrations applied, and
+`bun test-schema.ts` prints `2357 assertions: 2357 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-three (73) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -255,7 +255,7 @@ and it stamps `backfilled_at`. Preflight's `audit events` counts the keys and
 rows still waiting. `source` keeps its name and now carries one vocabulary, the
 row's own `metadata.source`. The event rides `p_payload.event` on both
 inserting `upsert_thought` forms and a tenth, defaulted `p_event` on
-`update_thought`; nothing over MCP sends one yet (SMD-1724, 1725, 1733).
+`update_thought`; nothing over MCP sends one yet (SMD-1724, 1725, 1733). Since 073 the trust it declares is also the row's (`metadata.trust`, below).
 
 Migration 049 widens `ob1_agent_keys.scope`'s CHECK from `read, write` to
 `read, write, capture` (dropping every CHECK on the column first, whatever name a
@@ -929,6 +929,36 @@ joins its own ids still computes every thought: pass the ids. The triggers run a
 the writer, so the **capture** group gains the four privileges on
 `ob1_source_gate`: a role granted before 071 fails preflight until `migrate.ts
 --grant` runs again. test-schema [65], test-live [35], test-upgrade [20w].
+
+Migration 073 puts the content's trust on the row (SMD-1724): `metadata.trust`,
+a third key the database owns beside 050's two. It is 046's
+`thought_audit.trust` for the write that put the standing text there: the
+key's registry kind, or lower when the write's event declared lower, never
+higher. A payload's own `metadata.trust` is read as that declaration
+(`ob1_declared_trust` folds it into the event when the event names none), so
+a raise is clamped to the key and filed under the audit row's
+`actor_context.claimed`, and a lowering stands; on a write that leaves the
+text, the trust the row already carries is an echo of a read (a client
+writing back the metadata it fetched) and declares nothing, while a new text
+weighs every word — a lowering and an echo of a lower trust cannot be told
+apart there, and the lower label is the safe error. The trust follows the content
+as the mark does: a re-capture or a metadata-only edit keeps it, and a
+text-changing edit takes the editor's. The stamp has to be in the write
+functions' bodies, because since 060 the projector writes the row from the
+event, so 073 redefines both inserting `upsert_thought` forms and
+`update_thought` on 060's and 061's bodies; the raw path (050's trigger)
+reads the `ob1.event` handoff's trust. An unclassified key's rows carry no
+trust unless the write declared `ingested`. `backfill_thought_actors` (called
+once by the file) derives trust from the same audit row it derives the writer
+from, so after `set_agent_kind` the same call fills both — and never raises
+one: the lowest of what that write recorded (or the claim it filed while its
+key was unclassified), the key's kind now, and the row's own word, so a key
+reclassified down takes its rows down, one reclassified up leaves their trust
+where it was (a text-changing edit restamps a row), a lowering a writer set
+before 073 is kept (a word off the ladder is replaced), and a text no audit
+row vouches for loses its trust with its marks. Nothing reads it yet;
+the tools' label and `min_trust` are SMD-1724's later PRs. test-schema [66],
+test-upgrade [20x].
 
 ## What changed relative to the guide
 
@@ -3137,7 +3167,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2317 assertions, PGlite, no container
+bun test-schema.ts                          # 2357 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1043 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
