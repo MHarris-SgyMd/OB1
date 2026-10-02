@@ -891,7 +891,13 @@ jobs:
       # (review pass 1). The stub runs from the image just built, which has
       # Bun, so nothing is pulled. The stop lands once the stub logs the
       # server's request, so the call is in flight however loaded the runner
-      # is (the dashboards build beside this step, SMD-2251).
+      # is (the dashboards build beside this step, SMD-2251). The verdict is the
+      # exit code under docker's 10 s grace, the answered call (the proof the
+      # stop waited for it) and the server's own `stopped in N s` line, N under
+      # 5 — not `docker stop`'s return, which is printed: on 18 of 221 attempts
+      # from 2026-09-27 to 10-02 it came back 5.0–10.6 s after a stop the
+      # server logged at 1.9 s, exit 0 (about 2 s on a passing run), and a
+      # 1–5 s window on it failed every one (SMD-2316).
       - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
         run: |
           KEY=$(openssl rand -hex 32)
@@ -908,16 +914,19 @@ jobs:
           t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
           wait
           code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
+          fin=$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' ob1-k8s-stop)" +%s%3N 2> /dev/null) || fin=""
           log=$(docker logs ob1-k8s-stop 2>&1)
           docker rm -f ob1-k8s-stop ob1-k8s-embed > /dev/null
           docker network rm ob1-k8s-stop > /dev/null
           echo "$log"
-          echo "docker stop: ${ms} ms, exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
+          echo "docker stop: returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
           [ -n "$up" ] || { echo "the Kubernetes image never answered" >&2; exit 1; }
           [ -n "$seen" ] || { echo "the server never called the embedding stub, so no call was in flight when the stop landed" >&2; exit 1; }
-          if ! { [ "$code" = 0 ] && [ "$ms" -ge 1000 ] && [ "$ms" -lt 5000 ]; }; then echo "expected exit 0 once the call in flight answered, in 1–5 s (137 near 10 s is the grace period's kill; under 1 s it did not wait)" >&2; exit 1; fi
+          [ "$code" = 0 ] || { echo "expected exit 0 once the call in flight answered (137 is the 10 s grace period's kill, 1 a stop cut off at the drain bound)" >&2; exit 1; }
           grep -q '^SIGTERM: no longer accepting; 1 in flight' <<< "$log" || { echo "the handler did not count the call in flight" >&2; exit 1; }
           grep -q '"id":1' /tmp/k8s-call.out || { echo "the call in flight got no answer" >&2; exit 1; }
+          stopped=$(grep '^SIGTERM: stopped in ' <<< "$log" || true)
+          if ! [[ "$stopped" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "expected the server's own line, stopped in under 5 s; exit 0 — it was: ${stopped:-none}" >&2; exit 1; fi
 
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
@@ -1561,35 +1570,42 @@ jobs:
       # ends the container (the Dockerfile's traps): before, each waited out
       # the 10 s grace period and was killed, exit 137 — about 30 s of this
       # job, over the canary's stops and the teardown. Last of the steps that
-      # use the server: it is left stopped. The serving stop is given 5 s:
-      # on the PR's first run the server logged `stopped in 0.0 s` and
-      # `docker compose stop` still took 2,476 ms on the runner, against a
-      # 10 s kill the gate exists to tell apart. The second stop lands inside
-      # preflight because the stub holds GET /models 2 s, and must end inside
-      # 1 s: the traps alone, with preflight in the foreground, end it only
-      # when the 2 s hold does (review pass 1). The log is read once, into a
-      # variable: `grep -q` on a pipe closes it early, which pipefail fails.
+      # use the server: it is left stopped. The serving stop is judged by its
+      # exit code under the 10 s grace and by its own `stopped in N s` line, N
+      # under 5 — not by `docker compose stop`'s return, which is printed: it
+      # took 2,476 ms on the PR's first run, and 5.1–7.9 s four times on
+      # 2026-09-27 after a server that logged `stopped in 0.0 s` (SMD-2316).
+      # The second stop lands inside preflight because the stub holds GET
+      # /models 2 s, and must end inside 1 s: the traps alone, with preflight
+      # in the foreground, end it only when the 2 s hold does (review pass 1).
+      # Preflight logs no time of its own, so that deadline is docker's kill
+      # timer, `stop -t 1`: a stop that ends in time exits 143 by itself, one
+      # that does not is killed, 137. The log is read once, into a variable:
+      # `grep -q` on a pipe closes it early, which pipefail fails.
       - name: The server stops on SIGTERM, serving and in preflight
         working-directory: deploy
         run: |
           stop() {
-            t0=$(date +%s%3N); docker compose -f compose.yaml stop server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
-            code=$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose -f compose.yaml ps -aq server)")
-            echo "$1: stopped in ${ms} ms, exit $code"
-            if ! { [ "$code" = "$2" ] && [ "$ms" -lt "$3" ]; }; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 within $3 ms (137 near 10 s is the grace period's kill)" >&2; exit 1; fi
+            if [ -n "${3:-}" ]; then t=(-t "$3"); else t=(); fi
+            t0=$(date +%s%3N); docker compose -f compose.yaml stop "${t[@]}" server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
+            id=$(docker compose -f compose.yaml ps -aq server)
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$id")
+            fin=$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' "$id")" +%s%3N 2> /dev/null) || fin=""
+            echo "$1: docker compose stop returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code"
+            if [ "$code" != "$2" ]; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 (137 is the kill at the end of the grace period: ${3:-10} s)" >&2; exit 1; fi
           }
           # A keyed call first, so the pool this stop closes is this step's to
           # open, whatever ran before it (review pass 2).
           curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/
-          stop serving 0 5000
+          stop serving 0
           last=$(docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: stopped' | tail -1 || true)
           echo "$last"
-          [[ "$last" =~ ^SIGTERM:\ stopped\ in\ [0-9.]+\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || { echo "the stop's line does not say the pool closed and exit 0" >&2; exit 1; }
+          if ! [[ "$last" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "the stop's line does not say it stopped in under 5 s, the pool closed and exit 0" >&2; exit 1; fi
           touch /tmp/provider-stub-slow
           docker compose -f compose.yaml start server > /dev/null 2>&1
           sleep 0.5
-          stop "in preflight" 143 1000
+          stop "in preflight" 143 1
           rm -f /tmp/provider-stub-slow
 
       - name: Logs on failure
