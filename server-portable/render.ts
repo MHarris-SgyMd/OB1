@@ -23,8 +23,9 @@ import type { AuditChange, LoggedSearchPage, ThoughtHybridMatch, ThoughtIdPage, 
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY } from "./core/filter.ts";
-import { failure, ok, type Outcome, type Refusal } from "./core/refusal.ts";
+import { failure, META_KEYS_MAX, META_VALUE_MAX, ok, type Outcome, type Refusal } from "./core/refusal.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { Captured, Deleted, HeadWindow, Updated } from "./core/writes.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
 export type Reply = { content: { type: "text"; text: string }[]; isError?: true; structuredContent: Record<string, unknown> };
@@ -54,7 +55,7 @@ const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
-const ID_KEY = /^(?:id|after|cursor|supersededBy|supersedesBefore|supersedesAfter)$|Id$/;
+const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy)$|Id$/;
 
 /**
  * The rule at the chokepoint (review pass 6): every string a picker hands over
@@ -77,25 +78,46 @@ function guard(v: unknown, key = ""): unknown {
  * or id, a filter's message, the gate's reason — are in the text, bounded.
  */
 function safeRefusal(r: Refusal): object {
-  return { code: r.code, retryable: r.retryable, ...(r.code === "REFUSED_EGRESS" ? { rule: r.rule } : {}) };
+  return {
+    code: r.code,
+    retryable: r.retryable,
+    ...(r.code === "REFUSED_EGRESS" ? { rule: r.rule } : {}),
+    // The derived_from indices to drop — present only for a caller allowed to
+    // know they exist (SMD-1978); what the session hook mends by.
+    ...(r.code === "DERIVED_FROM_MISSING" && r.named.length ? { positions: r.named.map((n) => n.position) } : {}),
+    // The thought that was saved without its vector: the server's own id.
+    ...(r.code === "EMBEDDING_NOT_ATTACHED" ? { id: r.id } : {}),
+    ...(r.code === "REFUSED_CITED" && r.citedBy !== undefined ? { citedBy: r.citedBy } : {}),
+    ...(r.code === "REFUSED_STALE_READ" && r.currentUpdatedAt ? { currentUpdatedAt: r.currentUpdatedAt } : {}),
+  };
 }
 
 /** A refusal a tool's renderer has no sentence for — a code it does not return. Not reached; said rather than thrown. */
 const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
 
 /**
- * A fault an operation threw — the store down, a missing migration — as every
- * tool has always said it, `Error: <message>`, with the tool's hint for the
- * message when it has one; FAILED beside it, unclassified (core/refusal.ts says
- * why; SMD-2461 classifies), the message and hint in the text alone. A thrown
- * non-Error (a string, undefined, an object that cannot be printed) is said as
- * itself where it can be, and never throws here.
+ * A fault an operation threw — the store down, a missing migration — said as
+ * the tool has always said it: `lead` (`Error: `, or update/delete's
+ * `<tool> failed: `), the message, and the tool's hint for it when it has one.
+ * Beside it the verdict: the fault's own (`failure()`: FAILED, unclassified,
+ * no `retryable` until SMD-2461), or one a tool states for itself — capture's
+ * STORE_UNAVAILABLE, retryable (SMD-1978). The message and hint ride the text
+ * alone. A thrown non-Error (a string, undefined, an object that cannot be
+ * printed) is said as itself where it can be, and never throws here.
  */
-export function failed(err: unknown, hint?: (msg: string) => string): Reply {
-  const f = failure(err);
-  const text = `Error: ${f.message}${hint ? hint(f.message) : ""}`;
-  return { content: [{ type: "text", text }], isError: true, structuredContent: { code: f.code, text } };
+export function failed(err: unknown, { hint, lead = "Error: ", verdict }: { hint?: (msg: string) => string; lead?: string; verdict?: { code: "STORE_UNAVAILABLE"; retryable: true } } = {}): Reply {
+  const { message, ...own } = failure(err);
+  const text = `${lead}${message}${hint ? hint(message) : ""}`;
+  return { content: [{ type: "text", text }], isError: true, structuredContent: { ...(verdict ?? own), text } };
 }
+
+/**
+ * capture_thought's fault: the store did not answer as itself — down, a
+ * missing function, a front returning 401 — a transient the caller keeps and
+ * retries (SMD-1978). The session hook keys on this code; it stays retryable
+ * until SMD-2461's one classifier reads every fault. The words are failed()'s.
+ */
+export const storeUnavailable = (err: unknown): Reply => failed(err, { verdict: { code: "STORE_UNAVAILABLE", retryable: true } });
 
 /** An enum the store reads from a constrained column, kept only when it is one of the words it may be. */
 const oneOf = <W extends string>(words: readonly W[], v: unknown): W | null => (words as readonly unknown[]).includes(v) ? v as W : null;
@@ -660,3 +682,299 @@ export const renderBrainInfoReply = (info: BrainInfo): Reply => render(ok(info),
 
 /** scan_thoughts: the handle is the text. */
 export const renderJobHandle = (o: Outcome<JobHandle>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);
+
+// ── The write tools (SMD-2283 PR 2) ──────────────────────────────────────────
+
+/**
+ * What a capture or an edit reply says when the whole-content vector could
+ * not be had for a reason that says nothing about the next attempt — a 429, a
+ * 5xx, a lost connection, OB1_LLM_TIMEOUT. The head window stands in, which is
+ * a legitimate state and a silent one, and unlike the re-embed there is no
+ * claim row here to record it. A provider that REFUSED the length stays silent,
+ * as change 27 decided: that is the vector every long capture gets there.
+ */
+function explainHeadWindow(e: HeadWindow | null): string {
+  if (!e?.fellBack || e.refused) return "";
+  return (
+    `\n\nNote: the whole content could not be embedded in one call (${e.error ?? "no detail"}); ` +
+    `the head window's vector stands in for it. The thought is stored and searchable, and every search chunk ` +
+    `has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
+  );
+}
+
+/**
+ * A `supersedes` that is not a thought id, refused at the tool before any model
+ * call or database write (032) — both tools, one sentence; `orNull` is the
+ * edit tool's clause, since only it takes null.
+ */
+const supersedesShape = (value: string, orNull: boolean): string =>
+  `Refused: \`supersedes\` must be a thought id (the ID: line of a search result)${orNull ? " or null to clear it" : ""}, not "${value.slice(0, 40)}".`;
+
+/** A caller's `metadata` refused at the boundary (SMD-2014), checked before the model calls. */
+function metadataShape(r: Extract<Refusal, { code: "REFUSED_METADATA_SHAPE" }>): string {
+  const k = r.key ?? "";
+  switch (r.problem) {
+    case "too_many_keys": return `Refused: \`metadata\` carries ${r.count} keys — at most ${META_KEYS_MAX}.`;
+    case "bad_key": return `Refused: the \`metadata\` key "${k.slice(0, 40)}" must be lower-case letters, digits and underscores, 2–40 characters, starting with a letter.`;
+    case "reserved_key": return `Refused: \`metadata.${k}\` is set by the server, not the caller — use the \`source\` argument for the origin label; drop the rest.`;
+    case "bad_value": return `Refused: \`metadata.${k}\` must be a string, number or boolean.`;
+    case "value_too_long": return `Refused: \`metadata.${k}\` is ${r.length} characters — at most ${META_VALUE_MAX}.`;
+  }
+}
+
+/** capture_thought's refusals, in the words the session hook has always read (SMD-1978). */
+function captureRefusal(r: Refusal): string {
+  switch (r.code) {
+    case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
+    case "REFUSED_DERIVED_FROM_SHAPE": return `Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${r.value.slice(0, 40)}".`;
+    case "REFUSED_METADATA_SHAPE": return metadataShape(r);
+    case "SUPERSEDES_UNJUDGED":
+      return r.cause === "check_failed"
+        ? `Error: this key's \`supersedes\` could not be checked against the target's capture record (${r.detail})${r.noPrivilege ? " — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`
+        : "Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.";
+    case "REFUSED_SUPERSEDES_OWNERSHIP":
+      return r.registryRefused
+        ? "Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself, and this key's identity could not be resolved — the agent registry refused its name or digest; see the server log."
+        : "Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.";
+    // 025's self-FK, said as update_thought says it, not as Postgres does (fourth review pass).
+    case "REFUSED_SUPERSEDES_UNKNOWN": return "Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.";
+    case "DERIVED_FROM_MISSING": {
+      // The verb agrees with what is SAID: the plural leaked the count to a
+      // non-reader through the placeholder (ninth review pass).
+      const where = r.named.length
+        ? r.named.map((n) => `derived_from[${n.position}] (${n.id})`).join(", ")
+        : "a `derived_from` id";
+      return `Refused: ${where} name${r.named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`;
+    }
+    case "EMBEDDING_NOT_ATTACHED":
+      return `Thought saved (id ${r.id}) but its embedding failed to attach: ` +
+        `${r.detail}. It will NOT appear in semantic search until re-captured.`;
+    default: return unknownRefusal(r);
+  }
+}
+
+/** capture_thought's value: the id, what the text was (a reader's only), and whether the vector's call was made. */
+const safeCapture: Safe<Captured> = (v) => ({
+  id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }),
+  embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures,
+});
+
+export function renderCapture(o: Outcome<Captured>): Reply {
+  return render(o, (v) => {
+    const meta = v.tags;
+    const { existed, reader, embeddings, chat, chunks, contextFailures } = v;
+    // The id, because update_thought and delete_thought take one. Without it
+    // an agent that captures a typo has to search for its own thought to fix
+    // it, and the two new tools are only usable against things it did not
+    // just write.
+    let confirmation = `Captured as ${meta.type || "thought"} — id ${v.id}`;
+    if (Array.isArray(meta.topics) && meta.topics.length)
+      confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
+    if (Array.isArray(meta.people) && meta.people.length)
+      confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
+    if (Array.isArray(meta.action_items) && meta.action_items.length)
+      confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+
+    // The gate's refusal first among the notes (SMD-1903): a thought
+    // without its vector is the one fact a caller must not miss. Not an
+    // error — the policy did what it says — but said in full. On a
+    // RE-CAPTURE the row keeps the vector it had (upsert_thought
+    // coalesces), so the note says that instead of "no vector" (first
+    // review pass). A database from before 035, or the PostgREST
+    // two-step, does not say which this was — and the coalesce holds
+    // there too (033), so the note hedges rather than tell the fresh-row
+    // story of a row that may be keeping its vector (second review pass).
+    if (!embeddings.allowed) {
+      confirmation += existed === true
+        ? `\n\nNote: the embedding call for this capture was not made — ${embeddings.reason}. This text was already a thought, and it keeps the vector it had.`
+        : existed === false
+          ? `\n\nNote: saved WITHOUT a vector — ${embeddings.reason}. ` +
+            `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
+            `(db/reembed.ts) against an endpoint the gate allows.`
+          : `\n\nNote: the embedding call for this capture was not made — ${embeddings.reason}. A new thought has no vector — findable by exact text ` +
+            `(search_thoughts_keyword), filled in by a re-embed pass (db/reembed.ts) against an endpoint the gate allows; text already captured keeps the vector it had. ` +
+            // A key that cannot read is not told which (SMD-1298); a database
+            // from before 035 cannot say.
+            (reader ? `This database does not say which this was.` : `This reply does not say which.`);
+    }
+
+    // A chunk whose situating blurb could not be generated is embedded bare
+    // and stored with a NULL context, which is a legitimate state and a
+    // silent one. Saying so here is half of what keeps it from being silent
+    // — preflight, which counts both kinds across the whole corpus, is the
+    // other half.
+    if (contextFailures > 0) {
+      confirmation += chat.allowed
+        ? `\n\nNote: ${contextFailures} of ${chunks} search chunks were embedded without ` +
+          `their situating context — the call failed, or returned a blurb too long to be one. ` +
+          `They are stored and searchable; re-capture to regenerate, or check the model at ` +
+          `${chat.base}.`
+        // The blurbs are chat calls, and the gate refused the chat endpoint
+        // (SMD-1903): not a model to check, and the reason is the one the
+        // tagging note below carries.
+        : `\n\nNote: the ${chunks} search chunks were embedded without their situating context — ` +
+          `the blurb calls were not made: ${chat.reason}. They are stored and searchable.`;
+    }
+    confirmation += explainHeadWindow(v.headWindow);
+
+    // Migration 035 (SMD-1453): a re-capture writes no provenance. The text
+    // was already a thought, so the derived_from / supersedes named here
+    // were not written; say so and name the edit that records it, since
+    // otherwise nothing would — the trace would show nothing and no
+    // error would say why.
+    if (v.recapture) {
+      const { derivedNamed, current } = v.recapture;
+      const named = [derivedNamed ? "`derived_from`" : null, v.recapture.given !== undefined ? "`supersedes`" : null].filter(Boolean);
+      // Postgres hands ids back lower-case; the shape check admits either
+      // case, so compare — and print — the caller's in lower case (third
+      // review pass: an upper-case self-pointer slipped past to an edit
+      // update_thought refuses). What stands is the row's pointer the store
+      // returned beside `existed` (035), not the caller's inputs alone (second
+      // review pass).
+      const given = v.recapture.given?.toLowerCase();
+      const advice = given === undefined ? ""
+        : given === v.id ? ` The \`supersedes\` given names the thought itself; a thought cannot supersede itself.`
+        : current === given ? ` It already supersedes ${given}; there is nothing to record.`
+        : current !== null ? ` It currently supersedes ${current}; to replace that pointer with ${given}, call update_thought with id ${v.id} and \`supersedes\` ${given}; it records the pointer if that thought exists and closes no loop.`
+        : ` To record that it supersedes ${given}, call update_thought with id ${v.id} and \`supersedes\` ${given}; it records the pointer if that thought exists and closes no loop.`;
+      confirmation +=
+        `\n\nNote: this text was already captured as ${v.id}, so the ${named.join(" and ")} given here ${named.length > 1 ? "were" : "was"} not written — ` +
+        `a re-capture leaves an existing thought's provenance as it is.` + advice +
+        (derivedNamed ? ` \`derived_from\` cannot be set on an existing thought through these tools.` : "");
+    }
+
+    // Tell the user when tags are placeholders rather than real extraction,
+    // so a broken credential does not look like a successful capture. The
+    // remedy names the endpoint the tagging call dialled — the chat one,
+    // which since SMD-1902 need not be where the embedding went.
+    if (meta.metadata_extraction_failed === "egress_denied") {
+      // Not a failure to check the endpoint for: the call was not made.
+      // The reason is the decision made here; providerCall's own refusal
+      // (the belt) reaching this branch would mean the two disagreed,
+      // which the shared function makes impossible — but say so rather
+      // than print an "allowed" sentence under a refusal.
+      const why = chat.allowed ? "the egress gate refused the tagging call" : chat.reason;
+      confirmation += existed === true
+        ? `\n\nNote: the tagging call for this capture was not made — ${why}. The existing thought keeps its tags; its metadata now carries the refusal marker.`
+        : existed === false
+          ? `\n\nNote: no topics, people or type were extracted — ${why}.`
+          : `\n\nNote: the tagging call for this capture was not made — ${why}. A new thought has no topics or type; text already captured keeps its tags, with the refusal marker merged in.`;
+    } else if (typeof meta.metadata_extraction_failed === "string") {
+      confirmation +=
+        `\n\nNote: the thought was saved, but automatic tagging failed ` +
+        `(${meta.metadata_extraction_failed}) — topics and people are placeholders. ` +
+        `Check the chat endpoint (${chat.base}), its credential, and the server logs.`;
+    }
+    return confirmation;
+  }, captureRefusal, safeCapture);
+}
+
+/**
+ * Turn an edit's or a delete's refusal into something the caller can act on.
+ * A stale read is not a fault — it is a race the caller can resolve by
+ * refetching — so the message says what to do rather than only what went wrong.
+ */
+function mutationRefusalText(r: Refusal): string {
+  switch (r.code) {
+    case "REFUSED_NOTHING_TO_UPDATE": return "Provide `content`, `metadata_patch`, `supersedes`, or any of them — an update with none would do nothing.";
+    case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
+    case "NOT_FOUND":
+      return `No thought with id ${r.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
+    case "REFUSED_STALE_READ":
+      return `Refused: ${r.id} changed after the if_unchanged_since you passed${
+        r.currentUpdatedAt ? ` (it is now ${r.currentUpdatedAt})` : ""
+      }. Re-read the thought and retry, so you amend the current text rather than overwrite someone else's edit.`;
+    case "REFUSED_DUPLICATE_CONTENT":
+      return `Refused: that text already exists as another thought, and two identical thoughts would break deduplication. Edit one of them, or delete the other first.`;
+    // Migration 032: the provenance envelope.
+    case "REFUSED_SUPERSEDES_UNKNOWN":
+      return `Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result — or null to clear the pointer.`;
+    case "REFUSED_WOULD_CYCLE":
+      return `Refused: that supersedes pointer would close a loop — the thought named already supersedes ${r.id}, directly or through a chain (or is ${r.id} itself). A version chain runs one way; point the newer thought at the older, or clear the older's pointer first.`;
+    // Migration 042: statements in other thoughts rest on this one. The rows
+    // are the function's sample (ten, newest first); the count is the whole.
+    case "REFUSED_CITED": {
+      const id = r.id;
+      const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${snipText(c.text, 120)}`);
+      const total = r.citedBy ?? rows.length;
+      const more = total - rows.length;
+      // One subject, one way through, three shapes: the number and its grammar
+      // spelled once (seventh review pass).
+      const one = total === 1;
+      const subject = `${total} citation${one ? "" : "s"} on other thoughts rest${one ? "s" : ""} on ${id} as ${one ? "its" : "their"} source`;
+      const through = `To delete anyway, pass detach_citations: true`;
+      const reread = `re-read the thought (fetch takes the id) before deciding. ${through}.`;
+      // The count and rows come from the guard's own refusal (042 carries them
+      // in the error), so a CITED envelope with neither is one the function did
+      // not write — a proxy, a truncated body. Say so rather than "0 citations".
+      if (total <= 0) return `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — ${reread}`;
+      // A count with no rows (a proxy that dropped the array): no list, no
+      // dangling colon, the same advice.
+      if (rows.length === 0) return `Refused: ${subject}, but the citing rows were not returned — ${reread}`;
+      return `Refused: ${subject} — deleting it would leave ${one ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). ${through} — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
+    }
+    case "REFUSED": return `Refused: ${r.error}`;
+    default: return unknownRefusal(r);
+  }
+}
+
+/**
+ * The two things migration 018 reports on a successful edit that the caller
+ * should hear about: the edit's unchanged text is also another thought's, or
+ * another thought's stale fingerprint blocks this one's. Neither says which
+ * row is older — a capture merged around a legacy row produces the same pair —
+ * so neither tells the caller which to delete.
+ */
+function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): string {
+  if (r.duplicateOf) {
+    return `\nNote: this thought holds the same text as ${r.duplicateOf}. Deduplication could not see this one because it had no fingerprint, so the edit was kept and no fingerprint was written. Read both before deciding whether they should be one thought; delete_thought keeps the removed text in the audit trail.`;
+  }
+  if (r.fingerprintHeldBy) {
+    return `\nNote: ${r.fingerprintHeldBy} carries a stale fingerprint for this text under different content, so this thought could not take its own. Re-saving that thought's text corrects it.`;
+  }
+  return "";
+}
+
+/** update_thought's value: what moved, and the pointers and pair it reports — ids, flags and counts. */
+const safeUpdate: Safe<Updated> = (v) => ({
+  id: v.id, updatedAt: v.updatedAt ?? null, contentChange: v.contentChange, metadataMerged: v.metadataMerged,
+  ...(v.supersedes !== undefined ? { supersedes: v.supersedes } : {}),
+  contextFailures: v.contextFailures,
+  ...(v.duplicateOf ? { duplicateOf: v.duplicateOf } : {}),
+  ...(v.fingerprintHeldBy ? { fingerprintHeldBy: v.fingerprintHeldBy } : {}),
+});
+
+export function renderUpdate(o: Outcome<Updated>): Reply {
+  return render(o, (v) => {
+    const what = [
+      v.contentChange === "reembedded" ? "content re-embedded" : v.contentChange === "no_vector" ? "content saved without a vector" : null,
+      v.metadataMerged ? "metadata merged" : null,
+      v.supersedes === null ? "supersedes cleared" : v.supersedes !== undefined ? `now supersedes ${v.supersedes}` : null,
+      // An edit replaces every chunk, so a failure here leaves the SAME
+      // half-contextualized state a capture can, and is worth the same
+      // sentence rather than a silent partial rewrite.
+      v.contextFailures ? `${v.contextFailures} chunks without context` : null,
+    ].filter(Boolean).join(", ");
+    return `Updated ${v.id} (${what}).\nupdated_at: ${v.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(v)}${explainHeadWindow(v.headWindow)}${
+      v.noVectorReason !== undefined
+        ? `\n\nNote: saved WITHOUT a vector — ${v.noVectorReason}. It is findable by exact text and joins semantic search after a re-embed pass (db/reembed.ts) against an endpoint the gate allows.`
+        : ""}`;
+  }, mutationRefusalText, safeUpdate);
+}
+
+/**
+ * What a successful delete did to the citations that named the thought
+ * (migration 042): the active ones it detached — only when asked — and the
+ * expired or superseded ones it marked in either mode. Silent when neither.
+ */
+function explainDetached(r: Deleted): string {
+  const parts: string[] = [];
+  if (r.detached) parts.push(`${r.detached} citation${r.detached === 1 ? "" : "s"} on other thoughts rested on it and ${r.detached === 1 ? "was" : "were"} detached: each keeps its text and stance and records ${r.id} as its deleted source.`);
+  if (r.inactive) parts.push(`${r.inactive} expired or superseded citation${r.inactive === 1 ? "" : "s"} that named it ${r.inactive === 1 ? "was" : "were"} marked with the deletion.`);
+  return parts.length ? ` ${parts.join(" ")}` : "";
+}
+
+export function renderDelete(o: Outcome<Deleted>): Reply {
+  return render(o, (v) => `Deleted ${v.id}. Its previous content is preserved in the audit trail.${explainDetached(v)}`,
+    mutationRefusalText, (v) => ({ id: v.id, detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
+}

@@ -1841,6 +1841,22 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
     assert(vM.mend === "metadata", "…a coded metadata refusal a later server might send mends by dropping metadata, read from the prose beside the code (SMD-2168 review pass 1: the mend was prose-only, a gap in the structured path)");
     const vMt = vc({ code: "STORE_UNAVAILABLE", retryable: true }, "Error: could not write the metadata column right now");
     assert(vMt.mend === null, "…but a RETRYABLE transient whose prose merely mentions metadata is not a metadata mend — the structured fallback is gated on final, as the prose path is (SMD-2168 review pass 2)");
+    // The capture refusals that took a code in SMD-2283 PR 2: each verdict from
+    // the code is the one the hook read from the same prose before it — what it
+    // drops, whether it keeps the payload, which positions — so a server with the
+    // codes changes nothing the hook does. The texts are the server's own.
+    const coded = [
+      [{ code: "REFUSED_SUPERSEDES_SHAPE", retryable: false }, 'Refused: `supersedes` must be a thought id (the ID: line of a search result), not "not-an-id".'],
+      [{ code: "REFUSED_DERIVED_FROM_SHAPE", retryable: false }, 'Refused: every `derived_from` entry must be a thought id (the ID: line of a search result), not "nope".'],
+      [{ code: "REFUSED_METADATA_SHAPE", retryable: false }, "Refused: `metadata.trust` is set by the server, not the caller — use the `source` argument for the origin label; drop the rest."],
+      [{ code: "REFUSED_METADATA_SHAPE", retryable: false }, "Refused: `metadata` carries 9 keys — at most 8."],
+      [{ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "11111111-1111-4111-8111-111111111111" }, "Thought saved (id 11111111-1111-4111-8111-111111111111) but its embedding failed to attach: the metadata column refused it. It will NOT appear in semantic search until re-captured."],
+    ];
+    for (const [sc, text] of coded) {
+      const [a, b] = [vc(sc, text), vp(text)];
+      assert(a.mend === b.mend && a.retryable === b.retryable && a.positions.join() === b.positions.join() && a.on === b.on,
+        `…${sc.code} reads as its prose always did: mend ${a.mend}/${b.mend}, retryable ${a.retryable}/${b.retryable} (SMD-2283)`);
+    }
     // The prose fallback derives the same verdicts for a server from before the code.
     assert(vp("Refused: derived_from[1] (x) names no thought").mend === "derived" && vp("Refused: derived_from[1] names no thought").positions.join() === "1", "…and from prose alone, a Refused naming a derived_from position mends by dropping it");
     assert(vp("Error: this key's `supersedes` could not be checked against the target's capture record (x)").retryable === true && vp("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable").on === "supersedes", "…an Error the pointer could not be judged is a kept transient marking the pointer");

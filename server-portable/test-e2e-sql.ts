@@ -1246,6 +1246,13 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // supersedes through a capture key (first review pass): only what it wrote.
   const steal = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — a later ending — claims to replace eta", source: "claude-code", supersedes: retrieved } });
   assert(steal.result?.isError === true && /only a thought it captured itself/.test(textOf(steal)) && sc(steal)?.code === "REFUSED_SUPERSEDES_OWNERSHIP" && sc(steal)?.retryable === false, `a capture key may not supersede another key's thought — refused, code and all (${sc(steal)?.code})`);
+  // With its agent id to hand, a capture key's supersedes naming no thought
+  // reads exactly as one naming another key's thought: the same code and the
+  // same words, so the refusal says nothing of whether the target exists
+  // (SMD-1298; SMD-2283 PR 2 review pass 2 — no test held it). The cases with
+  // the registry away or refusing are SMD-2473's.
+  const ghostSteal = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — a later ending — claims to replace a thought that is not there", source: "claude-code", supersedes: "00000000-0000-4000-8000-0000000000bb" } });
+  assert(sc(ghostSteal)?.code === sc(steal)?.code && textOf(ghostSteal) === textOf(steal), `…and a supersedes naming no thought is refused word for word alike (${sc(ghostSteal)?.code})`);
   // The words ride the value too: a client that shows the model structuredContent alone still reads which pointer to drop (SMD-2283 review pass 3).
   assert(sc(steal)?.text === textOf(steal), "a coded capture refusal carries its words in the value");
   const [[untouched]] = [await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE 'Session summary — a later ending%'`];
@@ -1789,40 +1796,41 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   await sql.close();
 }
 
+// The whole result, for [15] and [16]: structuredContent is the point (SMD-2283).
+const result = async (name: string, args: Record<string, unknown> = {}) => {
+  const r = await fetch(BASE, {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const t = await r.text();
+  const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+  if (b.error) throw new Error(`JSON-RPC error: ${JSON.stringify(b.error)}`);
+  const res = b.result as { content: { text: string }[]; isError?: boolean; structuredContent?: Record<string, any> };
+  return { text: res.content.map((c) => c.text).join("\n"), isError: res.isError === true, sc: res.structuredContent };
+};
+// The rule, by construction (review pass 5): beside its `text`, a prose
+// tool's value and every refusal hold only short tokens — ids, timestamps,
+// counts, codes — never a word a thought, a key or a judge wrote, which
+// reaches a value-only model (Claude Code, VS Code, Codex) through the text
+// alone, cleaned and bounded there. Every string leaf but the top-level
+// `text` is a uuid, an ISO time or Postgres's infinity, or one enum token
+// (review pass 6: a length cap let a short phrase through). Returns the paths
+// that break it.
+const SHAPE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[+-]?\d{4,6}-\d{2}-\d{2}(?:T[\d:.]+(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity|[A-Za-z][A-Za-z0-9_-]{0,39})$/i;
+const wordless = (v: unknown, at = ""): string[] => {
+  if (typeof v === "string") return SHAPE.test(v) ? [] : [at || "(root)"];
+  if (Array.isArray(v)) return v.flatMap((x, i) => wordless(x, `${at}[${i}]`));
+  if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => (at === "" && k === "text" ? [] : wordless(x, at ? `${at}.${k}` : k)));
+  return [];
+};
+const holds = (name: string, r: { text: string; sc?: Record<string, any> }) =>
+  assert(r.sc?.text === r.text && wordless(r.sc).length === 0, `${name}: the value carries the text, and beside it only tokens (${wordless(r.sc).join(", ") || "none other"})`);
+
 console.log("\n[15] Every read tool answers its typed result beside the text, and each refusal its code (SMD-2283)");
 {
-  // The whole result, not call()'s joined text: structuredContent is the point.
-  const result = async (name: string, args: Record<string, unknown> = {}) => {
-    const r = await fetch(BASE, {
-      method: "POST",
-      headers: H,
-      body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }),
-    });
-    const t = await r.text();
-    const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
-    if (b.error) throw new Error(`JSON-RPC error: ${JSON.stringify(b.error)}`);
-    const res = b.result as { content: { text: string }[]; isError?: boolean; structuredContent?: Record<string, any> };
-    return { text: res.content.map((c) => c.text).join("\n"), isError: res.isError === true, sc: res.structuredContent };
-  };
   const marker = "smd2283-typed-marker";
   const id = /id ([0-9a-f-]{36})/.exec(await call("capture_thought", { content: `${marker}: the typed answer rides beside the words` }))![1];
-  // The rule, by construction (review pass 5): beside its `text`, a prose
-  // tool's value and every refusal hold only short tokens — ids, timestamps,
-  // counts, codes — never a word a thought, a key or a judge wrote, which
-  // reaches a value-only model (Claude Code, VS Code, Codex) through the text
-  // alone, cleaned and bounded there. Every string leaf but the top-level
-  // `text` is a uuid, an ISO time or Postgres's infinity, or one enum token
-  // (review pass 6: a length cap let a short phrase through). Returns the paths
-  // that break it.
-  const SHAPE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[+-]?\d{4,6}-\d{2}-\d{2}(?:T[\d:.]+(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity|[A-Za-z][A-Za-z0-9_-]{0,39})$/i;
-  const wordless = (v: unknown, at = ""): string[] => {
-    if (typeof v === "string") return SHAPE.test(v) ? [] : [at || "(root)"];
-    if (Array.isArray(v)) return v.flatMap((x, i) => wordless(x, `${at}[${i}]`));
-    if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => (at === "" && k === "text" ? [] : wordless(x, at ? `${at}.${k}` : k)));
-    return [];
-  };
-  const holds = (name: string, r: { text: string; sc?: Record<string, any> }) =>
-    assert(r.sc?.text === r.text && wordless(r.sc).length === 0, `${name}: the value carries the text, and beside it only tokens (${wordless(r.sc).join(", ") || "none other"})`);
 
   const s = await result("search", { query: marker });
   assert(!s.isError && Array.isArray(s.sc?.results) && JSON.stringify(s.sc) === s.text, `search: the value is the JSON its text has always been (${s.text.slice(0, 60)})`);
@@ -1916,6 +1924,76 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   const js = await result("job_status", { job_id: missing });
   assert(js.isError && js.text.startsWith(`No job "${missing}" for this key`) && js.sc?.code === "NOT_FOUND", "job_status of no job: the same words, NOT_FOUND beside them");
   holds("job_status's refusal", js);
+}
+
+console.log("\n[16] Every write tool answers its typed result beside the text, and each refusal its code (SMD-2283 PR 2)");
+{
+  const marker = "smd2283-write-marker";
+  // A capture: the id the text names, whether the text was already a thought
+  // (a reader's to know), and whether the embedding call was made — beside the
+  // text, nothing a thought or the extractor wrote (the tags are in the text).
+  const cap = await result("capture_thought", { content: `${marker}: a write answered in two forms` });
+  const capId = /id ([0-9a-f-]{36})/.exec(cap.text)?.[1];
+  assert(!cap.isError && cap.sc?.id === capId && cap.sc?.existed === false && cap.sc?.embeddingCall === true && !("tags" in (cap.sc ?? {})), `capture_thought: the value names the id the text does, a fresh row, its embedding call made (${JSON.stringify(cap.sc)})`);
+  holds("capture_thought", cap);
+  const again = await result("capture_thought", { content: `${marker}: a write answered in two forms` });
+  assert(again.sc?.id === capId && again.sc?.existed === true, "a re-capture says, to a reader, that the text was already a thought");
+
+  // The shape refusals the hook mends by, each with the code its verdictOf maps.
+  const shapes: [string, Record<string, unknown>, string][] = [
+    ["REFUSED_SUPERSEDES_SHAPE", { supersedes: "not-an-id" }, "Refused: `supersedes` must be a thought id"],
+    ["REFUSED_DERIVED_FROM_SHAPE", { derived_from: ["nope"] }, "Refused: every `derived_from` entry must be a thought id"],
+    ["REFUSED_METADATA_SHAPE", { metadata: { trust: "operator" } }, "Refused: `metadata.trust` is set by the server"],
+  ];
+  for (const [code, args, lead] of shapes) {
+    const r = await result("capture_thought", { content: `${marker} shape ${code}`, ...args });
+    assert(r.isError && r.text.startsWith(lead) && r.sc?.code === code && r.sc?.retryable === false, `capture_thought refuses a bad shape as ${code}, final, in the words it always had (${r.text.slice(0, 60)})`);
+    holds(`capture_thought's ${code}`, r);
+  }
+
+  // A fault in capture: the store does not answer as itself (here a function
+  // the write needs is gone). The verdict is STORE_UNAVAILABLE, retryable —
+  // what the session hook keeps a payload by (SMD-1978); a FAILED with no
+  // retryable here would make the hook drop a summary on any outage (PR 2
+  // review pass 3: nothing held it). Put back whatever the assertions do.
+  {
+    const sql = new SQL({ url: URL_, max: 1 });
+    await sql`ALTER FUNCTION validate_derived_from(jsonb) RENAME TO validate_derived_from_away`;
+    try {
+      const fault = await result("capture_thought", { content: `${marker}: a capture whose write cannot run`, derived_from: [capId] });
+      assert(fault.isError && fault.text.startsWith("Error: ") && fault.sc?.code === "STORE_UNAVAILABLE" && fault.sc?.retryable === true && fault.sc?.text === fault.text,
+        `capture_thought's fault is STORE_UNAVAILABLE, retryable, its words beside it (${JSON.stringify(fault.sc)?.slice(0, 120)})`);
+    } finally {
+      // Every capture after this one needs the function (033 calls it on each
+      // write): restore it first, and close the connection even if that throws.
+      try {
+        await sql`ALTER FUNCTION validate_derived_from_away(jsonb) RENAME TO validate_derived_from`;
+      } finally {
+        await sql.close();
+      }
+    }
+  }
+
+  // An edit: what moved and when, as ids, flags and the time the text names.
+  const up = await result("update_thought", { id: capId, metadata_patch: { reviewed: true } });
+  assert(!up.isError && up.sc?.id === capId && up.sc?.metadataMerged === true && up.sc?.contentChange === null && typeof up.sc?.updatedAt === "string" && up.text.includes(`updated_at: ${up.sc.updatedAt}`),
+    `update_thought: the value says what moved and the updated_at the text names (${JSON.stringify(up.sc)})`);
+  holds("update_thought", up);
+  const nothing = await result("update_thought", { id: capId });
+  assert(nothing.isError && nothing.sc?.code === "REFUSED_NOTHING_TO_UPDATE" && /^Provide `content`, `metadata_patch`, `supersedes`/.test(nothing.text), "update_thought with nothing to do is REFUSED_NOTHING_TO_UPDATE, in its old words");
+  const stale = await result("update_thought", { id: capId, metadata_patch: { a: 1 }, if_unchanged_since: "2000-01-01T00:00:00Z" });
+  assert(stale.isError && stale.sc?.code === "REFUSED_STALE_READ" && stale.text.startsWith(`Refused: ${capId} changed after the if_unchanged_since you passed`), "a stale edit is REFUSED_STALE_READ, in its old words");
+  holds("update_thought's stale read", stale);
+  const missing = "00000000-0000-4000-8000-000000000000";
+  const gone = await result("update_thought", { id: missing, metadata_patch: { a: 1 } });
+  assert(gone.isError && gone.sc?.code === "NOT_FOUND" && gone.text.startsWith(`No thought with id ${missing}.`), "an edit of no thought is NOT_FOUND");
+
+  // A delete: the id, and the citations it detached or marked.
+  const del = await result("delete_thought", { id: capId });
+  assert(!del.isError && del.sc?.id === capId && del.sc?.detached === 0 && del.sc?.inactive === 0 && del.text.startsWith(`Deleted ${capId}.`), `delete_thought: the id and what it did to citations (${JSON.stringify(del.sc)})`);
+  holds("delete_thought", del);
+  const delGone = await result("delete_thought", { id: capId });
+  assert(delGone.isError && delGone.sc?.code === "NOT_FOUND", "a delete of a deleted thought is NOT_FOUND");
 }
 
 server.stop();
