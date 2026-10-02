@@ -132,8 +132,9 @@ const DIRECT_CHECKS = [
  * 6-argument match_thoughts beside 074's, every 6-argument call ambiguous; so
  * the signature remedies name all three, in order.
  */
-const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 074_min_trust.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
+const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql, 074_min_trust.sql and 075_min_trust_hybrid.sql (075 and 074 the last definers of search_thoughts_hybrid and match_thoughts, 027's body the hybrid's).";
 const APPLY_074 = "Apply db/migrations/074_min_trust.sql.";
+const APPLY_075 = "Apply db/migrations/075_min_trust_hybrid.sql.";
 /**
  * PostgREST answers a call it cannot resolve with PGRST202 both when the
  * function is missing and while its schema cache predates the migration that
@@ -141,7 +142,7 @@ const APPLY_074 = "Apply db/migrations/074_min_trust.sql.";
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/074_min_trust.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 074 last define search_thoughts_hybrid and match_thoughts, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/075_min_trust_hybrid.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 075 and 074 last define search_thoughts_hybrid and match_thoughts, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
 /** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
 const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
@@ -2496,7 +2497,7 @@ if (configFailed) {
         if (Number(hybrid[0].c) >= 1) add("hybrid search", "ok", "search_thoughts_hybrid present");
         else add("hybrid search", "fail",
                  "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
-                 "Apply the migrations through db/migrations/027_search_thoughts_relative_floor.sql (017_search_thoughts_hybrid.sql defines it; 020_match_thoughts_recency.sql redefines it with the arguments the server sends; 027 last defines it — stopping at 020 would leave 020's body over 027's). Then db/migrations/074_min_trust.sql: 020's file re-creates match_thoughts' 6-argument form, which beside 074's 7-argument one makes every 6-argument call 'function is not unique' (SMD-1724).");
+                 "Apply the migrations through db/migrations/027_search_thoughts_relative_floor.sql (017_search_thoughts_hybrid.sql defines it; 020_match_thoughts_recency.sql redefines it with the arguments the server sends; 027's body is the one that stands — stopping at 020 would leave 020's body over 027's). Then db/migrations/074_min_trust.sql and 075_min_trust_hybrid.sql: 020's file re-creates match_thoughts' 6-argument form, which beside 074's 7-argument one makes every 6-argument call 'function is not unique', and 075 last defines the hybrid, its 8-argument min_trust form beside the 7 (SMD-1724).");
 
         /**
          * Migration 024's function. On the SQL path thought_stats calls
@@ -2653,7 +2654,7 @@ if (configFailed) {
          * words it.
          */
         type Overload = { cfg: string; settings: Record<string, string>; src: string; rows: number; nargs: number; sig: string };
-        let catalog: { mt: Overload[]; hy: { nargs: number; sig: string }[]; kwRows: number | null; kwSig: string | null; ledger: Set<string> } | Error;
+        let catalog: { mt: Overload[]; hy: { nargs: number; sig: string; src: string }[]; kwRows: number | null; kwSig: string | null; ledger: Set<string> } | Error;
         try {
           const { parseSetConfig } = await import("../db/config.mjs");
           const mtRows = await sql`
@@ -2662,7 +2663,7 @@ if (configFailed) {
             WHERE p.proname = 'match_thoughts' AND n.nspname = 'public'
             ORDER BY (p.pronargs = 7) DESC, (p.pronargs = 6) DESC, p.oid`;
           const hyRows = await sql`
-            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
+            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig, p.prosrc AS src
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'search_thoughts_hybrid' AND n.nspname = 'public'
             ORDER BY (p.pronargs = 7) DESC, p.oid`;
@@ -2672,7 +2673,7 @@ if (configFailed) {
                                                       to_regprocedure('public.search_thoughts_keyword(text, integer, integer, jsonb)'))`;
           catalog = {
             mt: mtRows.map((r: { cfg: string[] | null; src: string; rows: number; nargs: number; sig: string }) => ({ cfg: (r.cfg ?? []).join(","), settings: parseSetConfig(r.cfg) as Record<string, string>, src: String(r.src ?? ""), rows: Number(r.rows ?? 0), nargs: Number(r.nargs), sig: String(r.sig) })),
-            hy: hyRows.map((r: { nargs: number; sig: string }) => ({ nargs: Number(r.nargs), sig: String(r.sig) })),
+            hy: hyRows.map((r: { nargs: number; sig: string; src: string }) => ({ nargs: Number(r.nargs), sig: String(r.sig), src: String(r.src ?? "") })),
             kwRows: kw.length ? Number(kw[0].rows) : null,
             kwSig: kw.length ? String(kw[0].sig) : null,
             ledger,
@@ -2714,19 +2715,52 @@ if (configFailed) {
             // below, with the DROP).
             const mtNew = mt.some((r) => r.nargs === 7 || r.nargs === 6);
             const mt020Only = !mt.some((r) => r.nargs === 7) && mt.some((r) => r.nargs === 6);
+            // 075 gave the hybrid an 8-argument form BESIDE the 7-argument one
+            // the servers call, every argument required, so the two never
+            // make a call ambiguous: the pair is the shipped state; the 7
+            // alone with 027's body a brain before 075 (a warning, as 074's);
+            // the 7 alone as 075's wrapper (ob1:seven-calls-eight) an 8
+            // dropped by hand, and the 8 alone a 7 dropped by hand — each a
+            // failure, every search the servers send failing (first review
+            // pass: the wrapper alone was a warning that every search
+            // answers, read by count, and every search failed).
             const hyNew = hy.some((r) => r.nargs === 7);
+            const hy8 = hy.some((r) => r.nargs === 8);
+            const hyWrapperAlone = !hy8 && hy.some((r) => r.nargs === 7 && /ob1:seven-calls-eight/.test(r.src));
+            // …and the pair with a 7 that is not the wrapper: an earlier file
+            // (017, 020, 027) re-applied by hand over 075 put its own body
+            // there, which the servers' 7-argument call then runs instead of
+            // the 8's — 020's absolute floor, say (first review pass, run-it).
+            const hyStale7 = hy8 && hy.some((r) => r.nargs === 7 && !/ob1:seven-calls-eight/.test(r.src));
             const mtKeep = mt.some((r) => r.nargs === 7) ? 7 : 6;
-            const extra = [...mt.filter((r) => r.nargs !== mtKeep), ...hy.filter((r) => r.nargs !== 7)].map((r) => r.sig);
-            if (mtNew && hyNew && extra.length === 0 && mt020Only) {
-              add("search signatures", "warn", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migration 020, one of each — but match_thoughts' is 020's, from before migration 074: every search answers, and min_trust (SMD-1724) is not on this brain`, APPLY_074);
+            const extra = [...mt.filter((r) => r.nargs !== mtKeep), ...hy.filter((r) => r.nargs !== 7 && r.nargs !== 8)].map((r) => r.sig);
+            // 075 refuses without 074, so a brain needing both is told both,
+            // in order (second review pass: 075 alone was named, and refused).
+            const then075 = mt020Only ? "Apply db/migrations/074_min_trust.sql, then 075_min_trust_hybrid.sql." : APPLY_075;
+            const behind = [
+              ...(mt020Only ? ["match_thoughts' is 020's, from before migration 074"] : []),
+              ...(hy8 ? [] : ["search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075"]),
+              ...(hyStale7 ? ["search_thoughts_hybrid's 7-argument form is not 075's — an earlier migration re-applied by hand over it — so the servers' call runs that body, not the 8-argument form's"] : []),
+            ];
+            if (mtNew && hyWrapperAlone && extra.length === 0) {
+              add("search signatures", "fail",
+                  `${hy[0].sig} is 075's 7-argument search_thoughts_hybrid, which calls its 8-argument form, and that form is missing — dropped by hand? — so every search would fail`,
+                  `${then075} It re-creates the 8-argument form beside the 7.`);
+            } else if (mtNew && hyNew && extra.length === 0 && behind.length) {
+              add("search signatures", "warn", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migration 020, one of each — but ${behind.join("; and ")}: every search answers, and min_trust (SMD-1724) ${mt020Only ? "is not on this brain" : hy8 ? "is on the 8-argument form alone" : "does not reach the hybrid the search tools read"}`,
+                  mt020Only && hy8 && !hyStale7 ? APPLY_074 : then075);
             } else if (mtNew && hyNew && extra.length === 0) {
-              add("search signatures", "ok", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migrations 020 and 074, one of each`);
+              add("search signatures", "ok", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migrations 020 and 074, one of each, with min_trust's 8-argument hybrid beside them (075)`);
+            } else if (mtNew && !hyNew && hy8 && extra.length === 0) {
+              add("search signatures", "fail",
+                  `${hy.map((r) => r.sig).join(", ")}: the 7-argument search_thoughts_hybrid the servers call is missing beside 075's 8-argument form — dropped by hand? — so every search would fail`,
+                  `${then075} Its CREATE OR REPLACE puts the 7-argument form back, calling the 8.`);
             } else if (mtNew && hyNew) {
               add("search signatures", "fail",
                   `beside the forms the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 020 or 074 — so every call that sends fewer arguments than the form it stands beside, which is every PostgREST caller by name, every hand-written SELECT and the servers' six-argument match_thoughts call, fails with "function is not unique"`,
                   `Drop the earlier form, as 020 and 074 do: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
             } else {
-              const old = [...(mtNew ? [] : mt), ...(hyNew ? [] : hy)].map((r) => r.sig);
+              const old = [...(mtNew ? [] : mt), ...(hyNew ? [] : hy.filter((r) => r.nargs !== 8))].map((r) => r.sig);
               add("search signatures", "fail",
                   `${old.join(" and ")} ${old.length === 1 ? "is the form" : "are the forms"} from before migration 020; the server sends recency_weight and half_life_days, which only 020's forms take — so every search would fail`,
                   APPLY_020);
