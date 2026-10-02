@@ -25,6 +25,9 @@ export const REGISTRATION_PATH = /^\/auth\/reg\/?$/i;
  * close it is counted twice, which can refuse one registration early, never
  * admit one late.
  */
+/** How long an admitted registration may take to send its body before its connection is closed and its place freed: Bun's own request timeout is 300 s (measured: 325 s). */
+export const REGISTRATION_TIMEOUT_MS = 30_000;
+
 export class RegistrationGate {
   #underWay = 0;
 

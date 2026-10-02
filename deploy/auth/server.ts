@@ -80,7 +80,7 @@ import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
 import { configFromEnv, type Config } from "./config.ts";
 import { ACCESS_TOKEN_TYPE, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
-import { REGISTRATION_PATH, RegistrationGate } from "./registration.ts";
+import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
 import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
 
 let C: Config;
@@ -352,8 +352,6 @@ function mount(req: http.IncomingMessage, inner: string) {
 
 const ORIGIN = new URL(L.origin);
 const registrations = new RegistrationGate(C.maxClients, () => store.countClients());
-/** How long an admitted registration may take to send its body before its connection is closed and its place freed. */
-const REGISTRATION_TIMEOUT_MS = 30_000;
 
 const server = http.createServer((req, res) => {
   // The provider builds every URL from the request's host and protocol (it
@@ -389,7 +387,7 @@ const server = http.createServer((req, res) => {
       return res.end(JSON.stringify({ error: "temporarily_unavailable", error_description: `the authorization server holds as many registered clients as it allows (${C.maxClients}); registered clients that go unused are removed after a day` }));
     }
     res.on("close", () => registrations.release());
-    // A registration that stalls holds its place only this long, not Bun's 300 s request timeout (measured: 325 s).
+    // A registration that stalls holds its place only this long (registration.ts).
     req.setTimeout(REGISTRATION_TIMEOUT_MS, () => req.destroy());
   }
   if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {

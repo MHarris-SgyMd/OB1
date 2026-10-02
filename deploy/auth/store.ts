@@ -217,6 +217,14 @@ async function selfCheck(): Promise<number> {
     console.log(`${ok ? "ok  " : "FAIL"} ${what}${ok || !detail ? "" : ` — ${detail}`}`);
     if (!ok) failed++;
   };
+  /** How many rows of a model and id a file holds: one handle per file, closed at the end. */
+  const handles: Database[] = [];
+  const counter = (path: string) => {
+    const h = new Database(path);
+    handles.push(h);
+    const q = h.query<{ n: number }, [string, string]>("SELECT count(*) AS n FROM oidc WHERE model = ? AND id = ?");
+    return (model: string, id: string) => q.get(model, id)?.n ?? 0;
+  };
   try {
     let t = 1_000_000;
     const clock = () => t;
@@ -317,7 +325,8 @@ async function selfCheck(): Promise<number> {
     await ps("Session").upsert("s-new", { uid: "u-new" }, -60 - CLOCK_TOLERANCE); // expired a minute ago
     expect("countClients() counts the registered clients stored", ps.countClients() === 5);
     const purged = ps.purge();
-    const gone = async (model: string, id: string) => (await new Database(join(dir, "purge.sqlite")).query<{ n: number }, [string, string]>("SELECT count(*) AS n FROM oidc WHERE model = ? AND id = ?").get(model, id))?.n === 0;
+    const inPurge = counter(join(dir, "purge.sqlite"));
+    const gone = async (model: string, id: string) => inPurge(model, id) === 0;
     expect(
       "purge() removes a client over a day old that nothing ever used, with its registration token, and one whose last token lapsed over a day ago, with that token",
       (await gone("Client", "abandoned")) && (await gone("RegistrationAccessToken", "rat-abandoned")) && (await gone("Client", "lapsed-long")) && (await gone("RefreshToken", "rt-long")),
@@ -352,7 +361,8 @@ async function selfCheck(): Promise<number> {
     await edge("Session").upsert("s-edge", { uid: "u-edge" }, -86_400 - CLOCK_TOLERANCE); // its expiry exactly a day ago
     await edge("Session").upsert("s-edge-1", { uid: "u-edge-1" }, -86_399 - CLOCK_TOLERANCE); // a second inside the day
     edge.purge();
-    const left = (id: string, model = "Client") => new Database(join(dir, "edge.sqlite")).query<{ n: number }, [string, string]>("SELECT count(*) AS n FROM oidc WHERE model = ? AND id = ?").get(model, id)?.n === 1;
+    const inEdge = counter(join(dir, "edge.sqlite"));
+    const left = (id: string, model = "Client") => inEdge(model, id) === 1;
     expect("a client exactly a day old with nothing alive goes; a second younger, it stays", !left("day-old") && left("day-old-less-1"));
     expect("a client whose last grant lapsed exactly a day ago goes; a second later, it stays", !left("grant-day-ago") && left("grant-day-ago-less-1"));
     expect("a live authorization code alone keeps its client", left("code-only"));
@@ -444,6 +454,7 @@ async function selfCheck(): Promise<number> {
       refused || "opened",
     );
   } finally {
+    for (const h of handles) h.close();
     rmSync(dir, { recursive: true, force: true });
   }
   console.log(failed ? `\n${failed} probe(s) failed` : "\nall probes hold");
