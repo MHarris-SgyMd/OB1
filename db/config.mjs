@@ -1649,8 +1649,18 @@ export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, json
 export const MATCH_THOUGHTS_SIGNATURE_6 = "match_thoughts(vector, float, int, jsonb, float, float)";
 /** search_thoughts_keyword since 074: 012's four arguments and `p_min_trust`. */
 export const SEARCH_THOUGHTS_KEYWORD_SIGNATURE = "search_thoughts_keyword(text, int, int, jsonb, text)";
-export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
-export const SEARCH_THOUGHTS_CURRENT_SIGNATURE = "search_thoughts_current(vector, text, float, int, jsonb, float, float)";
+/**
+ * 075 (SMD-1724): an 8-argument form of each with `min_trust` and every
+ * argument required, BESIDE the 7-argument form the servers call (which
+ * passes no min_trust) — not a defaulted eighth with the shorter form
+ * dropped, which 059's LANGUAGE sql body would make ambiguous on --reapply.
+ * Both are shipped; the constants name the 8-argument bodies, the _7 the
+ * forms the stores call.
+ */
+export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float, text)";
+export const SEARCH_THOUGHTS_CURRENT_SIGNATURE = "search_thoughts_current(vector, text, float, int, jsonb, float, float, text)";
+export const SEARCH_THOUGHTS_HYBRID_SIGNATURE_7 = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
+export const SEARCH_THOUGHTS_CURRENT_SIGNATURE_7 = "search_thoughts_current(vector, text, float, int, jsonb, float, float)";
 /**
  * update_thought's signature since migration 061 (SMD-1731): an eleventh,
  * defaulted parameter, `p_lineage`, the lineage envelope {chunks, metadata}

@@ -518,8 +518,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // paired with its inputs, SMD-2292; the pass settling stale proposals,
   // SMD-2297), 068 (the node_state projection kept current on write,
   // SMD-2256), 071 (node_state's dependency columns keyed, the gate
-  // stored, SMD-2267), 073 (the content's trust on the row, SMD-1724) and 074
-  // (min_trust on match_thoughts and the keyword arm, SMD-1724) stay recorded
+  // stored, SMD-2267), 073 (the content's trust on the row, SMD-1724), 074
+  // (min_trust on match_thoughts and the keyword arm, SMD-1724) and 075
+  // (min_trust on the hybrid and the current read, SMD-1724) stay recorded
   // and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -607,11 +608,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // bodies under a seventh and a fifth argument, the earlier forms dropped
   // and their privileges replayed, and adds an index on 001's thoughts over
   // a function of its own — nothing to refuse, a function body binds its
-  // names at call time ([20y]) — all recorded by the baseline with their
+  // names at call time ([20y]); 075 adds an 8-argument search_thoughts_hybrid
+  // and search_thoughts_current beside 027's and 068's and makes those two
+  // call them, nothing to refuse either ([20z]) — all recorded by the
+  // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 45, `030 is among the last forty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 46, `030 is among the last forty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3230,6 +3234,47 @@ console.log("\n[20y] Migration 074 onto a populated brain at the file before it 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the074 });
   const again = (await sql`SELECT count(*)::int AS c FROM pg_proc p WHERE p.proname IN ('match_thoughts', 'search_thoughts_keyword') AND p.pronamespace = 'public'::regnamespace`)[0].c;
   assert(Number(again) === 2 && (await reads()) === before, "a re-apply of 074 is a no-op: one form of each, the same answers");
+  await sql.close();
+}
+
+console.log("\n[20z] Migration 075 onto a populated brain at the file before it — an 8-argument hybrid and current read beside the 7-argument forms, every argument required, an operator's REVOKE on each 7 carried to its 8, every 7-argument call answering row for row as before, min_trust read through both arms, no audit row and no row moved; a re-apply a no-op (SMD-1724)");
+{
+  await dropSchema(URL_);
+  const the075 = MIGRATIONS.find((f) => f.endsWith("_min_trust_hybrid.sql"))!;  // by name: renumbered when main takes its number
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the075 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SELECT set_agent_kind('op-key', 'operator'), set_agent_kind('imp-key', 'ingested')`;
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : i === axis + 1 ? 0.5 : 0)).join(",")}]`;
+  for (let i = 0; i < 6; i++) {
+    const key = i % 2 === 0 ? "op-key" : "imp-key";
+    await sql`SELECT upsert_thought(${`[20z] UPG-75 row ${i}`}, ${JSON.stringify({ metadata: {}, actor: { name: key, via: "test-upgrade" } })}::text::jsonb, ${vec(i)}::vector)`;
+  }
+  await sql.unsafe(`REVOKE ALL ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float) FROM PUBLIC`);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION search_thoughts_current(vector, text, float, int, jsonb, float, float) FROM PUBLIC`);
+  const reads = async () => JSON.stringify({
+    hy: await sql.unsafe(`SELECT id, similarity, matched_needles, score FROM search_thoughts_hybrid('${vec(1)}'::vector, 'UPG-75', 0.0, 10, '{}'::jsonb)`),
+    cu: await sql.unsafe(`SELECT id, score FROM search_thoughts_current('${vec(2)}'::vector, 'UPG-75', 0.0, 10, '{}'::jsonb)`),
+  });
+  const stamps = async () => JSON.stringify(await sql`SELECT id, content, metadata, embedding::text AS e, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const before = await reads(), rowsBefore = await stamps();
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the075 });
+  const forms = (await sql`SELECT p.oid::regprocedure::text AS sig, p.pronargs::int AS n, p.pronargdefaults::int AS d, p.proacl::text AS acl FROM pg_proc p
+                           WHERE p.proname IN ('search_thoughts_hybrid', 'search_thoughts_current') AND p.pronamespace = 'public'::regnamespace ORDER BY 1`) as { sig: string; n: number; d: number; acl: string | null }[];
+  assert(forms.length === 4 && forms.filter((f) => f.n === 8).every((f) => f.d === 0) && forms.filter((f) => f.n === 7).every((f) => f.d === 5),
+    `two forms of each: the 7-argument ones with their five defaults, the 8-argument ones with none (${forms.map((f) => `${f.sig}:${f.d}`).join("; ")})`);
+  assert(forms.every((f) => f.acl !== null && !/(^|[{,])=X/.test(f.acl)), `…an operator's REVOKE FROM PUBLIC on each 7-argument form stands, and reaches the 8-argument form created beside it (${forms.map((f) => f.acl).join("; ")})`);
+  for (const f of forms) await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${f.sig} TO PUBLIC`);
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert((await reads()) === before && (await stamps()) === rowsBefore && Number(auditAfter) === Number(auditBefore),
+    "…every 7-argument call answers row for row as before (the hybrid and the current read), and no row or audit row moved");
+  const op = (await sql.unsafe(`SELECT metadata->>'trust' AS t FROM search_thoughts_hybrid('${vec(1)}'::vector, 'UPG-75', 0.0, 10, '{}'::jsonb, 0.0, 90.0, 'operator')`)) as { t: string }[];
+  const opCur = (await sql.unsafe(`SELECT metadata->>'trust' AS t FROM search_thoughts_current('${vec(1)}'::vector, 'UPG-75', 0.0, 10, '{}'::jsonb, 0.0, 90.0, 'operator')`)) as { t: string }[];
+  assert(op.length === 3 && op.every((r) => r.t === "operator") && opCur.length === 3 && opCur.every((r) => r.t === "operator"),
+    `min_trust operator through the hybrid and the current read keeps the operator's three rows of six (${op.length}, ${opCur.length})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the075 });
+  const again = (await sql`SELECT count(*)::int AS c FROM pg_proc p WHERE p.proname IN ('search_thoughts_hybrid', 'search_thoughts_current') AND p.pronamespace = 'public'::regnamespace`)[0].c;
+  assert(Number(again) === 4 && (await reads()) === before, "a re-apply of 075 is a no-op: two forms of each, the same answers");
   await sql.close();
 }
 

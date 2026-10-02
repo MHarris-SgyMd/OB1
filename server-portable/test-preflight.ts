@@ -24,7 +24,7 @@ import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
-import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -567,7 +567,9 @@ else {
    * be exercised here; this holds the SQL branch's message and remedy.
    */
   const noHybrid = new SQL({ url: LIVE, max: 1 });
+  // Both forms since 075: the 7-argument one the servers call and min_trust's 8.
   await noHybrid.unsafe(`DROP FUNCTION IF EXISTS ${SEARCH_THOUGHTS_HYBRID_SIGNATURE}`);
+  await noHybrid.unsafe(`DROP FUNCTION IF EXISTS ${SEARCH_THOUGHTS_HYBRID_SIGNATURE_7}`);
   await noHybrid.close();
   const missingHy = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(missingHy.code === 1, "a database missing migration 017 does not start");
@@ -962,6 +964,23 @@ else {
     "020's 6-argument form re-created beside 074's fails the start with its DROP, while the body checks read 074's form and pass");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("027") || f.startsWith("074") });
   assert((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).code === 0, "…and 074 re-applied (027 for the hybrid 020 replaced) is one form again");
+  // 075's pair (SMD-1724): the hybrid's 7-argument form the servers call and
+  // min_trust's 8-argument one. The 7 alone is a brain before 075 — a warning
+  // naming it; the 8 alone a 7 dropped by hand — a failure, the servers' call
+  // gone; 075 re-applied puts either back.
+  const pair = new SQL({ url: LIVE, max: 1 });
+  await pair.unsafe(`DROP FUNCTION ${SEARCH_THOUGHTS_HYBRID_SIGNATURE}`);
+  const no8 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("075") });
+  await pair.unsafe(`DROP FUNCTION ${SEARCH_THOUGHTS_HYBRID_SIGNATURE_7}`);
+  const no7 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  await pair.close();
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("075") });
+  const bothBack = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(no8.code === 0 && /search signatures[^\n]*search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075: every search answers/.test(no8.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql\./.test(no8.out),
+    "the hybrid's 7-argument form alone — a brain before 075 — starts with a warning naming 075");
+  assert(no7.code === 1 && /search signatures[^\n]*the 7-argument search_thoughts_hybrid the servers call is missing beside 075's 8-argument form/.test(no7.out) && bothBack.code === 0 && /search signatures[^\n]*with min_trust's 8-argument hybrid beside them \(075\)/.test(bothBack.out),
+    "…its 8-argument form alone fails the start, the servers' call gone; 075 re-applied is the shipped pair again");
 
   /**
    * The trigram flag is read only when 011 APPLIES. Migrations run once, so a

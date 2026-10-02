@@ -316,6 +316,9 @@ export const SEARCH_THOUGHTS_KEYWORD_SIGNATURE: string;
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE: string;
 /** The signature search_thoughts' prefer_current calls, as regprocedure text (059: the hybrid's seven arguments). */
 export const SEARCH_THOUGHTS_CURRENT_SIGNATURE: string;
+/** The 7-argument forms the servers call, beside 075's 8-argument ones (SMD-1724). */
+export const SEARCH_THOUGHTS_HYBRID_SIGNATURE_7: string;
+export const SEARCH_THOUGHTS_CURRENT_SIGNATURE_7: string;
 /** The signature the servers and reembed.ts call, as regprocedure text (061: eleven arguments, the lineage envelope last). */
 export const UPDATE_THOUGHT_SIGNATURE: string;
 /** 032's nine-argument form, the one 046 replaced (SMD-1730). */

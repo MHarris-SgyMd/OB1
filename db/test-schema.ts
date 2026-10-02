@@ -66,7 +66,9 @@ import {
   ROLE_GRANT_GROUPS,
   ROLE_GRANTS,
   SEARCH_THOUGHTS_CURRENT_SIGNATURE,
+  SEARCH_THOUGHTS_CURRENT_SIGNATURE_7,
   SEARCH_THOUGHTS_HYBRID_SIGNATURE,
+  SEARCH_THOUGHTS_HYBRID_SIGNATURE_7,
   stripSqlComments,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
@@ -1900,7 +1902,7 @@ console.log("\n[18] Migration 017 left upsert_thought, match_thoughts and search
   assert((await functionsNamed("upsert_thought")) === 3, "all three upsert_thought overloads survive");
   assert((await functionsNamed("match_thoughts")) === 1, "match_thoughts is untouched and unduplicated");
   assert((await functionsNamed("search_thoughts_keyword")) === 1, "search_thoughts_keyword is untouched and unduplicated");
-  assert((await functionsNamed("search_thoughts_hybrid")) === 1 && (await functionsNamed("extract_search_needles")) === 1, "017 adds exactly its two functions");
+  assert((await functionsNamed("search_thoughts_hybrid")) === 2 && (await functionsNamed("extract_search_needles")) === 1, "017 adds exactly its two functions (the hybrid in two forms since 075: the 7-argument one and min_trust's 8)");
   const vol = await db.query<{ p: string; v: string }>(
     `SELECT p.proname AS p, p.provolatile AS v FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE p.proname IN ('search_thoughts_hybrid', 'extract_search_needles') AND n.nspname = 'public'`);
@@ -2227,7 +2229,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   const MT = MATCH_THOUGHTS_SIGNATURE;
   const proc = (await db.query<{ prorows: number; cfg: string[] | null; prosrc: string }>(
     `SELECT prorows, proconfig AS cfg, prosrc FROM pg_proc WHERE oid = $1::regprocedure`, [MT])).rows[0];
-  assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_hybrid")) === 1, "one match_thoughts, one search_thoughts_hybrid: 020 replaced both signatures rather than adding overloads");
+  assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_hybrid")) === 2, "one match_thoughts and the hybrid's two forms: 020 replaced both signatures rather than adding overloads, and 075's 8-argument hybrid takes every argument, so no call is ambiguous");
   const settings = parseSetConfig(proc.cfg);
   // The shipped body: 020's clauses as 019 handed them over, 040's jit off
   // and 041's two pinned paths beside them — five settings and no other ([20]
@@ -2980,10 +2982,10 @@ console.log("\n[28] Migration 027: search_thoughts_hybrid admits relative to the
   // on a long capture, whose short-question cosine is 0.2–0.4 — with a cutoff
   // RELATIVE to the top candidate: admit the strongest match and every row
   // within half of it. The shape must actually have changed (the ob1:relative-
-  // floor sentinel, the v_relfloor * top comparison), and 027 must be the last
-  // definer.
-  assert(lastDefinerOf("search_thoughts_hybrid").startsWith("027"),
-    `027 is the last definer of search_thoughts_hybrid (${lastDefinerOf("search_thoughts_hybrid")})`);
+  // floor sentinel, the v_relfloor * top comparison) — in 027's body, which
+  // 075 carries as the 8-argument form, the 7-argument one calling it.
+  assert(lastDefinerOf("search_thoughts_hybrid").startsWith("075"),
+    `075 is the last definer of search_thoughts_hybrid, carrying 027's body (${lastDefinerOf("search_thoughts_hybrid")})`);
   // [20] re-applied 020's file to test the recency blend, and 020 defines
   // search_thoughts_hybrid too — so the shipped (027) body was reverted here.
   // Restore it before inspecting or exercising it. Same trap SMD-1299 tracks:
@@ -2992,12 +2994,12 @@ console.log("\n[28] Migration 027: search_thoughts_hybrid admits relative to the
   // order and is unaffected).
   await restoreShipped("search_thoughts_hybrid");
   const body = (await db.query<{ s: string }>(
-    `SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)).rows[0].s;
+    `SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [SEARCH_THOUGHTS_HYBRID_SIGNATURE])).rows[0].s;
   assert(/ob1:relative-floor/.test(body), "search_thoughts_hybrid carries the ob1:relative-floor sentinel a successor must keep");
   assert(/v_relfloor\s*\*\s*GREATEST\(ts\.top, 0\.0\)/.test(body),
     "…and admits relative to the top candidate's similarity (v_relfloor * GREATEST(top, 0))");
-  assert((await functionsNamed("search_thoughts_hybrid")) === 1,
-    "one search_thoughts_hybrid — 027 replaced the same signature, it did not overload");
+  assert((await functionsNamed("search_thoughts_hybrid")) === 2,
+    "the hybrid's two forms — 027 replaced the same signature, it did not overload; 075 adds min_trust's 8-argument form beside it");
 
   // A query whose whole candidate set scores BELOW the old 0.5 floor — the long-
   // capture case. Three rows at known cosines to the query unit(0):
@@ -11795,6 +11797,79 @@ console.log("\n[67] Migration 074: min_trust — match_thoughts and search_thoug
   assert(acl !== "" && !/(^|[{,])=X/.test(acl) && (await functionsNamed("match_thoughts")) === 1,
     `a REVOKE FROM PUBLIC on the 6-argument form is carried to the 7-argument one, and the 6-argument form is gone (${acl})`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${MT} TO PUBLIC`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+}
+
+console.log("\n[68] Migration 075: min_trust on search_thoughts_hybrid and search_thoughts_current — an 8-argument form of each, every argument required, beside the 7-argument form, which calls it with NULL; both arms and the needle probe read the rank; the 7-argument form's privileges carried (SMD-1724)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  const HY8 = SEARCH_THOUGHTS_HYBRID_SIGNATURE, HY7 = SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, CU8 = SEARCH_THOUGHTS_CURRENT_SIGNATURE, CU7 = SEARCH_THOUGHTS_CURRENT_SIGNATURE_7;
+  const fn = async (sig: string) => one<{ args: string; src: string; rows: number }>(`SELECT pg_get_function_arguments($1::regprocedure) AS args, prosrc AS src, prorows::int AS rows FROM pg_proc WHERE oid = $1::regprocedure`, [sig]);
+  // [62] replays 068, which puts 068's body back over the 7-argument
+  // search_thoughts_current; the shipped forms are 075's.
+  await restoreShipped("search_thoughts_hybrid", "search_thoughts_current");
+
+  // The catalog: two forms each, the 8 with no default anywhere, the 7 the
+  // 8 with NULL, both hybrids' estimate 100.
+  const [h8, h7, c8, c7] = await Promise.all([fn(HY8), fn(HY7), fn(CU8), fn(CU7)]);
+  assert((await functionsNamed("search_thoughts_hybrid")) === 2 && (await functionsNamed("search_thoughts_current")) === 2 && lastDefinerOf("search_thoughts_current").startsWith("075"),
+    "two forms of each — 075 last defines both — the 7-argument one kept beside min_trust's 8");
+  assert(!/DEFAULT/.test(h8.args) && !/DEFAULT/.test(c8.args) && /, min_trust text$/.test(h8.args) && /, min_trust text$/.test(c8.args),
+    `the 8-argument forms take every argument, none defaulted, min_trust last — so no 7-argument call is ambiguous (${h8.args.slice(-60)})`);
+  assert(/search_thoughts_hybrid\(query_embedding, query_text, match_threshold, match_count,\s+filter, recency_weight, half_life_days, NULL::text\)/.test(h7.src)
+      && /search_thoughts_current\(query_embedding, query_text, match_threshold, match_count,\s+filter, recency_weight, half_life_days, NULL::text\)/.test(c7.src)
+      && /ob1:relative-floor/.test(h8.src) && !/ob1:relative-floor/.test(h7.src),
+    "the 7-argument forms are one statement each, the 8-argument form with NULL — one body, 027's and 068's, in the 8");
+  assert(h8.rows === 100 && h7.rows === 100, `both hybrid forms declare ROWS 100, 068's estimate (${h8.rows}, ${h7.rows})`);
+  assert(/search_thoughts_keyword\(p\.needle, 100, 0, v_filter, min_trust\)/.test(h8.src) && /v_count, v_filter, recency_weight, half_life_days, min_trust\) AS m/.test(h8.src)
+      && /AND \(v_min = 0 OR ob1_trust_rank\(t\.metadata->>'trust'\) >= v_min\)\s+OFFSET 100 LIMIT 1\) AS common/.test(h8.src),
+    "the hybrid passes min_trust to both arms, and its needle probe reads the rank");
+
+  // A corpus: twenty operator notes and 150 ingested pages share a needle,
+  // so without min_trust the needle is common (past the probe's 100) and with
+  // min_trust operator it is the operator's five-and-twenty — used, its page
+  // whole.
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+  await db.exec(`SELECT set_agent_kind('op-key', 'operator'); SELECT set_agent_kind('imp-key', 'ingested')`);
+  const { unitVector } = seededRandom(17241);
+  const load = async (key: string, n: number, tag: string) => db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: key, via: "test-schema" })]);
+    const values = Array.from({ length: n }, (_, k) => `('075 ZQX-77 ${tag} ${k}', '{}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+    await tx.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  });
+  await load("op-key", 20, "operator");
+  await load("imp-key", 150, "ingested");
+  const qv = `[${unitVector(EMBEDDING_DIM).join(",")}]`;
+  type Row = { id: string; t: string | null; common: string[]; needles: string[] };
+  const hybrid = async (min: string | null, sig8 = true) =>
+    q<Row>(sig8
+      ? `SELECT id, metadata->>'trust' AS t, common_needles AS common, needles FROM search_thoughts_hybrid($1::vector, 'ZQX-77', 0.0, 50, '{}'::jsonb, 0.0, 90.0, $2)`
+      : `SELECT id, metadata->>'trust' AS t, common_needles AS common, needles FROM search_thoughts_hybrid($1::vector, 'ZQX-77', 0.0, 50, '{}'::jsonb, 0.0, 90.0)`, sig8 ? [qv, min] : [qv]);
+  const all = await hybrid(null), op = await hybrid("operator"), seven = await hybrid(null, false);
+  assert(all.length > 0 && all[0].common.includes("ZQX-77") && op.length === 20 && op.every((r) => r.t === "operator") && op[0].common.length === 0 && op[0].needles.includes("ZQX-77"),
+    `without min_trust the needle is common (170 rows); with min_trust operator the probe counts the operator's 20, the needle is used and only their rows come back (${op.length}, common ${JSON.stringify(op[0]?.common)})`);
+  assert(JSON.stringify(seven) === JSON.stringify(all), "the 7-argument call answers row for row as the 8-argument one with NULL");
+  const cur = await q<{ t: string | null }>(`SELECT metadata->>'trust' AS t FROM search_thoughts_current($1::vector, 'ZQX-77', 0.0, 25, '{}'::jsonb, 0.0, 90.0, 'operator')`, [qv]);
+  const cur7 = await q<{ id: string }>(`SELECT id FROM search_thoughts_current($1::vector, 'ZQX-77', 0.0, 25, '{}'::jsonb)`, [qv]);
+  const cur8 = await q<{ id: string }>(`SELECT id FROM search_thoughts_current($1::vector, 'ZQX-77', 0.0, 25, '{}'::jsonb, 0.0, 90.0, NULL)`, [qv]);
+  assert(cur.length === 20 && cur.every((r) => r.t === "operator") && cur7.length > 0 && JSON.stringify(cur7) === JSON.stringify(cur8),
+    `search_thoughts_current passes min_trust to the hybrid (${cur.length} operator rows), and its 5-argument call resolves to the 8-argument form with NULL, row for row (${cur7.length})`);
+  const bad = await refused(`SELECT * FROM search_thoughts_hybrid($1::vector, 'x', 0.0, 10, '{}'::jsonb, 0.0, 90.0, 'admin')`, [qv]);
+  assert(/min_trust must be operator, agent or ingested/.test(bad), "a min_trust off the ladder is refused by the hybrid before either arm runs");
+
+  // The 7-argument form's privileges reach the 8: the 8 dropped, an
+  // operator's REVOKE on the 7, then 075 — the 7's ACL replayed on the 8.
+  await db.exec(`DROP FUNCTION ${HY8}; DROP FUNCTION ${CU8}`);
+  await db.exec(`REVOKE ALL ON FUNCTION ${HY7} FROM PUBLIC; REVOKE ALL ON FUNCTION ${CU7} FROM PUBLIC`);
+  await restoreShipped("search_thoughts_hybrid");
+  const acls = await q<{ a: string | null }>(`SELECT proacl::text AS a FROM pg_proc WHERE oid IN ($1::regprocedure, $2::regprocedure)`, [HY8, CU8]);
+  assert(acls.length === 2 && acls.every((r) => r.a !== null && !/(^|[{,])=X/.test(r.a)), `a REVOKE FROM PUBLIC on each 7-argument form reaches the 8-argument form 075 creates (${acls.map((r) => r.a).join("; ")})`);
+  await db.exec(`GRANT EXECUTE ON FUNCTION ${HY7} TO PUBLIC; GRANT EXECUTE ON FUNCTION ${CU7} TO PUBLIC; GRANT EXECUTE ON FUNCTION ${HY8} TO PUBLIC; GRANT EXECUTE ON FUNCTION ${CU8} TO PUBLIC`);
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
