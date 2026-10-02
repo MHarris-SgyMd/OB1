@@ -1,3 +1,6 @@
 node_modules
 .env
 *.md
+# run from a checkout, never in the image (it imports ../env-file.ts and ../../db/env.ts)
+provision.ts
+tsconfig.json
