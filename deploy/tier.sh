@@ -169,14 +169,16 @@ done
 # are its to set, below. A quoted value spanning lines is not supported: compose
 # prints its lines raw, so the first is carried cut short and a later one shaped
 # like an allowed NAME=… reads as that name (none of the stack's knobs is one).
-# The authorization server's settings (OB1_AUTH_*: its signing key, client
-# secrets and the operator's password) are not tier.ts's, and stay behind
-# (SMD-2285; deploy/auth/provision.ts --self-check runs this loop).
 POSTGRES_PASSWORD=""
 while IFS= read -r line; do
   name="${line%%=*}"
   case "$name" in
-    OB1_ALLOW_REMOTE_DB|OB1_ENV_FILE|OB1_ENV_FILES|OB1_AUTH_*) continue ;;
+    OB1_ALLOW_REMOTE_DB|OB1_ENV_FILE|OB1_ENV_FILES) continue ;;
+    # The authorization server's settings (its signing key, client secrets and
+    # the operator's password) are not tier.ts's, and stay behind (SMD-2285;
+    # deploy/auth/provision.ts --self-check runs this loop). A line of its
+    # own: db/test-connect.ts reads the one above as names alone.
+    OB1_AUTH_*) continue ;;
     OB1_*|POSTGRES_PASSWORD|OPENROUTER_API_KEY) ;;
     *) continue ;;
   esac
