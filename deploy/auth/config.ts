@@ -14,6 +14,8 @@
  *   characters;
  * - OB1_AUTH_DB: the store's file, /data/auth.sqlite (the compose volume)
  *   unless set;
+ * - OB1_AUTH_MAX_CLIENTS: how many registered clients the store may hold, 200
+ *   unless set (1 to 100,000);
  * - OB1_AUTH_POC_ERROR_DETAIL: the proof of concept's switch (server.ts).
  *
  * `bun deploy/auth/provision.ts --init` writes every secret here into
@@ -37,6 +39,8 @@ export type Config = {
   /** Each static client's secret, by client id. */
   secrets: Record<string, string>;
   dbPath: string;
+  /** The most registered clients the store may hold: a registration past it is refused until the purge frees room. */
+  maxClients: number;
   pocErrorDetail: boolean;
 };
 
@@ -78,6 +82,8 @@ export function argon2idProblem(hash: string): string {
 
 export const wholeArgon2id = (hash: string) => argon2idProblem(hash) === "";
 export const DEFAULT_DB = "/data/auth.sqlite";
+export const DEFAULT_MAX_CLIENTS = 200;
+const MAX_CLIENTS_CEILING = 100_000;
 const INIT = "run `bun deploy/auth/provision.ts --init`, which writes it into deploy/.env";
 const INIT_THEM = "run `bun deploy/auth/provision.ts --init`, which writes them into deploy/.env";
 
@@ -140,6 +146,12 @@ export function configFromEnv(env: Env = process.env): Config {
   if (short.length) problems.push(`${short.map(secretName).join(", ")} ${short.length === 1 ? "is" : "are"} shorter than ${MIN_SECRET} characters`);
   for (const id of ids) secrets[id] = env[secretName(id)] ?? "";
 
+  const maxRaw = env.OB1_AUTH_MAX_CLIENTS?.trim();
+  const maxClients = maxRaw ? Number(maxRaw) : DEFAULT_MAX_CLIENTS;
+  if (maxRaw && !(/^\d+$/.test(maxRaw) && maxClients >= 1 && maxClients <= MAX_CLIENTS_CEILING)) {
+    problems.push(`OB1_AUTH_MAX_CLIENTS is not a whole number from 1 to ${MAX_CLIENTS_CEILING} ("${maxRaw}"; unset, it is ${DEFAULT_MAX_CLIENTS})`);
+  }
+
   if (problems.length) throw new Error(`the authorization server cannot start:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
   return {
     layout: layout(origin!, tiers as TierName[], services as Record<string, Service>),
@@ -148,6 +160,7 @@ export function configFromEnv(env: Env = process.env): Config {
     passwordHash,
     secrets,
     dbPath: env.OB1_AUTH_DB?.trim() || DEFAULT_DB,
+    maxClients,
     pocErrorDetail: env.OB1_AUTH_POC_ERROR_DETAIL === "1",
   };
 }
