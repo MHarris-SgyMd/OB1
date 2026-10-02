@@ -493,15 +493,61 @@ gated by a **write** key (stricter than the read routes; a read/capture/no key g
 bodiless `ok`). Like `worker_status`, all are SQL-backend only — the PostgREST shim
 answers that it needs the SQL store.
 
+## Where a tool's logic lives (SMD-2283)
+
+A tool is three pieces, so that the REST core (SMD-2284) calls the same logic the
+MCP tools do rather than a copy of it:
+
+- **`core/`** — what the tool does, with no MCP types and no prose. `core/schemas.ts`
+  holds every tool's title, description, behaviour hints and zod input schema, keyed by
+  the manifest's names (`tools.ts`). `core/reads.ts` holds the read operations, each a
+  function of the caller's principal and its typed input: the search operation with its
+  egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
+  Each returns its typed value or a typed refusal (`core/refusal.ts`: a `code`, whether
+  it is `retryable`, and the facts to say it with), and throws a fault.
+  `core/context.ts` is what they run against: the store, the provider settings and the
+  one embedder, the query log.
+- **`render.ts`** — the words: each read tool's reply rendered from that value, the
+  text the tools have always said.
+- **`index.ts`** — the Hono app, authentication, and the registration that joins the
+  two: validate (the SDK runs the spec's schema), call the operation, render.
+
+Every read tool's reply carries a typed answer as `structuredContent` beside the
+text. Claude Code, VS Code and Codex show the model `structuredContent` alone when it
+is present, so:
+
+- A tool whose text is its value's JSON (`search`, `fetch`, `list_thought_ids`,
+  `list_logged_searches`, `worker_status`, `job_status`, `scan_thoughts`) answers
+  the value itself. A value is always an object, so `worker_status`'s rows ride
+  under `pools` while its text stays the bare array.
+- A tool whose text is prose answers its `text` plus fields that cannot carry a
+  word a thought, a key or a judge wrote: ids, timestamps, counts, scores, booleans,
+  enum codes (a search hit's id, scores, `supersededBy` and demotion reasons; a
+  change's id, action, thought id and pointers; the stats' totals). Every such word
+  reaches the model through the text, cleaned and bounded there as it always was.
+  `render.ts`'s `guard` holds each such string to the shape its field's name
+  promises — a time, a uuid, or one enum token — and nulls anything else, so a
+  field typed as a time but filled from a thought's metadata (prefer_current's
+  `window.syncedAt`) cannot carry a sentence.
+  `brain_info` answers its whole record beside the table: it holds only the
+  server's and the database's own facts.
+- A refusal answers `{ code, retryable, text }` (`NOT_FOUND`, `REFUSED_FILTER`,
+  `REFUSED_EGRESS` with its `rule`, `REFUSED_SINCE`, `REFUSED_CURSOR`); a fault
+  `{ code: "FAILED", text }`, with no `retryable` yet — classifying faults is
+  SMD-2461.
+
+The core's values are whole, for the REST core. The write tools move into
+`core/` in SMD-2283's next two pull requests; until then they keep SMD-1978's codes.
+
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 344 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
-bun test-auth.ts          # 120 — scoped, hashed, named keys
-bun run test:local        # 52 — fully local provider, no credential
-bun run test:sql          # 180 — store conformance, real Postgres in a container
-bun run test:e2e          # 265 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-bun run cf:build          # ~342 KiB gzipped (measured 2026-09-20 at change 97; the PostgREST store and supabase-js are in it)
+bun test-server.ts        # 374 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-auth.ts          # 124 — scoped, hashed, named keys
+bun run test:local        # 170 — fully local provider, no credential
+bun run test:sql          # 196 — store conformance, real Postgres in a container
+bun run test:e2e          # 344 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run cf:build          # ~351 KiB gzipped (measured 2026-10-01, SMD-2283; the PostgREST store and supabase-js are in it)
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
