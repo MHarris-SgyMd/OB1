@@ -567,11 +567,11 @@ The core's values are whole, for the REST core.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 374 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-server.ts        # 390 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun run test:local        # 170 — fully local provider, no credential
-bun run test:sql          # 196 — store conformance, real Postgres in a container
-bun run test:e2e          # 392 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:sql          # 203 — store conformance, real Postgres in a container
+bun run test:e2e          # 412 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 bun run cf:build          # ~353 KiB gzipped (measured 2026-10-01, SMD-2283 PR 2; the PostgREST store and supabase-js are in it)
 ```
 
