@@ -12,7 +12,10 @@ backups, no resource limits.
 
 ## Prerequisites
 
-- podman or docker, with compose
+- podman or docker, with Docker Compose v2.23.1 or later (`docker compose`, or
+  what `podman compose` runs when it is installed): the proxy's route table is
+  an inline `configs:` entry, which older compose and the Python podman-compose
+  do not read
 - A model provider: the stack's own Ollama (`--profile local-models`, one line to
   set: `OB1_LLM_LOCAL=1`), an Ollama on the host, or an OpenRouter key — the shipped defaults are
   local; `deploy/.env.example`, "Model provider", is the one line to choose
@@ -46,13 +49,14 @@ ways out (SMD-1875). Before that row the name counted as local and was not
 dialled, so the stack came up `preflight OK` and the first capture failed on it
 (`getaddrinfo ENOTFOUND ollama`) with the server log ending at `Started server`.
 
-Three services, in order (five with the profile):
+Four services, in order (six with the profile):
 
 | Service | Replaces |
 | --- | --- |
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
 | `server` | Upstream's Edge Function and its deploy command |
+| `proxy` | Supabase's gateway in front of the function — the stack's one published port, with the server at `/mcp` on it ("One origin" below) |
 | `ollama` (profile) | OpenRouter — the model endpoint the server defaults to |
 | `ollama-pull` (profile) | Pulling both models by hand; runs once, then exits |
 
@@ -65,16 +69,19 @@ OB1_SMOKE_KEY=<your-raw-key> ./deploy/smoke.sh
 ### 4. Connect a client
 
 ```
-http://127.0.0.1:8000/?key=<MCP_ACCESS_KEY>
+http://127.0.0.1:8000/mcp?key=<MCP_ACCESS_KEY>
 ```
 
 8000 is `SERVER_PORT`, set in `deploy/.env` when something on the host already
 publishes it (a devcontainer publishing 8000 on the podman VM was the case met);
-the URL, `smoke.sh` and the `lsof` line below follow it.
+the URL, `smoke.sh` and the `lsof` line below follow it. It is the proxy's port,
+and `/mcp` the server's path on it. A client configured before SMD-1846 at the
+root (`http://127.0.0.1:8000/?key=…`) still works, through the proxy's legacy
+route ("One origin" below); give new clients `/mcp`.
 
 That URL works from this machine and nowhere else, by default — a client on
 this machine, such as Claude Code at user scope
-(`claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/
+(`claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/mcp
 --header "x-brain-key: <key>"`). A claude.ai or Claude Desktop custom connector
 connects from Anthropic's side, not from your machine, so it needs a TLS proxy
 or a tunnel in front; one on this host (caddy, cloudflared, `tailscale funnel`)
@@ -143,7 +150,8 @@ the repo root, with whatever `-f` files the stack was started with:
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration` | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `server` | `server:8000` — the proxy, and n8n | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
@@ -156,7 +164,8 @@ server per tier, each on loopback by default; its three Postgres services and
 shared Ollama publish nothing, exactly as above. A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own network,
-its server on `127.0.0.1:8011` (`--port`).
+its proxy on `127.0.0.1:8011` (`--port`), its server at `/mcp` there. The tier
+file's servers still publish a port each; SMD-2294 moves them onto proxy paths.
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
@@ -169,7 +178,7 @@ its server on `127.0.0.1:8011` (`--port`).
 every `compose*.yaml` under `deploy/` and refuses a mapping that drops the
 address, a service that reaches outside the file (`extends`, `include`) or onto
 the host without a port (`network_mode`), and holds an inventory of which
-service publishes from which file — the server and the profile's n8n from
+service publishes from which file — the proxy and the profile's n8n from
 `compose.yaml`, the database and Ollama from the host-ports file — so a new published port is
 named there deliberately, with its row in the table above; the "Full stack, no
 Supabase" CI job reads the rendered config the same way.
@@ -186,7 +195,7 @@ the shell does not read that file; and the trailing space anchors the port,
 since without it a Supabase CLI stack on 54321 and 54322 matches `5432` and
 reads as the database leaking)
 
-shows `127.0.0.1:<port>` for the server, and for 5432 nothing without the
+shows `127.0.0.1:<port>` for the proxy, and for 5432 nothing without the
 host-ports file and `127.0.0.1:5432` with it; a line on 11434 is a
 host-installed Ollama (SETUP.md's macOS path), not the stack's — `127.0.0.1` is
 its own default and enough, since `host.containers.internal` reaches the host's
@@ -200,22 +209,83 @@ connection to the Mac's LAN address succeeds; with the default it listens on
 not a refusal, when the macOS application firewall's stealth mode is on (it
 drops a probe of a closed port), so read `lsof`, not the error's wording.
 
+## One origin: the proxy and its paths
+
+The stack publishes one port, the `proxy` service's (Traefik, pinned by digest),
+and each service is a path on it rather than a port of its own (SMD-1846). The
+paths today:
+
+| Path | Answered by |
+| --- | --- |
+| `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
+| `/health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key |
+| `GET /`, `HEAD /` | the proxy: a 404. Never the MCP catch-all |
+| `/.well-known/*` | the proxy: a 404, for every path under it. A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246) |
+| anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `/worker-status`, `/jobs/<id>` (the poll links `scan_thoughts` returns are root-relative). It keeps every client configured before SMD-1846 working; SMD-2306 gives it a deprecation window and then removes it |
+
+The path reaches the server as it came, prefix and all: the server answers POST
+at every path and `/health` under any prefix, so `/mcp` needs no setting there.
+The routes are `x-proxy-routes` at the top of `compose.yaml`, which compose
+hands the proxy as an inline config, so a release's `compose.yaml` carries them
+and there is no second file to fetch. The same text is a label on the proxy, so
+an `up` after a route changed recreates it: compose does not recreate a
+container for a changed inline config alone (docker/compose#11900, measured on
+5.5).
+
+**Adding a service** is two edits in `compose.yaml`: the service, with no
+`ports:`, and a router for its path in `x-proxy-routes`, at a priority above
+`legacy` (1). Not container labels: Traefik's label-driven registry reads them
+through the container engine's socket, which is root on the host, and the
+proxy is the one process a client on the network reaches —
+`docs/orchestration-tool.md` declined the same socket for n8n. The dashboard,
+the authorization server (`/auth` and its `/.well-known/` routes, only while
+the `auth` profile is configured) and the REST core's opt-in `/api` arrive this
+way with their own tickets (`docs/operator-surface-tiers.md`).
+
+**What the proxy does not do.** No authentication: the key travels to the
+server untouched, as `x-brain-key` or `?key=`, and the server checks it. No TLS:
+a remote client still comes through a tunnel or a TLS proxy on the host, which
+dials `127.0.0.1:${SERVER_PORT}` (step 4); TLS at this proxy, once the stack has
+a public origin, is SMD-2382's. It keeps `Host` as the client sent it, deletes a
+header spelled with `_` or `.` that aliases another (`X_Brain_Key`), and passes
+an SSE stream through as it is written — the server's keepalive frame (every
+5 s on a long tool call, SMD-1864) reaches the client when it is sent.
+
+**Its access log never holds a query string.** A connector carries its key in
+`?key=`, and an OAuth redirect will carry its code and state there; a log line
+with the query would put on disk the key `keygen.ts` shows once. Traefik logs
+one JSON line per request with the query parameters and every header dropped:
+`compose logs proxy` shows the method, the path, the status and the timings.
+CI's "Full stack, no Supabase" job greps that log for the smoke key after calls
+carrying it in a query string.
+
+**Podman.** Nothing here needs the engine's socket, so there is no socket path
+to find and no SELinux label to relax. On podman machine (macOS), while
+SMD-1846 was built, the stack's published port was met unforwarded on the Mac
+while the proxy answered inside the VM (`podman machine ssh -- curl
+http://127.0.0.1:<port>/health` answered, the Mac's `curl` got nothing), and so
+was any container's port on that compose network; recreating the network
+(`compose down` then `up`) restored it where restarting or recreating the proxy
+did not. The eval kit's auth stack meets a similar race (`evals/eval-auth.ts`).
+
 ## Expected outcome
 
 `migrate` exits 0 having applied every migration under `db/migrations/` (its image,
 `db/Dockerfile`, carries the runner and the migrations and installs nothing —
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
-followed by `Started server`. `smoke.sh` ends with `0 failed` and exits 0 (its
-checks are the numbered comments in the script; the summary line counts them).
+followed by `Started server`, and `proxy` turns healthy. `smoke.sh` ends with
+`0 failed` and exits 0 (its checks are the numbered comments in the script; the
+summary line counts them).
 
-Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) — the URL
-you configure outside the proxy is the one to use; the exact match rule is the
-`HEALTH_PATH` comment in `server-portable/index.ts` (FORK.md change 75). The MCP
-endpoint serves POST only: `GET /` and `HEAD /` answer 405, so a platform-default
-probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK`
-POSTs to the endpoint instead, which also proves the MCP path serves; either is
-fine. Opening the connector URL in a browser shows `Method Not Allowed`, which is
-expected.
+Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) —
+`http://127.0.0.1:8000/health` at the origin root or `…/mcp/health` under the
+endpoint, or whatever URL you configure outside the proxy; the exact match rule
+is the `HEALTH_PATH` comment in `server-portable/index.ts` (FORK.md change 75).
+The MCP endpoint serves POST only: `GET /mcp` answers 405, and `GET /` the
+proxy's 404, so a platform-default probe aimed at `/` marks a healthy server
+down. The image's own `HEALTHCHECK` POSTs to the endpoint instead, which also
+proves the MCP path serves; either is fine. Opening the connector URL in a
+browser shows `Method Not Allowed`, which is expected.
 
 With a read or write key, the same `GET <base>/health` answers what the brain is,
 as JSON — version, commit, store, tier, the Postgres and pgvector versions, the
@@ -288,7 +358,7 @@ second argument, and a query string is refused. Check 2 probes the **origin root
 which is where claude.ai looks for OAuth discovery before it will open a custom
 connector (with the server's path as a suffix, when the URL carries one). A server
 behind a path prefix needs its proxy to route `/.well-known/` to it, or to 404 it
-there, for that check to pass.
+there, for that check to pass — this stack's proxy 404s it ("One origin" above).
 
 ## Keeping the board in the brain
 
@@ -316,8 +386,8 @@ is the state, so a pass that dies is finished by the next one. The same command
 runs from a checkout against any brain (`bun db/sync-linear.ts --url … --audit`
 is the lockstep census alone; `db/README.md`, "The board in the brain"). The
 scheduled form is the one built here; a Linear webhook is exact and immediate
-but needs an inbound URL the stack has no origin for until SMD-1846, and the
-handler's shape (signature, replay window, loop guard) is SMD-1862's.
+but needs an inbound route — a router on the proxy (SMD-1846) and a public
+origin a vendor can reach (SMD-2382) — and the handler's shape (signature, replay window, loop guard) is SMD-1862's.
 
 ## Refreshing a tier
 
@@ -517,8 +587,9 @@ The canary is `compose.yaml` again under the project `open-brain-canary`, with
 its own Postgres, volume, network and images, and `OB1_TIER=canary`. It needs
 Docker Compose v2 (`config --format json`, `up --wait`), which is what
 `docker compose` is and what `podman compose` runs when it is installed; the
-Python podman-compose is not enough. Its server listens on `127.0.0.1:8011`
-(`--port`), on loopback whatever `SERVER_BIND` says for stable. It reads the stack's env file, so the canary's
+Python podman-compose is not enough. Its proxy listens on `127.0.0.1:8011`
+(`--port`), on loopback whatever `SERVER_BIND` says for stable, with its server
+at `/mcp` there. It reads the stack's env file, so the canary's
 server gets stable's knobs and none is copied. Four things are the canary's
 own: the port, the address, the tier, and the compose profiles (none). Each
 tier has its own Postgres server, never a second database on stable's: a
@@ -595,14 +666,14 @@ stable is redeployed:
    `--no-smoke` skips the smoke and needs no key.
 5. With `--connect` it registers the Claude Code connector
    `open-brain-canary` (`--name`) at user scope, under the same key; a new
-   session sees its tools. The URL is the canary's own port until SMD-1846
-   puts one origin in front of the stack.
+   session sees its tools. The URL is `http://127.0.0.1:8011/mcp`, the
+   canary's own proxy; SMD-2294 moves it to `/canary/mcp` on stable's origin.
 
 `down` removes the canary's containers and network. It deregisters the
 connector only when `claude` has it at user scope and at the canary's port
-(any path or `?key=` after it). The port is read from the canary's server
+(any path or `?key=` after it). The port is read from the canary's proxy
 container, running or stopped (after a reboot podman leaves it stopped, and
-Docker restarts the server but not its Postgres); once that is gone, pass the
+Docker restarts it but not its Postgres); once that is gone, pass the
 `--port` it was stood up with. `claude mcp get` shows the
 entry that wins for the current directory, so a local entry by the name
 hides a user one behind it. One by that name anywhere else, or in local or

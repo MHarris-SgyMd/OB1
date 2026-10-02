@@ -4,7 +4,7 @@
  * way a browser would (SMD-1801). CI's "Full stack, no Supabase" job runs it
  * against the compose stack after `bun run build`.
  *
- *   MCP_URL=http://127.0.0.1:8000/ bun smoke.ts --key <write-key> [--read-key <read-key>]
+ *   MCP_URL=http://127.0.0.1:8000/mcp bun smoke.ts --key <write-key> [--read-key <read-key>]
  *
  * Starts `vite preview` on a free port with MCP_URL and a throwaway
  * SESSION_SECRET, then asserts, with a cookie jar of one:
