@@ -543,8 +543,12 @@ Codex show the model `structuredContent` alone when it is present, so:
   a reader's `positions`, `REFUSED_SUPERSEDES_UNKNOWN`,
   `REFUSED_SUPERSEDES_OWNERSHIP`, `SUPERSEDES_UNJUDGED`), and
   `EMBEDDING_NOT_ATTACHED` (saved without its vector; retryable, with the `id`). An
-  edit's and a delete's: `REFUSED_NOTHING_TO_UPDATE`, `REFUSED_STALE_READ`,
-  `REFUSED_DUPLICATE_CONTENT`, `REFUSED_WOULD_CYCLE`, `REFUSED_CITED`.
+  edit's and a delete's: `NOT_FOUND`, `REFUSED_NOTHING_TO_UPDATE`,
+  `REFUSED_SUPERSEDES_SHAPE`, `REFUSED_STALE_READ` (with the row's
+  `currentUpdatedAt`, to retry from without a re-read), `REFUSED_DUPLICATE_CONTENT`,
+  `REFUSED_SUPERSEDES_UNKNOWN`, `REFUSED_WOULD_CYCLE`, `REFUSED_CITED` (with
+  `citedBy`), and `REFUSED` for a refusal the store names that this server does not
+  know.
 - A fault answers `{ code: "FAILED", text }`, with no `retryable` yet —
   classifying faults is SMD-2461 — except capture's, `STORE_UNAVAILABLE` and
   retryable, which the session hook keys on (SMD-1978).

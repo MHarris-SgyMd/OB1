@@ -1964,14 +1964,19 @@ console.log("\n[16] Every write tool answers its typed result beside the text, a
       assert(fault.isError && fault.text.startsWith("Error: ") && fault.sc?.code === "STORE_UNAVAILABLE" && fault.sc?.retryable === true && fault.sc?.text === fault.text,
         `capture_thought's fault is STORE_UNAVAILABLE, retryable, its words beside it (${JSON.stringify(fault.sc)?.slice(0, 120)})`);
     } finally {
-      await sql`ALTER FUNCTION validate_derived_from_away(jsonb) RENAME TO validate_derived_from`;
-      await sql.close();
+      // Every capture after this one needs the function (033 calls it on each
+      // write): restore it first, and close the connection even if that throws.
+      try {
+        await sql`ALTER FUNCTION validate_derived_from_away(jsonb) RENAME TO validate_derived_from`;
+      } finally {
+        await sql.close();
+      }
     }
   }
 
   // An edit: what moved and when, as ids, flags and the time the text names.
   const up = await result("update_thought", { id: capId, metadata_patch: { reviewed: true } });
-  assert(!up.isError && up.sc?.id === capId && up.sc?.metadataMerged === true && up.sc?.content === null && typeof up.sc?.updatedAt === "string" && up.text.includes(`updated_at: ${up.sc.updatedAt}`),
+  assert(!up.isError && up.sc?.id === capId && up.sc?.metadataMerged === true && up.sc?.contentChange === null && typeof up.sc?.updatedAt === "string" && up.text.includes(`updated_at: ${up.sc.updatedAt}`),
     `update_thought: the value says what moved and the updated_at the text names (${JSON.stringify(up.sc)})`);
   holds("update_thought", up);
   const nothing = await result("update_thought", { id: capId });

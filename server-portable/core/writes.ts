@@ -359,7 +359,7 @@ export type Updated = {
   id: string;
   updatedAt?: string;
   /** The text: moved and re-embedded, moved without a vector (the gate refused the call), or left alone. */
-  content: "reembedded" | "no_vector" | null;
+  contentChange: "reembedded" | "no_vector" | null;
   metadataMerged: boolean;
   /** The pointer as the caller set it: an id, null for cleared, absent when left alone. */
   supersedes?: string | null;
@@ -449,7 +449,7 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id, conten
   return ok({
     id,
     ...(result.updatedAt !== undefined ? { updatedAt: result.updatedAt } : {}),
-    content: content === undefined ? null : gate?.embeddings.allowed ? "reembedded" : "no_vector",
+    contentChange: content === undefined ? null : gate?.embeddings.allowed ? "reembedded" : "no_vector",
     metadataMerged: metadata_patch !== undefined,
     ...(supersedes !== undefined ? { supersedes } : {}),
     contextFailures: embedded?.contextFailures ?? 0,

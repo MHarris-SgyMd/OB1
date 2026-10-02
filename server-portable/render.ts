@@ -105,7 +105,7 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
  * alone. A thrown non-Error (a string, undefined, an object that cannot be
  * printed) is said as itself where it can be, and never throws here.
  */
-export function failed(err: unknown, { hint, lead = "Error: ", verdict }: { hint?: (msg: string) => string; lead?: string; verdict?: { code: string; retryable?: boolean } } = {}): Reply {
+export function failed(err: unknown, { hint, lead = "Error: ", verdict }: { hint?: (msg: string) => string; lead?: string; verdict?: { code: "STORE_UNAVAILABLE"; retryable: true } } = {}): Reply {
   const { message, ...own } = failure(err);
   const text = `${lead}${message}${hint ? hint(message) : ""}`;
   return { content: [{ type: "text", text }], isError: true, structuredContent: { ...(verdict ?? own), text } };
@@ -937,7 +937,7 @@ function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): s
 
 /** update_thought's value: what moved, and the pointers and pair it reports — ids, flags and counts. */
 const safeUpdate: Safe<Updated> = (v) => ({
-  id: v.id, updatedAt: v.updatedAt ?? null, content: v.content, metadataMerged: v.metadataMerged,
+  id: v.id, updatedAt: v.updatedAt ?? null, contentChange: v.contentChange, metadataMerged: v.metadataMerged,
   ...(v.supersedes !== undefined ? { supersedes: v.supersedes } : {}),
   contextFailures: v.contextFailures,
   ...(v.duplicateOf ? { duplicateOf: v.duplicateOf } : {}),
@@ -947,7 +947,7 @@ const safeUpdate: Safe<Updated> = (v) => ({
 export function renderUpdate(o: Outcome<Updated>): Reply {
   return render(o, (v) => {
     const what = [
-      v.content === "reembedded" ? "content re-embedded" : v.content === "no_vector" ? "content saved without a vector" : null,
+      v.contentChange === "reembedded" ? "content re-embedded" : v.contentChange === "no_vector" ? "content saved without a vector" : null,
       v.metadataMerged ? "metadata merged" : null,
       v.supersedes === null ? "supersedes cleared" : v.supersedes !== undefined ? `now supersedes ${v.supersedes}` : null,
       // An edit replaces every chunk, so a failure here leaves the SAME
