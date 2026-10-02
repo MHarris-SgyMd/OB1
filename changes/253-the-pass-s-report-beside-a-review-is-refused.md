@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2405]
-migrations: []
----
-
-## Changelog
-
-`db/consolidate.ts --accept <id> --dry-run` no longer accepts the proposal. The review path never read `--dry-run` or `--status`, so a decision beside either was written for real under the operator's key. It is now refused with exit 2 before anything opens, as `--status` and `--dry-run` are beside `--list` or `--stale`, where they were dropped without a word (SMD-2405).
-
-## FORK
-
-The pass's report beside a review is refused — `--accept <id> --dry-run` accepted the proposal (SMD-2405)
+# 253. The pass's report beside a review is refused — `--accept <id> --dry-run` accepted the proposal (SMD-2405)
 
 **What changed.** In `reviewProblem`, the pure rule the CLI and `run()` share since SMD-2304:
 - **`--dry-run` or `--status` beside `--accept` or `--reject`** is refused: "--dry-run writes nothing, and --accept writes a decision; pass one (--list shows the proposal without deciding it)." Before, `WRITES` was true for a decision, the review branch ran, and `review_supersession_proposal` wrote the pointer and its audit row. `DRY_RUN` and `STATUS_ONLY` are only read on the pass's report path, which a review never reaches.
