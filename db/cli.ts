@@ -28,7 +28,8 @@
  *   - a flag that takes a value followed by nothing or by another flag
  *     (`--job --switch-model` once read "--switch-model" as the key);
  *   - an empty or blank value (`--items "$OUT"` with the variable unset would
- *     read as the flag absent and write nothing, exit 0);
+ *     read as the flag absent and write nothing, exit 0) — an engine's run()
+ *     refuses a blank option in the same words, through blankProblem;
  *   - a value joined with "=" (`--url=postgres://…`);
  *   - a value where no flag takes one, beyond the positionals the script
  *     declares;
@@ -136,6 +137,29 @@ export function flagList<K extends string>(spec: FlagSpec<K>, hints: Partial<Rec
   return `  flags: ${items.length ? items.join(", ") : "none"}`;
 }
 
+/** The scanner's refusal of a blank value — empty or whitespace only — by its flag's kind: one wording for scanArgs and blankProblem. */
+function blankWords(flag: string, takes: Takes): string {
+  if (takes === "optional") return `${flag} is empty; give it a value or leave it out`;
+  if (takes === "many") return `one of ${flag}'s values is empty`;
+  return `${flag} is empty; give it ${takes === "two" ? "two values" : "a value"}`;
+}
+
+/**
+ * The scanner's refusal of the first blank value — empty or whitespace only —
+ * among an engine's string options, in `spec`'s order, or null; an option
+ * absent (null or undefined) is not blank. `--job ""` reaches no run from the
+ * CLI, so an engine's run() refuses `job: ""` first, in the same words (reembed
+ * since SMD-2304 PR 4; extract and consolidate since SMD-2425). Pure.
+ */
+export function blankProblem<K extends string>(spec: FlagSpec<K>, values: Partial<Record<K, string | readonly string[] | null | undefined>>): string | null {
+  const blank = (v: string) => v.trim() === "";
+  for (const name of Object.keys(spec) as K[]) {
+    const v = values[name];
+    if (v != null && (typeof v === "string" ? blank(v) : v.some(blank))) return blankWords(`--${name}`, spec[name]);
+  }
+  return null;
+}
+
 /** "3", "3 and 5", "3, 5 and 6". */
 function positionsOf(ns: readonly number[]): string {
   return ns.length === 1 ? `${ns[0]}` : `${ns.slice(0, -1).join(", ")} and ${ns[ns.length - 1]}`;
@@ -151,12 +175,13 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
   const positionals: string[] = [];
   const strays: number[] = [];
   const known = (name: string): name is K => Object.hasOwn(spec, name);
-  /** The value at argv[i] for `flag`, or the refusal: `wanted` is "a value" or "two values". */
-  const valueAt = (flag: string, i: number, wanted = "a value"): string | { error: string } => {
+  /** The value at argv[i] for `flag`, or the refusal: `takes` is the flag's kind, one value or two. */
+  const valueAt = (flag: string, i: number, takes: "one" | "two" = "one"): string | { error: string } => {
     const v = argv[i];
+    const wanted = takes === "two" ? "two values" : "a value";
     if (v === undefined) return { error: `${flag} needs ${wanted}; nothing follows it` };
     if (v.startsWith("--")) return { error: `${flag} needs ${wanted}; a flag follows it` };
-    if (v.trim() === "") return { error: `${flag} is empty; give it ${wanted}` };
+    if (v.trim() === "") return { error: blankWords(flag, takes) };
     return v;
   };
   for (let i = 0; i < argv.length; i++) {
@@ -186,7 +211,7 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
       i++;
     } else if (takes === "two") {
       for (let k = 1; k <= 2; k++) {
-        const v = valueAt(a, i + 1, "two values");
+        const v = valueAt(a, i + 1, "two");
         if (typeof v !== "string") return v;
         got.push(v);
         i++;
@@ -194,13 +219,13 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
     } else if (takes === "optional") {
       const next = argv[i + 1];
       if (next !== undefined && !next.startsWith("--")) {
-        if (next.trim() === "") return { error: `${a} is empty; give it a value or leave it out` };
+        if (next.trim() === "") return { error: blankWords(a, "optional") };
         got.push(next);
         i++;
       }
     } else if (takes === "many") {
       while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
-        if (argv[i + 1].trim() === "") return { error: `one of ${a}'s values is empty` };
+        if (argv[i + 1].trim() === "") return { error: blankWords(a, "many") };
         got.push(argv[++i]);
       }
     }
