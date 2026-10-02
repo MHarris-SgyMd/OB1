@@ -31,6 +31,8 @@ import {
   HNSW_SEED_MAX_SCAN_TUPLES,
   MATCH_COUNT_CEILING,
   MATCH_THOUGHTS_SIGNATURE,
+  MATCH_THOUGHTS_SIGNATURE_6,
+  SEARCH_THOUGHTS_KEYWORD_SIGNATURE,
   QUERY_LOG,
   ROUTE_ESTIMATE_MIN_PAGES,
   ROUTE_SAMPLE_PAGES,
@@ -784,14 +786,14 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
 {
   const shipped = async () => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0].s);
   const src = await shipped();
-  assert(lastDefinerOf("match_thoughts").startsWith("041"), `041 is the last definer of match_thoughts — 039's body, run with jit off (040) and its two planner paths pinned (041), carrying 038's gate (${lastDefinerOf("match_thoughts")})`);
+  assert(lastDefinerOf("match_thoughts").startsWith("074"), `074 is the last definer of match_thoughts — 041's body (039's, run with jit off (040) and its two planner paths pinned (041), carrying 038's gate), with min_trust's statements beside its own (${lastDefinerOf("match_thoughts")})`);
   assert(TID_PROBE.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src) && !/TABLESAMPLE/.test(src),
     "the shipped body samples the heap by TID range — every tuple of one block, half-open at the next — into the three counts the gate reads, and carries no TABLESAMPLE");
-  assert(new RegExp(`floor\\(random\\(\\) \\* v_pages\\)::bigint AS blk\\s+FROM generate_series\\(1, ${ROUTE_SAMPLE_PAGES}\\)`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
+  assert(new RegExp(`floor\\(random\\(\\) \\* v_pages\\)::bigint AS blk\\s+FROM generate_series\\(1, ${ROUTE_SAMPLE_PAGES}\\)`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} AND v_min = 0 THEN`).test(src),
     `…with config.mjs's constants substituted: ${ROUTE_SAMPLE_PAGES} blocks drawn from the heap's page count, no sample under ${ROUTE_ESTIMATE_MIN_PAGES} heap pages`);
   assert(/v_hits >= 8\s+AND v_hit_pages >= 3\s+AND v_hits \* v_pages >= 10 \* v_exact \* v_pages_seen/.test(src),
     "…and the three conditions as the header states them: eight hits, on three pages, at ten times the threshold");
-  assert(/IF NOT v_broad THEN\s+SELECT array_agg\(s\.id\) INTO v_ids/.test(src) && /IF NOT v_broad AND COALESCE\(cardinality\(v_ids\), 0\) <= v_exact THEN/.test(src),
+  assert(/IF NOT v_broad AND v_min = 0 THEN\s+SELECT array_agg\(s\.id\) INTO v_ids/.test(src) && /IF NOT v_broad AND COALESCE\(cardinality\(v_ids\), 0\) <= v_exact THEN/.test(src),
     "…the collection runs only when the gate did not decide, and the exact branch only when the collection ran");
   // The statement itself, not the source around it: the body's comments
   // mention EXISTS and the sample in the same breath (review pass 1). Read
@@ -861,7 +863,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // rows are not — so the collection still runs and the answers hold.
   const definer = lastDefinerOf("match_thoughts");
   await db.exec(substituteMigration(readFileSync(join(MIGRATIONS, definer), "utf8"), migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, backfillLimit: null, routeEstimateMinPages: 0 })));
-  assert(/IF v_pages >= 0 THEN/.test(await shipped()), `${definer.slice(0, 3)} applied with SchemaOptions.routeEstimateMinPages = 0: the sample runs on any heap`);
+  assert(/IF v_pages >= 0 AND v_min = 0 THEN/.test(await shipped()), `${definer.slice(0, 3)} applied with SchemaOptions.routeEstimateMinPages = 0: the sample runs on any heap`);
   await agree("with the gate reached");
   // The gate's own input on this table, run as the body runs it: the sample
   // statement is read out of the installed body (pg_proc.prosrc) with the two
@@ -1006,7 +1008,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // the one this section's load read: that was [8d]'s rebuild, so a helper that
   // rebuilt wrongly every time compared equal (review pass 3).
   const indexBack = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_embedding_idx')) AS d`)).rows[0].d ?? "";
-  assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped())
+  assert(restored.length === 1 && restored[0].startsWith("074") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} AND v_min = 0 THEN`).test(await shipped())
       && indexBack === shippedWalkIndex,
     `…and the shipped floor and the walk's index are back for the sections after${indexBack === shippedWalkIndex ? "" : ` (index: ${indexBack || "none"})`}`);
 }
@@ -2064,7 +2066,7 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   };
   const MT = MATCH_THOUGHTS_SIGNATURE;
   const MT_4 = "match_thoughts(vector, float, int, jsonb)"; // the form 020 dropped; 014 and 019 re-create it
-  const KW = "search_thoughts_keyword(text, int, int, jsonb)";
+  const KW = SEARCH_THOUGHTS_KEYWORD_SIGNATURE;
 
   const mt = await proc(MT);
   const kw = await proc(KW);
@@ -2110,11 +2112,16 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const CAST = `embedding::halfvec(${EMBEDDING_DIM}) <=> query_embedding::halfvec(${EMBEDDING_DIM})`;
   const casts = (src: string) => src.split(CAST).length - 1;
   const uncast = (src: string) => src.split(CAST).join("embedding <=> query_embedding");
+  // 074 adds a fourth, min_trust's walk, after 041's three: 041's walk with
+  // the rank beside the containment and the filter as v_filter.
   const blocks = cteBlocks(mt.prosrc);
-  assert(blocks.length === 3 && casts(blocks[0]) === 2 && casts(blocks[1]) === 0 && casts(blocks[2]) === 2 && casts(mt.prosrc) === 4,
-         "039's cast is on both sides of each walk branch's two ORDER BYs — the unfiltered and the broad-filter CTEs, thoughts and chunks — and nowhere in the exact branch");
-  assert(cteBlocks(uncast(mt.prosrc)).join("\n---\n") === cteBlocks(mt014.prosrc).join("\n---\n"),
-         "with 039's cast taken out, the three candidate CTEs of the shipped body are 014's, byte for byte");
+  assert(blocks.length === 4 && casts(blocks[0]) === 2 && casts(blocks[1]) === 0 && casts(blocks[2]) === 2 && casts(blocks[3]) === 2 && casts(mt.prosrc) === 6,
+         "039's cast is on both sides of each walk branch's two ORDER BYs — the unfiltered, the broad-filter and min_trust's CTEs, thoughts and chunks — and nowhere in the exact branch");
+  assert(cteBlocks(uncast(mt.prosrc)).slice(0, 3).join("\n---\n") === cteBlocks(mt014.prosrc).join("\n---\n"),
+         "with 039's cast taken out, the first three candidate CTEs of the shipped body are 014's, byte for byte");
+  const RANK_LINE = /\n\s+AND ob1_trust_rank\((t|p)\.metadata->>'trust'\) >= v_min/g;
+  assert((blocks[3].match(RANK_LINE) ?? []).length === 2 && blocks[3].replace(RANK_LINE, "").replaceAll("@> v_filter", "@> filter") === blocks[2],
+         "…and the fourth, min_trust's walk (074), is the broad-filter walk with the rank beside the containment in both CTEs and nothing else moved");
   assert(routing(mt.prosrc).length > 0 && routing(mt.prosrc) === routing(mt014.prosrc), "…and so is the routing statement");
   assert(Number(mt014.prorows) === 1000 && !("enable_seqscan" in mt014.settings),
          `014's function has the estimate 1,000 and no plan setting (prorows ${mt014.prorows}, proconfig ${JSON.stringify(mt014.settings)}) — the trap that puts both in the defining statement`);
@@ -2134,31 +2141,39 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   // drops all three, 040's alone drops 041's two: each is what a hand
   // re-apply leaves and preflight's candidate scan reports (test-upgrade [18]
   // and [19] hold the same across an upgrade; this is the fast loop's copy).
+  // 074 replaced 041's 6-argument form with a 7-argument one, so 039, 040
+  // and 041 re-applied land BESIDE it, and are read by their own signature.
+  await reapply("041");
+  const mt041 = await proc(MATCH_THOUGHTS_SIGNATURE_6);
   await reapply("039");
-  const mt039 = await proc(MT);
-  assert(mt039.prosrc === mt.prosrc, "041's body is 039's byte for byte — 040's clause and 041's two are the whole change");
+  const mt039 = await proc(MATCH_THOUGHTS_SIGNATURE_6);
+  assert(mt039.prosrc === mt041.prosrc, "041's body is 039's byte for byte — 040's clause and 041's two are the whole change");
   assert(!("jit" in mt039.settings) && !("enable_nestloop" in mt039.settings) && !("enable_tidscan" in mt039.settings) && mt039.settings["enable_seqscan"] === "off",
          `…and 039 re-applied alone carries 019's clauses without 040's or 041's, the state a hand re-apply leaves (proconfig ${JSON.stringify(mt039.settings)})`);
   await reapply("040");
-  const mt040 = await proc(MT);
-  assert(mt040.prosrc === mt.prosrc && mt040.settings["jit"] === "off" && !("enable_nestloop" in mt040.settings) && !("enable_tidscan" in mt040.settings),
+  const mt040 = await proc(MATCH_THOUGHTS_SIGNATURE_6);
+  assert(mt040.prosrc === mt041.prosrc && mt040.settings["jit"] === "off" && !("enable_nestloop" in mt040.settings) && !("enable_tidscan" in mt040.settings),
          `…and 040 re-applied alone carries jit = off without 041's two pins, the state that hand re-apply leaves (proconfig ${JSON.stringify(mt040.settings)})`);
   await reapply("012");
-  const kw012 = await proc(KW);
-  assert(kw012.prosrc === kw.prosrc, "019's search_thoughts_keyword body is 012's, byte for byte");
+  // 012's 4-argument form, beside 074's 5-argument one: 074's body is 012's
+  // with min_trust's rank and its two DECLARE lines.
+  const kw012 = await proc("search_thoughts_keyword(text, int, int, jsonb)");
+  const KW_074 = /\n\s+-- 074:[^\n]*\n\s+v_min\s+int\s+:= ob1_min_trust_rank\(p_min_trust\);|\n\s+-- 074: min_trust, beside the containment\.[^\n]*\n\s+--[^\n]*\n\s+AND \(v_min = 0 OR ob1_trust_rank\(t\.metadata->>'trust'\) >= v_min\)/g;
+  assert((kw.prosrc.match(KW_074) ?? []).length === 2 && kw012.prosrc === kw.prosrc.replace(KW_074, ""),
+    "074's search_thoughts_keyword body is 012's, byte for byte, but for min_trust's rank and its local (019 carried 012's verbatim)");
   assert(Number(kw012.prorows) === 1000, `…and re-applying 012 alone resets its estimate to 1,000 (prorows ${kw012.prorows})`);
   const restored = await restoreShipped("match_thoughts", "search_thoughts_keyword");
   const back = await proc(MT);
   assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && back.settings["jit"] === "off" && back.settings["enable_nestloop"] === "on" && back.settings["enable_tidscan"] === "on" && Number((await proc(KW)).prorows) === 25,
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
-  assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
+  assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 074's DROPs removed the older forms again: one match_thoughts, one search_thoughts_keyword");
   // Deliberately pinned, as [20] pinned 019 before 020 landed, 020 before
-  // 037, 037 before 038, 038 before 039, 039 before 040 and 040 before 041:
-  // 019 last defines the keyword function, 041 match_thoughts. A successor that redefines
-  // either fails here on purpose, and the expectations move with the clauses
-  // it must carry.
-  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("041"),
-         `019 is the last definer of search_thoughts_keyword and 041 of match_thoughts (${restored.join(", ")})`);
+  // 037, 037 before 038, 038 before 039, 039 before 040, 040 before 041 and
+  // 041 before 074: 074 last defines both. A successor that redefines either
+  // fails here on purpose, and the expectations move with the clauses it must
+  // carry.
+  assert(restored.length === 1 && restored[0].startsWith("074"),
+         `074 is the last definer of search_thoughts_keyword and of match_thoughts (${restored.join(", ")})`);
 
   // The migrator's floor line, since whichever file last defines the function
   // redefines it with the hnsw.* clause 014 needed pgvector 0.8 for.
@@ -2265,6 +2280,10 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   const WALK_019 = /ORDER BY (t|c)\.embedding <=> query_embedding/g;
   assert((text019.match(WALK_019) ?? []).length === 4, "019's body has four walk ORDER BYs — thoughts and chunks, unfiltered and filtered — which take 039's cast for the comparison");
   await db.exec(text019.replace(WALK_019, (_, a: string) => `ORDER BY ${a}.embedding::halfvec(${EMBEDDING_DIM}) <=> query_embedding::halfvec(${EMBEDDING_DIM})`).replace("FUNCTION match_thoughts(", "FUNCTION match_thoughts_019("));
+  // 019's file also re-creates its 4-argument search_thoughts_keyword, which
+  // since 074 stands beside the 5-argument form: dropped at once, or every
+  // 4-argument call — the hybrid's — is ambiguous.
+  await db.exec(`DROP FUNCTION search_thoughts_keyword(text, int, int, jsonb)`);
   type Row = { id: string; similarity: number; score: number | null };
   let compared = 0;
   let same = true;
@@ -4382,9 +4401,14 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
     assert(HALF.test(d) && d.includes(` ON public.${t} `), `${name} is HNSW over (embedding)::halfvec(${EMBEDDING_DIM}) with halfvec_cosine_ops, under the name 001/007 gave it (${d})`);
     assert((await oid(`${t}_embedding_halfvec_idx`)) === null, `…and no staging index is left on ${t}`);
   }
+  // 039's file also re-creates its 6-argument match_thoughts, which since 074
+  // stands beside the 7-argument form and makes every short call ambiguous:
+  // this section re-applies it for the index swap alone, so the leftover form
+  // is dropped each time.
+  const reapply039 = async () => { await reapply("039"); await db.exec(`DROP FUNCTION IF EXISTS ${MATCH_THOUGHTS_SIGNATURE_6}`); };
   const oids = async () => JSON.stringify([await oid("thoughts_embedding_idx"), await oid("thought_chunks_embedding_idx")]);
   const kept = await oids();
-  await reapply("039");
+  await reapply039();
   assert((await oids()) === kept, "re-applying 039 rebuilds nothing: both indexes keep their OIDs (the swap finds halfvec under the shipped name and does nothing)");
   await reapply("001");
   assert((await oids()) === kept && HALF.test(await def("thoughts_embedding_idx")), "001 re-applied by hand leaves it: its CREATE INDEX IF NOT EXISTS finds the name");
@@ -4416,7 +4440,7 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
   await db.exec(`DROP INDEX thoughts_embedding_idx`);
   await db.exec(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
   assert(!/Index Scan/.test(await plan(cast)), "with a vector index back under the name, the body's ORDER BY has no index path (the second failure mode: 019's sequential scan — exact, slow)");
-  await reapply("039");
+  await reapply039();
   assert(HALF.test(await def("thoughts_embedding_idx")) && /Index Scan using thoughts_embedding_idx/.test(await plan(cast)), "re-applying 039 swaps it back, and the walk has its index again");
 
   // A staging index built beforehand — the CONCURRENTLY path for a large
@@ -4428,7 +4452,7 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
     return oid("thoughts_embedding_halfvec_idx");
   };
   const staged = await stage();
-  await reapply("039");
+  await reapply039();
   assert((await oid("thoughts_embedding_idx")) === staged && (await oid("thoughts_embedding_halfvec_idx")) === null && HALF.test(await def("thoughts_embedding_idx")),
          "a valid staging index built by hand is adopted: renamed under the shipped name, the same relation, nothing rebuilt");
   // A valid index of another shape under the staging name is refused by name,
@@ -4439,14 +4463,14 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
   await db.exec(`CREATE INDEX thoughts_embedding_halfvec_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
   let refused = "";
   try {
-    await reapply("039");
+    await reapply039();
   } catch (e) {
     refused = (e as Error).message;
   }
   assert(new RegExp(`migration 039: thoughts_embedding_halfvec_idx exists but is not an HNSW index over \\(embedding::halfvec\\(${EMBEDDING_DIM}\\)\\)`).test(refused) && !HALF.test(await def("thoughts_embedding_idx")),
          `a staging index of another shape is refused by name and nothing is renamed (${refused.split("\n")[0] || "it was adopted"})`);
   await db.exec(`DROP INDEX thoughts_embedding_halfvec_idx`);
-  await reapply("039");
+  await reapply039();
   assert(HALF.test(await def("thoughts_embedding_idx")) && (await oid("thoughts_embedding_halfvec_idx")) === null, "…dropped by hand, the re-run builds and swaps as on a fresh table");
   // The same under the SHIPPED name: a valid index that names halfvec but is
   // not this shape — an IVFFlat over the cast, from pgvector's docs — is
@@ -4455,14 +4479,14 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
   await db.exec(`CREATE INDEX thoughts_embedding_idx ON thoughts USING ivfflat ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops) WITH (lists = 1)`);
   refused = "";
   try {
-    await reapply("039");
+    await reapply039();
   } catch (e) {
     refused = (e as Error).message;
   }
   assert(new RegExp(`migration 039: thoughts_embedding_idx exists but is not an HNSW index over \\(embedding::halfvec\\(${EMBEDDING_DIM}\\)\\)`).test(refused) && /USING ivfflat/.test(await def("thoughts_embedding_idx")),
          `an IVFFlat index over the cast under the shipped name is refused by name, not taken for done (${refused.split("\n")[0] || "it was kept"})`);
   await db.exec(`DROP INDEX thoughts_embedding_idx`);
-  await reapply("039");
+  await reapply039();
   assert(HALF.test(await def("thoughts_embedding_idx")), "…dropped by hand, the re-run builds the HNSW index under the name");
   // An INVALID staging index — what an interrupted CREATE INDEX CONCURRENTLY
   // leaves — is dropped and a fresh one built, and an INVALID halfvec index
@@ -11578,6 +11602,156 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   b = await backfill();
   assert((await marks(ghost.id)) === "agent/ghost-key/agent" && (await marks(ghostLow.id)) === "agent/ghost-key/ingested" && (await marks(ghostAgent.id)) === "operator/ghost2-key/agent",
     `a key classified after its writes: its rows take the kind's trust, under the claim each filed while it could not be supported — a claim above the kind clamped to it, one below kept — and a declared ingested stays (${await marks(ghost.id)}; ${await marks(ghostLow.id)}; ${await marks(ghostAgent.id)})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+}
+
+console.log("\n[67] Migration 074: min_trust — match_thoughts and search_thoughts_keyword keep rows at or above a trust, through thoughts_trust_rank_idx on 014's route: the catalog, the ladder, the refusal, exactness on the exact branch and the walk, the gate reached, the keyword arm, the forms replaced and their privileges carried (SMD-1724)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  const MT = MATCH_THOUGHTS_SIGNATURE, KW = SEARCH_THOUGHTS_KEYWORD_SIGNATURE;
+  const srcOf = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+
+  // The catalog: one form each, the new argument last and defaulted, the
+  // sentinel, the index over the ladder.
+  assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1 && lastDefinerOf("match_thoughts").startsWith("074") && lastDefinerOf("search_thoughts_keyword").startsWith("074"),
+    "074 last defines match_thoughts and search_thoughts_keyword, one form of each — the 6- and 4-argument forms dropped");
+  const args = await one<{ mt: string; kw: string }>(`SELECT pg_get_function_arguments($1::regprocedure) AS mt, pg_get_function_arguments($2::regprocedure) AS kw`, [MT, KW]);
+  assert(/, min_trust text DEFAULT NULL::text$/.test(args.mt) && /, p_min_trust text DEFAULT NULL::text$/.test(args.kw), `the new argument is the last and defaults to NULL on both (${args.mt.slice(-40)}; ${args.kw.slice(-40)})`);
+  const mtSrc = await srcOf(MT);
+  assert(/ob1:min-trust-inside-scan/.test(mtSrc) && /ob1:filter-inside-scan/.test(mtSrc) && /IF \(filter IS NULL OR filter = '\{\}'::jsonb\) AND v_min = 0 THEN/.test(mtSrc),
+    "the body carries 014's sentinel and 074's, and a min_trust takes the filtered path whatever the filter");
+  const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_trust_rank_idx')) AS d`)).d ?? "";
+  assert(/USING btree \(ob1_trust_rank\(\(metadata ->> 'trust'::text\)\)\)$/.test(idx), `thoughts_trust_rank_idx is a btree over ob1_trust_rank(metadata->>'trust') (${idx})`);
+  const ranks = await one<{ r: string }>(`SELECT string_agg(ob1_trust_rank(w)::text, ',' ORDER BY o) AS r FROM unnest(ARRAY['operator', 'agent', 'ingested', NULL, 'admin', 'Operator']) WITH ORDINALITY AS u(w, o)`);
+  assert(ranks.r === "3,2,1,0,0,0", `the ladder as a number: operator 3, agent 2, ingested 1, and none, a word off the ladder or another case 0 (${ranks.r})`);
+  const bad = await refused(`SELECT * FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.0, 90.0, 'admin')`, [unit(0)]);
+  const badKw = await refused(`SELECT * FROM search_thoughts_keyword('x', 10, 0, '{}'::jsonb, 'Operator')`);
+  assert(/min_trust must be operator, agent or ingested/.test(bad) && /min_trust must be operator, agent or ingested/.test(badKw),
+    `a min_trust off the ladder is refused by name on both, never read as no constraint (${bad.split("\n")[0]})`);
+
+  // The corpus: rows through three classified keys and an unclassified one,
+  // stamped by 073 as they land (one raw statement per key under its
+  // envelope), with a `kind` facet across them.
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+  await db.exec(`SELECT set_agent_kind('op-key', 'operator'); SELECT set_agent_kind('bot-key', 'agent'); SELECT set_agent_kind('imp-key', 'ingested')`);
+  const { unitVector } = seededRandom(1724);
+  const load = async (key: string, n: number, tag: string) => {
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: key, via: "test-schema" })]);
+      const values = Array.from({ length: n }, (_, k) => `('074 ${tag} ${k}', '{"kind":"${k % 2 === 0 ? "even" : "odd"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await tx.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    });
+  };
+  await withoutWalkIndex(async () => {
+    await load("op-key", 40, "operator");
+    await load("bot-key", 40, "agent");
+    await load("imp-key", 40, "ingested");
+    await load("ghost-key", 40, "unclassified");
+  });
+  const census = await one<{ c: string }>(`SELECT string_agg(t || ':' || n, ',' ORDER BY t) AS c FROM (SELECT coalesce(metadata->>'trust', '-') AS t, count(*)::int AS n FROM thoughts GROUP BY 1) x`);
+  assert(census.c === "-:40,agent:40,ingested:40,operator:40", `the corpus: forty rows at each trust and forty unmarked (${census.c})`);
+  const oracle = async (qv: string, min: number, filter: string, n = 10) => {
+    await db.exec(`SET enable_indexscan = off`);
+    await db.exec(`SET enable_bitmapscan = off`);
+    try {
+      return (await q<{ id: string }>(`SELECT id FROM thoughts WHERE ob1_trust_rank(metadata->>'trust') >= $2 AND metadata @> $3::jsonb ORDER BY embedding <=> $1::vector, id LIMIT ${n}`, [qv, min, filter])).map((r) => r.id);
+    } finally {
+      await db.exec(`RESET enable_indexscan`);
+      await db.exec(`RESET enable_bitmapscan`);
+    }
+  };
+  const call = async (qv: string, min: string | null, filter: string, n = 10) =>
+    (await q<{ id: string; t: string | null }>(`SELECT id, metadata->>'trust' AS t FROM match_thoughts($1::vector, -1.0, ${n}, $2::jsonb, 0.0, 90.0, $3)`, [qv, filter, min]));
+  const LEVELS: [string, number][] = [["operator", 3], ["agent", 2], ["ingested", 1]];
+  let exactOk = 0, exactCases = 0, below = 0;
+  for (let i = 0; i < 3; i++) {
+    const qv = `[${unitVector(EMBEDDING_DIM).join(",")}]`;
+    for (const [word, rank] of LEVELS) {
+      for (const filter of ["{}", '{"kind":"even"}']) {
+        const want = await oracle(qv, rank, filter);
+        const got = await call(qv, word, filter);
+        exactCases++;
+        if (got.length === want.length && got.every((r, k) => r.id === want[k])) exactOk++;
+        below += got.filter((r) => ob1Rank(r.t) < rank).length;
+      }
+    }
+  }
+  function ob1Rank(t: string | null) { return t === "operator" ? 3 : t === "agent" ? 2 : t === "ingested" ? 1 : 0; }
+  assert(exactOk === exactCases && below === 0, `on the exact branch every min_trust, with and without a filter, returns the exact top-10 in order and nothing below its trust (${exactOk}/${exactCases})`);
+  const plainQ = `[${unitVector(EMBEDDING_DIM).join(",")}]`;
+  const allRows = await call(plainQ, null, "{}", 200);
+  const ingRows = await call(plainQ, "ingested", "{}", 200);
+  assert(allRows.length === 160 && ingRows.length === 120 && ingRows.every((r) => r.t !== null),
+    `NULL is no constraint (all ${allRows.length}); 'ingested' is "labelled": the forty unmarked rows are below every min_trust (${ingRows.length})`);
+  const nullCall = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [plainQ]);
+  const sevenNull = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.0, 90.0, NULL)`, [plainQ]);
+  assert(JSON.stringify(nullCall) === JSON.stringify(sevenNull) && nullCall.length === 10, "a 4-argument call still resolves, to the same rows as min_trust NULL — the default, not a second overload");
+
+  // The walk: more operator rows than the exact branch takes, so a
+  // min_trust routes to the walk with the rank inside the scan.
+  // Each query's nearest row is an ingested one planted at the query itself,
+  // so a walk that let the rank out of its scan returns it first.
+  const walkQs = Array.from({ length: 3 }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
+  await withoutWalkIndex(async () => {
+    await load("op-key", 1100, "walk");
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "imp-key", via: "test-schema" })]);
+      for (const [k, qv] of walkQs.entries()) await tx.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{}'::jsonb, $2::vector)`, [`074 planted at walk query ${k}`, qv]);
+    });
+  });
+  const opCount = (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'trust' = 'operator'`)).c;
+  assert(opCount > 1000, `${opCount} operator rows, above the 1,000-row exact threshold: min_trust operator takes the walk`);
+  const nearest = await call(walkQs[0], null, "{}", 1);
+  assert(nearest[0]?.t === "ingested", "without min_trust each walk query's nearest row is the ingested one planted at it");
+  let walkOverlap = 0, walkReturned = 0, walkBelow = 0;
+  for (let i = 0; i < 3; i++) {
+    const qv = walkQs[i];
+    const want = new Set(await oracle(qv, 3, "{}"));
+    const got = await call(qv, "operator", "{}");
+    walkReturned += got.length;
+    walkOverlap += got.filter((r) => want.has(r.id)).length;
+    walkBelow += got.filter((r) => r.t !== "operator").length;
+  }
+  assert(walkReturned === 30 && walkBelow === 0 && walkOverlap >= 27, `the walk returns 10 rows for each of 3 queries, every one the operator's, at least 27 of 30 the exact top-10 (${walkReturned} returned, ${walkOverlap} exact)`);
+  // The gate reached: 074 applied with the floor at zero, so a min_trust
+  // call samples the heap first; the table is not ten times the threshold,
+  // so the collection still runs and the exact branch's answers hold.
+  await db.exec(substituteMigration(readFileSync(join(MIGRATIONS, lastDefinerOf("match_thoughts")), "utf8"), migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, backfillLimit: null, routeEstimateMinPages: 0 })));
+  assert(/IF v_pages >= 0 AND v_min > 0 THEN/.test(await srcOf(MT)), "074 applied with SchemaOptions.routeEstimateMinPages = 0: min_trust's sample runs on any heap");
+  let gateOk = 0;
+  for (let i = 0; i < 3; i++) {
+    const qv = `[${unitVector(EMBEDDING_DIM).join(",")}]`;
+    const want = await oracle(qv, 2, '{"kind":"odd"}');
+    const got = await call(qv, "agent", '{"kind":"odd"}');
+    if (got.length === want.length && got.every((r, k) => r.id === want[k])) gateOk++;
+  }
+  assert(gateOk === 3, `with the gate reached, min_trust agent under a filter still returns the exact top-10 (${gateOk}/3)`);
+  const restored = await restoreShipped("match_thoughts");
+  assert(restored.length === 1 && restored[0].startsWith("074") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} AND v_min > 0 THEN`).test(await srcOf(MT)), "…and the shipped floor is back for the sections after");
+
+  // The keyword arm, and the hybrid, which calls both positionally.
+  const kw = await q<{ t: string | null; n: number }>(`SELECT metadata->>'trust' AS t, total_count::int AS n FROM search_thoughts_keyword('074 ', 100, 0, '{"kind":"even"}'::jsonb, 'agent')`);
+  assert(kw.length > 0 && kw.every((r) => r.t === "operator" || r.t === "agent") && kw[0].n === (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE content ILIKE '%074 %' AND metadata @> '{"kind":"even"}' AND ob1_trust_rank(metadata->>'trust') >= 2`)).c,
+    `the keyword arm under min_trust agent returns the operator's and the agent's rows alone, and total_count counts exactly those (${kw.length} on the page of ${kw[0]?.n})`);
+  const hy = await q<{ id: string }>(`SELECT id FROM search_thoughts_hybrid($1::vector, '074 operator', -1.0, 10, '{}'::jsonb)`, [plainQ]);
+  assert(hy.length === 10, "search_thoughts_hybrid still calls both through their defaults (PR 2b gives it min_trust)");
+
+  // The privileges a 6-argument form carried reach the 7-argument one: 041
+  // back alone over a brain with no 7-argument form, an operator's REVOKE on
+  // it, then 074 — the 6-argument ACL replayed, the form dropped.
+  await db.exec(`DROP FUNCTION ${MT}`);
+  await reapply("041");
+  await db.exec(`REVOKE ALL ON FUNCTION ${MATCH_THOUGHTS_SIGNATURE_6} FROM PUBLIC`);
+  await restoreShipped("match_thoughts");
+  const acl = (await one<{ a: string | null }>(`SELECT proacl::text AS a FROM pg_proc WHERE oid = $1::regprocedure`, [MT])).a ?? "";
+  assert(acl !== "" && !/(^|[{,])=X/.test(acl) && (await functionsNamed("match_thoughts")) === 1,
+    `a REVOKE FROM PUBLIC on the 6-argument form is carried to the 7-argument one, and the 6-argument form is gone (${acl})`);
+  await db.exec(`GRANT EXECUTE ON FUNCTION ${MT} TO PUBLIC`);
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);

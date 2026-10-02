@@ -518,8 +518,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // paired with its inputs, SMD-2292; the pass settling stale proposals,
   // SMD-2297), 068 (the node_state projection kept current on write,
   // SMD-2256), 071 (node_state's dependency columns keyed, the gate
-  // stored, SMD-2267) and 073 (the content's trust on the row, SMD-1724)
-  // stay recorded and
+  // stored, SMD-2267), 073 (the content's trust on the row, SMD-1724) and 074
+  // (min_trust on match_thoughts and the keyword arm, SMD-1724) stay recorded
+  // and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -601,11 +602,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // only 006's table; 073 redefines 055's two stamp arms and 050's stamp
   // trigger and backfill, adds a third stamp form and the trust fold, and
   // redefines the 2- and 3-argument upsert_thought and update_thought on 060's
-  // and 061's bodies, refusing by name without 061 ([20x]) — all recorded by
-  // the baseline with their prerequisites present, so none becomes the
-  // plain-run failure point above).
+  // and 061's bodies, refusing by name without 061 ([20x]); 074 redefines
+  // 041's match_thoughts and 019's search_thoughts_keyword on their own
+  // bodies under a seventh and a fifth argument, the earlier forms dropped
+  // and their privileges replayed, and adds an index on 001's thoughts over
+  // a function of its own — nothing to refuse, a function body binds its
+  // names at call time ([20y]) — all recorded by the baseline with their
+  // prerequisites present, so none becomes the plain-run failure point
+  // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 44, `030 is among the last forty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 45, `030 is among the last forty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3181,6 +3187,49 @@ console.log("\n[20x] Migration 073 on a schema without 061 — refused up front,
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the073 });
   assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === n && JSON.stringify(await rowsOf()) === JSON.stringify(after),
     "a re-apply of 073 is a no-op: no audit row, no row moved — its backfill finds the rows agreeing with the log");
+  await sql.close();
+}
+
+console.log("\n[20y] Migration 074 onto a populated brain at the file before it — match_thoughts and search_thoughts_keyword replaced by their min_trust forms, the earlier forms gone, an operator's REVOKE on each carried to its successor, every call without min_trust answering row for row as before, min_trust read through the new index, no audit row and no row moved; a re-apply a no-op (SMD-1724)");
+{
+  await dropSchema(URL_);
+  const the074 = MIGRATIONS.find((f) => f.endsWith("_min_trust.sql"))!;  // by name: renumbered when main takes its number
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the074 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SELECT set_agent_kind('op-key', 'operator'), set_agent_kind('imp-key', 'ingested')`;
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : i === axis + 1 ? 0.5 : 0)).join(",")}]`;
+  for (let i = 0; i < 6; i++) {
+    const key = i % 2 === 0 ? "op-key" : "imp-key";
+    await sql`SELECT upsert_thought(${`[20y] row ${i}`}, ${JSON.stringify({ metadata: { kind: i < 3 ? "a" : "b" }, actor: { name: key, via: "test-upgrade" } })}::text::jsonb, ${vec(i)}::vector)`;
+  }
+  // An operator's hardening on both forms before the upgrade.
+  await sql.unsafe(`REVOKE ALL ON FUNCTION match_thoughts(vector, float, int, jsonb, float, float) FROM PUBLIC`);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION search_thoughts_keyword(text, int, int, jsonb) FROM PUBLIC`);
+  const reads = async () => JSON.stringify({
+    mt: await sql.unsafe(`SELECT id, similarity, score FROM match_thoughts('${vec(1)}'::vector, -1.0, 10, '{}'::jsonb)`),
+    mtFiltered: await sql.unsafe(`SELECT id FROM match_thoughts('${vec(4)}'::vector, -1.0, 10, '{"kind":"b"}'::jsonb)`),
+    kw: await sql.unsafe(`SELECT id, occurrences, total_count FROM search_thoughts_keyword('[20y]', 25, 0, '{"kind":"a"}'::jsonb)`),
+  });
+  const stamps = async () => JSON.stringify(await sql`SELECT id, content, metadata, embedding::text AS e, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const before = await reads(), rowsBefore = await stamps();
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the074 });
+  const forms = (await sql`SELECT p.oid::regprocedure::text AS sig, p.proacl::text AS acl FROM pg_proc p WHERE p.proname IN ('match_thoughts', 'search_thoughts_keyword') AND p.pronamespace = 'public'::regnamespace ORDER BY 1`) as { sig: string; acl: string | null }[];
+  assert(forms.length === 2 && /^match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision,text\)$/.test(forms[0].sig) && /^search_thoughts_keyword\(text,integer,integer,jsonb,text\)$/.test(forms[1].sig),
+    `one form of each, the min_trust ones (${forms.map((f) => f.sig).join("; ")})`);
+  assert(forms.every((f) => f.acl !== null && !/(^|[{,])=X/.test(f.acl)), `…an operator's REVOKE FROM PUBLIC on each earlier form is carried to its successor (${forms.map((f) => f.acl).join("; ")})`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION match_thoughts(vector, float, int, jsonb, float, float, text) TO PUBLIC`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION search_thoughts_keyword(text, int, int, jsonb, text) TO PUBLIC`);
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert((await reads()) === before && (await stamps()) === rowsBefore && Number(auditAfter) === Number(auditBefore),
+    "…every call without min_trust answers row for row as before (the unfiltered, a filtered and the keyword arm), and no row or audit row moved");
+  const op = (await sql.unsafe(`SELECT metadata->>'trust' AS t FROM match_thoughts('${vec(1)}'::vector, -1.0, 10, '{}'::jsonb, 0.0, 90.0, 'operator')`)) as { t: string }[];
+  assert(op.length === 3 && op.every((r) => r.t === "operator"), `min_trust operator keeps the operator's three rows of six (${op.length})`);
+  const [idx] = await sql`SELECT pg_get_indexdef(to_regclass('thoughts_trust_rank_idx')) AS d`;
+  assert(/ob1_trust_rank\(\(metadata ->> 'trust'::text\)\)/.test(String(idx.d)), "…and thoughts_trust_rank_idx stands over the ladder");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the074 });
+  const again = (await sql`SELECT count(*)::int AS c FROM pg_proc p WHERE p.proname IN ('match_thoughts', 'search_thoughts_keyword') AND p.pronamespace = 'public'::regnamespace`)[0].c;
+  assert(Number(again) === 2 && (await reads()) === before, "a re-apply of 074 is a no-op: one form of each, the same answers");
   await sql.close();
 }
 

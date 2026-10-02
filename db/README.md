@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2357 assertions: 2357 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy-three (73) migrations applied, and
+`bun test-schema.ts` prints `2379 assertions: 2379 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-four (74) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -959,6 +959,23 @@ before 073 is kept (a word off the ladder is replaced), and a text no audit
 row vouches for loses its trust with its marks. Nothing reads it yet;
 the tools' label and `min_trust` are SMD-1724's later PRs. test-schema [66],
 test-upgrade [20x].
+
+Migration 074 reads it (SMD-1724): `match_thoughts` gains a seventh argument,
+`min_trust text DEFAULT NULL`, and `search_thoughts_keyword` a fifth,
+`p_min_trust`, each keeping rows whose `metadata.trust` is at or above the word
+(operator > agent > ingested; a row with no trust is below every word, so
+`ingested` means "labelled"; any other word is refused). The earlier forms are
+dropped first and their privileges replayed onto the new ones, as 020 did, so a
+six- or four-argument call resolves to the default and is never "not unique".
+NULL is the function 041 shipped: every statement it ran runs byte for byte.
+A min_trust takes the filtered path whatever the filter, and its statements
+stand beside 041's — the gate's sample, a collection by
+`thoughts_trust_rank_idx` (a btree over `ob1_trust_rank(metadata->>'trust')`)
+alone or beside the GIN index when a filter is given too, and the walk with the
+rank inside both candidate scans; the exact answer is 041's over the ids
+collected. The hybrid and `search_thoughts_current` call both through their
+defaults and gain the argument in a later PR. test-schema [67], test-live [21b],
+test-upgrade [20y].
 
 ## What changed relative to the guide
 
@@ -3167,8 +3184,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2357 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1043 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2379 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1048 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

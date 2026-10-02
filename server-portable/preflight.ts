@@ -123,14 +123,16 @@ const DIRECT_CHECKS = [
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
- * call; 027 last defines search_thoughts_hybrid (the relative floor) and 041
- * match_thoughts (039's half-precision walk over 038's gate, run with jit
- * off and its two planner paths pinned), both under 020's signatures. A remedy
+ * call; 027 last defines search_thoughts_hybrid (the relative floor) and 074
+ * match_thoughts (041's body — 039's half-precision walk over 038's gate, run
+ * with jit off and its two planner paths pinned — with min_trust beside it,
+ * under a seventh argument; SMD-1724). A remedy
  * that applied 020 alone would leave 020's bodies over theirs — the
  * stale-body state the ledger then cannot see — so the signature remedies
  * name all three, in order.
  */
-const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 041_match_thoughts_pin_paths.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
+const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 074_min_trust.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
+const APPLY_074 = "Apply db/migrations/074_min_trust.sql.";
 /**
  * PostgREST answers a call it cannot resolve with PGRST202 both when the
  * function is missing and while its schema cache predates the migration that
@@ -138,7 +140,7 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 041 last define search_thoughts_hybrid and match_thoughts, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 074 last define search_thoughts_hybrid and match_thoughts, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
 /** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
 const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
@@ -2650,24 +2652,28 @@ if (configFailed) {
          * words it.
          */
         type Overload = { cfg: string; settings: Record<string, string>; src: string; rows: number; nargs: number; sig: string };
-        let catalog: { mt: Overload[]; hy: { nargs: number; sig: string }[]; kwRows: number | null; ledger: Set<string> } | Error;
+        let catalog: { mt: Overload[]; hy: { nargs: number; sig: string }[]; kwRows: number | null; kwSig: string | null; ledger: Set<string> } | Error;
         try {
           const { parseSetConfig } = await import("../db/config.mjs");
           const mtRows = await sql`
             SELECT p.proconfig AS cfg, p.prosrc AS src, p.prorows AS rows, p.pronargs AS nargs, p.oid::regprocedure::text AS sig
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'match_thoughts' AND n.nspname = 'public'
-            ORDER BY (p.pronargs = 6) DESC, p.oid`;
+            ORDER BY (p.pronargs = 7) DESC, (p.pronargs = 6) DESC, p.oid`;
           const hyRows = await sql`
             SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'search_thoughts_hybrid' AND n.nspname = 'public'
             ORDER BY (p.pronargs = 7) DESC, p.oid`;
-          const kw = await sql`SELECT p.prorows AS rows FROM pg_proc p WHERE p.oid = to_regprocedure('public.search_thoughts_keyword(text, integer, integer, jsonb)')`;
+          // 074's five arguments (min_trust), else 012's four.
+          const kw = await sql`SELECT p.prorows AS rows, p.oid::regprocedure::text AS sig FROM pg_proc p
+                               WHERE p.oid = COALESCE(to_regprocedure('public.search_thoughts_keyword(text, integer, integer, jsonb, text)'),
+                                                      to_regprocedure('public.search_thoughts_keyword(text, integer, integer, jsonb)'))`;
           catalog = {
             mt: mtRows.map((r: { cfg: string[] | null; src: string; rows: number; nargs: number; sig: string }) => ({ cfg: (r.cfg ?? []).join(","), settings: parseSetConfig(r.cfg) as Record<string, string>, src: String(r.src ?? ""), rows: Number(r.rows ?? 0), nargs: Number(r.nargs), sig: String(r.sig) })),
             hy: hyRows.map((r: { nargs: number; sig: string }) => ({ nargs: Number(r.nargs), sig: String(r.sig) })),
             kwRows: kw.length ? Number(kw[0].rows) : null,
+            kwSig: kw.length ? String(kw[0].sig) : null,
             ledger,
           };
         } catch (e) {
@@ -2699,15 +2705,25 @@ if (configFailed) {
           if (!mt.length || !hy.length) {
             add("search signatures", "skip", "not checked — a search function is missing, and the checks above say which");
           } else {
-            const mtNew = mt.some((r) => r.nargs === 6);
+            // 074 (SMD-1724) gave match_thoughts a seventh argument, min_trust,
+            // by dropping 020's 6-argument form — 020's mechanism, one form
+            // later. The servers send six, so 020's form alone still answers
+            // every search (a warning: min_trust is not on this brain); both
+            // forms at once make every 6-argument call ambiguous (the failure
+            // below, with the DROP).
+            const mtNew = mt.some((r) => r.nargs === 7 || r.nargs === 6);
+            const mt020Only = !mt.some((r) => r.nargs === 7) && mt.some((r) => r.nargs === 6);
             const hyNew = hy.some((r) => r.nargs === 7);
-            const extra = [...mt.filter((r) => r.nargs !== 6), ...hy.filter((r) => r.nargs !== 7)].map((r) => r.sig);
-            if (mtNew && hyNew && extra.length === 0) {
-              add("search signatures", "ok", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migration 020, one of each`);
+            const mtKeep = mt.some((r) => r.nargs === 7) ? 7 : 6;
+            const extra = [...mt.filter((r) => r.nargs !== mtKeep), ...hy.filter((r) => r.nargs !== 7)].map((r) => r.sig);
+            if (mtNew && hyNew && extra.length === 0 && mt020Only) {
+              add("search signatures", "warn", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migration 020, one of each — but match_thoughts' is 020's, from before migration 074: every search answers, and min_trust (SMD-1724) is not on this brain`, APPLY_074);
+            } else if (mtNew && hyNew && extra.length === 0) {
+              add("search signatures", "ok", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migrations 020 and 074, one of each`);
             } else if (mtNew && hyNew) {
               add("search signatures", "fail",
-                  `beside the forms the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 020 — so every call that sends four arguments to match_thoughts (five to search_thoughts_hybrid), which is every PostgREST caller by name and every hand-written SELECT, fails with "function is not unique"`,
-                  `Drop the earlier form, as 020 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+                  `beside the forms the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 020 or 074 — so every call that sends fewer arguments than the form it stands beside, which is every PostgREST caller by name, every hand-written SELECT and the servers' six-argument match_thoughts call, fails with "function is not unique"`,
+                  `Drop the earlier form, as 020 and 074 do: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
             } else {
               const old = [...(mtNew ? [] : mt), ...(hyNew ? [] : hy)].map((r) => r.sig);
               add("search signatures", "fail",
@@ -3070,7 +3086,7 @@ if (configFailed) {
          */
         try {
           if (catalog instanceof Error) throw catalog;
-          const { mt, kwRows, ledger } = catalog;
+          const { mt, kwRows, kwSig, ledger } = catalog;
           if (!mt.length) {
             add("candidate scan", "skip", "not checked — match_thoughts is not defined (filtered search says so)");
           } else {
@@ -3087,6 +3103,10 @@ if (configFailed) {
             const ledgerHas019 = ledger.has("019");
             const ledgerHas040 = ledger.has("040");
             const ledgerHas041 = ledger.has("041");
+            // 074 last defines match_thoughts AND search_thoughts_keyword
+            // (SMD-1724), each with its clauses and estimate: its file is the
+            // remedy for both while the ledger does not record it.
+            const ledgerHas074 = ledger.has("074");
             // Whether THIS server would compile at all: Supabase's images are
             // built without LLVM JIT and its upgrades set jit = off, so there a
             // missing clause costs nothing today and the warning says so.
@@ -3103,9 +3123,9 @@ if (configFailed) {
             // and 041 does not define that function, so its remedy is the ALTER
             // in either case, beside the file or in the Put-it-back list.
             const mtAlter = mtMissing ? `ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${nestloopOn ? "" : " SET enable_nestloop = on"}${tidscanOn ? "" : " SET enable_tidscan = on"}${rows !== 10 ? " ROWS 10" : ""};` : "";
-            const kwAlter = kwOff ? "ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;" : "";
-            const remedy = mtMissing && !ledgerHas041
-              ? `Apply db/migrations/041_match_thoughts_pin_paths.sql${!seqOff || rows !== 10 ? " — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own (019's file alone would re-create the 4-argument form 020 dropped)" : ""}.${kwOff ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ${kwAlter}  and carry it into the migration that redefined that function.` : ""}`
+            const kwAlter = kwOff ? `ALTER FUNCTION ${kwSig ?? "search_thoughts_keyword(text, int, int, jsonb, text)"} ROWS 25;` : "";
+            const remedy = (mtMissing || kwOff) && !ledgerHas074
+              ? `Apply db/migrations/074_min_trust.sql${!seqOff || rows !== 10 || kwOff ? " — the last definer of match_thoughts and search_thoughts_keyword, which carries 019's clauses and both estimates with its own (019's file alone would re-create the forms 020 and 074 dropped)" : ""}.`
               : `Put it back — after any re-apply of a migration body, since CREATE OR REPLACE resets these: SELECT '[1]'::vector; ${[mtAlter, kwAlter].filter(Boolean).join(" ")}  and carry them into the migration that redefined the function.`;
             const estimates = [
               ...(rows !== 10 ? [`match_thoughts' row estimate is ${rows} rather than 10`] : []),
