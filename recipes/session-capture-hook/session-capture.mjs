@@ -1430,7 +1430,10 @@ export function verdictOf(result, text) {
  * the session forever, since the state kept naming it.)
  */
 export async function postCapture(cfg, payload) {
-  const args = { content: payload.text, source: payload.harness };
+  // SMD-1724: a session summary is an agent's output — derived from the
+  // session, written by the hook or its model — declared so; the server clamps
+  // it to the key's kind. A server from before the argument strips it unread.
+  const args = { content: payload.text, source: payload.harness, trust: "agent" };
   if (payload.derived_from?.length) args.derived_from = payload.derived_from;
   if (payload.supersedes) args.supersedes = payload.supersedes;
   // What rides in metadata.* beside the row's own source (which stays the

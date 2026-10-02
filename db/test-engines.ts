@@ -290,6 +290,10 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     ["--batch past its bound and a short lease", { url: AT, batch: 2147483648, ttl: 3, heartbeat: 2 }, ["--url", AT, "--batch", "2147483648", "--ttl", "3", "--heartbeat", "2"], {}],
     ["--timeout past its bound and a short lease", { url: AT, timeout: 9007199254741, ttl: 3, heartbeat: 2 }, ["--url", AT, "--timeout", "9007199254741", "--ttl", "3", "--heartbeat", "2"], {}],
     ["--decide without the Jev tier", { url: AT, decide: true }, ["--url", AT, "--decide"], {}],
+    // A blank value the scanner refuses, first — before the URL and the numbers — refused by run() in its words (SMD-2425: run() pooled and recorded under the key '').
+    ["--job blank, before the URL", { job: "" }, ["--job", ""], {}],
+    ["--dump blank", { url: AT, dump: "  " }, ["--url", AT, "--dump", "  "], {}],
+    ["a blank --job before --workers 0", { url: AT, workers: 0, job: " " }, ["--url", AT, "--workers", "0", "--job", " "], {}],
     // The banner on stdout, then the blanket gate (SMD-1903): the default policy with nothing declared local.
     ["an egress policy that refuses every row", { url: AT }, ["--url", AT], {}],
     // …under a model named in the environment run() is given: its banner names it, as the CLI's does.
@@ -385,6 +389,14 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     ["--timeout past its bound and a short lease", { url: AT, timeout: 9007199254741, ttl: 3, heartbeat: 2 }, ["--url", AT, "--timeout", "9007199254741", "--ttl", "3", "--heartbeat", "2"], {}],
     ["--stale past the timestamp floor", { url: AT, stale: 2000001 }, ["--url", AT, "--stale", "2000001"], {}],
     ["--note with the pass's marker", { url: AT, reject: ID, note: "settled by the pass: mine" }, ["--url", AT, "--reject", ID, "--note", "settled by the pass: mine"], {}],
+    // A blank value the scanner refuses, first — before the URL, the numbers and the review rules — refused by run() in its words (SMD-2425: a blank note reached the decision).
+    ["--dump blank, before the URL", { dump: "" }, ["--dump", ""], {}],
+    ["--list blank", { url: AT, list: " " }, ["--url", AT, "--list", " "], {}],
+    ["--accept blank", { url: AT, accept: "" }, ["--url", AT, "--accept", ""], {}],
+    ["--reject blank", { url: AT, reject: "  " }, ["--url", AT, "--reject", "  "], {}],
+    ["--direction blank", { url: AT, accept: ID, direction: " " }, ["--url", AT, "--accept", ID, "--direction", " "], {}],
+    ["--note blank", { url: AT, reject: ID, note: "  " }, ["--url", AT, "--reject", ID, "--note", "  "], {}],
+    ["a blank --note before --workers 0", { url: AT, workers: 0, reject: ID, note: " " }, ["--url", AT, "--workers", "0", "--reject", ID, "--note", " "], {}],
     // The banner on stdout, then the blanket gate (SMD-1903), under a judge model named in env.
     ["the egress gate's refusal under OB1_JUDGE_MODEL from env", { url: AT }, ["--url", AT], { OB1_JUDGE_MODEL: "env-judge" }],
   ];

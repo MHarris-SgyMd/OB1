@@ -476,6 +476,9 @@ async function storeAuditReport(result: AuditResult, actor: { name: string }): P
     p_content: content,
     p_payload: {
       actor,
+      // SMD-1724: the report is a model's reading of the window — an agent's
+      // output, declared so; the database stamps the thought's trust.
+      event: { trust: "agent" },
       metadata: {
         type: "audit_report",
         source: "auditor-function",

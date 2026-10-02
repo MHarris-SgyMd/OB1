@@ -14,7 +14,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { commandLine, flagList, readNumber, scanArgs, type Args, type FlagSpec } from "./cli.ts";
+import { blankProblem, commandLine, flagList, readNumber, scanArgs, type Args, type FlagSpec } from "./cli.ts";
 import { parseArgs as graphArgs } from "./graph-centrality.ts";
 
 let pass = 0;
@@ -103,6 +103,23 @@ const refusal = (argv: string[], positionals = 0): string => { const r = scan(ar
   ok(flagList(SPEC) === "  flags: --url <value>, --compare <a> <b>, --follow [value], --ids <value> …, --query <value> (repeatable), --dry-run", "the flag list shows what each flag takes");
   ok(flagList({ url: "one", force: "none", query: "repeated" }, { url: "<postgres://…>", force: "(with --baseline)", query: "<q>" }) === "  flags: --url <postgres://…>, --force (with --baseline), --query <q> (repeatable)", "…with a script's hints, a repeated flag still said to repeat");
   ok(flagList({}) === "  flags: none", "…and says none for a script that takes none");
+}
+
+// ---------------------------------------------------------------------------
+// blankProblem: an engine's run() refuses a blank option in the scanner's
+// words (SMD-2425) — one wording, so the two cannot drift.
+// ---------------------------------------------------------------------------
+{
+  for (const blank of ["", " ", "\t"]) {
+    ok(blankProblem(SPEC, { url: blank }) === refusal(["--url", blank]), `a one-value option's blank (${JSON.stringify(blank)}) in the scanner's words`);
+    ok(blankProblem(SPEC, { follow: blank }) === refusal(["--follow", blank]), `…an optional flag's (${JSON.stringify(blank)})`);
+    ok(blankProblem(SPEC, { query: blank }) === refusal(["--query", blank]), `…a repeated flag's (${JSON.stringify(blank)})`);
+    ok(blankProblem(SPEC, { ids: ["a", blank] }) === refusal(["--ids", "a", blank]), `…one of a many flag's values (${JSON.stringify(blank)})`);
+    ok(blankProblem(SPEC, { compare: ["a", blank] }) === refusal(["--compare", "a", blank]), `…and a two-value flag's (${JSON.stringify(blank)})`);
+  }
+  ok(blankProblem(SPEC, {}) === null && blankProblem(SPEC, { url: undefined, follow: null as unknown as undefined, ids: [] }) === null, "an option absent, null or an empty list is not blank");
+  ok(blankProblem(SPEC, { url: "x", follow: "30", ids: ["a", "b"], query: " q " }) === null, "values with text pass, padded ones too (the scanner reads them as given)");
+  ok(blankProblem(SPEC, { query: "", url: "" }) === "--url is empty; give it a value", "the first blank in the spec's order is the one refused");
 }
 
 // ---------------------------------------------------------------------------

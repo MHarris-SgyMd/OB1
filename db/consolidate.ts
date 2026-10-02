@@ -129,7 +129,7 @@ import {
 import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
-import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
+import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
 /**
@@ -318,6 +318,13 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" |
  */
 export async function run(opts: ConsolidateOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
+  // A blank value where the CLI's scanner refuses one first, in its words and
+  // with its flag list: `--job ""` reaches no run (SMD-2425, as reembed's).
+  const blank = blankProblem(FLAGS, { dump: opts.dump, list: opts.list, accept: opts.accept, reject: opts.reject, direction: opts.direction, note: opts.note });
+  if (blank !== null) {
+    err(`${blank}\n${flagList(FLAGS, HINTS)}`);
+    return 2;
+  }
   // databaseUrl's two refusals without its exit, then the numbers and the
   // review flags. A URL beside a caller's client is the worker key's (above),
   // so it is held to the rule too.
@@ -1176,6 +1183,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 err(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
               }
               if (recorded) failed++;
+              // The hard stop's release beat this one: the caller's own stop, not a lapse (SMD-2425).
+              else if (hardStopped) return;
               else {
                 // Not ours to record: the lease lapsed during the pauses, or the
                 // row was returned by hand. Counted with the rows this worker lost.
@@ -1215,6 +1224,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             continue;
           }
           if (!ok) {
+            // The hard stop's release beat this one to the row: not a lapse to
+            // report, the caller's own stop; a release that went through first
+            // is counted below as any is — as reembed's (SMD-2425).
+            if (hardStopped) return;
             // Not ours to finish: counted with the rows this worker lost, not
             // the ones it finished, so the workers' summaries add up.
             err(`  ${b.thought_id}: the claim was no longer this worker's at release — its lease lapsed (no beat reached the database for ${TTL} s) or it was returned by hand with release_claims_for_worker; the row is the pool's or another worker's now`);
