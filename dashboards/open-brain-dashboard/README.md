@@ -154,6 +154,14 @@ the server is asked) and, given `--capture-key`, with a capture-only key
 the semantic tool, which needs the server's embedding provider; the smoke
 drives the keyword tool so it runs where no provider does (CI).
 
+`test-parsers.ts` holds the reply parsers in `src/lib/api.ts` to the server's
+own replies, rendered by `server-portable/render.ts` in the same checkout. It
+needs no server, no install and no database, and CI runs it on every change:
+
+```bash
+bun test-parsers.ts
+```
+
 ## Troubleshooting
 
 **Issue: `SESSION_SECRET must be set and at least 32 characters`**

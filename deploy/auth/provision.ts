@@ -62,6 +62,9 @@ export const COMPOSE_PASSES = [
   "OB1_AUTH_COOKIE_KEYS",
   "OB1_AUTH_OPERATOR_PASSWORD_HASH",
   "OB1_AUTH_MAX_CLIENTS",
+  "OB1_AUTH_REGISTRATIONS_PER_HOUR",
+  "OB1_AUTH_TRUSTED_PROXY",
+  "OB1_AUTH_FORWARDED_HOPS",
   // deploy/.env's, so the server can refuse a start the file does not configure (config.ts).
   "COMPOSE_PROFILES",
   ...clientIds(Object.keys(TIER_PREFIX) as TierName[], {}).map(secretName),
@@ -287,6 +290,26 @@ async function selfCheck(): Promise<number> {
     };
     const maxes = [maxOf(undefined), maxOf(" "), maxOf("1"), maxOf("100000")];
     expect("OB1_AUTH_MAX_CLIENTS is 200 unset or blank, and takes a whole number from 1 to 100,000", JSON.stringify(maxes) === "[200,200,1,100000]", JSON.stringify(maxes));
+    const perHour = (v: string | undefined) => {
+      try {
+        return configFromEnv(v === undefined ? good : { ...good, OB1_AUTH_REGISTRATIONS_PER_HOUR: v }).registrationsPerHour;
+      } catch (e) {
+        return (e as Error).message;
+      }
+    };
+    const proxyOf = (over: Record<string, string>) => {
+      try {
+        const c = configFromEnv({ ...good, ...over });
+        return `${c.trustedProxy ?? "-"} ${c.forwardedHops}`;
+      } catch (e) {
+        return (e as Error).message;
+      }
+    };
+    expect(
+      "no trusted proxy and one hop unless set; a host name or an address taken, anything else refused",
+      proxyOf({}) === "- 1" && proxyOf({ OB1_AUTH_TRUSTED_PROXY: " proxy ", OB1_AUTH_FORWARDED_HOPS: "2" }) === "proxy 2" && proxyOf({ OB1_AUTH_TRUSTED_PROXY: "172.20.0.5" }) === "172.20.0.5 1" && /OB1_AUTH_TRUSTED_PROXY is not a host name or an address/.test(proxyOf({ OB1_AUTH_TRUSTED_PROXY: "proxy, other" })) && /OB1_AUTH_FORWARDED_HOPS is not a whole number/.test(proxyOf({ OB1_AUTH_FORWARDED_HOPS: "0" })),
+    );
+    expect("OB1_AUTH_REGISTRATIONS_PER_HOUR is 30 unset, takes 1 to 100,000, and refuses 0", JSON.stringify([perHour(undefined), perHour("1"), perHour("100000")]) === "[30,1,100000]" && /OB1_AUTH_REGISTRATIONS_PER_HOUR is not a whole number from 1 to 100000 \("0"/.test(String(perHour("0"))));
     for (const bad of ["0", "100001", "-5", "2.5", "1e3", "lots"]) {
       const said = refusal(() => configFromEnv({ ...good, OB1_AUTH_MAX_CLIENTS: bad }));
       expect(`OB1_AUTH_MAX_CLIENTS "${bad}" is refused`, said.includes(`OB1_AUTH_MAX_CLIENTS is not a whole number from 1 to 100000 ("${bad}"`), said || "accepted");
@@ -470,7 +493,7 @@ async function selfCheck(): Promise<number> {
     const env = auth.environment ?? {};
     expect("compose: the auth service is in the auth profile alone", JSON.stringify(auth.profiles) === '["auth"]');
     expect(
-      "compose: it passes exactly the layout, the keys, the hash, the registration cap and the fixed clients' secrets, each as ${X:-}",
+      "compose: it passes exactly the layout, the keys, the hash, the registration limits and the fixed clients' secrets, each as ${X:-}",
       JSON.stringify(Object.keys(env).sort()) === JSON.stringify([...COMPOSE_PASSES].sort()) && Object.entries(env).every(([k, v]) => v === `\${${k}:-}`),
       Object.keys(env).join(", "),
     );

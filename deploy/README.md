@@ -1276,6 +1276,60 @@ around it supports forgetting its client; a client with no refresh token
 meets an unknown-client page at sign-in, and its app must forget the client
 to register afresh.
 
+**Abuse limits** (SMD-2309), kept in memory (a restart forgets them), in
+two layers. Each refusal is a 429 (the cap above keeps its 503), with
+`Retry-After` where waiting helps (a spent sign-in starts again instead).
+
+Always on, and safe when every client looks like one address, as behind a
+host tunnel:
+- **Password checks** across every client: ten at once, then one a second.
+  A right password gives its check back, so only wrong ones spend it. Past
+  it the sign-in page asks for a moment. A guesser gets about 3,600 tries an
+  hour, but a flood of them holds the right password off too while it lasts:
+  nothing outlasts the flood, and the loopback sign-in that answers one is
+  SMD-2286's.
+- **Each sign-in** takes five wrong passwords, then must start again from the
+  app.
+- **Registration** has the cap and the idle purge above.
+
+Per address, only with `OB1_AUTH_TRUSTED_PROXY` set to the proxy in front (a
+host name or address). A request from that proxy is the client whose
+`X-Forwarded-For` entry sits `OB1_AUTH_FORWARDED_HOPS` from the right (1
+unless set); a request from anyone else is its own connection's address, so
+no header can pick one. A request with no such entry gets only the limits
+above, and an IPv6 address counts by its /64. An address that wins password
+checks in a flood is locked out after six, so one address cannot hold them.
+- **Sign-in:** five wrong passwords are free; each one after locks the address
+  out for a minute, doubling, at most fifteen. The right password clears it.
+- **The token and revocation endpoints:** twenty failed authentications of
+  one client from one address in fifteen minutes refuse that client from
+  there until the oldest falls out; another client from the same address is
+  untouched, so one connector failing behind a platform's shared egress
+  refuses no other. Only a request that presented a secret or an assertion,
+  for a client that exists and holds a secret, counts.
+- **Registration:** `OB1_AUTH_REGISTRATIONS_PER_HOUR` clients an hour (30
+  unless set), so no one address fills the cap. A platform that registers
+  from a shared egress shares its hour too: thirty registrations there stop
+  your next connect through it until the oldest is an hour old.
+
+While the name does not resolve, the per-address limits are off and the log
+says so every five minutes. Compose's `proxy` shares `mesh` with `auth`, so
+`OB1_AUTH_TRUSTED_PROXY=proxy` resolves.
+
+Leave `OB1_AUTH_TRUSTED_PROXY` unset unless the proxy's entry is each
+client's own. Compose's proxy trusts no forwarded header, so with one hop the
+entry is the proxy's own peer: each client's address when the published port
+faces clients directly (a Linux host's port forwarding keeps the source),
+but one address for everyone behind a host tunnel (cloudflared, `tailscale
+funnel`, caddy) or a forwarder that rewrites the source (rootless podman on
+macOS showed every client as its gateway, measured). A lockout there is
+everyone's. Two hops need the tunnel to write its client into
+`X-Forwarded-For` and the proxy to trust that header (Traefik's
+`forwardedHeaders.trustedIPs`, which compose does not set); a tunnel that
+passes the header through unwritten lets the client name entry 2. A password from `--init`, or one of 12 characters
+or more, is what holds against many addresses guessing; the loopback
+break-glass sign-in is SMD-2286's.
+
 **Custody and backups.**
 - **The signing key** signs every token the server issues: a new key
   invalidates them all, and a lost one cannot be recovered.
@@ -1321,8 +1375,8 @@ job does the same.
 `/.well-known/oauth-protected-resource/mcp`, served by the MCP server while
 this one answers (SMD-2382, SMD-2286); passkey
 sign-in, which needs the public origin (SMD-2382, SMD-2286); the MCP server
-and the GUI as its clients (SMD-2286, SMD-2287); and rate limits on the
-public edge (SMD-2309), beside the cap above. The release
+and the GUI as its clients (SMD-2286, SMD-2287); and rate limits at the
+proxy (SMD-2309), beside the server's own above. The release
 overlay does not pin an image for it yet, so the profile builds from a
 checkout.
 

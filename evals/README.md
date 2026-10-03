@@ -6867,7 +6867,9 @@ The consent-page mutants above hold its pages too.
     review. The deploy should check the resource before rotation, or accept it
     and document it.
 - **SMD-2382:** the `auth` profile's configured and reachable states.
-- **SMD-2309:** sign-in brute-force limits.
+- **SMD-2309:** limits at the proxy and on `/mcp`, `/dashboard` and `/api`;
+  the server's own (sign-in, client authentication, registration) are
+  `deploy/auth/limits.ts`.
 
 ## Related
 
