@@ -209,6 +209,39 @@ console.log("\n[5] Auth failure — missing key, and an unparseable body");
   assert((await r2.json())?.id === null, "unparseable body → id: null");
 }
 
+console.log("\n[5a] A refused body is read only so far (SMD-2309): past REFUSAL_BODY_LIMIT, id: null");
+{
+  const { REFUSAL_BODY_LIMIT } = await import("./index.ts");
+  const request = (pad: number) => JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list", params: { pad: "x".repeat(pad) } });
+  const under = await fetch(BASE, { method: "POST", headers: H, body: request(REFUSAL_BODY_LIMIT - 200) });
+  assert((await under.json())?.id === 7, "a body under the limit still has its id echoed");
+  const over = await fetch(BASE, { method: "POST", headers: H, body: request(4 * 1024 * 1024) });
+  const overBody = await over.json();
+  assert(over.status === 200 && overBody?.error?.code === -32001 && overBody?.id === null, `a 4 MB body past the limit is refused with id: null (${over.status}, ${JSON.stringify(overBody?.id)})`);
+  // No Content-Length: the read stops at the limit as it goes.
+  const big = new TextEncoder().encode(request(4 * 1024 * 1024));
+  const stream = new ReadableStream<Uint8Array>({ start(c) { for (let i = 0; i < big.length; i += 16 * 1024) c.enqueue(big.subarray(i, i + 16 * 1024)); c.close(); } });
+  const chunked = await fetch(BASE, { method: "POST", headers: H, body: stream, duplex: "half" } as RequestInit);
+  assert((await chunked.json())?.id === null, "a streamed body past the limit is refused with id: null");
+  // Declared past the limit, the body is not read at all: a small one sent with
+  // a Content-Length over it still gets id: null (raw, since fetch sets its own).
+  const { connect } = await import("node:net");
+  const small = request(10);
+  const declared = await new Promise<string>((resolve, reject) => {
+    const sock = connect(Number(new URL(BASE).port), "127.0.0.1");
+    let got = "";
+    sock.on("data", (d) => (got += d));
+    sock.on("end", () => resolve(got));
+    sock.on("error", reject);
+    sock.on("connect", () => {
+      sock.write(`POST / HTTP/1.1\r\nhost: localhost\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\nconnection: close\r\ncontent-length: ${REFUSAL_BODY_LIMIT + 1}\r\n\r\n${small}`);
+      setTimeout(() => sock.end(), 2000);
+    });
+  });
+  const declaredBody = declared.slice(declared.indexOf("\r\n\r\n") + 4);
+  assert(/"id":null/.test(declaredBody) && /-32001/.test(declaredBody), `a small body declaring more than the limit is refused with id: null, unread (${declaredBody.slice(0, 80)})`);
+}
+
 console.log("\n[5b] A refused NOTIFICATION (no id) gets no JSON-RPC body — 202, not a 200 envelope the client drops (SMD-2106)");
 {
   const post = (body: string, headers: Record<string, string> = H) => fetch(BASE, { method: "POST", headers, body });
