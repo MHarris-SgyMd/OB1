@@ -246,9 +246,9 @@
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
  *      remaining size (SMD-2126)
- *  25. a tripwire on server-portable/index.ts and the process root it builds
- *      on, root.ts, for the logic a move to server-portable/core/ leaves
- *      behind (SMD-2283, SMD-2284): each file's import and export statements
+ *  25. a tripwire on server-portable/index.ts, the process root it builds
+ *      on (root.ts) and the REST core (api.ts, rest/*.ts), for the logic a
+ *      move to server-portable/core/ leaves behind (SMD-2283, SMD-2284): each file's import and export statements
  *      name only its own TRANSPORT_FILES list's modules, whole or by the names
  *      listed and under those names (never egress.ts, embed.ts, metadata.ts
  *      or a store backend; root.ts's readers, the store's module,
@@ -5135,9 +5135,10 @@ checkPostgrestClients();
 // zod), calls a core operation and renders its answer (render.ts), and the REST
 // core (SMD-2284) calls the same operations: one gateway, not two (SMD-1931).
 // The process root both entries build on — the environment, the store and the
-// agent registry — is root.ts (SMD-2284). This is a tripwire for the forms a
-// move leaves behind, not a proof: a text scan cannot follow a value. In each
-// of TRANSPORT_FILES:
+// agent registry — is root.ts, and the REST core (api.ts, rest/) is held as
+// index.ts is (SMD-2284). This is a tripwire for the forms a move leaves
+// behind, not a proof: a text scan cannot follow a value. In each of
+// TRANSPORT_FILES:
 //   - every import and re-export statement (comments and strings blanked, so
 //     a sentence naming a file is not one) names a module the file's own list
 //     allows, whole or by the names it lists, under their own names — for
@@ -5190,9 +5191,33 @@ const ROOT_ROLE: TransportRole = {
   wiring: true,
   mustImport: "./store.ts",
 };
+// The REST core (SMD-2284): its entry builds the core over the root's readers
+// as index.ts does; rest/ routes, authorizes and answers, and reaches the
+// store, the gate and the models through the core alone.
+const API_ROLE: TransportRole = {
+  imports: new Map<string, "*" | ReadonlySet<string>>([
+    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "serveHere"])],
+    ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
+  ]),
+  wiring: false,
+  mustImport: "./core/index.ts",
+};
+const REST_IMPORTS = new Map<string, "*" | ReadonlySet<string>>([
+  ["hono", "*"], ["zod", "*"],
+  ["../auth.ts", "*"], ["../tools.ts", "*"], ["../jobs.ts", "*"], ["../sse.ts", "*"], ["../version.ts", "*"],
+  ["../agents.ts", new Set(["AgentOutcome"])],
+  ["../core/index.ts", "*"],
+  ["../core/refusal.ts", new Set(["failure", "ok", "refusalValue", "Refusal", "RefusalCode"])],
+  ["./routes.ts", "*"], ["./openapi.ts", "*"],
+]);
+const REST_ROLE: TransportRole = { imports: REST_IMPORTS, wiring: false, mustImport: "../core/index.ts" };
 const TRANSPORT_FILES = new Map<string, TransportRole>([
   ["server-portable/index.ts", INDEX_ROLE],
   ["server-portable/root.ts", ROOT_ROLE],
+  ["server-portable/api.ts", API_ROLE],
+  ["server-portable/rest/app.ts", REST_ROLE],
+  ["server-portable/rest/routes.ts", REST_ROLE],
+  ["server-portable/rest/openapi.ts", REST_ROLE],
 ]);
 /** The functions whose bodies are the store's wiring: build it once (and wire the job sink), close it at a stop. */
 const STORE_WIRING = ["db", "closeStore"];
@@ -5339,6 +5364,14 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ['export function db(): Promise<ThoughtStore> {\n  return _store!;\n}\nexport function closeStore(): Promise<boolean> {\n  return createStore(env()).then(() => true);\n}\n', true, ROOT_ROLE],
   ['export const PORT = 8080\nimport { db } from "./root.ts";\nconst core = createCore({ env, store: db, door });\n', false],
   ['export const X = 1\nimport { createStore, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
+  // SMD-2284 PR 2: the REST core reaches the store through the core alone.
+  ['import { decideCalls } from "../egress.ts";\n', true, REST_ROLE],
+  ['import { createStore } from "../store.ts";\n', true, REST_ROLE],
+  ["const r = await fetch(url);\n", true, REST_ROLE],
+  ['import { createCore } from "./core/index.ts";\nimport { db } from "./root.ts";\nconst core = createCore({ env, store: db, door: API_DOOR });\nconst id = await agents().resolve(db(), p);\n', false, API_ROLE],
+  ['import { db } from "./root.ts";\nconst s = await db();\n', true, API_ROLE],
+  ['import { failure, refusalValue, type Refusal, type RefusalCode } from "../core/refusal.ts";\n', false, REST_ROLE],
+  ['import { refuse } from "../core/refusal.ts";\n', true, REST_ROLE],
   // Review pass 1's root probe: a store call past the wiring, in the root itself.
   ["const r = await (await db()).retryFailed(workType);\n", true, ROOT_ROLE],
   ['import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";\n', false],

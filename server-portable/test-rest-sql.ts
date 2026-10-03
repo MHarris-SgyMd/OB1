@@ -1,0 +1,340 @@
+#!/usr/bin/env bun
+/**
+ * test-rest-sql.ts — the REST core against real Postgres, beside the MCP
+ * server over the same store (SMD-2284).
+ *
+ * The contract: every operation is run through both doors on the same
+ * database, and the MCP reply is what render.ts makes of the REST answer —
+ * text and structuredContent both — so the MCP server could be a client of
+ * the REST core (SMD-2287) without a word changing. A refusal is the same
+ * code and the same declared facts through both, at the status REST gives
+ * it. Then test-auth's cases against REST (a read key cannot write, a capture
+ * key cannot read, a wrong or revoked key is a 401), the door a REST write
+ * records, and a log with no query, key or content in it.
+ *
+ * The embedding provider is stubbed, as test-e2e-sql's is.
+ *
+ *   ../db/with-postgres.sh bun test-rest-sql.ts
+ */
+
+import { SQL } from "bun";
+import { createAssert, resetSchema } from "../db/test-support.ts";
+import { hashKey } from "./auth.ts";
+import { ok } from "./core/refusal.ts";
+import * as say from "./render.ts";
+import { REFUSAL_STATUS } from "./rest/app.ts";
+import { TOOL_NAMES } from "./tools.ts";
+
+const URL_ = process.env.DATABASE_URL;
+if (!URL_) {
+  console.error("DATABASE_URL is not set. Try: ../db/with-postgres.sh bun test-rest-sql.ts");
+  process.exit(2);
+}
+
+const EMBEDDING_DIM = 1536;
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
+process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
+process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
+
+const { assert, report } = createAssert();
+await resetSchema(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
+
+// ── Stub only the model provider (test-e2e-sql.ts's stub) ────────────────────
+const STUB_BASE = "https://stub.invalid/v1";
+const KNOWN: Record<string, number> = { alpha: 0, beta: 1, gamma: 2 };
+const axisFor = (text: string) => KNOWN[Object.keys(KNOWN).find((k) => text.toLowerCase().includes(k)) ?? ""] ?? 3;
+const realFetch = globalThis.fetch;
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = String(input instanceof Request ? input.url : input);
+  if (url.startsWith(STUB_BASE)) {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    if (url.endsWith("/embeddings")) {
+      const v = new Array(EMBEDDING_DIM).fill(0);
+      v[axisFor(String(body.input))] = 1;
+      return new Response(JSON.stringify({ data: [{ embedding: v }] }), { headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ topics: ["stubbed"], type: "idea" }) } }] }), { headers: { "Content-Type": "application/json" } });
+  }
+  return realFetch(input as RequestInfo, init);
+}) as typeof fetch;
+
+process.env.OB1_LLM_BASE_URL = STUB_BASE;
+process.env.OB1_LLM_LOCAL = "1";
+process.env.OPENROUTER_API_KEY = "stub";
+delete process.env.OB1_STORE;
+delete process.env.SUPABASE_URL;
+delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+delete process.env.MCP_ACCESS_KEY;
+delete process.env.OB1_QUERY_LOG; // off: a read through one door must leave nothing the other door's read would see
+process.env.DATABASE_URL = URL_;
+process.env.OB1_AGENT_CACHE_TTL_MS = "0"; // a revocation reaches the next request
+const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw", gone: "gone-raw" } as const;
+process.env.MCP_ACCESS_KEYS = [
+  `writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`,
+  `hook:capture:${hashKey(KEYS.hook)}`, `gone:write:${hashKey(KEYS.gone)}`,
+].join(",");
+
+// Both doors in one process, over the one process root (root.ts): one store.
+const mcpServer = Bun.serve({ port: 0, fetch: (await import("./index.ts")).default.fetch });
+const apiServer = Bun.serve({ port: 0, fetch: (await import("./api.ts")).default.fetch });
+const MCP = `http://localhost:${mcpServer.port}`;
+const API = `http://localhost:${apiServer.port}`;
+
+type Reply = { text: string; sc: Record<string, unknown>; isError: boolean };
+let rpcId = 1;
+async function mcp(name: string, args: Record<string, unknown>, key: string = KEYS.writer): Promise<Reply> {
+  const r = await fetch(MCP, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": key },
+    body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const t = await r.text();
+  const body = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+  if (body.error) throw new Error(`JSON-RPC error on ${name}: ${JSON.stringify(body.error)}`);
+  return { text: (body.result.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n"), sc: body.result.structuredContent ?? {}, isError: body.result.isError === true };
+}
+type Answer = { status: number; body: Record<string, unknown>; headers: Headers };
+async function rest(method: string, path: string, body?: unknown, key: string = KEYS.writer): Promise<Answer> {
+  const r = await fetch(`${API}${path}`, {
+    method,
+    headers: { ...(key ? { "x-brain-key": key } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { status: r.status, body: await r.json() as Record<string, unknown>, headers: r.headers };
+}
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+/** render.ts over a REST answer; a value it cannot render reads as an empty reply, so its case fails rather than the suite. */
+function rendered(render: (v: never) => say.Reply, v: unknown): say.Reply {
+  try {
+    return render(v as never);
+  } catch (err) {
+    return { content: [{ type: "text", text: `(the REST value does not render: ${(err as Error).message})` }], structuredContent: {} };
+  }
+}
+const firstDiff = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+  [...new Set([...Object.keys(a), ...Object.keys(b)])].find((k) => !same(a[k], b[k])) ?? "-";
+
+const sql = new SQL({ url: URL_, max: 1 });
+
+console.log("[1] A capture through the REST core is a creation, recorded at its own door");
+const ids: string[] = [];
+{
+  for (const content of ["alpha: the first thought through REST", "beta: the second thought through REST", "gamma: the third thought through REST"]) {
+    const r = await rest("POST", "/v1/thoughts", { content });
+    assert(r.status === 201 && typeof r.body.id === "string" && r.body.embeddingAttached === true && r.headers.get("location") === `/v1/thoughts/${r.body.id}`,
+      `POST /v1/thoughts → 201, its id, its Location, its vector attached (${r.status} ${JSON.stringify(r.body).slice(0, 100)})`);
+    ids.push(String(r.body.id));
+  }
+  const [audit] = await sql`SELECT actor_name, origin FROM thought_audit WHERE thought_id = ${ids[0]}::uuid AND action = 'capture' ORDER BY id LIMIT 1`;
+  assert(audit?.origin === "open-brain-api" && audit?.actor_name === "writer", `the audit row names the key and the REST core's door (${JSON.stringify(audit)})`);
+}
+
+console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST answer, text and structuredContent");
+{
+  type Case = [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, render: (v: never) => say.Reply];
+  const cases: Case[] = [
+    ["search", { query: "alpha" }, "POST", "/v1/search/compat", { query: "alpha" }, (v) => say.renderSearch(ok(v))],
+    ["fetch", { id: ids[1] }, "GET", `/v1/thoughts/${ids[1]}`, undefined, (v) => say.renderFetch(ok(v))],
+    ["search_thoughts", { query: "alpha", limit: 5 }, "POST", "/v1/search", { query: "alpha", limit: 5 }, (v) => say.renderSearchThoughts(ok(v), false)],
+    ["search_thoughts", { query: "beta", prefer_current: true }, "POST", "/v1/search", { query: "beta", prefer_current: true }, (v) => say.renderSearchThoughts(ok(v), true)],
+    ["search_thoughts_keyword", { query: "thought through" }, "POST", "/v1/search/keyword", { query: "thought through" }, (v) => say.renderSearchThoughtsKeyword(ok(v))],
+    ["list_thoughts", { limit: 5 }, "GET", "/v1/thoughts?limit=5", undefined, (v) => say.renderListThoughts(ok(v))],
+    ["list_thought_ids", { limit: 2 }, "GET", "/v1/thought-ids?limit=2", undefined, (v) => say.renderThoughtIds(ok(v))],
+    ["list_logged_searches", {}, "GET", "/v1/logged-searches", undefined, (v) => say.renderLoggedSearches(ok(v))],
+    ["list_supersession_proposals", { status: "all" }, "GET", "/v1/proposals?status=all", undefined, (v) => say.renderSupersessionProposals(ok(v))],
+    ["thought_stats", {}, "GET", "/v1/stats", undefined, (v) => say.renderThoughtStats(ok(v))],
+    ["thought_changes", { limit: 10, actions: ["capture"] }, "GET", "/v1/changes?limit=10&actions=capture", undefined, (v) => say.renderThoughtChanges(ok(v))],
+    ["worker_status", {}, "GET", "/v1/workers", undefined, (v) => say.renderWorkerStatus(ok(v))],
+  ];
+  const covered = new Set<string>();
+  for (const [tool, args, method, path, body, render] of cases) {
+    const r = await rest(method, path, body);
+    const m = await mcp(tool, args);
+    const out = rendered(render, r.body);
+    covered.add(tool);
+    assert(r.status === 200 && !m.isError, `${tool}: both doors answer (${r.status}, ${m.isError ? "error" : "ok"})`);
+    assert(out.content[0].text === m.text, `${tool}: the MCP text is the REST value rendered (${out.content[0].text === m.text ? "same" : `REST→ ${out.content[0].text.slice(0, 80)} | MCP ${m.text.slice(0, 60)}`})`);
+    assert(same(out.structuredContent, m.sc), `${tool}: …and its structuredContent (first difference: ${firstDiff(out.structuredContent, m.sc)})`);
+  }
+  // brain_info's record carries the read's own clock: everything else agrees.
+  const b = await rest("GET", "/v1/brain");
+  const m = await mcp("brain_info", {});
+  const steady = (v: Record<string, unknown>) => JSON.stringify(v, (k, x) => (/(?:At|Ms|_ms|ms)$/.test(k) ? undefined : x));
+  const info = rendered((v) => say.renderBrainInfoReply(v), b.body).structuredContent;
+  assert(b.status === 200 && steady({ ...info, text: undefined }) === steady({ ...m.sc, text: undefined }), `brain_info: the record agrees but for its clocks (${b.status})`);
+  covered.add("brain_info");
+  const reads = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_thought_ids", "list_logged_searches", "list_supersession_proposals", "thought_stats", "thought_changes", "worker_status", "brain_info"];
+  assert(reads.every((t) => covered.has(t)), "every read operation but the job pair is compared here; the job pair is [4]");
+}
+
+console.log("\n[3] Every write: the same reply through either door, the ids each made aside");
+{
+  // Each door writes its own row; the REST answer, given the MCP row's id and
+  // times, renders to the MCP reply.
+  const swap = (v: Record<string, unknown>, from: Record<string, unknown>) =>
+    Object.fromEntries(Object.entries(v).map(([k, x]) => [k, (k === "id" || /At$/.test(k)) && k in from ? from[k] : x]));
+  const r = await rest("POST", "/v1/thoughts", { content: "delta: written through REST", source: "rest-suite" });
+  const m = await mcp("capture_thought", { content: "delta: written through MCP", source: "rest-suite" });
+  const { embeddingAttached: _attached, ...captured } = r.body;
+  const cr = rendered((v) => say.renderCapture(ok(v)), swap(captured, m.sc));
+  assert(cr.content[0].text === m.text && same(cr.structuredContent, m.sc), `capture_thought: the same reply (first difference: ${firstDiff(cr.structuredContent, m.sc)})`);
+
+  const u = await rest("PATCH", `/v1/thoughts/${ids[0]}`, { metadata_patch: { reviewed: true } });
+  const um = await mcp("update_thought", { id: ids[1], metadata_patch: { reviewed: true } });
+  const ur = rendered((v) => say.renderUpdate(ok(v)), swap(u.body, um.sc));
+  assert(u.status === 200 && ur.content[0].text === um.text && same(ur.structuredContent, um.sc), `update_thought: the same reply (${u.status}; first difference: ${firstDiff(ur.structuredContent, um.sc)})`);
+
+  const doomedRest = String(r.body.id), doomedMcp = String(m.sc.id);
+  const d = await rest("DELETE", `/v1/thoughts/${doomedRest}`);
+  const dm = await mcp("delete_thought", { id: doomedMcp });
+  const dr = rendered((v) => say.renderDelete(ok(v)), swap(d.body, dm.sc));
+  assert(d.status === 200 && dr.content[0].text === dm.text && same(dr.structuredContent, dm.sc), `delete_thought: the same reply (${d.status}; first difference: ${firstDiff(dr.structuredContent, dm.sc)})`);
+
+  const workers: [string, Record<string, unknown>, string, (v: never) => say.Reply][] = [
+    ["retry_failed", { work_type: "extract:none@p1" }, "/v1/workers/retry", (v) => say.renderRetryFailed(ok(v))],
+    ["release_stale_leases", {}, "/v1/workers/release-leases", (v) => say.renderReleaseStaleLeases(ok(v))],
+    ["run_worker", { work_type: "extract:none@p1", dry_run: true }, "/v1/workers/run", (v) => say.renderRunWorker(ok(v))],
+  ];
+  for (const [tool, args, path, render] of workers) {
+    const w = await rest("POST", path, args);
+    const wm = await mcp(tool, args);
+    const wr = rendered(render, w.body);
+    assert(w.status === 200 && wr.content[0].text === wm.text && same(wr.structuredContent, wm.sc), `${tool}: the same reply (${w.status} ${JSON.stringify(w.body).slice(0, 80)})`);
+  }
+}
+
+console.log("\n[4] A job through REST: a handle on this server's routes, its poll the job_status tool's answer, its stream");
+{
+  const s = await rest("POST", "/v1/jobs/scan", { limit: 10 }, KEYS.reader);
+  const jobId = String(s.body.jobId);
+  assert(s.status === 202 && s.body.poll === `/v1/jobs/${jobId}` && s.body.stream === `/v1/jobs/${jobId}/stream` && s.headers.get("location") === `/v1/jobs/${jobId}`, `POST /v1/jobs/scan → 202 and a handle on /v1/jobs (${s.status} ${JSON.stringify(s.body)})`);
+  let poll: Answer = { status: 0, body: {}, headers: new Headers() };
+  for (let i = 0; i < 50; i++) {
+    poll = await rest("GET", `/v1/jobs/${jobId}`, undefined, KEYS.reader);
+    if (poll.body.status === "succeeded" || poll.body.status === "failed") break;
+    await Bun.sleep(50);
+  }
+  const pm = await mcp("job_status", { job_id: jobId }, KEYS.reader);
+  const pr = rendered((v) => say.renderJobStatus(ok(v)), poll.body);
+  assert(poll.status === 200 && poll.body.status === "succeeded" && pr.content[0].text === pm.text && same(pr.structuredContent, pm.sc), `job_status: the poll is the tool's answer (${poll.body.status})`);
+  const other = await rest("GET", `/v1/jobs/${jobId}`, undefined, KEYS.writer);
+  assert(other.status === 404 && other.body.code === "NOT_FOUND", `another key's poll is NOT_FOUND (${other.status})`);
+  const stream = await fetch(`${API}/v1/jobs/${jobId}/stream`, { headers: { "x-brain-key": KEYS.reader } });
+  const events = await stream.text();
+  assert(stream.status === 200 && /text\/event-stream/.test(stream.headers.get("content-type") ?? "") && /succeeded/.test(events), `its stream replays the job's end (${stream.status})`);
+}
+
+console.log("\n[5] A refusal is the same code and facts through both doors, at the status REST gives it");
+{
+  const missing = "00000000-0000-4000-8000-000000000000";
+  const filter = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`k${i}`, "v"]));
+  const cases: [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown][] = [
+    ["fetch", { id: missing }, "GET", `/v1/thoughts/${missing}`, undefined],
+    ["thought_changes", { since: "not-a-time" }, "GET", "/v1/changes?since=not-a-time", undefined],
+    ["list_thought_ids", { after: "not-a-uuid" }, "GET", "/v1/thought-ids?after=not-a-uuid", undefined],
+    ["list_logged_searches", { since: "not-a-time" }, "GET", "/v1/logged-searches?since=not-a-time", undefined],
+    ["search_thoughts", { query: "alpha", filter }, "POST", "/v1/search", { query: "alpha", filter }],
+    ["capture_thought", { content: "epsilon", supersedes: "not-a-uuid" }, "POST", "/v1/thoughts", { content: "epsilon", supersedes: "not-a-uuid" }],
+    ["capture_thought", { content: "epsilon", metadata: { source: "spoofed" } }, "POST", "/v1/thoughts", { content: "epsilon", metadata: { source: "spoofed" } }],
+    ["update_thought", { id: ids[2] }, "PATCH", `/v1/thoughts/${ids[2]}`, {}],
+    ["update_thought", { id: missing, content: "zeta" }, "PATCH", `/v1/thoughts/${missing}`, { content: "zeta" }],
+    ["delete_thought", { id: missing }, "DELETE", `/v1/thoughts/${missing}`, undefined],
+    ["retry_failed", { work_type: "  " }, "POST", "/v1/workers/retry", { work_type: "  " }],
+    ["release_stale_leases", { include_live: true }, "POST", "/v1/workers/release-leases", { include_live: true }],
+    ["run_worker", { work_type: "extract:none@p1" }, "POST", "/v1/workers/run", { work_type: "extract:none@p1" }],
+  ];
+  const codes = new Set<string>();
+  for (const [tool, args, method, path, body] of cases) {
+    const r = await rest(method, path, body);
+    const m = await mcp(tool, args);
+    const { text: _text, ...facts } = m.sc;
+    const code = String(r.body.code);
+    codes.add(code);
+    assert(m.isError && same(r.body, facts), `${tool} ${code}: the same code and facts (REST ${JSON.stringify(r.body)} | MCP ${JSON.stringify(facts)})`);
+    assert(r.status === REFUSAL_STATUS[code as keyof typeof REFUSAL_STATUS], `…at its status (${r.status})`);
+  }
+  // Refusals that carry facts beside the code: the positions to drop and the
+  // row's current time. REFUSED_CITED's count needs an extracted statement
+  // citing the thought (042), which db/test-schema.ts and test-live.ts build.
+  const withFacts: [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, fact: string][] = [
+    ["capture_thought", { content: "kappa", derived_from: [ids[0], missing] }, "POST", "/v1/thoughts", { content: "kappa", derived_from: [ids[0], missing] }, "positions"],
+    ["update_thought", { id: ids[0], content: "alpha, edited", if_unchanged_since: "2020-01-01T00:00:00Z" }, "PATCH", `/v1/thoughts/${ids[0]}`, { content: "alpha, edited", if_unchanged_since: "2020-01-01T00:00:00Z" }, "currentUpdatedAt"],
+  ];
+  for (const [tool, args, method, path, body, fact] of withFacts) {
+    const r = await rest(method, path, body);
+    const m = await mcp(tool, args);
+    const { text: _text, ...facts } = m.sc;
+    const code = String(r.body.code);
+    codes.add(code);
+    assert(m.isError && fact in r.body && same(r.body, facts), `${tool} ${code}: the same code and its ${fact} (REST ${JSON.stringify(r.body)} | MCP ${JSON.stringify(facts)})`);
+    assert(r.status === REFUSAL_STATUS[code as keyof typeof REFUSAL_STATUS], `…at its status (${r.status})`);
+  }
+  assert(codes.size >= 12, `${codes.size} distinct codes compared`);
+}
+
+console.log("\n[6] test-auth's cases against REST: a read key cannot write, a capture key cannot read, a wrong or revoked key is a 401");
+{
+  let r = await rest("POST", "/v1/thoughts", { content: "a read key's capture" }, KEYS.reader);
+  assert(r.status === 403 && r.body.code === "FORBIDDEN", `a read key cannot capture (${r.status})`);
+  r = await rest("DELETE", `/v1/thoughts/${ids[2]}`, undefined, KEYS.reader);
+  assert(r.status === 403, `…nor delete (${r.status})`);
+  r = await rest("PATCH", `/v1/thoughts/${ids[2]}`, { content: "changed" }, KEYS.hook);
+  assert(r.status === 403, `a capture key cannot update (${r.status})`);
+  for (const path of ["/v1/stats", "/v1/thoughts", `/v1/thoughts/${ids[2]}`, "/v1/changes", "/v1/workers"]) {
+    r = await rest("GET", path, undefined, KEYS.hook);
+    assert(r.status === 403 && r.body.code === "FORBIDDEN", `a capture key cannot read ${path} (${r.status})`);
+  }
+  r = await rest("POST", "/v1/search", { query: "alpha" }, KEYS.hook);
+  assert(r.status === 403, `…nor search (${r.status})`);
+  r = await rest("POST", "/v1/thoughts", { content: "eta: a capture key's thought" }, KEYS.hook);
+  assert(r.status === 201 && r.body.embeddingAttached === true, `a capture key captures (${r.status})`);
+  assert(r.body.existed === undefined, "…and is not told whether the text was already a thought (the existence-oracle rule)");
+  r = await rest("GET", "/v1/stats", undefined, "not-a-key");
+  assert(r.status === 401 && r.body.code === "UNAUTHORIZED", `a wrong key is a 401 (${r.status})`);
+  r = await rest("GET", "/v1/stats", undefined, "");
+  assert(r.status === 401, `no key is a 401 (${r.status})`);
+  const viaQuery = await fetch(`${API}/v1/stats?key=${KEYS.reader}`);
+  assert(viaQuery.status === 401, `a key in the query string is no key (${viaQuery.status})`);
+  r = await rest("GET", "/v1/stats", undefined, KEYS.gone);
+  assert(r.status === 200, `the key to be revoked reads first (${r.status})`);
+  await sql`SELECT revoke_agent_key(${hashKey(KEYS.gone)}, ${"rest suite"})`;
+  r = await rest("GET", "/v1/stats", undefined, KEYS.gone);
+  assert(r.status === 401 && r.body.code === "REVOKED", `a revoked key is a 401 REVOKED (${r.status} ${r.body.code})`);
+  const who = await rest("GET", "/v1/whoami", undefined, KEYS.reader);
+  assert(who.status === 200 && who.body.name === "reader" && who.body.scope === "read" && typeof who.body.agentId === "string", `whoami names the key, its scope and its agent id (${JSON.stringify(who.body).slice(0, 120)})`);
+}
+
+console.log("\n[7] The OpenAPI document and the internal liveness answer with no key");
+{
+  const doc = await fetch(`${API}/openapi.json`);
+  const body = await doc.json() as { paths: Record<string, Record<string, { operationId: string }>> };
+  const ops = Object.values(body.paths).flatMap((m) => Object.values(m)).map((o) => o.operationId);
+  assert(doc.status === 200 && TOOL_NAMES.every((t) => ops.includes(t)), `GET /openapi.json lists all ${TOOL_NAMES.length} tools' operations`);
+  const live = await fetch(`${API}/health`);
+  assert(live.status === 200 && same(await live.json(), { status: "ok" }), "GET /health is liveness, saying nothing about the brain");
+}
+
+console.log("\n[8] The log: one line per request, with no query, key, id or content in it");
+{
+  const lines: string[] = [];
+  const realLog = console.log;
+  console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  try {
+    await rest("POST", "/v1/search", { query: "the private words searched" });
+    await rest("GET", `/v1/thoughts/${ids[2]}?trace=1`);
+    await rest("GET", "/v1/changes?agent=someone-named");
+    await rest("POST", "/v1/thoughts", { content: "theta: content that must not be logged" });
+  } finally {
+    console.log = realLog;
+  }
+  const api = lines.filter((l) => l.startsWith("api "));
+  assert(api.length === 4, `four requests, four lines (${api.length}: ${api.join(" / ")})`);
+  const all = lines.join("\n");
+  for (const s of ["private words", ids[2], "trace=1", "someone-named", "must not be logged", KEYS.writer]) assert(!all.includes(s), `no ${s.slice(0, 20)} in the log`);
+}
+
+apiServer.stop();
+mcpServer.stop();
+await sql.close();
+globalThis.fetch = realFetch;
+report();

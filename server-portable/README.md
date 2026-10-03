@@ -571,18 +571,66 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
 
 The core's values are whole, for the REST core.
 
+## The REST core (SMD-2284)
+
+`bun api.ts` serves every operation the tools expose as JSON, over the same core and
+the same process root (`root.ts`) as the MCP server. Its compose service, reached as
+`api.ob1.internal` and public at `/api` only where the operator turns that on, is
+SMD-2284's next step; today it runs where you start it.
+
+- **Routes** come from `rest/routes.ts`, one per tool in the manifest (a tool
+  without one does not compile): `GET /v1/thoughts`, `GET`/`PATCH`/`DELETE
+  /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST /v1/search` (and `/keyword`,
+  `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
+  `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
+  /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/jobs/scan`, `GET
+  /v1/jobs/{job_id}` and its `/stream`. A GET or DELETE reads its input from the
+  query string, a POST or PATCH from a JSON body; a search's text always rides a
+  body. The input is the tool's own zod schema (`core/schemas.ts`), held strictly: an
+  unknown field is refused.
+- **`GET /openapi.json`** is built from the same two sources, so it lists every
+  operation with the input its route parses. **`GET /v1/whoami`** names the
+  calling key, its scope, its agent id and the operations it may call.
+- **Authorization** is the key's: `x-brain-key`, `x-access-key` or `Authorization:
+  Bearer` — never `?key=`, which only URL-only MCP connectors need. No key or a
+  wrong one is a 401 `UNAUTHORIZED`, a revoked one a 401 `REVOKED`, a busy registry
+  a 503 `BUSY` with `Retry-After`, a scope that does not reach the operation a 403
+  `FORBIDDEN` naming the scope it needs.
+- **Answers.** A success is the operation's value (a capture is a 201 with its
+  `Location` and `embeddingAttached`; a scan a 202 whose handle points at
+  `/v1/jobs`). A refusal is its code, `retryable` and the facts its code declares
+  (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
+  the status `rest/app.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
+  rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
+  not built, 503 retry. A save whose vector did not attach (the PostgREST two-step)
+  is a 201 with `embeddingAttached: false`, not a refusal, so a client does not
+  capture again. A refused input is a 400 `REFUSED_INPUT` naming each field and
+  zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
+  gives it, and no `retryable` until SMD-2461.
+- **The log** is one line per request — the method, the route's template, the
+  status and the time — with no query string, key, id or content in it.
+- **`GET /health`** is liveness with no key, for the container's healthcheck; the
+  keyed BrainInfo is `GET /v1/brain`. A write through the REST core records its door
+  as `open-brain-api` (thought_audit.origin).
+
+`test-rest-sql.ts` runs every operation through both servers on one database and
+holds that the MCP reply is what `render.ts` makes of the REST answer, text and
+`structuredContent` both, with the same refusal codes and facts.
+
 ## Expected outcome
 
 ```bash
 bun test-server.ts        # 432 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 124 — scoped, hashed, named keys
+bun test-rest.ts          # 156 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
 bun run test:e2e          # 417 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+../db/with-postgres.sh bun test-rest-sql.ts  # 109 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 
-`test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
+`test:sql`, `test:e2e` and `test-rest-sql.ts` need podman or docker; they use `../db/with-postgres.sh`
 to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 ## Testing

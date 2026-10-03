@@ -1,0 +1,61 @@
+// Where each operation lives on the REST core (SMD-2284): its method, its path
+// and the status a success answers — one row per tool in the manifest
+// (tools.ts), keyed by its name, so a tool added there without a route here,
+// or a route for a tool the manifest lacks, is a compile error. The input is
+// the tool's own zod schema (core/schemas.ts): a path's `{name}` fills the
+// field of that name, a GET or DELETE reads the rest from the query string, a
+// POST or PATCH from the JSON body. Free text a search runs on travels in a
+// body, so it never sits in a URL a log or a proxy may keep.
+
+import type { ToolName } from "../tools.ts";
+import type { Principal } from "../auth.ts";
+import type { Core, Input, Outcome } from "../core/index.ts";
+import { ok } from "../core/refusal.ts";
+
+export type Method = "GET" | "POST" | "PATCH" | "DELETE";
+
+/** What a call needs beyond the principal and the input: the stop's tracker, for an operation that starts detached work. */
+export type CallOptions = { track?: <T>(run: () => Promise<T>) => Promise<T> };
+
+export type Route<K extends ToolName> = {
+  method: Method;
+  /** OpenAPI's path form: `{field}` names an input field filled from the path. */
+  path: string;
+  /** The status a success answers: 200, a creation 201, a job accepted 202. */
+  ok: 200 | 201 | 202;
+  /** The operation the route calls — the MCP tool's own, from createCore. */
+  call: (core: Core, principal: Principal, input: Input<K>, opts: CallOptions) => Promise<Outcome<object>>;
+};
+
+export const ROUTES: { [K in ToolName]: Route<K> } = {
+  // ChatGPT's compatibility shapes, beside the brain's own search and fetch.
+  search: { method: "POST", path: "/v1/search/compat", ok: 200, call: (c, p, i) => c.search(p, i) },
+  fetch: { method: "GET", path: "/v1/thoughts/{id}", ok: 200, call: (c, p, i) => c.fetch(p, i) },
+  search_thoughts: { method: "POST", path: "/v1/search", ok: 200, call: (c, p, i) => c.searchThoughts(p, i) },
+  search_thoughts_keyword: { method: "POST", path: "/v1/search/keyword", ok: 200, call: (c, p, i) => c.searchThoughtsKeyword(p, i) },
+  list_thoughts: { method: "GET", path: "/v1/thoughts", ok: 200, call: (c, p, i) => c.listThoughts(p, i) },
+  list_thought_ids: { method: "GET", path: "/v1/thought-ids", ok: 200, call: (c, p, i) => c.listThoughtIds(p, i) },
+  list_logged_searches: { method: "GET", path: "/v1/logged-searches", ok: 200, call: (c, p, i) => c.listLoggedSearches(p, i) },
+  list_supersession_proposals: { method: "GET", path: "/v1/proposals", ok: 200, call: (c, p, i) => c.listSupersessionProposals(p, i) },
+  thought_stats: { method: "GET", path: "/v1/stats", ok: 200, call: (c, p, i) => c.thoughtStats(p, i) },
+  thought_changes: { method: "GET", path: "/v1/changes", ok: 200, call: (c, p, i) => c.thoughtChanges(p, i) },
+  worker_status: { method: "GET", path: "/v1/workers", ok: 200, call: (c, p, i) => c.workerStatus(p, i) },
+  brain_info: { method: "GET", path: "/v1/brain", ok: 200, call: async (c) => ok(await c.brainInfo("tool")) },
+  job_status: { method: "GET", path: "/v1/jobs/{job_id}", ok: 200, call: (c, p, i) => c.jobStatus(p, i) },
+  scan_thoughts: { method: "POST", path: "/v1/jobs/scan", ok: 202, call: (c, p, i, o) => c.scanThoughts(p, i, { track: o.track }) },
+  capture_thought: { method: "POST", path: "/v1/thoughts", ok: 201, call: (c, p, i) => c.capture(p, i) },
+  update_thought: { method: "PATCH", path: "/v1/thoughts/{id}", ok: 200, call: (c, p, i) => c.updateThought(p, i) },
+  delete_thought: { method: "DELETE", path: "/v1/thoughts/{id}", ok: 200, call: (c, p, i) => c.deleteThought(p, i) },
+  retry_failed: { method: "POST", path: "/v1/workers/retry", ok: 200, call: (c, p, i) => c.retryFailed(p, i) },
+  release_stale_leases: { method: "POST", path: "/v1/workers/release-leases", ok: 200, call: (c, p, i) => c.releaseStaleLeases(p, i) },
+  run_worker: { method: "POST", path: "/v1/workers/run", ok: 200, call: (c, p, i) => c.runWorker(p, i) },
+};
+
+/** The `{field}` names a route's path fills, in order. */
+export const pathFields = (path: string): string[] => [...path.matchAll(/\{([a-z_]+)\}/g)].map((m) => m[1]);
+
+/** The path in Hono's form, `:field` for `{field}`. */
+export const honoPath = (path: string): string => path.replace(/\{([a-z_]+)\}/g, ":$1");
+
+/** Whether a route's input rides the query string (GET, DELETE) or a JSON body (POST, PATCH). */
+export const readsQuery = (method: Method): boolean => method === "GET" || method === "DELETE";
