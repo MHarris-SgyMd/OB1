@@ -51,7 +51,7 @@ import {
 export { INSUFFICIENT_EVIDENCE, JEV_CONTRACT } from "./jev-contract.ts";
 export type { JevDecision, JevInfo, JevModelInfo, JevOption, JevResult } from "./jev-contract.ts";
 
-/** The environment keys this module reads. A subset of index.ts's Env. */
+/** The environment keys this module reads. A subset of root.ts's Env. */
 export type JevEnv = EgressEnv & {
   /** Where the tier is served, e.g. http://127.0.0.1:8020 or http://jev:8020; unset, the tier is off. */
   OB1_JEV_BASE_URL?: string;

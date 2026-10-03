@@ -1,19 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-2285]
-migrations: []
----
-
-## Changelog
-
-The authorization server's proof-of-concept kit now runs the runner-up too: Better Auth 1.7.6 with its OAuth-provider and CIMD plugins, through the same stack and verifier as oidc-provider and in the same CI job, passes all 32 checks, with one noted departure from RFC 7636 (a wrong PKCE verifier gets `invalid_request`) — after an allowlist, an Origin check and three hooks of ours, since its handler also serves sign-up and session routes, its signed interaction query is not bound to the browser (a consent was forged cross-page until the Origin check), it lets a token carry several audiences, and it offers DPoP with no switch.
-The winner's sign-in and consent pages now forbid framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`): a framed consent page would have let one click post it from the brain's own origin. The verifier gains four checks for both candidates (off-protocol routes 404, a DPoP proof binds nothing, a cross-origin consent issues nothing, no page may be framed), for 32 in all (SMD-2285).
-The winning server leaves the kit for `deploy/auth/` and runs as `deploy/compose.yaml`'s `auth` profile: its own exactly pinned image, its tiers and service clients read from `OB1_AUTH_TIERS` (`stable` when unset) and `OB1_AUTH_SERVICES`, its state in SQLite in its own volume (it holds no Postgres credential), its secrets written by `bun deploy/auth/provision.ts --init`, and every setting checked at start, the problems named all at once; registration stays open but is capped (`OB1_AUTH_MAX_CLIENTS`, 200), and an hourly purge removes expired rows and registered clients unused for a day. Nothing routes to it until the proxy; the proof of concept checks its image, 32/32 (SMD-2285).
-
-## FORK
-
-The authorization server's proof of concept, second leg: the runner-up, Better Auth 1.7.6, through the same 32 checks as oidc-provider, the winner's pages made unframeable, and the winning server moved to `deploy/auth/` and deployed as the `auth` compose profile with a SQLite store, its registration capped and purged (SMD-2285)
+# 245. The authorization server's proof of concept, second leg: the runner-up, Better Auth 1.7.6, through the same 32 checks as oidc-provider, the winner's pages made unframeable, and the winning server moved to `deploy/auth/` and deployed as the `auth` compose profile with a SQLite store, its registration capped and purged (SMD-2285)
 
 This follows the winner's kit, released in 1.4.0 (`changes/242-the-authorization-server-s-proof-of-concept-oidc.md`); the ticket asks for criteria 1–5 proved "with the winner and one runner-up". The runner-up is eval-only; the winner's move to `deploy/auth/` is below.
 

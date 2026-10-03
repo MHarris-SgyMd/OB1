@@ -310,8 +310,12 @@ jobs:
       # does not install). Then its rules with no stack: the SQLite store's
       # adapter on a scratch file (expiry, consume, a grant's revocation, a
       # second open); every start-up setting refused at once, the origin
-      # strictly; --init and the check of deploy/.env on scratch files; and
-      # compose's `auth` block as written. The full-stack job runs the service.
+      # strictly; --init and the check of deploy/.env on scratch files;
+      # compose's `auth` block as written; and the abuse limits on a clock of
+      # their own (SMD-2309: the password bucket, tries per sign-in, the
+      # sign-in backoff, the sliding window, the token path, what counts and
+      # the client a request names, the address rule, the proxy's resolution
+      # and the bounded maps). The full-stack job runs the service.
       - name: Install the authorization server's pinned packages
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
@@ -322,7 +326,7 @@ jobs:
 
       - name: Authorization server rules
         working-directory: deploy/auth
-        run: bun store.ts --self-check && bun provision.ts --self-check
+        run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check
 
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
@@ -1228,9 +1232,13 @@ jobs:
       # with no session is the library's 400, and a write to a store another
       # connection holds locked answers 500 and is logged; with the cap set to
       # 3, a fourth registration is refused 503 for now, however the path is
-      # spelled; and a stop is the
-      # server's own (exit 0 inside 5 s, its line in the log), not the grace
-      # period's SIGKILL. The container goes at the end; the volume, the
+      # spelled; with the trusted proxy named as the container's own loopback,
+      # so the per-address limits are on, a 21st bad secret for one client
+      # from one forwarded address is refused 429, and that client from
+      # another address, another client, a client that does not exist or a
+      # public one, is not (SMD-2309); and a stop is
+      # the server's own (exit 0 inside 5 s, its line in the log), not the
+      # grace period's SIGKILL. The container goes at the end; the volume, the
       # networks and the auth lines in .env stay to the job's end (tier.sh
       # hands tier.ts no OB1_AUTH_* line).
       # Through the proxy (SMD-1846 PR 2), its auth router: before the server
@@ -1270,7 +1278,7 @@ jobs:
           # `down -v`, which removes auth-data too), and canary.sh sets its own.
           # The refusal below waits 30 s before its exit 2 (no hot restart
           # loop), so this step takes that much longer.
-          printf 'OB1_PUBLIC_ORIGIN=https://brain.example.test\nOB1_AUTH_MAX_CLIENTS=3\nCOMPOSE_PROFILES=auth\n' >> .env
+          printf 'OB1_PUBLIC_ORIGIN=https://brain.example.test\nOB1_AUTH_MAX_CLIENTS=3\nCOMPOSE_PROFILES=auth\nOB1_AUTH_TRUSTED_PROXY=127.0.0.1\n' >> .env
           bun auth/provision.ts --init
           bun auth/provision.ts
           set +e
@@ -1319,6 +1327,13 @@ jobs:
           [ "$full" = "$want" ] || { echo "registrations past the cap answered \"$full\", not \"$want\""; exit 1; }
           got=$(via_proxy -X POST -H 'content-type: application/json' -d '{"redirect_uris":["https://client.example/callback"],"token_endpoint_auth_method":"none"}' http://127.0.0.1:8010/auth/reg)
           if ! { [ "$got" = "503 -" ] && grep -qi '^retry-after: 3600' /tmp/auth-via-proxy.h; }; then echo "a registration past the cap through the proxy answered \"$got\" ($(grep -i '^retry-after' /tmp/auth-via-proxy.h || echo 'no Retry-After')), not the server's 503 with Retry-After 3600"; exit 1; fi
+          # SMD-2309: twenty failed authentications for one client from one forwarded address, then the token endpoint
+          # refuses that client from there for now, and neither another address nor another client from the same one;
+          # a client that does not exist, or the public one registered above (no secret to guess), is never counted.
+          pub=$(bun -e 'console.log(JSON.parse(await Bun.stdin.text()).client_id)' < /tmp/auth-client.json)
+          bad=$(auth exec -T -e PUB="$pub" auth bun -e 'const tok = async (client, from) => (await fetch("http://127.0.0.1:3000/auth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: "Basic " + btoa(client + ":not-the-secret"), "x-forwarded-for": from }, body: "grant_type=client_credentials" })).status; const out = []; for (let i = 0; i < 21; i++) out.push(await tok("gui", "203.0.113.9")); const none = []; const open = []; for (let i = 0; i < 21; i++) { none.push(await tok("no-such-client", "203.0.113.11")); open.push(await tok(process.env.PUB, "203.0.113.12")); } console.log(out.filter((s) => s === 401).length, out.at(-1), await tok("gui", "203.0.113.10"), await tok("mcp", "203.0.113.9"), none.filter((s) => s === 401).length, open.filter((s) => s === 401).length)')
+          want="20 429 401 401 21 21"
+          [ "$bad" = "$want" ] || { echo "21 bad client secrets, then another address, another client, and 21 each for no client and the public one, answered \"$bad\", not \"$want\""; exit 1; }
           grep -qF "server error: SQLiteError: database is locked" <<<"$(auth logs --no-color auth)" || { echo "the locked store's server_error is not in the log"; exit 1; }
           id=$(auth ps -q auth)
           SECONDS=0

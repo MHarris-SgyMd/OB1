@@ -1,17 +1,4 @@
----
-type: removed
-bump: patch
-tickets: [SMD-2103]
-migrations: []
----
-
-## Changelog
-
-`recipes/brain-smoke-test` is retired: the harness needed a Supabase project to start, and `deploy/smoke.sh` now has the one check of its that applies here and that smoke.sh lacked. smoke.sh's check 1 sends no key and then a wrong key, and requires the JSON-RPC Unauthorized error (-32001) both times, not just an HTTP 200. No schema change (SMD-2103).
-
-## FORK
-
-brain-smoke-test retires into deploy/smoke.sh, whose first check now reads the refusal instead of trusting the 200 (SMD-2103)
+# 246. brain-smoke-test retires into deploy/smoke.sh, whose first check now reads the refusal instead of trusting the 200 (SMD-2103)
 
 **What changed.**
 - `deploy/smoke.sh` check 1 is now two rows, each an `initialize` the server must refuse with JSON-RPC error -32001 (`JSON_RPC_UNAUTHORIZED_CODE`, `server-portable/index.ts`):

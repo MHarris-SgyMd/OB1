@@ -1460,7 +1460,7 @@ export interface ThoughtStore {
    * 069's `jobs` table), or null when this store cannot hold one. The SQL store
    * returns a sink; the PostgREST store returns null, so the Workers/PostgREST
    * path stays pure in-memory (no long-lived process to persist or resume a
-   * detached run). index.ts injects the result into jobs.ts (`setJobSink`) at
+   * detached run). root.ts injects the result into jobs.ts (`setJobSink`) at
    * startup and runs the reconcile once.
    */
   jobSink(): JobSink | null;

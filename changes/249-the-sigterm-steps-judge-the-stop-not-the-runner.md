@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2316]
-migrations: []
----
-
-## Changelog
-
-Fork Checks' two SIGTERM steps judge a stop by its exit code and the server's own `stopped in N s` line, and the stop during preflight by docker's 1 s kill timer (`stop -t 1`), where both timed the `docker stop` CLI's return — which on 18 of 221 attempts came back 5.0–10.6 s after a stop the server had finished in 1.9 s, failing a correct stop (SMD-2316).
-
-## FORK
-
-The SIGTERM steps judge the stop, not the runner's `docker stop` — a correct stop no longer fails when the CLI comes back late (SMD-2316)
+# 249. The SIGTERM steps judge the stop, not the runner's `docker stop` — a correct stop no longer fails when the CLI comes back late (SMD-2316)
 
 **What changed.** `.github/workflows/fork-checks.yml`, job `deploy-stack`, the two steps SMD-2250 added:
 - **"The Kubernetes image stops on SIGTERM, finishing a call in flight"** passes on exit 0 under docker's 10 s grace, the handler's `1 in flight`, the call's answer (the proof the stop waited for it) and the server's own last line, `SIGTERM: stopped in N s; exit 0` with N under 5. It no longer asks `docker stop` to return in 1–5 s.
