@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-1846]
-migrations: []
----
-
-## Changelog
-
-The compose stack has one origin: a `proxy` service (Traefik, pinned by digest) is its only published port, on the same `SERVER_BIND`/`SERVER_PORT`, and the server is `/mcp` on it with no port of its own. The proxy answers every other `/.well-known` path with its own 404, logs no query string, and passes SSE through unbuffered; a legacy route keeps every URL clients hold today (`POST /?key=`, the root `/health`, `GET /`'s 405) answering as the server did, through a deprecation window still to come. Name `proxy` whenever you name `server` in an `up`; roll back with `--remove-orphans`. With `COMPOSE_PROFILES=auth` in `deploy/.env` (the authorization server now refuses to start without it) the proxy routes `/auth` and its three discovery paths to it while it answers, and answers them 404 while it does not; its session cookie is `Path=/auth`. An operator already running the profile from the command line must add `COMPOSE_PROFILES=auth` before the next `up`. No schema change (SMD-1846).
-
-## FORK
-
-One origin for the stack — a reverse proxy is the only published port, and the server is a path on it (SMD-1846)
+# 250. One origin for the stack — a reverse proxy is the only published port, and the server is a path on it (SMD-1846)
 
 **What changed.** `deploy/compose.yaml` gains `proxy`: Traefik v3.7.13, pinned to its multi-arch index digest, run as `nobody` with every capability dropped. It publishes `${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}`, the mapping the server had, so a `deploy/.env` written before it publishes the same address and port. The server loses `ports:` and is reached as `server:8000` on the compose network, by the proxy and by n8n as before. The route table is `x-proxy-routes`, a YAML block at the top of the file that compose hands Traefik's file provider as an inline `configs:` entry; three routers (a fourth, `auth`, comes with PR 2 below), each on the `web` entrypoint alone, path kept as it came (the server answers POST at every path and `/health` under any prefix, so it needs no base-path setting):
 

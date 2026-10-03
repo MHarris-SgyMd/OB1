@@ -17,6 +17,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY server-portable/*.ts server-portable/package.json ./
 COPY server-portable/shims ./shims
 COPY server-portable/core ./core
+COPY server-portable/rest ./rest
 # The embedding contract and the version helpers, both imported by preflight.ts.
 # Kept at ../db/ inside the image so the import path is identical in the container
 # and in a checkout; releases.json at their parent's parent, where version.mjs

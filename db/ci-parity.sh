@@ -82,6 +82,7 @@ main() {
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
   run server-portable    test-e2e-sql.ts
+  run server-portable    test-rest-sql.ts
   run server-portable    test-local-provider.ts
   run server-portable    test-audit.ts
   run server-portable    test-update-delete.ts
@@ -104,6 +105,7 @@ main() {
   # tool-count assertions reach a pull request while this reported all green.
   run server-portable    test-server.ts
   run server-portable    test-auth.ts
+  run server-portable    test-rest.ts
   run server-portable    test-thoughts.ts
   typecheck server-portable
   typecheck compat/supabase-sql

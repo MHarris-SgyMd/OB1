@@ -72,6 +72,11 @@
  * listening and hourly: it deletes rows expired a day ago, and every
  * registered client more than a day old that nothing alive in the last day
  * names (an abandoned sign-in's, or one registered for the sake of it).
+ *
+ * The abuse limits are limits.ts's: password checks across every client and
+ * tries per sign-in always, and with a trusted proxy, per address, a sign-in
+ * backoff, failed client authentications (per client too) and registrations
+ * an hour.
  */
 import http from "node:http";
 import Provider, { errors, type ClientMetadata, type KoaContextWithOIDC, type ResourceServer } from "oidc-provider";
@@ -80,6 +85,7 @@ import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
 import { configFromEnv, type Config } from "./config.ts";
 import { ACCESS_TOKEN_TYPE, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
+import { Bucket, clientAddress, clientIdOf, clientKey, countsAgainstClient, retryAfter, SIGN_IN_RATE, SignInBackoff, TOKEN_FAILURES, TOKEN_PATH, Tries, TRIES_PER_SIGN_IN, trustedProxy, WindowLimit } from "./limits.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
 import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
 
@@ -239,6 +245,32 @@ provider.on("grant.error", (ctx, error) => {
   if (ctx.body && typeof ctx.body === "object") Object.assign(ctx.body, detailOf(error));
 });
 
+// The abuse limits (limits.ts). Per address only with a trusted proxy in
+// front: behind a tunnel every client is one address, and a per-address
+// lockout there would be everyone's. addressOf returns undefined, and the
+// per-address limits are off, while the proxy's name does not resolve.
+const { set: trusted } = trustedProxy(C.trustedProxy);
+const addressOf = (req: http.IncomingMessage) => (trusted.size ? clientAddress(req, trusted, C.forwardedHops) : undefined);
+
+// Failed client authentications, per address and client: the token and
+// revocation endpoints refuse that client from that address past them. Only
+// a client the library found, and one with a secret to guess, counts: a
+// made-up id, a public client or one named by a metadata document URL (which
+// the library fetches for any https id) has none, and counting them would let
+// an address push its own entry out of the map with ids enough (MAX_ENTRIES).
+// The keys one address can make are then the clients holding a secret: the
+// fixed ones and at most OB1_AUTH_MAX_CLIENTS registered.
+const tokenFailures = new WindowLimit(TOKEN_FAILURES.limit, TOKEN_FAILURES.windowMs);
+const countFailedClient = (ctx: KoaContextWithOIDC, error: Error) => {
+  const oidc = ctx.oidc as unknown as { client?: { clientSecret?: unknown }; params?: { client_id?: unknown; client_secret?: unknown; client_assertion?: unknown } } | undefined;
+  const params = oidc?.params ?? {};
+  const address = addressOf(ctx.req);
+  if (address !== undefined && typeof oidc?.client?.clientSecret === "string" && countsAgainstClient(error as { error?: string }, { authorization: ctx.headers.authorization, ...params })) tokenFailures.record(clientKey(address, clientIdOf(ctx.headers.authorization, params.client_id, params.client_assertion)));
+};
+
+provider.on("grant.error", countFailedClient);
+provider.on("revocation.error", countFailedClient);
+
 const EXCHANGE_PARAMS = ["subject_token", "subject_token_type", "actor_token", "actor_token_type", "requested_token_type", "resource", "audience", "scope"];
 
 provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
@@ -289,6 +321,11 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
 
 // --- sign-in and consent --------------------------------------------------
 
+/** Password checks across every address, wrong passwords per sign-in flow, and (with a trusted proxy) per address. */
+const verifies = new Bucket(SIGN_IN_RATE.capacity, SIGN_IN_RATE.everyMs);
+const flowTries = new Tries(TRIES_PER_SIGN_IN, 600_000);
+const signIns = new SignInBackoff();
+
 function send(res: http.ServerResponse, status: number, html: string) {
   res.writeHead(status, PAGE_HEADERS);
   res.end(html);
@@ -336,10 +373,29 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
   if (action === "abort") return provider.interactionFinished(req, res, { error: "access_denied", error_description: "the operator denied the request" }, { mergeWithLastSubmission: false });
   if (action === "login") {
     if (prompt.name !== "login") return page(res, 400, "none", "not a sign-in step");
+    // Every limit is checked, then every one reserved, before the first await,
+    // so a burst of concurrent sign-ins is held as the same sign-ins one at a
+    // time would be (limits.ts).
+    const tooManyPage = (waitMs: number, note: string) => {
+      res.setHeader("retry-after", retryAfter(waitMs));
+      return send(res, 429, loginPage(asking, `${base}/login`, { note }));
+    };
+    // A spent sign-in is not waited out but started again: no Retry-After, and no form to post into it.
+    if (!flowTries.has(uid)) return send(res, 429, loginPage(asking, `${base}/login`, { note: "Too many wrong passwords for this sign-in: start again from the app.", form: false }));
+    const address = addressOf(req);
+    const locked = address === undefined ? 0 : signIns.wait(address);
+    if (locked) return tooManyPage(locked, `Too many wrong passwords from your address: try again in ${Math.ceil(locked / 60_000)} minute(s); a sign-in left open longer than ten minutes must start again from the app.`);
+    const busy = verifies.take();
+    if (busy) return tooManyPage(busy, "Too many sign-ins right now: try again in a moment.");
+    flowTries.take(uid);
+    if (address !== undefined) signIns.attempt(address);
     const form = await readForm(req);
     if (!(await Bun.password.verify(form.get("password") ?? "", C.passwordHash).catch(() => false))) {
-      return send(res, 401, loginPage(asking, `${base}/login`, true));
+      return send(res, 401, loginPage(asking, `${base}/login`, { wrong: true }));
     }
+    verifies.giveBack();
+    flowTries.clear(uid);
+    if (address !== undefined) signIns.succeeded(address);
     return provider.interactionFinished(req, res, { login: { accountId: OPERATOR, amr: ["pwd"] } }, { mergeWithLastSubmission: false });
   }
   if (action === "confirm") {
@@ -372,6 +428,54 @@ function mount(req: http.IncomingMessage, inner: string) {
 
 const ORIGIN = new URL(L.origin);
 const registrations = new RegistrationGate(C.maxClients, () => store.countClients());
+/** Registrations per address in an hour, with a trusted proxy (limits.ts): reserved at admission, given back on an answer other than 201 or a body stalled past the timeout. */
+const registrationsByAddress = new WindowLimit(C.registrationsPerHour, 3_600_000);
+
+/** A 429 in OAuth's JSON shape, with Retry-After. */
+function tooMany(res: http.ServerResponse, waitMs: number, why: string) {
+  res.writeHead(429, { "content-type": "application/json", "retry-after": retryAfter(waitMs), "cache-control": "no-store" });
+  res.end(JSON.stringify({ error: "temporarily_unavailable", error_description: `${why}; try again in ${retryAfter(waitMs)} s` }));
+}
+
+/** The library's own bound on a request body (selective_body.js). */
+const TOKEN_BODY_LIMIT = 56 * 1024;
+/**
+ * A token or revocation request's body, read here so the client it names is
+ * known before the library checks its secret. The library takes a body read
+ * upstream from `req.body` (it logs once that it did). It is read as UTF-8,
+ * whatever charset the request names, and the library parses the same
+ * string, so the two cannot disagree on the client. Undefined when it is not
+ * a form, which the library then answers as it would have; null when it is
+ * larger than the library allows.
+ */
+async function readTokenBody(req: http.IncomingMessage): Promise<string | null | undefined> {
+  if (!/^application\/x-www-form-urlencoded\b/i.test(req.headers["content-type"] ?? "")) return undefined;
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > TOKEN_BODY_LIMIT) return null;
+    chunks.push(c as Buffer);
+  }
+  const body = Buffer.concat(chunks).toString();
+  (req as http.IncomingMessage & { body?: string }).body = body;
+  return body;
+}
+
+/** Whether a token or revocation request may reach the library: refused while its client, from its address, is past its failures. */
+async function tokenGate(req: http.IncomingMessage, res: http.ServerResponse, address: string): Promise<boolean> {
+  const body = await readTokenBody(req);
+  if (body === null) {
+    res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+    res.end(JSON.stringify({ error: "invalid_request", error_description: "failed to parse the request body" }));
+    return false;
+  }
+  const form = new URLSearchParams(body ?? "");
+  const clientId = clientIdOf(req.headers.authorization, form.get("client_id") ?? undefined, form.get("client_assertion") ?? undefined);
+  const wait = tokenFailures.wait(clientKey(address, clientId));
+  if (wait) tooMany(res, wait, "too many failed authentications for this client from this address");
+  return !wait;
+}
 
 const server = http.createServer((req, res) => {
   // The provider builds every URL from the request's host and protocol (it
@@ -398,9 +502,37 @@ const server = http.createServer((req, res) => {
       page(res, 500, "none", "something went wrong on the server; try again, and see its log");
     });
   }
+  const address = addressOf(req);
+  if (address !== undefined && req.method === "POST" && TOKEN_PATH.test(url.pathname)) {
+    return void tokenGate(req, res, address).then(
+      (pass) => {
+        if (!pass) return;
+        mount(req, (req.url ?? "").slice("/auth".length) || "/");
+        return callback(req, res);
+      },
+      () => res.destroy(),
+    );
+  }
   // Every spelling the library routes to registration (registration.ts), with
   // the ones under way counted: the client is saved only after its body is read.
   if (req.method === "POST" && REGISTRATION_PATH.test(url.pathname)) {
+    let giveBackSlot = () => {};
+    if (address !== undefined) {
+      const wait = registrationsByAddress.take(address);
+      if (wait) return tooMany(res, wait, `this address has registered ${C.registrationsPerHour} clients in the last hour`);
+      // Given back once the answer is sent and is not a new client, or when
+      // the body stalls past the timeout below (no client can exist); a
+      // request dropped otherwise keeps its place, since the client may exist.
+      let settled = false;
+      giveBackSlot = () => {
+        if (!settled) registrationsByAddress.giveBack(address);
+        settled = true;
+      };
+      res.on("finish", () => {
+        if (res.statusCode !== 201) giveBackSlot();
+        settled = true;
+      });
+    }
     if (!registrations.admit()) {
       // RFC 7591 names no error for a full server; this is OAuth's own for "not now".
       res.writeHead(503, { "content-type": "application/json", "retry-after": "3600", "cache-control": "no-store" });
@@ -408,7 +540,10 @@ const server = http.createServer((req, res) => {
     }
     res.on("close", () => registrations.release());
     // A registration that stalls holds its place only this long (registration.ts).
-    req.setTimeout(REGISTRATION_TIMEOUT_MS, () => req.destroy());
+    req.setTimeout(REGISTRATION_TIMEOUT_MS, () => {
+      giveBackSlot();
+      req.destroy();
+    });
   }
   if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {
     mount(req, (req.url ?? "").slice("/auth".length) || "/");

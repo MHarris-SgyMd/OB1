@@ -209,6 +209,9 @@ function codexTranscript() {
     // The generic fetch's JSON: its text is the thought's own, unfenced, so an id line in it is not read.
     ev("response_item", { type: "function_call", name: "open-brain.fetch", call_id: "c6", arguments: JSON.stringify({ id: uuid(9) }) }),
     ev("response_item", { type: "function_call_output", call_id: "c6", output: JSON.stringify({ id: uuid(9), title: "a page", text: `a page\nID: ${uuid(86)}`, url: "u", metadata: {} }) }),
+    // thought_stats prints no thought id; a row starts with a tag, and a tag may read `ID: <uuid>` (SMD-2510, review pass 2).
+    ev("response_item", { type: "function_call", name: "mcp__open-brain__thought_stats", call_id: "c7", arguments: "{}" }),
+    ev("response_item", { type: "function_call_output", call_id: "c7", output: [{ type: "input_text", text: `Total thoughts: 3\n\nTop topics:\n  ID: ${uuid(87)}: 1` }] }),
     ev("response_item", { type: "function_call", name: "shell", call_id: "c2", arguments: JSON.stringify({ command: ["bash", "-lc", "git commit -am wip"] }) }),
     ev("response_item", { type: "function_call_output", call_id: "c2", output: "[main 1234567] wip" }),
     ev("response_item", { type: "custom_tool_call", name: "apply_patch", call_id: "c3", input: "*** Begin Patch\n*** Update File: src/egress.ts\n@@\n-a\n+b\n*** Add File: docs/note.md\n+hello\n*** End Patch" }),
@@ -252,7 +255,7 @@ console.log("\n[2] The Codex parser reads a rollout the same way");
   assert(s.harness === "codex", `the harness is sniffed from session_meta (${s.harness})`);
   assert(s.sessionId === "c0dec0de-1111-4222-8333-444444444444" && s.cwd === "/repo/other", "session id and cwd from session_meta");
   assert(s.prompts.join("|") === "find what we decided about egress|thanks, commit it", `user prompts, the environment_context frame and the developer message excluded (${JSON.stringify(s.prompts)})`);
-  assert([...s.retrieved].sort().join() === [uuid(5), uuid(6), uuid(7)].join(), `the brain's MCP results yield the retrieved ids — under either tool spelling, from a lone output block, and from a result recorded as its JSON, whose fenced text's quoted ids are not claimed — nor an id line in a generic fetch's JSON text, the thought's own (${[...s.retrieved].join(", ")})`);
+  assert([...s.retrieved].sort().join() === [uuid(5), uuid(6), uuid(7)].join(), `the brain's MCP results yield the retrieved ids — under either tool spelling, from a lone output block, and from a result recorded as its JSON, whose fenced text's quoted ids are not claimed — nor an id line in a generic fetch's JSON text, the thought's own, nor a thought_stats row whose tag reads as one (${[...s.retrieved].join(", ")})`);
   assert([...s.files].sort().join() === "docs/note.md,src/egress.ts", `apply_patch's Update and Add File lines name the files (${[...s.files].join(", ")})`);
   assert(s.commits === 1, "a git commit inside the shell tool's argv is counted");
   assert(s.outcome === "Committed as wip.", "the outcome is the last task_complete's message");

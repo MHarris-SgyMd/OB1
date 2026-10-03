@@ -10,7 +10,7 @@
 # The profile is the stack's own Ollama, where the server's model endpoint
 # defaults; drop it when deploy/.env names another provider.
 #
-# Then point an MCP client at http://127.0.0.1:8000/mcp?key=$MCP_ACCESS_KEY
+# Then point an MCP client at http://127.0.0.1:8000/mcp?key=<your key>
 #
 # Secrets come from deploy/.env, which is gitignored. Copy .env.example first.
 # Nothing here is production-shaped — no TLS, no backups, no resource limits — it
@@ -395,7 +395,7 @@ services:
       # The opt-in query log (migration 034): off unless deploy/.env says on,
       # and preflight prints which. Until SMD-1843 nothing here forwarded it, so
       # SETUP.md's switch never reached the container. Every knob the server
-      # declares (server-portable/index.ts, type Env) is forwarded now, and
+      # declares (server-portable/root.ts, type Env) is forwarded now, and
       # scripts/check-fork-consistency.ts check 14 fails on the next one that
       # is not — a name in a comment, or on ollama-pull's command line, is not
       # a forward.
@@ -1031,6 +1031,9 @@ services:
       OB1_AUTH_TIERS: ${OB1_AUTH_TIERS:-}
       OB1_AUTH_SERVICES: ${OB1_AUTH_SERVICES:-}
       OB1_AUTH_MAX_CLIENTS: ${OB1_AUTH_MAX_CLIENTS:-}
+      OB1_AUTH_REGISTRATIONS_PER_HOUR: ${OB1_AUTH_REGISTRATIONS_PER_HOUR:-}
+      OB1_AUTH_TRUSTED_PROXY: ${OB1_AUTH_TRUSTED_PROXY:-}
+      OB1_AUTH_FORWARDED_HOPS: ${OB1_AUTH_FORWARDED_HOPS:-}
       # deploy/.env's (the shell's, when it sets one), and never the command
       # line's --profile: the server refuses to start unless it names auth,
       # the stack's configured state (ADR decision 16; auth/config.ts). The

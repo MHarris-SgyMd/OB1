@@ -519,8 +519,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-2297), 068 (the node_state projection kept current on write,
   // SMD-2256), 071 (node_state's dependency columns keyed, the gate
   // stored, SMD-2267), 073 (the content's trust on the row, SMD-1724), 074
-  // (min_trust on match_thoughts and the keyword arm, SMD-1724) and 075
-  // (min_trust on the hybrid and the current read, SMD-1724) stay recorded
+  // (min_trust on match_thoughts and the keyword arm, SMD-1724), 075
+  // (min_trust on the hybrid and the current read, SMD-1724) and 077 (the
+  // current read by the tickets a thought names, SMD-2271) stay recorded
   // and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -610,12 +611,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // a function of its own — nothing to refuse, a function body binds its
   // names at call time ([20y]); 075 adds an 8-argument search_thoughts_hybrid
   // and search_thoughts_current beside 027's and 068's and makes those two
-  // call them, nothing to refuse either ([20z]) — all recorded by the
+  // call them, nothing to refuse either ([20z]); 076 upserts
+  // ob1_config.schema_version for the 1.5.0 cut, needing only 006's table; 077
+  // adds ticket_references and ticket_references_settled and redefines 075's
+  // 8-argument search_thoughts_current on its own body, refusing by name
+  // without 068 or 075 ([20aa]) — all recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 46, `030 is among the last forty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 48, `030 is among the last forty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3297,6 +3302,64 @@ console.log("\n[20z] Migration 075: refused without 074 or 068, naming each; ont
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the075 });
   const again = (await sql`SELECT count(*)::int AS c FROM pg_proc p WHERE p.proname IN ('search_thoughts_hybrid', 'search_thoughts_current') AND p.pronamespace = 'public'::regnamespace`)[0].c;
   assert(Number(again) === 4 && (await reads()) === before, "a re-apply of 075 is a no-op: two forms of each, the same answers");
+  await sql.close();
+}
+
+console.log("\n[20aa] Migration 077: refused without 068 or 075, naming each; onto a populated brain at the file before it — ticket_references and ticket_references_settled added, search_thoughts_current's columns, forms and an operator's REVOKE kept, every read of a thought naming no settled ticket answering row for row as before, a summary whose ticket is Done demoted with its keys, no audit row and no row moved; a re-apply a no-op (SMD-2271)");
+{
+  // The guard, driven: without 068's ticket heads, and with 068 but not
+  // 075's 8-argument search_thoughts_current. A plpgsql body binds its calls
+  // when it runs, so without the guard 077 would apply and every
+  // prefer_current search fail at its first call.
+  const the077 = MIGRATIONS.find((f) => f.endsWith("_references_settled.sql"))!;  // by name: renumbered when main takes its number
+  const the075 = MIGRATIONS.find((f) => f.endsWith("_min_trust_hybrid.sql"))!;
+  const the068 = MIGRATIONS.find((f) => f.endsWith("_node_state_projection.sql"))!;
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the068 });
+  const no068 = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the077 }).then(() => "applied", (e: Error) => e.message);
+  assert(no068 === "migration 077 needs 068 (ob1_ticket_head, node_state); this schema lacks it", `077 on a schema without 068 is refused up front, naming 068 (${no068})`);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the075 });
+  const no075 = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the077 }).then(() => "applied", (e: Error) => e.message);
+  assert(no075 === "migration 077 needs 075 (the 8-argument search_thoughts_current); this schema lacks it", `…and on a schema with 068 but not 075 it is refused, naming 075 (${no075})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the077 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : i === axis + 1 ? 0.5 : 0)).join(",")}]`;
+  const put = async (content: string, axis: number, metadata: Record<string, unknown>) =>
+    ((await sql`SELECT upsert_thought(${content}, ${JSON.stringify({ metadata })}::text::jsonb, ${vec(axis)}::vector) AS r`)[0].r as { id: string }).id;
+  const done = await put("[20aa] UPG-77 ticket", 0, { type: "task", source: "linear", issue: "SMD-7701", status: "Done", status_type: "completed", linear_updated_at: "2026-10-02T00:00:00.000Z" });
+  const plainIds: string[] = [];
+  for (let i = 0; i < 4; i++) plainIds.push(await put(`[20aa] UPG-77 note ${i}`, i, { type: "note" }));
+  const summary = await put("Session summary — SMD-7701 — [20aa] UPG-77 recommends SMD-7701", 1, { type: "observation" });
+  await sql.unsafe(`REVOKE ALL ON FUNCTION search_thoughts_current(vector, text, float, int, jsonb, float, float, text) FROM PUBLIC`);
+  const read = async (only: "plain" | "all") => {
+    const rows = (await sql.unsafe(`SELECT id::text AS id, score, demoted FROM search_thoughts_current('${vec(1)}'::vector, 'UPG-77', 0.0, 10, '{}'::jsonb)`)) as { id: string; score: number; demoted: string[] | null }[];
+    return only === "plain" ? JSON.stringify(rows.filter((r) => r.id !== summary)) : rows;
+  };
+  const stamps = async () => JSON.stringify(await sql`SELECT id, content, metadata, embedding::text AS e, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const before = await read("plain"), rowsBefore = await stamps();
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the077 });
+  const fns = (await sql`SELECT p.oid::regprocedure::text AS sig, p.proacl::text AS acl, pg_get_function_result(p.oid) AS r FROM pg_proc p
+                         WHERE p.proname IN ('ticket_references', 'ticket_references_settled', 'search_thoughts_current') AND p.pronamespace = 'public'::regnamespace ORDER BY 1`) as { sig: string; acl: string | null; r: string }[];
+  const cur8 = fns.find((f) => f.sig.endsWith("text)") && f.sig.startsWith("search_thoughts_current"));
+  assert(fns.length === 4 && fns.some((f) => f.sig === "ticket_references(text,jsonb)") && fns.some((f) => f.sig === "ticket_references_settled(text,jsonb)")
+      && cur8 !== undefined && cur8.acl !== null && !/(^|[{,])=X/.test(cur8.acl) && /window_exact boolean\)$/.test(cur8.r),
+    `the two functions added; search_thoughts_current's two forms kept, their columns unchanged, an operator's REVOKE on the 8-argument form standing (${fns.map((f) => f.sig).join("; ")})`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION search_thoughts_current(vector, text, float, int, jsonb, float, float, text) TO PUBLIC`);
+  const after = await read("all") as { id: string; score: number; demoted: string[] | null }[];
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert((await read("plain")) === before && (await stamps()) === rowsBefore && Number(auditAfter) === Number(auditBefore),
+    "…every row naming no settled ticket answers as before, and no row or audit row moved");
+  const sum = after.find((r) => r.id === summary);
+  const lastCurrent = Math.max(...after.map((r, i) => (r.demoted === null ? i : -1)));
+  assert(sum?.demoted?.join() === "references settled work (SMD-7701)" && after.findIndex((r) => r.id === summary) > lastCurrent && after.find((r) => r.id === done)?.demoted?.join() === "completed",
+    `…and the summary whose header ticket is Done is demoted below the current rows, naming it, beside the ticket's own row (${JSON.stringify(sum?.demoted)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the077 });
+  const again = (await sql`SELECT count(*)::int AS c FROM pg_proc p WHERE p.proname IN ('ticket_references', 'ticket_references_settled', 'search_thoughts_current') AND p.pronamespace = 'public'::regnamespace`)[0].c;
+  assert(Number(again) === 4 && JSON.stringify(await read("all")) === JSON.stringify(after), "a re-apply of 077 is a no-op: the same functions, the same answers");
   await sql.close();
 }
 

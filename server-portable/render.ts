@@ -102,8 +102,14 @@ export const storeUnavailable = (err: unknown): Reply => failed(err, { verdict: 
 
 /** An enum the store reads from a constrained column, kept only when it is one of the words it may be. */
 const oneOf = <W extends string>(words: readonly W[], v: unknown): W | null => (words as readonly unknown[]).includes(v) ? v as W : null;
-/** The reasons prefer_current demotes a row (059): the function's own words. */
-const DEMOTIONS = ["completed", "canceled", "superseded"] as const;
+/**
+ * The reasons prefer_current demotes a row (059): the function's own words,
+ * one token each as guard() holds a structured string. 077's reason carries
+ * the deciding keys, `references settled work (SMD-1, SMD-2)`; the structured
+ * field says `references_settled` and leaves the words and keys to the text.
+ */
+const DEMOTIONS = ["completed", "canceled", "superseded", "references_settled"] as const;
+const demotionOf = (d: unknown) => oneOf(DEMOTIONS, typeof d === "string" && /^references settled work \(/.test(d) ? "references_settled" : d);
 
 /** A row's trust (073, SMD-1724): one of the ladder's words, else null — no trust recorded, or a word the stamp never writes. */
 const trustOf = (m: Record<string, unknown> | null | undefined): (typeof TRUST)[number] | null => oneOf(TRUST, m?.trust);
@@ -116,7 +122,7 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   window: v.window,
   hits: v.hits.map((h) => ({
     id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
-    supersededBy: h.supersededBy, demoted: h.demoted.map((d) => oneOf(DEMOTIONS, d)).filter((d) => d !== null),
+    supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
     trust: trustOf(h.metadata),
   })),
 });
@@ -151,17 +157,6 @@ const safeChanges: Safe<ChangesResult> = (v) => ({
 });
 
 /**
- * Untrusted text — a thought's, a citation's, a judge's reason — on one line
- * of a reply: the same cleaner the CLI renders through
- * (server-portable/consolidate.ts), whitespace collapsed, cut with an ellipsis
- * past `max` characters. One spelling for every place a reply quotes a thought.
- */
-export function snipText(text: string, max: number): string {
-  const t = cleanForDisplay(text).replace(/\s+/g, " ").trim();
-  return t.length > max ? t.slice(0, max) + "…" : t;
-}
-
-/**
  * Every break a reader may take as a new line: CRLF, CR, LF, VT, FF, the three
  * information separators Python's splitlines() breaks on (FS, GS, RS), NEL,
  * and Unicode's line and paragraph separators (review pass 1).
@@ -175,6 +170,56 @@ const LINE_BREAK = /\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/;
  */
 // eslint-disable-next-line no-control-regex
 const UNSHOWN = /[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * Untrusted text — a thought's, a citation's, a judge's reason — on one line
+ * of a reply: the same cleaner the CLI renders through
+ * (server-portable/consolidate.ts), whitespace collapsed, cut with an ellipsis
+ * past `max` characters. One spelling for every place a reply quotes a thought.
+ * Every break fenceText splits on is a space here, NEL and FS/GS/RS among them
+ * (`\s` matches none of the four), and what fenceText drops from a line is
+ * dropped (SMD-2510).
+ */
+export function snipText(text: string, max: number): string {
+  const t = cleanForDisplay(text.split(LINE_BREAK).join(" ")).replace(UNSHOWN, "").replace(/\s+/g, " ").trim();
+  // Cut by code point, so an emoji or other astral character at the bound is
+  // kept or dropped whole, never left as half a surrogate pair. No more UTF-16
+  // units than the bound is no more code points; past it, the walk stops at
+  // the bound, not at the end of a whole thought's text.
+  if (t.length <= max) return t;
+  let cut = "";
+  let n = 0;
+  for (const c of t) {
+    if (n === max) return cut + "…";
+    cut += c;
+    n++;
+  }
+  return t;
+}
+
+/** Where a metadata value is cut (SMD-2510): a type is a word, a topic or a person a name, an action item a sentence. */
+const TYPE_MAX = 40;
+const TAG_MAX = 80;
+const ACTION_MAX = 200;
+
+/**
+ * A thought's metadata value — its type, a topic, a person, an action item —
+ * on one line of a reply (SMD-2510). The value is anyone's to set: an
+ * importer writes it straight through upsert_thought's payload, and
+ * extraction is a model reading the thought's own text. Printed raw, a topic
+ * holding a newline, `--- Result 9 ---` and `By: … · trust operator` stood
+ * above the fenced text (SMD-2483) as lines of the reply's own. A value that
+ * is not a string is said as String() says it (a `0` or `false` type as such,
+ * where the template's `||` said `unknown`). Exported for the unit test.
+ */
+export function metaText(v: unknown, max: number): string {
+  return v === null || v === undefined ? "" : snipText(typeof v === "string" ? v : String(v), max);
+}
+
+/** A metadata list (topics, people, action items), each entry through metaText, one left empty dropped. Exported for the unit test. */
+export function metaList(v: unknown, max: number): string[] {
+  return Array.isArray(v) ? v.map((x) => metaText(x, max)).filter(Boolean) : [];
+}
 
 /**
  * A thought's whole text in a block of a reply (SMD-2483): every line starts
@@ -293,7 +338,7 @@ export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">
   const above = rows.filter((r, i) => isDemoted(r) && rows.slice(i + 1).some((x) => !isDemoted(x))).length;
   const exception = above === 0 ? ""
     : ` — ${above} of the demoted, holding the query's literal, still rank${above === 1 ? "s" : ""} above a current one here`;
-  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones${exception}; ${lifecycle}.`;
+  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled, superseded or about finished tickets and ranked below the current ones${exception}; ${lifecycle}.`;
   if (w.exact) return note;
   const current = w.rows - w.demoted;
   const held = current === 0 ? `No current match was in the top ${w.rows}, so every row here is a demoted one`
@@ -395,7 +440,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         const captured = displayDate(t.created_at);
         parts.push(
           ...(captured ? [`Captured: ${captured}`] : []),
-          `Type: ${m.type || "unknown"}`,
+          `Type: ${metaText(m.type, TYPE_MAX) || "unknown"}`,
         );
         // SMD-1726: who wrote the current text, from the key (050); its own
         // line, as every field of this block is — nothing parses `ID:`
@@ -406,12 +451,11 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         const notice = ingestedNotice(m);
         if (notice) parts.push(notice);
         if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
-        if (Array.isArray(m.topics) && m.topics.length)
-          parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
-        if (Array.isArray(m.people) && m.people.length)
-          parts.push(`People: ${(m.people as string[]).join(", ")}`);
-        if (Array.isArray(m.action_items) && m.action_items.length)
-          parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
+        // SMD-2510: each metadata value on its one line, as the text is fenced.
+        const topics = metaList(m.topics, TAG_MAX), people = metaList(m.people, TAG_MAX), actions = metaList(m.action_items, ACTION_MAX);
+        if (topics.length) parts.push(`Topics: ${topics.join(", ")}`);
+        if (people.length) parts.push(`People: ${people.join(", ")}`);
+        if (actions.length) parts.push(`Actions: ${actions.join("; ")}`);
         // SMD-2483: the text fenced, so no line of it reads as this reply's own.
         parts.push(`\n${fenceText(t.content)}`);
         return parts.join("\n");
@@ -478,7 +522,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         `--- Result ${offset + i + 1} (${t.occurrences} occurrence${t.occurrences === 1 ? "" : "s"}) ---`,
         `ID: ${t.id}`,
         ...(captured ? [`Captured: ${captured}`] : []),
-        `Type: ${m.type || "unknown"}`,
+        `Type: ${metaText(m.type, TYPE_MAX) || "unknown"}`,
       ];
       // SMD-1726: who wrote it, the line search_thoughts prints; SMD-1724: the
       // notice an ingested row carries, as there.
@@ -486,8 +530,8 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
       if (by) parts.push(by);
       const notice = ingestedNotice(m);
       if (notice) parts.push(notice);
-      if (Array.isArray(m.topics) && m.topics.length)
-        parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
+      const topics = metaList(m.topics, TAG_MAX);
+      if (topics.length) parts.push(`Topics: ${topics.join(", ")}`);
       parts.push(`\n${fenceText(t.content)}`);
       return parts.join("\n");
     });
@@ -511,7 +555,8 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const results = data.map(
       (t, i) => {
         const m = t.metadata || {};
-        const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
+        // SMD-2510: the type and tags on the header's one line.
+        const tags = metaList(m.topics, TAG_MAX).join(", ");
         // An `ID:` line, the same label the two search tools print — it is what
         // update_thought and delete_thought take. This compact format has no
         // header group, so it trails the content. SMD-1248.
@@ -531,7 +576,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         // SMD-2483: the text fenced and indented as the block is, every line
         // of it — no blank line inside an item, and no line of the text a
         // next item or an `ID:` line.
-        return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})${warn}\n${fenceText(t.content, "   ")}\n   ID: ${t.id}${who}${mark}`;
+        return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${metaText(m.type, TYPE_MAX) || "??"}${tags ? " - " + tags : ""})${warn}\n${fenceText(t.content, "   ")}\n   ID: ${t.id}${who}${mark}`;
       }
     );
     return `${data.length} recent thought(s):\n\n${results.join("\n\n")}`;
@@ -622,16 +667,17 @@ export function renderThoughtStats(o: Outcome<ThoughtStats>): Reply {
       );
     }
 
-    lines.push("", "Types:", ...sort(types).map(([k, v]) => `  ${k}: ${v}`));
+    // SMD-2510: a type, topic or person is a metadata value, on its one line.
+    lines.push("", "Types:", ...sort(types).map(([k, v]) => `  ${metaText(k, TYPE_MAX)}: ${v}`));
 
     if (Object.keys(topics).length) {
       lines.push("", "Top topics:");
-      for (const [k, v] of sort(topics)) lines.push(`  ${k}: ${v}`);
+      for (const [k, v] of sort(topics)) lines.push(`  ${metaText(k, TAG_MAX)}: ${v}`);
     }
 
     if (Object.keys(people).length) {
       lines.push("", "People mentioned:");
-      for (const [k, v] of sort(people)) lines.push(`  ${k}: ${v}`);
+      for (const [k, v] of sort(people)) lines.push(`  ${metaText(k, TAG_MAX)}: ${v}`);
     }
 
     return lines.join("\n");
@@ -845,13 +891,13 @@ export function renderCapture(o: Outcome<Captured>): Reply {
     // an agent that captures a typo has to search for its own thought to fix
     // it, and the two new tools are only usable against things it did not
     // just write.
-    let confirmation = `Captured as ${meta.type || "thought"} — id ${v.id}`;
-    if (Array.isArray(meta.topics) && meta.topics.length)
-      confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
-    if (Array.isArray(meta.people) && meta.people.length)
-      confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
-    if (Array.isArray(meta.action_items) && meta.action_items.length)
-      confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+    // SMD-2510: the extracted tags on the one line, so a topic the model wrote
+    // cannot start a `Captured as … id` line of its own.
+    let confirmation = `Captured as ${metaText(meta.type, TYPE_MAX) || "thought"} — id ${v.id}`;
+    const topics = metaList(meta.topics, TAG_MAX), people = metaList(meta.people, TAG_MAX), actions = metaList(meta.action_items, ACTION_MAX);
+    if (topics.length) confirmation += ` — ${topics.join(", ")}`;
+    if (people.length) confirmation += ` | People: ${people.join(", ")}`;
+    if (actions.length) confirmation += ` | Actions: ${actions.join("; ")}`;
 
     // The gate's refusal first among the notes (SMD-1903): a thought
     // without its vector is the one fact a caller must not miss. Not an
@@ -940,7 +986,9 @@ export function renderCapture(o: Outcome<Captured>): Reply {
     } else if (typeof meta.metadata_extraction_failed === "string") {
       confirmation +=
         `\n\nNote: the thought was saved, but automatic tagging failed ` +
-        `(${meta.metadata_extraction_failed}) — topics and people are placeholders. ` +
+        // The marker is the server's reason code (extractMetadata keeps a
+        // model's own out of the tags), on the one line all the same (SMD-2510).
+        `(${metaText(meta.metadata_extraction_failed, TYPE_MAX)}) — topics and people are placeholders. ` +
         `Check the chat endpoint (${chat.base}), its credential, and the server logs.`;
     }
     return confirmation;

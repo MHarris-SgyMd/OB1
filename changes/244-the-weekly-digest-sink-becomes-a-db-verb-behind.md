@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2239]
-migrations: []
----
-
-## Changelog
-
-`db/weekly-digest.ts` is the `db/` home for the weekly digest — it pages the week's `thoughts`, has the brain's chat model synthesize an importance-ranked digest, and delivers it to Telegram, a file, or stdout — and, unlike the `recipes/weekly-digest` script it replaces, every hop that leaves the box passes the egress gate. The synthesis (the thoughts → the chat provider) goes through the gated dialler, and the Telegram send (the digest → `api.telegram.org`) is gated in its own right: under the default `deny` the send is refused, the refusal names the rule, and the digest is printed to stdout instead — nothing reaches Telegram. One term opts the sink in: `OB1_EGRESS_ALLOW=type:digest` (or `source:weekly-digest`, or `actor:<key>`). The sensitivity boundary the recipe promised is kept and fail-closed. No schema change (SMD-2239).
-
-## FORK
-
-The weekly-digest sink becomes a `db/` verb behind the egress gate (SMD-2239)
+# 244. The weekly-digest sink becomes a `db/` verb behind the egress gate (SMD-2239)
 
 **What it adds.** `db/weekly-digest.ts` on SMD-2134's harness: `db/connect.ts` for the connection, `db/worker-bootstrap.ts` for the actor and the egress refusal wording, and `server-portable/`'s own `resolveEmbedConfig` + gated `providerCall` for the synthesis. It is the fork's **first true sink** — brain content leaving to a third party, not only to an LLM — so it gates two independent hops:
 

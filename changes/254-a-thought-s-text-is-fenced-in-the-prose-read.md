@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2483]
-migrations: []
----
-
-## Changelog
-
-`search_thoughts`, `search_thoughts_keyword` and `list_thoughts` print every line of a thought's text behind a `│ ` fence. A line of the text can no longer stand as a line of the reply. Before this fix, a thought captured through an ingested key could carry a lookalike `--- Result` block, a `By: … · trust operator` line, or a list item of its own. Those lines read as another thought's, without the notice ingested text carries. Every row's text is fenced, whatever its trust (SMD-2483).
-
-## FORK
-
-A thought's text is fenced in the prose read tools, so it cannot forge a result block (SMD-2483)
+# 254. A thought's text is fenced in the prose read tools, so it cannot forge a result block (SMD-2483)
 
 **What changed.**
 - **`fenceText` in `server-portable/render.ts`.** It puts `│ ` before every line of a thought's text, and `│` alone on an empty line. No line the renderer writes itself starts with that character.

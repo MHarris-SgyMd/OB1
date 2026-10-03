@@ -1,290 +1,28 @@
 
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
-import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from "./store.ts";
-import { tierProblem, trimmedEnv } from "../db/config.mjs";
+import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
-import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
-import { atEndpoint, subscribe as subscribeJob, markRunningLost, setJobSink } from "./jobs.ts";
+import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
 import { createCore, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
 import type { ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
+import { labelPart, withSseKeepalive } from "./sse.ts";
 
 // What the suites import from the module they drive; each now lives beside the
 // core or the renderer it belongs to (SMD-2283).
 export { parseFilter, withActorFilter } from "./core/filter.ts";
 export { actorLine, demotedLine, currentNote, currentSearchHint, ingestedNotice, INGESTED_NOTICE, minTrustHint } from "./render.ts";
 export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";
-
-/**
- * Runtime-portable env access.
- *
- * Workers has no module scope for secrets — bindings arrive on the request
- * context, so nothing can be read at import time. Deno, Bun and Node all expose
- * globals instead. Reading through this shim (seeded by the first middleware)
- * lets one file run on all four.
- */
-type Env = {
-  OPENROUTER_API_KEY: string;
-  /** Named, scoped, hashed keys: `name:scope:sha256` entries. Preferred. */
-  MCP_ACCESS_KEYS?: string;
-  /** Legacy single raw key — full write access. See auth.ts. */
-  MCP_ACCESS_KEY?: string;
-  /** Which data layer to use: "sql" (the default when unset) or "postgrest" (Cloudflare Workers). */
-  OB1_STORE?: string;
-  /**
-   * Required when OB1_STORE=postgrest. Holding a postgres:// URL, SUPABASE_URL
-   * also serves as the SQL store's connection string (store.ts:databaseUrl).
-   */
-  SUPABASE_URL?: string;
-  SUPABASE_SERVICE_ROLE_KEY?: string;
-  /** The SQL store's connection string — required unless SUPABASE_URL holds one. */
-  DATABASE_URL?: string;
-  /** The SQL store's connection pool size (store-sql.ts); default 10. */
-  OB1_PG_POOL?: string;
-  /**
-   * The platform's grace period for a stop, in seconds; the server drains for
-   * 2 s less (shutdown.ts). Default 10, Docker's. Read once, at start-up, from
-   * the process's environment: the handlers go in before the first request
-   * seeds the rest.
-   */
-  OB1_STOP_GRACE?: string;
-  /**
-   * The opt-in trigram index. The migrator builds it; in the server's process
-   * db/config.mjs reads it (TRGM_INDEX), which preflight.ts imports to tell the
-   * setting and the database apart. Declared here because this block is the
-   * one list of what the container's process reads — check 14 holds
-   * deploy/compose.yaml to it (SMD-1843).
-   */
-  OB1_TRGM_INDEX?: string;
-  /** Must match the width of thoughts.embedding — see db/config.mjs. */
-  OB1_EMBEDDING_DIM?: string;
-  OB1_EMBEDDING_MODEL?: string;
-  /**
-   * "on" to send the OpenAI `dimensions` parameter, asking the provider to return
-   * OB1_EMBEDDING_DIM numbers instead of the model's native width. Off by default;
-   * only safe for models trained for Matryoshka truncation.
-   */
-  OB1_EMBEDDING_DIMENSIONS?: string;
-  /**
-   * Chunking for captures too long to embed in one provider call. Tokens per
-   * window and overlap between windows; see chunk.ts. Unset, the length a
-   * capture is windowed above and the window size are derived from the
-   * embedding model's measured window (db/config.mjs, KNOWN_MODEL_WINDOW; 1200
-   * and 1200 for a model it does not know) and preflight prints the rule and
-   * where it came from.
-   */
-  OB1_CHUNK_TOKENS?: string;
-  OB1_CHUNK_OVERLAP?: string;
-  /** "on" to generate a situating blurb per chunk before embedding it. Off by
-   *  default, and measured off — see db/config.mjs and evals/eval-contextual.ts. */
-  OB1_CHUNK_CONTEXT?: string;
-  /**
-   * Estimated tokens of thought text per entity-extraction call
-   * (db/extract-entities.ts; SMD-1879). Unset, derived from the METADATA
-   * model's served context (db/config.mjs, KNOWN_CHAT_MODEL_WINDOW) and never
-   * above entities.ts's measured default. The server never extracts; preflight,
-   * which runs in this container, prints the rule and where it came from.
-   */
-  OB1_EXTRACT_CHUNK_TOKENS?: string;
-  /**
-   * The most windows one thought is extracted in (SMD-2240); a longer one is
-   * extracted over its first this many and recorded with a caveat. Unset:
-   * db/config.mjs's EXTRACT_MAX_WINDOWS, 24. Read here only by preflight,
-   * for the same reason as the window above.
-   */
-  OB1_EXTRACT_MAX_WINDOWS?: string;
-  /**
-   * The larger local model a runaway extraction call escalates to instead of the
-   * penalised same-model retry (SMD-2000). Read here only by preflight, which
-   * names it on the extraction window row and probes it with --deep; the server
-   * never extracts. Unset (or equal to the metadata model): the retry is unchanged.
-   */
-  OB1_EXTRACT_ESCALATE_MODEL?: string;
-  /**
-   * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
-   * search and one per follow-up fetch/edit/delete of a returned id — or, since
-   * SMD-1719, per id a write cited as its source — so a
-   * retrieval change can be replayed against real use (evals/eval-replay.ts).
-   * Off by default — anything but "on" writes nothing. Personal data at rest
-   * (every query typed); see SETUP.md. The write is best-effort and never fails
-   * a search; prune_query_log() enforces the retention window below.
-   */
-  OB1_QUERY_LOG?: string;
-  /** Days query_log rows are kept by prune_query_log(); default 30. See db/config.mjs. */
-  OB1_QUERY_LOG_RETENTION_DAYS?: string;
-  /**
-   * Which pipeline tier this server runs as (SMD-1806): stable | canary |
-   * working. Stamped onto every query_log row the server writes, so the canary
-   * — which replays stable's log — can tell a stable-written row from its own.
-   * Unset is a plain brain (the row's tier is NULL); the tiers are one corpus
-   * read through three schemas with one writer per tier. Read here as well as by
-   * db/ingest-records.ts (which stamps ob1_config.tier) and preflight's `tier`.
-   */
-  OB1_TIER?: string;
-  /**
-   * The commit the image was built from — baked by server-portable/Dockerfile
-   * from its OB1_GIT_SHA build arg, never forwarded at runtime (compose passes
-   * the build arg; check 14 excuses the forward). Reported by brain_info and
-   * the keyed /health body (SMD-2041); unset reads as `unknown`.
-   */
-  OB1_GIT_SHA?: string;
-  /** Model for metadata extraction. No schema dependency — safe to change anytime. */
-  OB1_METADATA_MODEL?: string;
-  /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
-  OB1_JUDGE_MODEL?: string;
-  /**
-   * The typed-decision tier (jev.ts, SMD-2050): where it is served, the model
-   * the caller expects, and 1/on when that endpoint is on this box (declared,
-   * as OB1_LLM_LOCAL is). The server never decides; preflight, which runs in
-   * this container, checks the tier when OB1_JEV_BASE_URL is set.
-   */
-  OB1_JEV_BASE_URL?: string;
-  OB1_JEV_MODEL?: string;
-  OB1_JEV_LOCAL?: string;
-  /** Sampling temperature for extraction. Defaults to 0 — metadata.ts's extractMetadata says why; embed.ts's resolveEmbedConfig owns the default. */
-  OB1_METADATA_TEMPERATURE?: string;
-  /**
-   * Whether a thinking model reasons before extracting. Unset, off/false/0: no
-   * reasoning pass (`reasoning_effort: none`); on/true/1: the model's default
-   * effort; any other word (low, medium, high) is sent as the effort. See
-   * embed.ts metadataReasoning.
-   */
-  OB1_METADATA_REASONING?: string;
-  /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. Embeddings, and chat unless OB1_CHAT_BASE_URL says otherwise. */
-  OB1_LLM_BASE_URL?: string;
-  /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
-  OB1_LLM_API_KEY?: string;
-  /** Where the chat calls (metadata, blurbs, the judge) go when it is not OB1_LLM_BASE_URL — see embed.ts resolveProviderEndpoints (SMD-1902). */
-  OB1_CHAT_BASE_URL?: string;
-  /** The chat endpoint's own credential; a different chat endpoint never inherits OB1_LLM_API_KEY. */
-  OB1_CHAT_API_KEY?: string;
-  /**
-   * 1/on: the endpoint OB1_LLM_BASE_URL names is on this machine or its
-   * private network, so the egress gate does not apply to it (SMD-1903).
-   * Declared, never guessed from the address — a loopback URL with this unset
-   * is remote to the gate.
-   */
-  OB1_LLM_LOCAL?: string;
-  /** Likewise for OB1_CHAT_BASE_URL; a chat endpoint at the same base is the same box, declared by either knob. */
-  OB1_CHAT_LOCAL?: string;
-  /**
-   * What may leave the box for an endpoint not declared local: deny (the
-   * default — only what an OB1_EGRESS_ALLOW term names), allow (everything
-   * but what an OB1_EGRESS_DENY term names) or off. See egress.ts.
-   */
-  OB1_EGRESS_POLICY?: string;
-  /** Comma-separated unit:value terms (actor, source, type, topic, marker) read under deny. */
-  OB1_EGRESS_ALLOW?: string;
-  /** The same, read under allow. */
-  OB1_EGRESS_DENY?: string;
-  /** Seconds a single provider call — embedding, blurb or metadata extraction — may take. Default 120 — see embed.ts. */
-  OB1_LLM_TIMEOUT?: string;
-  OPEN_BRAIN_CITATION_BASE_URL?: string;
-  /**
-   * How long a resolved agent identity is cached, in milliseconds. Also the
-   * delay before ob1_agent_keys.revoked_at takes effect. Default 60000; 0
-   * resolves on every request. See agents.ts.
-   */
-  OB1_AGENT_CACHE_TTL_MS?: string;
-};
-
-let ENV: Env | null = null;
-
-function initEnv(bindings?: Record<string, unknown>): void {
-  if (ENV) return;
-  const globals = (globalThis as { process?: { env?: Record<string, string> } }).process?.env ?? {};
-  // Trimmed once here, for every knob: a quoted `"sk-abc "` in deploy/.env
-  // reaches the provider as the key, not the key and a space (SMD-1843).
-  const candidate = trimmedEnv({ ...globals, ...(bindings ?? {}) }) as Env;
-  // A wrong OB1_TIER (e.g. "Stable", "prod") fails migration 045's query_log.tier
-  // CHECK, and the best-effort log write swallows the error — silently dropping
-  // every query_log row and emptying SMD-1806's canary replay. Refuse it here,
-  // at the one place the env is frozen, rather than lean on the DB CHECK. The
-  // container also gates it earlier (preflight, the entrypoint's first command);
-  // this covers Workers and any direct `bun index.ts` (SMD-1953).
-  //
-  // Validate BEFORE assigning ENV: the `if (ENV) return` above means a value
-  // assigned here sticks, so throwing after assignment would fire on the first
-  // call and then let every later call skip the guard — the bad tier would reach
-  // the log write on the second request. Leaving ENV null on a bad value makes
-  // every call re-run and re-throw.
-  const tierIssue = tierProblem(candidate.OB1_TIER);
-  if (tierIssue) throw new Error(tierIssue);
-  ENV = candidate;
-}
-
-function env(): Env {
-  if (!ENV) throw new Error("env accessed before initEnv() — is the seeding middleware registered?");
-  return ENV;
-}
-
-// Built once, on first use. createStore() dynamically imports whichever backend
-// is configured, so a Cloudflare build never pulls in the Postgres client. The
-// PostgREST store selected where the SQL store runs is said once, here, at the
-// moment the selection takes effect (change 97); preflight says it at the
-// entrypoint as well, so a container sees it before the first request.
-let _store: Promise<ThoughtStore> | null = null;
-let jobStoreWired = false;
-function db(): Promise<ThoughtStore> {
-  if (!_store) {
-    const notice = postgrestOnBunNotice(storeKind(env()));
-    if (notice) console.warn(notice);
-    _store = createStore(env());
-    // Once, on the Bun server and the moment the store is first built (env() is
-    // seeded by then): wire the durable job store (SMD-2318) and reconcile jobs a
-    // prior process left running — a clean stop's `lost` write that did not land,
-    // or a hard crash — so a poll after the restart sees a terminal answer, not a
-    // live job with no runner. Detached and best-effort: the handle routes never
-    // gate on it, the SQL store returns a sink, the PostgREST store returns null
-    // (the registry stays in-memory), and a store that fails to build leaves it
-    // in-memory too. A suite drives the sink itself (it holds the store).
-    if (SERVES_ON_BUN && !jobStoreWired) {
-      jobStoreWired = true;
-      void _store.then(async (store) => {
-        const s = store.jobSink();
-        if (!s) return;
-        // Reconcile BEFORE wiring the sink: only after setJobSink does a job of
-        // this process get persisted as running, so running the reconcile first
-        // means it can only touch a prior process's rows — never a job this
-        // process just started (which would race the reconcile's UPDATE and be
-        // wrongly cut to lost).
-        const lost = await s.reconcileRunningLost();
-        setJobSink(s);
-        if (lost > 0) console.warn(`startup reconciled ${lost} job${lost === 1 ? "" : "s"} left running by a prior process: marked lost (SMD-2318)`);
-      }).catch(() => { /* no durable store: the registry stays in-memory */ });
-    }
-  }
-  return _store;
-}
-
-/**
- * The stop's close: the pool only if a request opened one — a store that
- * failed to build has none, and the PostgREST store holds no pooled connection
- * to close. True when a SQL pool was closed. Beside db(), so the store's wiring
- * is these two bodies (check 25).
- */
-function closeStore(): Promise<boolean> {
-  return _store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : Promise.resolve(false);
-}
-
-// Built on first use, for the same reason as the store: reading env() at module
-// scope runs before initEnv() has seeded it.
-let _agents: AgentResolver | null = null;
-function agents(): AgentResolver {
-  // Lookups are shared across requests only on the SQL store: on Workers (the
-  // PostgREST store) a fetch belongs to the request that started it.
-  if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS), Date.now, storeKind(env()) === "sql");
-  return _agents;
-}
+export { SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
 
 // The core (SMD-2283): every tool's logic over the store and the model
 // provider, as functions of a principal and a typed input (core/index.ts). Built
-// once, at import; it reads the environment and the store through the two
-// lazy readers above, so Cloudflare Workers bindings — which arrive per
+// once, at import; it reads the environment and the store through root.ts's
+// two lazy readers, so Cloudflare Workers bindings — which arrive per
 // request — still apply. The model provider is anything speaking the OpenAI
 // /embeddings and /chat/completions shapes, which includes OpenRouter, OpenAI
 // itself, and Ollama's compatibility layer — so a fully local brain is a URL
@@ -586,38 +324,58 @@ const BUSY_MESSAGE =
   "Temporarily unavailable: the agent registry is busy and could not confirm this key. Retry in a few seconds.";
 
 /**
- * Read the request body as text. This CONSUMES the body: both callers return a
- * refusal right after, so nothing downstream needs it. Returns null on read
- * failure. No
- * bodyless-method branch: `req.text()` on a request without a body resolves to
- * "", and extractJsonRpcId("") is null, so the method never mattered here.
+ * The most of a keyless request's body read for its refusal's JSON-RPC id:
+ * the one cost a caller who has shown no key sets (SMD-2309 review:
+ * unbounded, a 100 MB body cost 0.6 s and hundreds of MB, measured). A request
+ * MCP clients send is a few KB. A refusal to a key that matched (revoked,
+ * busy) reads the whole body, as the accepted path does: a long capture's id
+ * must come back, or the client waits out its timeout (review pass 2).
  */
-async function readBodyText(req: Request): Promise<string | null> {
+export const REFUSAL_BODY_LIMIT = 64 * 1024;
+
+/**
+ * Read a refused request's body as text, at most `limit` bytes. This CONSUMES
+ * the body: both callers return a refusal right after, so nothing downstream
+ * needs it. Returns null on read failure, and for a body past the limit
+ * (declared, or read so far), which the refusal then answers with `id: null`
+ * as it does a body it cannot parse. No bodyless-method branch: a request
+ * without a body reads as "", and its id is null. Decoded as it is read, so a
+ * character split across chunks survives and no Buffer is needed (Workers).
+ */
+async function readBodyText(req: Request, limit = Infinity): Promise<string | null> {
   try {
-    return await req.text();
+    if (Number(req.headers.get("content-length")) > limit) return null;
+    if (!req.body) return "";
+    const reader = req.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        void reader.cancel().catch(() => {});
+        return null;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
   } catch {
     return null;
   }
 }
 
 /**
- * Best-effort extraction of the JSON-RPC `id` from a raw request body.
- * Returns null when the body is missing, not JSON, or not a JSON-RPC
- * shape with an id. Per the JSON-RPC 2.0 spec, id may be a string,
- * number, or null — we preserve any of those; anything else becomes null.
+ * Best-effort extraction of the JSON-RPC `id` from a parsed request body.
+ * Null when the body is missing, not JSON, or not a JSON-RPC shape with an
+ * id. Per the JSON-RPC 2.0 spec, id may be a string, number, or null — we
+ * preserve any of those; anything else becomes null.
  */
-function extractJsonRpcId(bodyText: string | null): string | number | null {
-  if (!bodyText) return null;
-  try {
-    const parsed = JSON.parse(bodyText);
-    if (parsed && typeof parsed === "object" && "id" in parsed) {
-      const id = (parsed as { id: unknown }).id;
-      if (typeof id === "string" || typeof id === "number" || id === null) {
-        return id;
-      }
-    }
-  } catch {
-    // fall through — malformed body
+function jsonRpcIdOf(parsed: unknown): string | number | null {
+  if (parsed && typeof parsed === "object" && "id" in parsed) {
+    const id = (parsed as { id: unknown }).id;
+    if (typeof id === "string" || typeof id === "number" || id === null) return id;
   }
   return null;
 }
@@ -637,13 +395,13 @@ function extractJsonRpcId(bodyText: string | null): string | number | null {
  * before this helper existed.
  */
 function refusalTarget(bodyText: string | null): { expectsReply: boolean; id: string | number | null } {
-  const id = extractJsonRpcId(bodyText);
   let parsed: unknown;
   try {
     parsed = bodyText ? JSON.parse(bodyText) : undefined;
   } catch {
-    return { expectsReply: true, id };
+    return { expectsReply: true, id: null };
   }
+  const id = jsonRpcIdOf(parsed);
   const messages = Array.isArray(parsed) ? parsed : [parsed];
   const isNotification = (m: unknown): boolean =>
     typeof m === "object" && m !== null && !Array.isArray(m)
@@ -976,108 +734,6 @@ app.get("*", async (c, next) => {
   return c.json(job.value, 200, corsHeaders);
 });
 
-// ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────
-//
-// The transport answers a POST with an SSE stream at once and writes the tool's
-// result to it when the tool returns; until then the stream carries nothing.
-// Bun closes a connection that has been silent for `idleTimeout` seconds — 10
-// by default — a streaming response included, at the next of its 4-second
-// sweeps, so between 8 and 12 s of silence by phase; it never reaches into a
-// handler that has not yet returned a response. Measured on 1.4.0, macOS and
-// the Alpine image alike: a handler still pending at 12 s answers normally,
-// body read or not, on a fresh or a reused socket; a streamed response silent
-// for 13 s is closed at the sweep, the client sees ECONNRESET, and the handler
-// runs on to write into a closed stream; a comment frame every 5 s keeps it
-// open. A capture whose embedding and metadata calls ran past ten seconds was
-// that second case (9.76 s, deterministically, on the dogfood brain), with no
-// line in the server's log. So every SSE response leaves through
-// withSseKeepalive: a `: keepalive` comment — a line SSE parsers discard by
-// specification, so no client sees an event — every SSE_KEEPALIVE_MS for the
-// life of the stream, until the transport closes it or the client goes, when
-// the timer stops itself. The idle timeout itself stays at the runtime's
-// default: its job is reaping dead keep-alive sockets, and raising it to the
-// ceiling of 255 s would move the cliff a long capture falls off rather than
-// remove it, and let a dead socket linger 25× longer. Half the default, so a
-// stream is never silent for a whole sweep; a proxy's read timeout in front of
-// the server (SMD-1846) is kept the same way.
-export const SSE_KEEPALIVE_MS = 5_000;
-
-/**
- * How long a stream is kept alive at most. A provider call is bounded by
- * OB1_LLM_TIMEOUT (120 s, embed.ts) and a capture makes a few; a database
- * write is bounded by nothing — a transaction stuck on upsert_thought's
- * fingerprint lock (033) would hold every concurrent capture of that thought,
- * and with an unbounded keepalive each would hold a stream and a timer for
- * hours with no line anywhere. Past this the timer stops, one line says so,
- * and the runtime's idle timeout takes over: a call this long is stuck, not
- * slow. (Review pass 1.)
- */
-export const SSE_KEEPALIVE_MAX_MS = 10 * 60_000;
-
-/** The SSE comment frame the keepalive writes. A line beginning `:` is a comment (WHATWG, "event stream interpretation"): every parser drops it. */
-const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
-
-/**
- * The response with its SSE body kept alive: a comment frame every
- * `intervalMs` until the body ends (`onEnd` runs once, then), the client
- * leaves (`signal` aborts, or the next frame finds the stream closed — either
- * stops the timer, so an abandoned call leaks nothing), or `maxMs` passes
- * since `startedAt` (the timer stops, `stalledRequestLine` is logged for
- * `label` and `onStall` runs once — the route marks the request settled, so
- * the runtime's reap that follows on Bun is not logged as a client leaving; on
- * Node or Workers nothing reaps a silent stream, and it stays open until the
- * client or a proxy gives up). A response that is not an event stream is
- * returned as it is, `onEnd` run at once: it is complete.
- */
-export function withSseKeepalive(
-  response: Response,
-  opts: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string } = {},
-): Response {
-  const body = response.body;
-  if (!body || !/^text\/event-stream\b/i.test(response.headers.get("content-type") ?? "")) {
-    opts.onEnd?.();
-    return response;
-  }
-  const intervalMs = opts.intervalMs ?? SSE_KEEPALIVE_MS;
-  const maxMs = opts.maxMs ?? SSE_KEEPALIVE_MAX_MS;
-  const started = opts.startedAt ?? performance.now();
-  let timer: ReturnType<typeof setInterval> | null = null;
-  const stop = () => {
-    if (timer === null) return;
-    clearInterval(timer);
-    timer = null;
-    opts.signal?.removeEventListener("abort", stop);
-  };
-  const keepalive = new TransformStream<Uint8Array, Uint8Array>({
-    start(controller) {
-      timer = setInterval(() => {
-        const elapsed = performance.now() - started;
-        if (elapsed >= maxMs) {
-          stop();
-          console.warn(stalledRequestLine(opts.label ?? "?", elapsed));
-          opts.onStall?.();
-          return;
-        }
-        try {
-          controller.enqueue(SSE_KEEPALIVE_FRAME);
-        } catch {
-          stop(); // the readable side closed under the timer: the client left
-        }
-      }, intervalMs);
-    },
-    flush() {
-      stop(); // the transport closed the stream: the response is complete
-      opts.onEnd?.();
-    },
-  });
-  opts.signal?.addEventListener("abort", stop, { once: true });
-  if (opts.signal?.aborted) stop(); // gone before the stream was built: nothing to keep alive
-  return new Response(body.pipeThrough(keepalive), { status: response.status, statusText: response.statusText, headers: response.headers });
-}
-
-/** A caller's string as a log line may carry it: printable ASCII only — a newline would forge a second line — and at most this many characters. */
-const LABEL_PART_MAX = 64;
-const labelPart = (s: string): string => s.replace(/[^\x20-\x7e]/g, "?").slice(0, LABEL_PART_MAX);
 
 /**
  * What a log line may say about a request: the JSON-RPC method and, for a
@@ -1095,11 +751,6 @@ export function requestLabel(bodyText: string | null): string {
   } catch {
     return "?";
   }
-}
-
-/** The line logged when a stream has been kept alive for SSE_KEEPALIVE_MAX_MS: the call is stuck, and the keepalive lets go. */
-export function stalledRequestLine(label: string, elapsedMs: number): string {
-  return `request still running after ${Math.round(elapsedMs / 1000)} s: ${label} — the keepalive stops here and the runtime's idle timeout takes over; a provider call is bounded by OB1_LLM_TIMEOUT, so look at the database (SMD-1864)`;
 }
 
 /**
@@ -1178,7 +829,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     // error rather than a transport fault and keep the connection alive.
     // Best-effort echo of the inbound request id keeps the response
     // correlated; malformed/missing bodies fall back to id: null.
-    const bodyText = await readBodyText(c.req.raw);
+    const bodyText = await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT);
     const target = refusalTarget(bodyText);
     settled = true;
     // A notification (no id) gets no JSON-RPC body: 202, since no key never
@@ -1252,7 +903,7 @@ app.on(MCP_METHODS, "*", async (c) => {
   response.headers.delete("mcp-session-id");
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
   // Kept alive for as long as the tool runs, up to SSE_KEEPALIVE_MAX_MS from the
-  // route's entry (SMD-1864, above); a stall settles the request too, so the
+  // route's entry (SMD-1864, sse.ts); a stall settles the request too, so the
   // reap that follows it is not a second line blaming the client.
   const settle = () => { settled = true; };
   return withSseKeepalive(response, { signal, label, startedAt: started, onEnd: settle, onStall: settle });
@@ -1284,6 +935,7 @@ let bunServer: Stoppable | undefined;
 /** Set once the stop closes what is still in flight at its bound, so the route's close line names the stop, not the client. */
 let cutByStop = false;
 if (SERVES_ON_BUN) {
+  serveHere(); // the store's first build wires the durable job store (root.ts)
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
   drainOnSignal({
@@ -1309,7 +961,7 @@ if (SERVES_ON_BUN) {
 
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
-  // No `idleTimeout`: a tool call outlives the default by the keepalive above,
+  // No `idleTimeout`: a tool call outlives the default by the keepalive (sse.ts),
   // and the default is the right reaper for a dead socket (SMD-1864).
   // An empty PORT is unset, not port 0 (a random port, silently) — `||`, the rule the vendored servers' tails share (SMD-1799).
   port: Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.PORT || 8000),

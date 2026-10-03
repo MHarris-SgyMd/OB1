@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-2283]
-migrations: []
----
-
-## Changelog
-
-Every tool's logic moves out of the MCP registration into a transport-free `server-portable/core/` (the egress gate, the query log, the store reads and writes, capture's existence-oracle rules, the worker actions and their REST POSTs), its words into `render.ts`, and its schema into `core/schemas.ts`; every reply now carries its typed answer as `structuredContent` beside unchanged text — the value, a coded refusal, or a typed fault — the session hook maps capture's new shape codes to the mends it always made, and a consistency check holds `index.ts` to transport (SMD-2283).
-
-## FORK
-
-Every tool runs on a transport-free core and answers a typed result beside its text (SMD-2283)
+# 248. Every tool runs on a transport-free core and answers a typed result beside its text (SMD-2283)
 
 **What changed.** `buildServer` held every tool's logic inside its
 `server.registerTool` closure, so the REST core SMD-2282 decided on could only
