@@ -147,6 +147,12 @@ jobs:
         working-directory: server-portable
         run: bun test-auth.ts
 
+      # The REST core's surface (SMD-2284) over a stub core: the routes against
+      # the manifest, the OpenAPI document, the authorization ladder, the log.
+      - name: The REST core's routes and authorization
+        working-directory: server-portable
+        run: bun test-rest.ts
+
       # Pure logic — the alias table, title truncation, citation URLs. No database
       # and no provider, so it runs in the fast job rather than the Postgres one.
       - name: Thought vocabulary and presentation rules
@@ -621,6 +627,15 @@ jobs:
       - name: End-to-end over MCP with no Supabase
         working-directory: server-portable
         run: bun test-e2e-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The REST core beside the MCP server on one database (SMD-2284): every
+      # operation through both doors, the MCP reply what render.ts makes of the
+      # REST answer, the same refusals, and test-auth's cases against REST.
+      - name: The REST core agrees with MCP
+        working-directory: server-portable
+        run: bun test-rest-sql.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
