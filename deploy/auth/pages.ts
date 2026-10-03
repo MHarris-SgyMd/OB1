@@ -59,7 +59,7 @@ export function who(a: Asking): string {
 }
 
 /** The sign-in page. `action` is where its one form posts the password; a spent sign-in has no form. */
-export function loginPage(a: Asking, action: string, wrong = false, note = "", form = true): string {
+export function loginPage(a: Asking, action: string, { wrong = false, note = "", form = true }: { wrong?: boolean; note?: string; form?: boolean } = {}): string {
   const fields = form ? `<form method="post" action="${esc(action)}"><input type="password" name="password" autocomplete="current-password"><button>Sign in</button></form>` : "";
   return pageHtml("login", `${wrong ? "<p>Wrong password.</p>" : ""}${note ? `<p>${esc(note)}</p>` : ""}<p>Sign in to let ${who(a)} reach your brain.</p>${fields}`);
 }

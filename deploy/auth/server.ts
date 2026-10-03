@@ -248,30 +248,6 @@ const countFailedClient = (ctx: KoaContextWithOIDC, error: Error) => {
   if (address !== undefined && typeof oidc?.client?.clientSecret === "string" && countsAgainstClient(error as { error?: string }, { authorization: ctx.headers.authorization, ...params })) tokenFailures.record(clientKey(address, clientIdOf(ctx.headers.authorization, params.client_id, params.client_assertion)));
 };
 
-/** The library's own bound on a request body (selective_body.js). */
-const TOKEN_BODY_LIMIT = 56 * 1024;
-/**
- * A token or revocation request's body, read here so the client it names is
- * known before the library checks its secret. The library takes a body read
- * upstream from `req.body` (it logs once that it did). It is read as UTF-8,
- * whatever charset the request names, and the library parses the same
- * string, so the two cannot disagree on the client. Undefined when it is not
- * a form, which the library then answers as it would have; null when it is
- * larger than the library allows.
- */
-async function readTokenBody(req: http.IncomingMessage): Promise<string | null | undefined> {
-  if (!/^application\/x-www-form-urlencoded\b/i.test(req.headers["content-type"] ?? "")) return undefined;
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const c of req) {
-    size += (c as Buffer).length;
-    if (size > TOKEN_BODY_LIMIT) return null;
-    chunks.push(c as Buffer);
-  }
-  const body = Buffer.concat(chunks).toString();
-  (req as http.IncomingMessage & { body?: string }).body = body;
-  return body;
-}
 provider.on("grant.error", countFailedClient);
 provider.on("revocation.error", countFailedClient);
 
@@ -382,10 +358,10 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
     // time would be (limits.ts).
     const tooManyPage = (waitMs: number, note: string) => {
       res.setHeader("retry-after", retryAfter(waitMs));
-      return send(res, 429, loginPage(asking, `${base}/login`, false, note));
+      return send(res, 429, loginPage(asking, `${base}/login`, { note }));
     };
     // A spent sign-in is not waited out but started again: no Retry-After, and no form to post into it.
-    if (!flowTries.has(uid)) return send(res, 429, loginPage(asking, `${base}/login`, false, "Too many wrong passwords for this sign-in: start again from the app.", false));
+    if (!flowTries.has(uid)) return send(res, 429, loginPage(asking, `${base}/login`, { note: "Too many wrong passwords for this sign-in: start again from the app.", form: false }));
     const address = addressOf(req);
     const locked = address === undefined ? 0 : signIns.wait(address);
     if (locked) return tooManyPage(locked, `Too many wrong passwords from your address: try again in ${Math.ceil(locked / 60_000)} minute(s); a sign-in left open longer than ten minutes must start again from the app.`);
@@ -395,7 +371,7 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
     if (address !== undefined) signIns.attempt(address);
     const form = await readForm(req);
     if (!(await Bun.password.verify(form.get("password") ?? "", C.passwordHash).catch(() => false))) {
-      return send(res, 401, loginPage(asking, `${base}/login`, true));
+      return send(res, 401, loginPage(asking, `${base}/login`, { wrong: true }));
     }
     verifies.giveBack();
     flowTries.clear(uid);
@@ -439,6 +415,31 @@ const registrationsByAddress = new WindowLimit(C.registrationsPerHour, 3_600_000
 function tooMany(res: http.ServerResponse, waitMs: number, why: string) {
   res.writeHead(429, { "content-type": "application/json", "retry-after": retryAfter(waitMs), "cache-control": "no-store" });
   res.end(JSON.stringify({ error: "temporarily_unavailable", error_description: `${why}; try again in ${retryAfter(waitMs)} s` }));
+}
+
+/** The library's own bound on a request body (selective_body.js). */
+const TOKEN_BODY_LIMIT = 56 * 1024;
+/**
+ * A token or revocation request's body, read here so the client it names is
+ * known before the library checks its secret. The library takes a body read
+ * upstream from `req.body` (it logs once that it did). It is read as UTF-8,
+ * whatever charset the request names, and the library parses the same
+ * string, so the two cannot disagree on the client. Undefined when it is not
+ * a form, which the library then answers as it would have; null when it is
+ * larger than the library allows.
+ */
+async function readTokenBody(req: http.IncomingMessage): Promise<string | null | undefined> {
+  if (!/^application\/x-www-form-urlencoded\b/i.test(req.headers["content-type"] ?? "")) return undefined;
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > TOKEN_BODY_LIMIT) return null;
+    chunks.push(c as Buffer);
+  }
+  const body = Buffer.concat(chunks).toString();
+  (req as http.IncomingMessage & { body?: string }).body = body;
+  return body;
 }
 
 /** Whether a token or revocation request may reach the library: refused while its client, from its address, is past its failures. */
