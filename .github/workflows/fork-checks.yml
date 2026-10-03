@@ -112,6 +112,13 @@ jobs:
       - name: Session capture hook
         run: bun recipes/session-capture-hook/test-session-capture.mjs
 
+      # The dashboard's reply parsers (SMD-2510): src/lib/api.ts's three, fed the
+      # server's own replies from server-portable/render.ts, so a reply's shape
+      # and the dashboard's reader cannot drift apart. render.ts imports only
+      # local files, so nothing is installed. Bun only, no database.
+      - name: Dashboard reply parsers
+        run: bun dashboards/open-brain-dashboard/test-parsers.ts
+
   portable-server:
     name: Portable server (Bun + Workers)
     runs-on: ubuntu-24.04
