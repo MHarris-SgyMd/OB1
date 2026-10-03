@@ -234,8 +234,14 @@ its score multiplied by 0.25. Under the hybrid's fusion that puts every current
 match in the window first, then the demoted ones in their own order (a demoted
 exact hit keeps a quarter of its literal bonus, so on a query of literals only,
 or holding several of the query's literals, it can still outrank current rows —
-the header says when one does); each
-demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`),
+the header says when one does). Since migration 077 (SMD-2271) a thought with no
+ticket of its own is demoted too when every ticket it is about is finished:
+the keys in its topics, action items or session-summary header all Done or
+Canceled — or, naming none of those, three or more keys in its text, all
+finished — and no open ticket named anywhere in it. Each
+demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`,
+`references settled work (SMD-…)` with the deciding keys; the structured reply's
+`demoted` carries the token `references_settled`),
 and the header says how many of the window were demoted, how many carry a
 lifecycle and the latest sync among them — and, when the window held fewer
 current matches than asked for, that one past it may have been missed (raise
@@ -642,12 +648,12 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 502 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and the replies' fenced text and one-line metadata
+bun test-server.ts        # 503 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and the replies' fenced text and one-line metadata
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun test-rest.ts          # 223 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
-bun run test:e2e          # 422 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 423 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 131 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
