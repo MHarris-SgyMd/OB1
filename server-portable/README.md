@@ -590,8 +590,9 @@ SMD-2284's next step; today it runs where you start it.
   (`core/schemas.ts`), held strictly: an unknown field is refused. A GET whose headers
   announce a body is refused too (Bun hands a GET's handler no body, so its input would
   vanish). A HEAD answers what the GET would before it looks anything up — the caller's
-  standing and the input — with the GET's content type and no body, and never runs the
-  operation, so a HEAD for a thought that is not there is still a 200. A method a path
+  standing and the input as the schema holds it — with the GET's content type and no
+  body, and never runs the operation, so a HEAD for a thought that is not there, or with
+  a `since` or `after` the operation itself would refuse, is still a 200. A method a path
   does not take is a 405 naming those it does.
 - **`GET /openapi.json`** is built from the same two sources, so it lists every
   operation with the input its route parses. **`GET /v1/whoami`** names the
@@ -603,8 +604,9 @@ SMD-2284's next step; today it runs where you start it.
   `FORBIDDEN` naming the scope it needs.
 - **Answers.** A success is the operation's value, for a key that can read (a capture
   is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
-  vector with the row, false when the egress gate refused the embedding call; a scan a
-  202 whose handle points at `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
+  vector with the row, false when the egress gate refused the embedding call (on a
+  re-capture the row then keeps the vector it had); a scan a 202 whose handle points at
+  `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
   `embeddingCall`, `chunks`, `contextFailures` — and not the provider's address, the
   egress gate's reasons or the extractor's tags. A refusal is its code, `retryable` and the facts its code declares
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
@@ -642,7 +644,7 @@ those its own way.
 ```bash
 bun test-server.ts        # 432 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 124 — scoped, hashed, named keys
-bun test-rest.ts          # 218 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-rest.ts          # 223 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
 bun run test:e2e          # 417 — the whole server over MCP with no Supabase at all, OB1_STORE unset

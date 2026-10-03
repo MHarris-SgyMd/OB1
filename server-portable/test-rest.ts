@@ -65,6 +65,8 @@ console.log("\n[2] The OpenAPI document lists every operation the tools expose, 
     assert(JSON.stringify(got) === JSON.stringify(want), `${t.name}: its ${op.requestBody ? "body" : "query"} is the schema's fields (${got.join(",")})`);
   }
   assert(ops.includes("whoami") && ops.includes("job_stream"), "whoami and the job stream are operations");
+  assert(!JSON.stringify(doc).includes("GET /jobs/"), "no description sends a REST client to the MCP server's /jobs");
+  for (const path of ["/v1/whoami", "/v1/jobs/{job_id}/stream", "/health"]) assert("405" in (doc.paths[path].get as unknown as { responses: Record<string, unknown> }).responses, `${path} documents its 405`);
   // Every status a keyed operation can answer is documented, each refusal's code under its own.
   // 501 is the one status only an operation with a mode not built gives (run_worker's drain).
   const statuses = new Set(["400", "401", "403", "405", "500", "503", ...Object.values(REFUSAL_STATUS).map(String)]);
@@ -236,6 +238,8 @@ console.log("\n[7b] HEAD answers standing without running the operation; input s
   assert(g.status === 400 && g.body.code === "REFUSED_INPUT", `a GET that announced a body is refused, though the body never arrives (${g.status})`);
   g = await json(await app.fetch(new Request("http://api/v1/thoughts", { headers: { "x-brain-key": "read-raw", "transfer-encoding": "chunked" } })));
   assert(g.status === 400, `…and one sent chunked (${g.status})`);
+  g = await json(await app.fetch(new Request("http://api/v1/thoughts", { headers: { "x-brain-key": "read-raw", "content-length": "11, 11" } })));
+  assert(g.status === 400, `…and one whose repeated length Bun joined into "11, 11" (${g.status})`);
   g = await json(await app.fetch(new Request("http://api/v1/thoughts", { headers: { "x-brain-key": "read-raw", "content-length": "0" } })));
   assert(g.status === 200, `a GET declaring an empty body is a GET (${g.status})`);
   r = await hit("/v1/stats", { key: "cap-raw", method: "HEAD" });

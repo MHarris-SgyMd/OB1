@@ -60,20 +60,22 @@ export function openApiDocument(): Json {
     paths[route.path][route.method.toLowerCase()] = {
       operationId: name,
       summary: spec.title,
-      description: spec.description,
+      // The tool's own words, but a job's links: an MCP client polls the
+      // MCP server's /jobs, a REST client this server's /v1/jobs.
+      description: spec.description.replace(/GET \/jobs\//g, "GET /v1/jobs/"),
       "x-ob1-scope": TOOLS.find((t) => t.name === name)!.scope,
       ...(parameters.length ? { parameters } : {}),
       ...(readsQuery(route.method) ? {} : { requestBody: { required: required.size > 0, content: { "application/json": { schema: input } } } }),
       responses: {
-        [String(route.ok)]: { description: name === "capture_thought" ? "The thought, with `embeddingAttached` — whether this capture wrote its vector with the row (false when the egress gate refused the embedding call); a key that cannot read is told its id, `embeddingCall`, `chunks` and `contextFailures` alone. A save whose vector did not attach (the PostgREST two-step) is `{ id, embeddingAttached: false }`." : "The operation's value.", content: { "application/json": { schema: { type: "object" } } } },
+        [String(route.ok)]: { description: name === "capture_thought" ? "The thought, with `embeddingAttached` — whether this capture wrote its vector with the row (false when the egress gate refused the embedding call); on a re-capture, false says this capture wrote none, not that the row has none; a key that cannot read is told its id, `embeddingCall`, `chunks`, `contextFailures` and `embeddingAttached` alone. A save whose vector did not attach (the PostgREST two-step) is `{ id, embeddingAttached: false }`." : "The operation's value.", content: { "application/json": { schema: { type: "object" } } } },
         ...answersFor(name),
       },
       security: KEYED,
     };
   }
-  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call.", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": refusal("No key, a wrong key or a revoked one."), "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
-  paths["/v1/jobs/{job_id}/stream"] = { get: { operationId: "job_stream", summary: "A job's events", description: "The job's progress and its end as server-sent events, for the key that started it.", parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "An event stream.", content: { "text/event-stream": {} } }, "401": KEYED_ANSWERS["401"], "403": KEYED_ANSWERS["403"], "404": refusal("No such job for this key."), "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
-  paths["/health"] = { get: { operationId: "health", summary: "Liveness", description: "Internal only: the process is serving. No key, nothing about the brain.", responses: { "200": { description: "Serving." } }, security: [] } };
+  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call.", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": refusal("No key, a wrong key or a revoked one."), "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
+  paths["/v1/jobs/{job_id}/stream"] = { get: { operationId: "job_stream", summary: "A job's events", description: "The job's progress and its end as server-sent events, for the key that started it.", parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "An event stream.", content: { "text/event-stream": {} } }, "401": KEYED_ANSWERS["401"], "403": KEYED_ANSWERS["403"], "404": refusal("No such job for this key."), "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
+  paths["/health"] = { get: { operationId: "health", summary: "Liveness", description: "Internal only: the process is serving. No key, nothing about the brain.", responses: { "200": { description: "Serving." }, "405": KEYED_ANSWERS["405"] }, security: [] } };
   return {
     openapi: "3.1.0",
     info: { title: "Open Brain REST core", version: FORK_VERSION, description: "Every operation the brain's MCP tools expose, as JSON (SMD-2284). Internal by default; public at /api only where the operator turns it on." },

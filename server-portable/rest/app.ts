@@ -134,10 +134,12 @@ export function createRestApp(deps: RestDeps): Hono {
     c.json(body, status, headers);
   /**
    * A HEAD answers what the GET would say before it looks anything up — the
-   * caller's standing and, on an operation, its input — with the GET's
-   * content type and no body, and never runs the operation: a fetch would
-   * write an action-log row for a probe, a stream would subscribe for no one.
-   * So a HEAD for a thought or a job that is not there is still a 200.
+   * caller's standing and, on an operation, its input as the schema holds it
+   * — with the GET's content type and no body, and never runs the operation:
+   * a fetch would write an action-log row for a probe, a stream would
+   * subscribe for no one. So a HEAD for a thought or a job that is not there
+   * is still a 200, and so is one whose `since` or `after` the operation itself
+   * would refuse (REFUSED_SINCE, REFUSED_CURSOR). Bun adds `content-length: 0`.
    */
   const headOnly = (c: Context, type = "application/json") => c.req.method === "HEAD" ? c.body(null, 200, { "content-type": type }) : null;
 
@@ -205,7 +207,10 @@ export function createRestApp(deps: RestDeps): Hono {
       if (readsQuery(route.method)) {
         // Bun hands a GET's handler no body, whatever was sent: the headers
         // that announced one are what is left of it (review pass 2).
-        const announced = c.req.method !== "DELETE" && (Number(c.req.header("content-length") ?? "0") > 0 || c.req.header("transfer-encoding") !== undefined);
+        // Any length but zero counts: Bun joins a repeated Content-Length
+        // into "11, 11", which is no number (review pass 3).
+        const length = c.req.header("content-length");
+        const announced = c.req.method !== "DELETE" && ((length !== undefined && !/^\s*0+\s*$/.test(length)) || c.req.header("transfer-encoding") !== undefined);
         if (announced || (await c.req.text()).trim() !== "") return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${route.method} reads its input from the query string, not a body` }] });
         const read = inputFromQuery(name, query);
         if ("problem" in read) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: read.problem }] });
@@ -283,8 +288,11 @@ function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: ob
     const v = value as Captured;
     // Attached: this capture wrote its vector with the row — the embedding
     // call was made (the egress gate allowed it) and, on a re-capture, its
-    // vector refreshed the row's. A refused call writes the row without one
-    // (review pass 2: this said true either way).
+    // vector refreshed the row's (review pass 2: this said true either way).
+    // A refused call writes none: a new row has no vector, and a re-capture's
+    // row keeps the one it had (073's upsert) — so false says what this
+    // capture did, not what the row holds, which a key that cannot read may
+    // not learn (whether the text was already a thought).
     return c.json({ ...capturedFor(p, v), embeddingAttached: v.embeddings.allowed }, 201, { Location: `/v1/thoughts/${v.id}` });
   }
   if (name === "scan_thoughts") {

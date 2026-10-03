@@ -253,7 +253,7 @@ console.log("\n[4] A job through REST: a handle on this server's routes, its pol
   const sm = await mcp("scan_thoughts", { limit: 10 }, KEYS.reader);
   assert(same(Object.keys(s.body).sort(), Object.keys(sm.sc).sort()) && s.body.status === sm.sc.status && sm.sc.poll === `/jobs/${sm.sc.jobId}`,
     `scan_thoughts: the same handle through both doors, each on its own server's routes (MCP ${JSON.stringify(sm.sc).slice(0, 90)})`);
-  assert(s.status === 202 && s.body.poll === `/v1/jobs/${jobId}` && s.body.stream === `/v1/jobs/${jobId}/stream` && s.headers.get("location") === `/v1/jobs/${jobId}`, `POST /v1/jobs/scan → 202 and a handle on /v1/jobs (${s.status} ${JSON.stringify(s.body)})`);
+  assert(s.status === 202 && s.body.poll === `/v1/jobs/${jobId}` && s.body.stream === `/v1/jobs/${jobId}/stream` && s.headers.get("location") === `/v1/jobs/${jobId}`, `POST /v1/scans → 202 and a handle on /v1/jobs (${s.status} ${JSON.stringify(s.body)})`);
   let poll: Answer = { status: 0, body: {}, headers: new Headers() };
   for (let i = 0; i < 50; i++) {
     poll = await rest("GET", `/v1/jobs/${jobId}`, undefined, KEYS.reader);
