@@ -213,8 +213,8 @@ const options = {
   basePath: "/auth",
   secret: need("OB1_AUTH_COOKIE_KEYS").split(",")[0],
   trustedOrigins: [L.origin],
-  // Better Auth limits request rates itself (the winner has no limiter: SMD-2309's). The verifier
-  // registers dozens of clients a run, so the POC turns it off for parity; the deploy would keep one.
+  // Better Auth limits request rates itself (the winner's are deploy/auth/limits.ts, SMD-2309). The
+  // verifier registers dozens of clients a run, so the POC turns it off; the deploy would keep one.
   rateLimit: { enabled: false },
   database: new Database(":memory:"),
   emailAndPassword: {
@@ -333,7 +333,7 @@ async function interaction(req: Request, url: URL): Promise<Response> {
     if (req.method === "GET") return html(200, loginPage(asking, `/auth/interaction/login?${signed}`));
     const form = new URLSearchParams(await req.text());
     const r = await inner("/sign-in/email", { method: "POST", body: JSON.stringify({ email: OPERATOR_EMAIL, password: form.get("password") ?? "", oauth_query: signed }) });
-    if (r.status === 401 || r.status === 403) return html(401, loginPage(asking, `/auth/interaction/login?${signed}`, true));
+    if (r.status === 401 || r.status === 403) return html(401, loginPage(asking, `/auth/interaction/login?${signed}`, { wrong: true }));
     return relay(r);
   }
   if (url.pathname === "/auth/interaction/consent") return html(200, consentPage(asking, `/auth/interaction/consent/confirm?${signed}`, `/auth/interaction/consent/abort?${signed}`));
