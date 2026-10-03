@@ -213,8 +213,8 @@ const options = {
   basePath: "/auth",
   secret: need("OB1_AUTH_COOKIE_KEYS").split(",")[0],
   trustedOrigins: [L.origin],
-  // Better Auth limits request rates itself (the winner has no limiter: SMD-2309's). The verifier
-  // registers dozens of clients a run, so the POC turns it off for parity; the deploy would keep one.
+  // Better Auth limits request rates itself (the winner's are deploy/auth/limits.ts, SMD-2309). The
+  // verifier registers dozens of clients a run, so the POC turns it off; the deploy would keep one.
   rateLimit: { enabled: false },
   database: new Database(":memory:"),
   emailAndPassword: {

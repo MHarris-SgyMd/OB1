@@ -16,6 +16,15 @@
  *   unless set;
  * - OB1_AUTH_MAX_CLIENTS: how many registered clients the store may hold, 200
  *   unless set (1 to 100,000);
+ * - OB1_AUTH_TRUSTED_PROXY: the proxy in front, a host name or address; set,
+ *   it turns on the per-address limits (limits.ts) while it resolves, and
+ *   they are off without it;
+ * - OB1_AUTH_FORWARDED_HOPS: which X-Forwarded-For entry from the right is the
+ *   client, 1 unless set (2 when the tunnel writes its client into the
+ *   header and the proxy trusts it);
+ * - OB1_AUTH_REGISTRATIONS_PER_HOUR: how many clients one address may register
+ *   in an hour, 30 unless set (1 to 100,000; per-address, so only with a
+ *   trusted proxy);
  * - OB1_AUTH_POC_ERROR_DETAIL: the proof of concept's switch (server.ts).
  *
  * `bun deploy/auth/provision.ts --init` writes every secret here into
@@ -41,6 +50,12 @@ export type Config = {
   dbPath: string;
   /** The most registered clients the store may hold: a registration past it is refused until the purge frees room. */
   maxClients: number;
+  /** The most clients one address may register in an hour (limits.ts). */
+  registrationsPerHour: number;
+  /** The proxy whose X-Forwarded-For is trusted; unset, the per-address limits are off. */
+  trustedProxy?: string;
+  /** Which X-Forwarded-For entry from the right is the client. */
+  forwardedHops: number;
   pocErrorDetail: boolean;
 };
 
@@ -83,7 +98,9 @@ export function argon2idProblem(hash: string): string {
 export const wholeArgon2id = (hash: string) => argon2idProblem(hash) === "";
 export const DEFAULT_DB = "/data/auth.sqlite";
 export const DEFAULT_MAX_CLIENTS = 200;
-const MAX_CLIENTS_CEILING = 100_000;
+export const DEFAULT_REGISTRATIONS_PER_HOUR = 30;
+/** The ceiling of every whole-number setting. */
+const WHOLE_CEILING = 100_000;
 const INIT = "run `bun deploy/auth/provision.ts --init`, which writes it into deploy/.env";
 const INIT_THEM = "run `bun deploy/auth/provision.ts --init`, which writes them into deploy/.env";
 
@@ -146,11 +163,18 @@ export function configFromEnv(env: Env = process.env): Config {
   if (short.length) problems.push(`${short.map(secretName).join(", ")} ${short.length === 1 ? "is" : "are"} shorter than ${MIN_SECRET} characters`);
   for (const id of ids) secrets[id] = env[secretName(id)] ?? "";
 
-  const maxRaw = env.OB1_AUTH_MAX_CLIENTS?.trim();
-  const maxClients = maxRaw ? Number(maxRaw) : DEFAULT_MAX_CLIENTS;
-  if (maxRaw && !(/^\d+$/.test(maxRaw) && maxClients >= 1 && maxClients <= MAX_CLIENTS_CEILING)) {
-    problems.push(`OB1_AUTH_MAX_CLIENTS is not a whole number from 1 to ${MAX_CLIENTS_CEILING} ("${maxRaw}"; unset, it is ${DEFAULT_MAX_CLIENTS})`);
-  }
+  /** A whole-number setting from 1 to WHOLE_CEILING, its fallback when unset or blank; a problem otherwise. */
+  const whole = (name: string, fallback: number) => {
+    const raw = env[name]?.trim();
+    const n = raw ? Number(raw) : fallback;
+    if (raw && !(/^\d+$/.test(raw) && n >= 1 && n <= WHOLE_CEILING)) problems.push(`${name} is not a whole number from 1 to ${WHOLE_CEILING} ("${raw}"; unset, it is ${fallback})`);
+    return n;
+  };
+  const maxClients = whole("OB1_AUTH_MAX_CLIENTS", DEFAULT_MAX_CLIENTS);
+  const registrationsPerHour = whole("OB1_AUTH_REGISTRATIONS_PER_HOUR", DEFAULT_REGISTRATIONS_PER_HOUR);
+  const forwardedHops = whole("OB1_AUTH_FORWARDED_HOPS", 1);
+  const trustedProxy = env.OB1_AUTH_TRUSTED_PROXY?.trim() || undefined;
+  if (trustedProxy && !/^[A-Za-z0-9.:_-]+$/.test(trustedProxy)) problems.push(`OB1_AUTH_TRUSTED_PROXY is not a host name or an address ("${trustedProxy}")`);
 
   if (problems.length) throw new Error(`the authorization server cannot start:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
   return {
@@ -161,6 +185,9 @@ export function configFromEnv(env: Env = process.env): Config {
     secrets,
     dbPath: env.OB1_AUTH_DB?.trim() || DEFAULT_DB,
     maxClients,
+    registrationsPerHour,
+    trustedProxy,
+    forwardedHops,
     pocErrorDetail: env.OB1_AUTH_POC_ERROR_DETAIL === "1",
   };
 }

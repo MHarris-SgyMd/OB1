@@ -58,9 +58,10 @@ export function who(a: Asking): string {
   return `<strong>${esc(checked)}</strong>${said}, <strong>${esc(destination)}</strong>`;
 }
 
-/** The sign-in page. `action` is where its one form posts the password. */
-export function loginPage(a: Asking, action: string, wrong = false): string {
-  return pageHtml("login", `${wrong ? "<p>Wrong password.</p>" : ""}<p>Sign in to let ${who(a)} reach your brain.</p><form method="post" action="${esc(action)}"><input type="password" name="password" autocomplete="current-password"><button>Sign in</button></form>`);
+/** The sign-in page. `action` is where its one form posts the password; a spent sign-in has no form. */
+export function loginPage(a: Asking, action: string, wrong = false, note = "", form = true): string {
+  const fields = form ? `<form method="post" action="${esc(action)}"><input type="password" name="password" autocomplete="current-password"><button>Sign in</button></form>` : "";
+  return pageHtml("login", `${wrong ? "<p>Wrong password.</p>" : ""}${note ? `<p>${esc(note)}</p>` : ""}<p>Sign in to let ${who(a)} reach your brain.</p>${fields}`);
 }
 
 /** The consent page, with an Allow form posting to `confirm` and a Deny form posting to `abort`. */
