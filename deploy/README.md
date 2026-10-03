@@ -63,7 +63,7 @@ Four services, in order (six with the profile):
 ### 3. Verify
 
 ```bash
-OB1_SMOKE_KEY=<your-raw-key> ./deploy/smoke.sh
+OB1_SMOKE_KEY=<your key> ./deploy/smoke.sh
 ```
 
 ### 4. Connect a client
@@ -273,9 +273,9 @@ an SSE stream through as it is written — the server's keepalive frame (every
 
 **No rate limits on `/mcp`, by design (SMD-2309).** A wrong key costs the
 server a SHA-256 or two per key form presented, no query, and a read of at
-most 64 KiB of the body for the refusal's JSON-RPC id. What a limit could hold off
-is guessing, and a key `keygen.ts` mints is 32 random bytes: out of reach at
-any rate. A limit cannot slow guessing without refusing before the key is
+most 64 KiB of the body for the refusal's JSON-RPC id. What a limit could
+hold off is guessing, and a key `keygen.ts` mints is 32 random bytes: out of
+reach at any rate. A limit cannot slow guessing without refusing before the key is
 checked, which refuses the right key from the same place too; delaying only
 wrong answers does not help, since a guesser opens connections in parallel.
 Per address that is a lockout anyone can set off from a platform's shared
