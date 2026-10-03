@@ -368,7 +368,7 @@ services:
       # The opt-in query log (migration 034): off unless deploy/.env says on,
       # and preflight prints which. Until SMD-1843 nothing here forwarded it, so
       # SETUP.md's switch never reached the container. Every knob the server
-      # declares (server-portable/index.ts, type Env) is forwarded now, and
+      # declares (server-portable/root.ts, type Env) is forwarded now, and
       # scripts/check-fork-consistency.ts check 14 fails on the next one that
       # is not — a name in a comment, or on ollama-pull's command line, is not
       # a forward.

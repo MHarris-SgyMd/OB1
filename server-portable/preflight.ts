@@ -47,7 +47,7 @@ const results: Check[] = [];
 const add = (name: string, status: Status, detail: string, fix?: string) =>
   results.push({ name, status, detail, fix });
 
-// Trimmed once, as index.ts's initEnv trims the server's — the gate judges the
+// Trimmed once, as root.ts's initEnv trims the server's — the gate judges the
 // values the server will read (SMD-1843).
 const env = trimmedEnv(process.env as Record<string, string | undefined>);
 const store = storeKind(env);

@@ -153,9 +153,14 @@ console.log("[1] The module is importable at all");
 console.log("\n[2] Runtime neutrality");
 {
   const src = await Bun.file(new URL("./index.ts", import.meta.url)).text();
-  assert(!/\bDeno\./.test(src), "no Deno.* references");
-  assert(!/\bBun\./.test(src), "no Bun.* references");
-  assert(!/jsr:/.test(src), "no jsr: imports");
+  // The process root the server builds on and its stream keepalive (SMD-2284) run on Workers too.
+  const rootSrc = await Bun.file(new URL("./root.ts", import.meta.url)).text();
+  const sseSrc = await Bun.file(new URL("./sse.ts", import.meta.url)).text();
+  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc]]) {
+    assert(!/\bDeno\./.test(text), `${file}: no Deno.* references`);
+    assert(!/\bBun\./.test(text), `${file}: no Bun.* references`);
+    assert(!/jsr:/.test(text), `${file}: no jsr: imports`);
+  }
   assert(/initEnv\(c\.env/.test(src), "seeds env from the request context (Workers path)");
   // initEnv is the in-process guard (Workers has no preflight entrypoint): a bad
   // OB1_TIER throws here at the env-freeze boundary, so it never reaches the
@@ -163,7 +168,7 @@ console.log("\n[2] Runtime neutrality");
   // The throw must come BEFORE `ENV = candidate`: the `if (ENV) return` at the top
   // means a bad env assigned first would stick and let the next call skip the
   // guard (the guard would fire once, then be bypassed).
-  assert(/tierProblem\(candidate\.OB1_TIER\)/.test(src) && src.indexOf("throw new Error(tierIssue)") < src.indexOf("ENV = candidate"),
+  assert(/tierProblem\(candidate\.OB1_TIER\)/.test(rootSrc) && rootSrc.indexOf("throw new Error(tierIssue)") < rootSrc.indexOf("ENV = candidate"),
     "initEnv refuses an invalid OB1_TIER before assigning ENV, so a bad tier throws on every call, not just the first");
 }
 
@@ -405,7 +410,7 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
   // composed server sees "" wherever deploy/.env set nothing.
   assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "" }) === QUERY_LOG.retentionDaysDefault,
          "OB1_QUERY_LOG_RETENTION_DAYS='' — what compose forwards for an unset variable — is the default window, not 0 days");
-  // The boundary rule index.ts's initEnv and preflight apply to the whole environment (SMD-1843).
+  // The boundary rule root.ts's initEnv and preflight apply to the whole environment (SMD-1843).
   const trimmed = trimmedEnv({ OB1_LLM_API_KEY: " sk-abc ", OB1_EMBEDDING_DIM: " ", MCP_ACCESS_KEYS: "a:write:h1\nb:read:h2\n", PORT: "8000", n: 3, u: undefined });
   assert(trimmed.OB1_LLM_API_KEY === "sk-abc" && trimmed.OB1_EMBEDDING_DIM === "" && trimmed.MCP_ACCESS_KEYS === "a:write:h1\nb:read:h2" && trimmed.PORT === "8000" && trimmed.n === 3 && trimmed.u === undefined,
          "trimmedEnv trims every string value (a quoted key's trailing space, a dimension of spaces to ''), keeps inner newlines, and passes non-strings through");
@@ -1156,37 +1161,31 @@ console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selec
 
 console.log("\n[15] The server says once, when it builds the store, that PostgREST is retired on Bun (SMD-1797)");
 {
-  // A second instance of the server: index.ts seeds its env once, on the first
-  // request, and builds its store once, so the instance above — which never
-  // built one — cannot be re-pointed. Bun keys its module cache on the full
-  // specifier, so a query string yields a fresh module with its own env and
-  // store, and the process env it copies is the one set here.
+  // A second process root: root.ts seeds its env once and builds its store
+  // once, so the root the server above uses — which never built one — cannot
+  // be re-pointed. Bun keys its module cache on the full specifier, so a query
+  // string yields a fresh module with its own env and store, and the process
+  // env it copies is the one set here. The root is where the store is built
+  // (SMD-2284), so it is driven directly: two reads of the store, one build.
   process.env.OB1_STORE = "postgrest";
   process.env.SUPABASE_URL = "https://stub.invalid";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
-  const freshSpecifier = "./index.ts?postgrest-notice"; // a variable, so tsc does not try to resolve the query string as a module
-  const second = (await import(freshSpecifier)).default as { fetch: (req: Request) => Response | Promise<Response> };
-  const srv2 = Bun.serve({ port: 0, fetch: second.fetch });
+  const freshSpecifier = "./root.ts?postgrest-notice"; // a variable, so tsc does not try to resolve the query string as a module
+  const fresh = (await import(freshSpecifier)) as { initEnv: () => void; db: () => Promise<unknown> };
   const warned: string[] = [];
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
   try {
-    // A tool that reaches the store before any provider call: two calls, one build.
-    for (let i = 0; i < 2; i++) {
-      await fetch(`http://localhost:${srv2.port}`, {
-        method: "POST", headers: AUTH, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 5),
-        body: JSON.stringify({ jsonrpc: "2.0", id: 40 + i, method: "tools/call", params: { name: "thought_stats", arguments: {} } }),
-      }).then((r) => r.text()).catch(() => "");
-    }
+    fresh.initEnv();
+    for (let i = 0; i < 2; i++) await fresh.db().catch(() => null);
   } finally {
     console.warn = realWarn;
-    srv2.stop(true);
     delete process.env.OB1_STORE;
     delete process.env.SUPABASE_URL;
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   }
   const notices = warned.filter((w) => /keeps for Cloudflare Workers only/.test(w));
-  assert(notices.length === 1, `the retired notice is logged exactly once across two tool calls (${notices.length} of ${warned.length} warnings)`);
+  assert(notices.length === 1, `the retired notice is logged exactly once across two reads of the store (${notices.length} of ${warned.length} warnings)`);
   const { postgrestOnBunNotice: noticeOf } = await import("./store.ts");
   assert(notices[0] === noticeOf("postgrest"), "…and it is store.ts's line itself, byte for byte — not a copy carrying the same phrases");
 }
@@ -1220,7 +1219,7 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
 
 console.log("\n[17] tierProblem validates OB1_TIER at the boundary initEnv and preflight share (SMD-1953)");
 {
-  // The one validator db/config.mjs owns; index.ts's initEnv throws on it and
+  // The one validator db/config.mjs owns; root.ts's initEnv throws on it and
   // preflight's tier check fails on it, so a wrong OB1_TIER cannot reach the
   // best-effort log write that would silently drop every query_log row.
   assert(tierProblem(undefined) === null && tierProblem("") === null, "unset or empty is fine — a plain brain, not a pipeline tier");
@@ -1564,7 +1563,7 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const stalled = warned.filter((w) => /request still running/.test(w));
   const sm = /after (\d+) s/.exec(stalled[0] ?? "");
   assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
-    `…and says so once, in index.ts's own line naming the call (${stalled.length} line)`);
+    `…and says so once, in sse.ts's own line naming the call (${stalled.length} line)`);
   assert(slow.ok && slow.ms >= SLOW_EMBED_MS, `the real server answers search_thoughts after a ${SLOW_EMBED_MS} ms embedding, past the last sweep (${slow.ok ? `${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
   const dataLine = slow.text.split("\n").find((l) => l.startsWith("data: "));
   let envelope: { jsonrpc?: string; id?: unknown } | null = null;

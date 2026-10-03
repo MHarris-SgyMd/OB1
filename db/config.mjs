@@ -38,7 +38,7 @@ const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
  */
 /**
  * The same rule for a whole environment record: every string value trimmed,
- * everything else as it was. server-portable/index.ts applies it once in
+ * everything else as it was. server-portable/root.ts applies it once in
  * initEnv and preflight.ts once to process.env, so a quoted `"sk-abc "` in
  * deploy/.env is the key and not the key plus a space — for all nineteen
  * declared knobs at once, not one reader at a time (SMD-1843, eighth pass).
@@ -763,9 +763,9 @@ export function composeChunkForEmbedding(context, chunk) {
  */
 /**
  * Resolve the truncation decision. A FUNCTION rather than only the constant
- * below, because server-portable/index.ts reads its environment lazily so
- * Cloudflare Workers bindings apply — it cannot use a value computed at module
- * load. Both it and preflight.ts call this, so the rule exists once.
+ * below, because the server (server-portable/root.ts) reads its environment
+ * lazily so Cloudflare Workers bindings apply — it cannot use a value computed
+ * at module load. Both it and preflight.ts call this, so the rule exists once.
  *
  * Getting that wrong is not theoretical: the auto-enable below was added here
  * while index.ts and preflight.ts kept their own copy of the old regex, and the
