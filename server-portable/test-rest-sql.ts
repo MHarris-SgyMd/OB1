@@ -4,11 +4,14 @@
  * server over the same store (SMD-2284).
  *
  * The contract: every operation is run through both doors on the same
- * database, and the MCP reply is what render.ts makes of the REST answer —
- * text and structuredContent both — so the MCP server could be a client of
- * the REST core (SMD-2287) without a word changing. A refusal is the same
- * code and the same declared facts through both, at the status REST gives
- * it. Then test-auth's cases against REST (a read key cannot write, a capture
+ * database, over data that gives each something to say, and the MCP reply to
+ * a success is what render.ts makes of the REST answer — text and
+ * structuredContent both. So every word and field MCP shows on a success is
+ * in the REST answer; the REST answer may carry more (it is the core's whole
+ * value, for a key that can read). A refusal is the same code and the same
+ * declared facts through both, at the status REST gives it; its MCP text
+ * reads facts REST withholds (the caller's input, the store's words), so a
+ * refusal's prose is not derivable from REST alone (SMD-2287's to settle). Then test-auth's cases against REST (a read key cannot write, a capture
  * key cannot read, a wrong or revoked key is a 401), the door a REST write
  * records, and a log with no query, key or content in it.
  *
@@ -64,7 +67,7 @@ process.env.OPENROUTER_API_KEY = "stub";
 delete process.env.OB1_STORE;
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
-delete process.env.MCP_ACCESS_KEY;
+process.env.MCP_ACCESS_KEY = "legacy-raw"; // the legacy single key: full write, named MCP_ACCESS_KEY
 delete process.env.OB1_QUERY_LOG; // off: a read through one door must leave nothing the other door's read would see
 process.env.DATABASE_URL = URL_;
 process.env.OB1_AGENT_CACHE_TTL_MS = "0"; // a revocation reaches the next request
@@ -129,6 +132,22 @@ const ids: string[] = [];
   assert(audit?.origin === "open-brain-api" && audit?.actor_name === "writer", `the audit row names the key and the REST core's door (${JSON.stringify(audit)})`);
 }
 
+// Data each comparison has something to say about: two logged searches, a
+// pending supersession proposal, failed rows in two pools and two stale leases.
+{
+  for (const q of ["seeded search one", "seeded search two"]) {
+    await sql`INSERT INTO query_log (kind, tool, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, arm)
+              VALUES ('search', 'search_thoughts', ${q}, 10, 0, 0, '{}'::jsonb, ARRAY[${ids[0]}::uuid], ARRAY[0.9::real], 'hybrid')`;
+  }
+  await sql`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'conflict_undirected', 0.7, 'a seeded reason', 0.9, 'consolidate:stub@p2', NULL)`;
+  await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error) VALUES
+    (${ids[0]}::uuid, 'extract:rest@p1', 'failed', 'w', now(), 'boom'),
+    (${ids[1]}::uuid, 'extract:mcp@p1', 'failed', 'w', now(), 'boom')`;
+  await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES
+    (${ids[0]}::uuid, 'extract:lease@p1', 'claimed', 'w-rest', now() - interval '2 hours', now() - interval '2 hours'),
+    (${ids[1]}::uuid, 'extract:lease@p1', 'claimed', 'w-mcp', now() - interval '2 hours', now() - interval '2 hours')`;
+}
+
 console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST answer, text and structuredContent");
 {
   type Case = [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, render: (v: never) => say.Reply];
@@ -153,15 +172,15 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     const out = rendered(render, r.body);
     covered.add(tool);
     assert(r.status === 200 && !m.isError, `${tool}: both doors answer (${r.status}, ${m.isError ? "error" : "ok"})`);
+    assert(!/^\{"[a-z]+":\[\]/i.test(JSON.stringify(r.body)) && !same(r.body, { pools: [] }), `${tool}: …over something, not an empty page (${JSON.stringify(r.body).slice(0, 60)})`);
     assert(out.content[0].text === m.text, `${tool}: the MCP text is the REST value rendered (${out.content[0].text === m.text ? "same" : `REST→ ${out.content[0].text.slice(0, 80)} | MCP ${m.text.slice(0, 60)}`})`);
     assert(same(out.structuredContent, m.sc), `${tool}: …and its structuredContent (first difference: ${firstDiff(out.structuredContent, m.sc)})`);
   }
-  // brain_info's record carries the read's own clock: everything else agrees.
+  // brain_info: the whole record, and the table it renders to.
   const b = await rest("GET", "/v1/brain");
   const m = await mcp("brain_info", {});
-  const steady = (v: Record<string, unknown>) => JSON.stringify(v, (k, x) => (/(?:At|Ms|_ms|ms)$/.test(k) ? undefined : x));
-  const info = rendered((v) => say.renderBrainInfoReply(v), b.body).structuredContent;
-  assert(b.status === 200 && steady({ ...info, text: undefined }) === steady({ ...m.sc, text: undefined }), `brain_info: the record agrees but for its clocks (${b.status})`);
+  const info = rendered((v) => say.renderBrainInfoReply(v), b.body);
+  assert(b.status === 200 && info.content[0].text === m.text && same(info.structuredContent, m.sc), `brain_info: the same record and table (${b.status}; first difference: ${firstDiff(info.structuredContent, m.sc)})`);
   covered.add("brain_info");
   const reads = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_thought_ids", "list_logged_searches", "list_supersession_proposals", "thought_stats", "thought_changes", "worker_status", "brain_info"];
   assert(reads.every((t) => covered.has(t)), "every read operation but the job pair is compared here; the job pair is [4]");
@@ -171,8 +190,8 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
 {
   // Each door writes its own row; the REST answer, given the MCP row's id and
   // times, renders to the MCP reply.
-  const swap = (v: Record<string, unknown>, from: Record<string, unknown>) =>
-    Object.fromEntries(Object.entries(v).map(([k, x]) => [k, (k === "id" || /At$/.test(k)) && k in from ? from[k] : x]));
+  const swap = (v: Record<string, unknown>, from: Record<string, unknown>, keys: string[] = ["id", "updatedAt"]) =>
+    Object.fromEntries(Object.entries(v).map(([k, x]) => [k, keys.includes(k) && k in from ? from[k] : x]));
   const r = await rest("POST", "/v1/thoughts", { content: "delta: written through REST", source: "rest-suite" });
   const m = await mcp("capture_thought", { content: "delta: written through MCP", source: "rest-suite" });
   const { embeddingAttached: _attached, ...captured } = r.body;
@@ -180,26 +199,30 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   assert(cr.content[0].text === m.text && same(cr.structuredContent, m.sc), `capture_thought: the same reply (first difference: ${firstDiff(cr.structuredContent, m.sc)})`);
 
   const u = await rest("PATCH", `/v1/thoughts/${ids[0]}`, { metadata_patch: { reviewed: true } });
+  assert(u.body.id === ids[0] && typeof u.body.updatedAt === "string", `the REST update answers the thought it changed (${u.body.id})`);
   const um = await mcp("update_thought", { id: ids[1], metadata_patch: { reviewed: true } });
   const ur = rendered((v) => say.renderUpdate(ok(v)), swap(u.body, um.sc));
   assert(u.status === 200 && ur.content[0].text === um.text && same(ur.structuredContent, um.sc), `update_thought: the same reply (${u.status}; first difference: ${firstDiff(ur.structuredContent, um.sc)})`);
 
   const doomedRest = String(r.body.id), doomedMcp = String(m.sc.id);
   const d = await rest("DELETE", `/v1/thoughts/${doomedRest}`);
+  assert(d.body.id === doomedRest && (await rest("GET", `/v1/thoughts/${doomedRest}`)).status === 404, "the REST delete answers the thought it removed, and it is gone");
   const dm = await mcp("delete_thought", { id: doomedMcp });
   const dr = rendered((v) => say.renderDelete(ok(v)), swap(d.body, dm.sc));
   assert(d.status === 200 && dr.content[0].text === dm.text && same(dr.structuredContent, dm.sc), `delete_thought: the same reply (${d.status}; first difference: ${firstDiff(dr.structuredContent, dm.sc)})`);
 
-  const workers: [string, Record<string, unknown>, string, (v: never) => say.Reply][] = [
-    ["retry_failed", { work_type: "extract:none@p1" }, "/v1/workers/retry", (v) => say.renderRetryFailed(ok(v))],
-    ["release_stale_leases", {}, "/v1/workers/release-leases", (v) => say.renderReleaseStaleLeases(ok(v))],
-    ["run_worker", { work_type: "extract:none@p1", dry_run: true }, "/v1/workers/run", (v) => say.renderRunWorker(ok(v))],
+  // Each door acts on its own seeded pool or holder, so both act on a row.
+  const workers: [string, Record<string, unknown>, Record<string, unknown>, string, (v: never) => say.Reply, string[]][] = [
+    ["retry_failed", { work_type: "extract:rest@p1" }, { work_type: "extract:mcp@p1" }, "/v1/workers/retry", (v) => say.renderRetryFailed(ok(v)), ["workType", "ids"]],
+    ["release_stale_leases", { worker_id: "w-rest" }, { worker_id: "w-mcp" }, "/v1/workers/release-leases", (v) => say.renderReleaseStaleLeases(ok(v)), ["ids", "workers"]],
+    ["run_worker", { work_type: "extract:rest@p1", dry_run: true }, { work_type: "extract:rest@p1", dry_run: true }, "/v1/workers/run", (v) => say.renderRunWorker(ok(v)), []],
   ];
-  for (const [tool, args, path, render] of workers) {
-    const w = await rest("POST", path, args);
-    const wm = await mcp(tool, args);
-    const wr = rendered(render, w.body);
-    assert(w.status === 200 && wr.content[0].text === wm.text && same(wr.structuredContent, wm.sc), `${tool}: the same reply (${w.status} ${JSON.stringify(w.body).slice(0, 80)})`);
+  for (const [tool, restArgs, mcpArgs, path, render, own] of workers) {
+    const w = await rest("POST", path, restArgs);
+    const wm = await mcp(tool, mcpArgs);
+    const wr = rendered(render, swap(w.body, wm.sc, own));
+    assert(w.status === 200 && JSON.stringify(w.body).match(/"(?:retried|released|pending)":[1-9]/) !== null, `${tool}: REST acted on a row (${JSON.stringify(w.body).slice(0, 90)})`);
+    assert(wr.content[0].text === wm.text && same(wr.structuredContent, wm.sc), `${tool}: the same reply (first difference: ${firstDiff(wr.structuredContent, wm.sc)})`);
   }
 }
 
@@ -207,6 +230,9 @@ console.log("\n[4] A job through REST: a handle on this server's routes, its pol
 {
   const s = await rest("POST", "/v1/jobs/scan", { limit: 10 }, KEYS.reader);
   const jobId = String(s.body.jobId);
+  const sm = await mcp("scan_thoughts", { limit: 10 }, KEYS.reader);
+  assert(same(Object.keys(s.body).sort(), Object.keys(sm.sc).sort()) && s.body.status === sm.sc.status && sm.sc.poll === `/jobs/${sm.sc.jobId}`,
+    `scan_thoughts: the same handle through both doors, each on its own server's routes (MCP ${JSON.stringify(sm.sc).slice(0, 90)})`);
   assert(s.status === 202 && s.body.poll === `/v1/jobs/${jobId}` && s.body.stream === `/v1/jobs/${jobId}/stream` && s.headers.get("location") === `/v1/jobs/${jobId}`, `POST /v1/jobs/scan → 202 and a handle on /v1/jobs (${s.status} ${JSON.stringify(s.body)})`);
   let poll: Answer = { status: 0, body: {}, headers: new Headers() };
   for (let i = 0; i < 50; i++) {
@@ -289,6 +315,10 @@ console.log("\n[6] test-auth's cases against REST: a read key cannot write, a ca
   r = await rest("POST", "/v1/thoughts", { content: "eta: a capture key's thought" }, KEYS.hook);
   assert(r.status === 201 && r.body.embeddingAttached === true, `a capture key captures (${r.status})`);
   assert(r.body.existed === undefined, "…and is not told whether the text was already a thought (the existence-oracle rule)");
+  const hm = await mcp("capture_thought", { content: "theta: a capture key's thought" }, KEYS.hook);
+  const { text: _t, ...hookFacts } = hm.sc;
+  const { embeddingAttached: _a, ...hookRest } = r.body;
+  assert(same({ ...hookRest, id: hookFacts.id }, hookFacts), `…and told exactly the fields the MCP tool gives it — no provider address or gate reasons (REST ${JSON.stringify(hookRest)} | MCP ${JSON.stringify(hookFacts)})`);
   r = await rest("GET", "/v1/stats", undefined, "not-a-key");
   assert(r.status === 401 && r.body.code === "UNAUTHORIZED", `a wrong key is a 401 (${r.status})`);
   r = await rest("GET", "/v1/stats", undefined, "");
@@ -300,6 +330,8 @@ console.log("\n[6] test-auth's cases against REST: a read key cannot write, a ca
   await sql`SELECT revoke_agent_key(${hashKey(KEYS.gone)}, ${"rest suite"})`;
   r = await rest("GET", "/v1/stats", undefined, KEYS.gone);
   assert(r.status === 401 && r.body.code === "REVOKED", `a revoked key is a 401 REVOKED (${r.status} ${r.body.code})`);
+  const legacy = await rest("GET", "/v1/whoami", undefined, "legacy-raw");
+  assert(legacy.status === 200 && legacy.body.name === "MCP_ACCESS_KEY" && legacy.body.scope === "write", `the legacy single key is a write key named MCP_ACCESS_KEY (${JSON.stringify(legacy.body).slice(0, 80)})`);
   const who = await rest("GET", "/v1/whoami", undefined, KEYS.reader);
   assert(who.status === 200 && who.body.name === "reader" && who.body.scope === "read" && typeof who.body.agentId === "string", `whoami names the key, its scope and its agent id (${JSON.stringify(who.body).slice(0, 120)})`);
 }
@@ -314,18 +346,18 @@ console.log("\n[7] The OpenAPI document and the internal liveness answer with no
   assert(live.status === 200 && same(await live.json(), { status: "ok" }), "GET /health is liveness, saying nothing about the brain");
 }
 
-console.log("\n[8] The log: one line per request, with no query, key, id or content in it");
+console.log("\n[8] The log: one line per request, with no query, key, id or content in it, on any console channel");
 {
   const lines: string[] = [];
-  const realLog = console.log;
-  console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  const real = { log: console.log, warn: console.warn, error: console.error };
+  for (const k of ["log", "warn", "error"] as const) console[k] = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
   try {
     await rest("POST", "/v1/search", { query: "the private words searched" });
     await rest("GET", `/v1/thoughts/${ids[2]}?trace=1`);
     await rest("GET", "/v1/changes?agent=someone-named");
     await rest("POST", "/v1/thoughts", { content: "theta: content that must not be logged" });
   } finally {
-    console.log = realLog;
+    Object.assign(console, real);
   }
   const api = lines.filter((l) => l.startsWith("api "));
   assert(api.length === 4, `four requests, four lines (${api.length}: ${api.join(" / ")})`);

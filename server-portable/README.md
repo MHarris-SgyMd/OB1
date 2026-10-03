@@ -585,9 +585,11 @@ SMD-2284's next step; today it runs where you start it.
   `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
   /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/jobs/scan`, `GET
   /v1/jobs/{job_id}` and its `/stream`. A GET or DELETE reads its input from the
-  query string, a POST or PATCH from a JSON body; a search's text always rides a
-  body. The input is the tool's own zod schema (`core/schemas.ts`), held strictly: an
-  unknown field is refused.
+  query string, a POST or PATCH from a JSON body, and input sent the other way is
+  refused; a search's text always rides a body. The input is the tool's own zod schema
+  (`core/schemas.ts`), held strictly: an unknown field is refused. A HEAD answers the
+  caller's standing without running the operation; a method a path does not take is a
+  405 naming those it does.
 - **`GET /openapi.json`** is built from the same two sources, so it lists every
   operation with the input its route parses. **`GET /v1/whoami`** names the
   calling key, its scope, its agent id and the operations it may call.
@@ -596,9 +598,11 @@ SMD-2284's next step; today it runs where you start it.
   wrong one is a 401 `UNAUTHORIZED`, a revoked one a 401 `REVOKED`, a busy registry
   a 503 `BUSY` with `Retry-After`, a scope that does not reach the operation a 403
   `FORBIDDEN` naming the scope it needs.
-- **Answers.** A success is the operation's value (a capture is a 201 with its
-  `Location` and `embeddingAttached`; a scan a 202 whose handle points at
-  `/v1/jobs`). A refusal is its code, `retryable` and the facts its code declares
+- **Answers.** A success is the operation's value, for a key that can read (a capture
+  is a 201 with its `Location` and `embeddingAttached`; a scan a 202 whose handle points
+  at `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
+  `embeddingCall`, `chunks`, `contextFailures` — and not the provider's address, the
+  egress gate's reasons or the extractor's tags. A refusal is its code, `retryable` and the facts its code declares
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
   the status `rest/app.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
   rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
@@ -606,27 +610,39 @@ SMD-2284's next step; today it runs where you start it.
   is a 201 with `embeddingAttached: false`, not a refusal, so a client does not
   capture again. A refused input is a 400 `REFUSED_INPUT` naming each field and
   zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
-  gives it, and no `retryable` until SMD-2461.
+  gives it, and no `retryable` until SMD-2461 — but capture's is a 503
+  `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
+  carries `Retry-After`. Loose core inputs that reach Postgres (an unbounded
+  `list_thoughts` limit, a non-UUID id on update or delete) are still faults
+  through both doors (SMD-2534).
 - **The log** is one line per request — the method, the route's template, the
   status and the time — with no query string, key, id or content in it.
 - **`GET /health`** is liveness with no key, for the container's healthcheck; the
   keyed BrainInfo is `GET /v1/brain`. A write through the REST core records its door
   as `open-brain-api` (thought_audit.origin).
+- **Jobs** stay in this process's memory until SMD-2284's PR 3: the durable job store's
+  start-up reconcile marks every live job in the table lost, the MCP server's too, so
+  it is wired here only once that reconcile is scoped to the server that started each
+  job.
 
-`test-rest-sql.ts` runs every operation through both servers on one database and
-holds that the MCP reply is what `render.ts` makes of the REST answer, text and
-`structuredContent` both, with the same refusal codes and facts.
+`test-rest-sql.ts` runs every operation through both servers on one database, over
+data each has something to say about, and holds that the MCP reply to a success is what
+`render.ts` makes of the REST answer, text and `structuredContent` both — so every word
+MCP shows is in the REST answer, which may carry more — and that a refusal is the same
+code and facts through both. A refusal's MCP text reads facts REST withholds (the
+caller's input, the store's words), so the MCP server as a REST client (SMD-2287) words
+those its own way.
 
 ## Expected outcome
 
 ```bash
 bun test-server.ts        # 432 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 124 — scoped, hashed, named keys
-bun test-rest.ts          # 156 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-rest.ts          # 192 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
 bun run test:e2e          # 417 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 109 — the REST core beside the MCP server on one database: every operation through both
+../db/with-postgres.sh bun test-rest-sql.ts  # 129 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 

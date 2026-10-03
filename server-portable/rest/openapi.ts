@@ -7,7 +7,7 @@ import { z } from "zod";
 import { SPECS } from "../core/index.ts";
 import { TOOLS, type ToolName } from "../tools.ts";
 import { FORK_VERSION } from "../version.ts";
-import { pathFields, readsQuery, ROUTES } from "./routes.ts";
+import { pathFields, readsQuery, REFUSAL_STATUS, ROUTES } from "./routes.ts";
 
 type Json = Record<string, unknown>;
 
@@ -20,7 +20,22 @@ function inputSchema(name: ToolName, omit: string[]): Json {
 }
 
 const refusal = (description: string) => ({ description, content: { "application/json": { schema: { $ref: "#/components/schemas/Refusal" } } } });
-const KEYED = [{ brainKey: [] }, { bearer: [] }];
+const KEYED = [{ brainKey: [] }, { accessKey: [] }, { bearer: [] }];
+
+/** Which refusal codes answer each status (REFUSAL_STATUS), so the document says what a client may see under each. */
+const codesAt = (status: number): string => Object.entries(REFUSAL_STATUS).filter(([code, s]) => s === status && code !== "EMBEDDING_NOT_ATTACHED").map(([code]) => code).join(", ");
+/** The answers every keyed operation may give besides its success: the caller's standing, the input, a refusal by its status, a fault. */
+const KEYED_ANSWERS = {
+  "400": refusal(`The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: ${codesAt(400)}.`),
+  "401": refusal("No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED)."),
+  "403": refusal(`The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: ${codesAt(403)}.`),
+  "404": refusal(`Nothing there: ${codesAt(404)}.`),
+  "409": refusal(`The state conflicts: ${codesAt(409)}.`),
+  "422": refusal(`A reference to nothing, or a refusal the store named: ${codesAt(422)}.`),
+  "500": refusal("A fault (FAILED, with its message; no retryable until SMD-2461)."),
+  "501": refusal(`A mode not built: ${codesAt(501)}.`),
+  "503": refusal(`Retry, after Retry-After: the agent registry is busy (BUSY), capture's store fault (STORE_UNAVAILABLE), or ${codesAt(503)}.`),
+};
 
 export function openApiDocument(): Json {
   const paths: Record<string, Record<string, Json>> = {};
@@ -44,18 +59,14 @@ export function openApiDocument(): Json {
       ...(parameters.length ? { parameters } : {}),
       ...(readsQuery(route.method) ? {} : { requestBody: { required: required.size > 0, content: { "application/json": { schema: input } } } }),
       responses: {
-        [String(route.ok)]: { description: "The operation's value.", content: { "application/json": { schema: { type: "object" } } } },
-        "400": refusal("The input does not fit the schema (REFUSED_INPUT), or a refusal the caller can mend."),
-        "401": refusal("No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED)."),
-        "403": refusal("The key's scope does not reach this operation (FORBIDDEN), or a rule it may not pass."),
-        "500": refusal("A fault (FAILED)."),
-        "503": refusal("Retry: the agent registry is busy (BUSY), or a refusal marked retryable."),
+        [String(route.ok)]: { description: name === "capture_thought" ? "The thought, with `embeddingAttached`; a key that cannot read is told its id, `embeddingCall`, `chunks` and `contextFailures` alone. A save whose vector did not attach is `{ id, embeddingAttached: false }`." : "The operation's value.", content: { "application/json": { schema: { type: "object" } } } },
+        ...KEYED_ANSWERS,
       },
       security: KEYED,
     };
   }
-  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call.", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": refusal("No key, a wrong key or a revoked one.") }, security: KEYED } };
-  paths["/v1/jobs/{job_id}/stream"] = { get: { operationId: "job_stream", summary: "A job's events", description: "The job's progress and its end as server-sent events, for the key that started it.", parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "An event stream.", content: { "text/event-stream": {} } }, "404": refusal("No such job for this key.") }, security: KEYED } };
+  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call.", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": refusal("No key, a wrong key or a revoked one."), "503": KEYED_ANSWERS["503"] }, security: KEYED } };
+  paths["/v1/jobs/{job_id}/stream"] = { get: { operationId: "job_stream", summary: "A job's events", description: "The job's progress and its end as server-sent events, for the key that started it.", parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "An event stream.", content: { "text/event-stream": {} } }, "401": KEYED_ANSWERS["401"], "403": KEYED_ANSWERS["403"], "404": refusal("No such job for this key."), "503": KEYED_ANSWERS["503"] }, security: KEYED } };
   paths["/health"] = { get: { operationId: "health", summary: "Liveness", description: "Internal only: the process is serving. No key, nothing about the brain.", responses: { "200": { description: "Serving." } }, security: [] } };
   return {
     openapi: "3.1.0",
@@ -64,6 +75,7 @@ export function openApiDocument(): Json {
     components: {
       securitySchemes: {
         brainKey: { type: "apiKey", in: "header", name: "x-brain-key" },
+        accessKey: { type: "apiKey", in: "header", name: "x-access-key" },
         bearer: { type: "http", scheme: "bearer" },
       },
       schemas: {

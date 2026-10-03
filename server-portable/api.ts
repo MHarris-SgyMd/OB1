@@ -6,7 +6,7 @@
 // stack's mesh once SMD-2284's PR 3 adds the service, public only where the
 // operator turns /api on.
 
-import { agents, closeStore, db, env, initEnv, serveHere } from "./root.ts";
+import { agents, closeStore, db, env, initEnv } from "./root.ts";
 import { createCore } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
@@ -37,8 +37,12 @@ export const app = createRestApp({
 // imports it.
 const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
 let bunServer: Stoppable | undefined;
+// Not serveHere() yet: the store's first build would wire the durable job
+// store and reconcile every live job in it to lost — the MCP server's too,
+// on the same database (store-sql.ts's reconcileRunningLost). Until SMD-2284's
+// PR 3 scopes that reconcile to the server that started a job, this server's
+// jobs live in its memory alone (jobs.ts, as on Workers).
 if (SERVES_ON_BUN) {
-  serveHere(); // the store's first build wires the durable job store (root.ts)
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
   drainOnSignal({

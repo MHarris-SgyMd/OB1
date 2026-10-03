@@ -65,6 +65,15 @@ console.log("\n[2] The OpenAPI document lists every operation the tools expose, 
     assert(JSON.stringify(got) === JSON.stringify(want), `${t.name}: its ${op.requestBody ? "body" : "query"} is the schema's fields (${got.join(",")})`);
   }
   assert(ops.includes("whoami") && ops.includes("job_stream"), "whoami and the job stream are operations");
+  // Every status a keyed operation can answer is documented, each refusal's code under its own.
+  const statuses = new Set(["400", "401", "403", "500", "503", ...Object.values(REFUSAL_STATUS).map(String)]);
+  for (const r of Object.values(ROUTES)) {
+    const responses = (doc.paths[r.path][r.method.toLowerCase()] as unknown as { responses: Record<string, { description: string }> }).responses;
+    const missing = [...statuses].filter((s) => !(s in responses));
+    assert(missing.length === 0, `${r.method} ${r.path} documents every status it can answer${missing.length ? ` (missing ${missing.join(", ")})` : ""}`);
+  }
+  const codeLines = Object.values((doc.paths["/v1/thoughts"].post as unknown as { responses: Record<string, { description: string }> }).responses).map((x) => x.description).join(" ");
+  assert(Object.keys(REFUSAL_STATUS).filter((c) => c !== "EMBEDDING_NOT_ATTACHED").every((c) => codeLines.includes(c)), "…and names every refusal code under its status");
 }
 
 console.log("\n[3] A query string is read as the schema's types");
@@ -95,18 +104,20 @@ const core = new Proxy({}, {
   },
 }) as unknown as Core;
 let identity: AgentOutcome = { status: "ok", agentId: "agent-1" };
+let resolveThrows = false;
 const lines: string[] = [];
 const app = createRestApp({
   core,
   init: () => {},
   keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},w:write:${hashKey("write-raw")},c:capture:${hashKey("cap-raw")}` }),
-  resolve: async () => identity,
+  resolve: async () => { if (resolveThrows) throw new Error("the registry threw"); return identity; },
   track: (run) => run(),
   log: (l) => lines.push(l),
 });
 const hit = (path: string, init: RequestInit & { key?: string } = {}) =>
   app.fetch(new Request(`http://api${path}`, { ...init, headers: { ...(init.key ? { "x-brain-key": init.key } : {}), ...(init.body ? { "content-type": "application/json" } : {}) } }));
 const json = async (r: Response) => ({ status: r.status, body: await r.json() as Record<string, unknown> });
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 console.log("\n[5] The authorization ladder: a wrong key 401, a revoked one 401, a busy registry 503, a scope that does not reach 403");
 {
@@ -124,8 +135,18 @@ console.log("\n[5] The authorization ladder: a wrong key 401, a revoked one 401,
   assert(r.status === 403 && r.body.needs === "write", `…nor delete (${r.status})`);
   r = await json(await hit("/v1/stats", { key: "cap-raw" }));
   assert(r.status === 403 && r.body.needs === "read", `a capture key cannot read (${r.status})`);
+  const captured = {
+    id: "cap-id", reader: false, tags: { type: "idea" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null,
+    embeddings: { allowed: true, reason: "allowed: host ollama:11434" }, chat: { allowed: true, reason: "allowed", base: "http://ollama:11434/v1" },
+  };
+  answer = async () => ok(captured);
   r = await json(await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "x" }) }));
   assert(r.status === 201, `…and can capture (${r.status})`);
+  assert(same(r.body, { id: "cap-id", embeddingCall: true, chunks: 0, contextFailures: 0, embeddingAttached: true }),
+    `…told what the MCP tool tells it — no provider address, gate reason or tags (${JSON.stringify(r.body)})`);
+  r = await json(await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "x" }) }));
+  assert(r.status === 201 && same(r.body, { ...captured, embeddingAttached: true }), "a key that can read is told the whole value");
+  answer = async () => ok({});
   identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-02T00:00:00Z", reason: null };
   r = await json(await hit("/v1/stats", { key: "read-raw" }));
   assert(r.status === 401 && r.body.code === "REVOKED", `a revoked key → 401 REVOKED (${r.status} ${r.body.code})`);
@@ -191,6 +212,47 @@ console.log("\n[7] A refusal answers its code, its status and its declared facts
   assert(r.status === 500 && JSON.stringify(r.body) === JSON.stringify({ code: "FAILED", message: "connection refused" }), `a fault is FAILED 500 with no verdict (${JSON.stringify(r.body)})`);
   answer = async () => ok({});
   assert(Object.values(REFUSAL_STATUS).every((s) => s >= 400 && s < 600), "every refusal answers a 4xx or a 5xx");
+}
+
+console.log("\n[7b] HEAD answers standing without running the operation; input sent the wrong way is refused; a wrong method is a 405");
+{
+  calls.length = 0;
+  let r = await hit("/v1/thoughts/the-id", { key: "read-raw", method: "HEAD" });
+  assert(r.status === 200 && (await r.text()) === "" && calls.length === 0, `HEAD on a GET route is 200 with no body, and the operation does not run (${r.status}, ${calls.length} calls)`);
+  r = await hit("/v1/jobs/j1/stream", { key: "read-raw", method: "HEAD" });
+  assert(r.status === 200 && (await r.text()) === "", `HEAD on a job's stream subscribes to nothing (${r.status})`);
+  r = await hit("/v1/stats", { key: "cap-raw", method: "HEAD" });
+  assert(r.status === 403, `HEAD keeps the scope's answer (${r.status})`);
+  let b = await json(await hit("/v1/search?limit=5", { key: "read-raw", method: "POST", body: JSON.stringify({ query: "q" }) }));
+  assert(b.status === 400 && b.body.code === "REFUSED_INPUT", `a POST's query string is refused, not ignored (${b.status})`);
+  b = await json(await hit("/v1/thoughts/the-id", { key: "write-raw", method: "DELETE", body: JSON.stringify({ detach_citations: true }) }));
+  assert(b.status === 400 && b.body.code === "REFUSED_INPUT", `a DELETE's body is refused, not ignored (${b.status})`);
+  b = await json(await hit("/v1/thoughts?__proto__=x", { key: "read-raw" }));
+  assert(b.status === 400 && b.body.code === "REFUSED_INPUT", `?__proto__= is refused as an unknown key, not dropped (${b.status})`);
+  const put = await hit("/v1/thoughts", { key: "write-raw", method: "PUT" });
+  assert(put.status === 405 && put.headers.get("allow") === "GET, HEAD, POST" && (await put.json() as { code: string }).code === "METHOD_NOT_ALLOWED", `PUT on /v1/thoughts is a 405 naming GET, HEAD, POST (${put.status} ${put.headers.get("allow")})`);
+  const post = await hit("/v1/jobs/j1", { key: "write-raw", method: "POST" });
+  assert(post.status === 405 && post.headers.get("allow") === "GET, HEAD", `POST on a job is a 405 naming GET, HEAD (${post.status} ${post.headers.get("allow")})`);
+  b = await json(await hit("/v1/nothing-here", { key: "read-raw" }));
+  assert(b.status === 404 && b.body.code === "NO_ROUTE", `a path no route serves is NO_ROUTE (${b.status})`);
+}
+
+console.log("\n[7c] A 503 says when to retry; capture's fault is the transient the hook retries; a throw outside an operation is JSON");
+{
+  answer = async () => refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
+  let r = await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
+  assert(r.status === 503 && r.headers.get("retry-after") === "2", `a retryable refusal at 503 carries Retry-After (${r.status} ${r.headers.get("retry-after")})`);
+  answer = async () => { throw new Error("connection refused"); };
+  r = await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
+  const cb = await r.json() as Record<string, unknown>;
+  assert(r.status === 503 && r.headers.get("retry-after") === "2" && same(cb, { code: "STORE_UNAVAILABLE", retryable: true, message: "connection refused" }), `capture's fault is STORE_UNAVAILABLE, retryable, as the MCP tool says it (${r.status} ${JSON.stringify(cb)})`);
+  const other = await json(await hit("/v1/stats", { key: "read-raw" }));
+  assert(other.status === 500 && other.body.code === "FAILED" && !("retryable" in other.body), "…while another operation's fault stays FAILED with no verdict");
+  answer = async () => ok({});
+  resolveThrows = true;
+  const thrown = await hit("/v1/stats", { key: "read-raw" });
+  resolveThrows = false;
+  assert(thrown.status === 500 && /application\/json/.test(thrown.headers.get("content-type") ?? "") && (await thrown.json() as { code: string }).code === "FAILED", `a throw outside an operation is a JSON FAILED (${thrown.status} ${thrown.headers.get("content-type")})`);
 }
 
 console.log("\n[8] One log line per request: method, route, status, time — no query, key, id or content");

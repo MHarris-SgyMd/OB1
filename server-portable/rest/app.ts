@@ -8,50 +8,20 @@
 
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { authenticate, SCOPES, type AuthConfig, type Principal } from "../auth.ts";
+import { authenticate, canRead, SCOPES, type AuthConfig, type Principal } from "../auth.ts";
 import type { AgentOutcome } from "../agents.ts";
 import { SPECS, type Core } from "../core/index.ts";
-import { failure, refusalValue, type Refusal, type RefusalCode } from "../core/refusal.ts";
+import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
 import { TOOLS, UNLOCKS, visibleToolNames, type ToolName } from "../tools.ts";
 import { subscribe as subscribeJob } from "../jobs.ts";
 import { labelPart, withSseKeepalive } from "../sse.ts";
-import { honoPath, pathFields, readsQuery, ROUTES, type CallOptions } from "./routes.ts";
+import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOptions, type Method } from "./routes.ts";
+
+export { REFUSAL_STATUS } from "./routes.ts";
 import { openApiDocument } from "./openapi.ts";
 
-/**
- * The HTTP status each refusal answers with — one per code, so a new refusal
- * does not compile until it has one. 400 a shape the caller can fix, 403 a
- * rule the caller may not pass, 404 nothing there, 409 the state changed or
- * conflicts, 422 a reference to nothing, 501 a mode not built, 503 retry.
- */
-export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 501 | 503> = {
-  NOT_FOUND: 404,
-  REFUSED_FILTER: 400,
-  REFUSED_EGRESS: 403,
-  REFUSED_SINCE: 400,
-  REFUSED_CURSOR: 400,
-  REFUSED_SUPERSEDES_SHAPE: 400,
-  REFUSED_DERIVED_FROM_SHAPE: 400,
-  REFUSED_METADATA_SHAPE: 400,
-  SUPERSEDES_UNJUDGED: 503,
-  REFUSED_SUPERSEDES_OWNERSHIP: 403,
-  REFUSED_SUPERSEDES_UNKNOWN: 422,
-  DERIVED_FROM_MISSING: 422,
-  // Never answered as a refusal: the row is saved, so it is a creation (below).
-  EMBEDDING_NOT_ATTACHED: 503,
-  REFUSED_NOTHING_TO_UPDATE: 400,
-  REFUSED_STALE_READ: 409,
-  REFUSED_DUPLICATE_CONTENT: 409,
-  REFUSED_WOULD_CYCLE: 409,
-  REFUSED_CITED: 409,
-  REFUSED: 422,
-  REFUSED_EMPTY_WORK_TYPE: 400,
-  REFUSED_LIVE_LEASE_NEEDS_WORKER: 400,
-  RUN_WORKER_DRAIN_NOT_AVAILABLE: 501,
-};
-
 /** The codes the REST core answers on its own, before or around an operation. */
-export type TransportCode = "UNAUTHORIZED" | "REVOKED" | "BUSY" | "FORBIDDEN" | "REFUSED_INPUT" | "NO_ROUTE" | "FAILED";
+export type TransportCode = "UNAUTHORIZED" | "REVOKED" | "BUSY" | "FORBIDDEN" | "REFUSED_INPUT" | "NO_ROUTE" | "METHOD_NOT_ALLOWED" | "FAILED" | "STORE_UNAVAILABLE";
 
 export interface RestDeps {
   core: Core;
@@ -67,8 +37,9 @@ export interface RestDeps {
   log?: (line: string) => void;
 }
 
-/** How long a refused-for-now key is told to wait (the busy registry, agents.ts). */
+/** How long a caller told to retry is told to wait: the busy registry (agents.ts), and every refusal or fault answered 503. */
 const RETRY_AFTER_SECONDS = 2;
+const RETRY_AFTER = { "Retry-After": String(RETRY_AFTER_SECONDS) };
 
 /**
  * The keys a request presents, from its headers alone: `x-brain-key`,
@@ -104,7 +75,9 @@ function queryTypes(name: ToolName): Map<string, string> {
  */
 export function inputFromQuery(name: ToolName, params: URLSearchParams): { input: Record<string, unknown> } | { problem: string } {
   const types = queryTypes(name);
-  const input: Record<string, unknown> = {};
+  // No prototype: a `__proto__` key is a key like any other, which the strict
+  // schema then refuses, rather than an assignment that drops it unseen.
+  const input: Record<string, unknown> = Object.create(null);
   for (const key of new Set(params.keys())) {
     const values = params.getAll(key);
     const type = types.get(key);
@@ -120,6 +93,21 @@ export function inputFromQuery(name: ToolName, params: URLSearchParams): { input
 
 /** The issues of a refused input, each its field's path and zod's message — never the value it was given. */
 const issuesOf = (error: z.ZodError) => error.issues.map((i) => ({ path: i.path.map(String).join("."), message: i.message }));
+
+/**
+ * The methods each path answers, for a 405's `Allow`: a request whose path is
+ * a route's and whose method is not (a PUT, a GET on a POST route) is told
+ * which it may send, not that nothing is there.
+ */
+const ROUTE_METHODS: [RegExp, Method | "GET"][] = [
+  ...Object.values(ROUTES).map((r) => [new RegExp(`^${r.path.replace(/\{[a-z_]+\}/g, "[^/]+")}$`), r.method] as [RegExp, Method]),
+  [/^\/v1\/whoami$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
+];
+const allowedOn = (path: string): string[] => {
+  const methods = new Set<string>(ROUTE_METHODS.filter(([re]) => re.test(path)).map(([, m]) => m));
+  if (methods.has("GET")) methods.add("HEAD");
+  return [...methods].sort();
+};
 
 export function createRestApp(deps: RestDeps): Hono {
   const app = new Hono();
@@ -142,8 +130,10 @@ export function createRestApp(deps: RestDeps): Hono {
   app.get("/health", (c) => c.json({ status: "ok" }));
   app.get("/openapi.json", (c) => c.json(doc));
 
-  const refuse = (c: Context, status: 400 | 401 | 403 | 404 | 503, body: { code: TransportCode } & Record<string, unknown>, headers: Record<string, string> = {}) =>
+  const refuse = (c: Context, status: 400 | 401 | 403 | 404 | 405 | 503, body: { code: TransportCode } & Record<string, unknown>, headers: Record<string, string> = {}) =>
     c.json(body, status, headers);
+  /** A HEAD is the GET's status and headers with no body, so it answers the caller's standing without running the operation (index.ts's job routes answer HEAD as liveness too). */
+  const headOnly = (c: Context) => c.req.method === "HEAD" ? c.body(null, 200) : null;
 
   /**
    * The caller, or the answer that refuses it: a key that authenticates (any
@@ -160,7 +150,7 @@ export function createRestApp(deps: RestDeps): Hono {
     if (!principal) return refuse(c, 401, { code: "UNAUTHORIZED" }, { "WWW-Authenticate": "Bearer" });
     const identity = await deps.resolve(principal);
     if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED" }, { "WWW-Authenticate": "Bearer" });
-    if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true }, { "Retry-After": String(RETRY_AFTER_SECONDS) });
+    if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true }, RETRY_AFTER);
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
     return principal;
@@ -182,6 +172,9 @@ export function createRestApp(deps: RestDeps): Hono {
     const p = await caller(c);
     if (p instanceof Response) return p;
     if (!mayCall(p, "job_status")) return refuse(c, 403, { code: "FORBIDDEN", needs: scopeOf("job_status") });
+    // A HEAD would subscribe and keep a stream alive that no one reads.
+    const head = headOnly(c);
+    if (head) return head;
     const id = c.req.param("job_id");
     const stream = await subscribeJob(p, id);
     if (!stream) return c.json(refusalValue({ code: "NOT_FOUND", retryable: false, id }), 404);
@@ -197,14 +190,23 @@ export function createRestApp(deps: RestDeps): Hono {
       const p = await caller(c);
       if (p instanceof Response) return p;
       if (!mayCall(p, name)) return refuse(c, 403, { code: "FORBIDDEN", needs: scopeOf(name) });
+      // A HEAD on a GET route: the caller's standing, and not the operation —
+      // a fetch would write an action-log row for a probe.
+      const head = headOnly(c);
+      if (head) return head;
 
-      // The input: the path's fields, then the query string or the body.
+      // The input: the path's fields, then the query string or the body — and
+      // only the one the route reads: input sent the other way is refused, not
+      // dropped (a DELETE's body `detach_citations` would otherwise be ignored).
       let rest: Record<string, unknown>;
+      const query = new URL(c.req.url).searchParams;
       if (readsQuery(route.method)) {
-        const read = inputFromQuery(name, new URL(c.req.url).searchParams);
+        if ((await c.req.text()).trim() !== "") return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${route.method} reads its input from the query string, not a body` }] });
+        const read = inputFromQuery(name, query);
         if ("problem" in read) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: read.problem }] });
         rest = read.input;
       } else {
+        if (query.size > 0) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${route.method} reads its input from a JSON body, not the query string` }] });
         const text = await c.req.text();
         let body: unknown = {};
         try {
@@ -226,28 +228,53 @@ export function createRestApp(deps: RestDeps): Hono {
         outcome = await route.call(deps.core, p, parsed.data as never, { track: deps.track });
       } catch (err) {
         // A fault: FAILED with what was thrown, as the MCP tool's text says it
-        // to the same key; no `retryable` until SMD-2461 classifies faults.
+        // to the same key; no `retryable` until SMD-2461 classifies faults —
+        // but capture's, the transient the session hook retries, as the tool
+        // gives it (SMD-1978).
+        if (route.fault) return c.json({ code: route.fault, retryable: true, message: failure(err).message }, 503, RETRY_AFTER);
         return c.json(failure(err), 500);
       }
-      if (outcome.ok) return answered(c, name, route.ok, outcome.value);
+      if (outcome.ok) return answered(c, name, route.ok, outcome.value, p);
       const r = outcome.refusal as Refusal;
       // Saved, but its vector did not attach (the PostgREST two-step): the row
       // is there, so the answer is the creation, flagged — a client that read a
       // refusal as "not written" would capture again.
       if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false }, 201, { Location: `/v1/thoughts/${r.id}` });
-      return c.json(refusalValue(r), REFUSAL_STATUS[r.code]);
+      const status = REFUSAL_STATUS[r.code];
+      return c.json(refusalValue(r), status, status === 503 ? RETRY_AFTER : {});
     });
   }
 
-  app.notFound((c) => c.json({ code: "NO_ROUTE" satisfies TransportCode }, 404));
+  // A path a route serves, sent with another method, is a 405 naming the
+  // ones it takes; any other path is NO_ROUTE.
+  app.notFound((c) => {
+    const allow = allowedOn(c.req.path);
+    return allow.length
+      ? refuse(c, 405, { code: "METHOD_NOT_ALLOWED" }, { Allow: allow.join(", ") })
+      : refuse(c, 404, { code: "NO_ROUTE" });
+  });
+  // What escapes a route — a throw outside an operation's own catch — is a
+  // JSON fault like any other, not a text 500 and a stack on stderr.
+  app.onError((err, c) => c.json(failure(err), 500));
   return app;
 }
 
+/**
+ * What a key that cannot read is told of its capture: the fields the MCP tool
+ * gives it (render.ts's capture value) — the id, whether its embedding was
+ * made, its chunks and context failures — and not the provider's address,
+ * the egress gate's reasons or the extractor's tags (the maintainer's call,
+ * SMD-2284 review pass 1). A reader is told the whole value.
+ */
+type Captured = { id: string; existed?: boolean; embeddings: { allowed: boolean }; chunks: number; contextFailures: number };
+const capturedFor = (p: Principal, v: Captured): object =>
+  canRead(p) ? v : { id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }), embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures };
+
 /** A success as JSON: the operation's value, with a creation's Location, and a job's links on this server's own routes. */
-function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: object): Response {
+function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: object, p: Principal): Response {
   if (name === "capture_thought") {
-    const id = (value as { id: string }).id;
-    return c.json({ ...value, embeddingAttached: true }, 201, { Location: `/v1/thoughts/${id}` });
+    const v = value as Captured;
+    return c.json({ ...capturedFor(p, v), embeddingAttached: true }, 201, { Location: `/v1/thoughts/${v.id}` });
   }
   if (name === "scan_thoughts") {
     const { jobId } = value as { jobId: string };
