@@ -1134,7 +1134,8 @@ export function cutByStopLine(label: string, elapsedMs: number): string {
 // it) would not have been enough; it treats the 405 notFound gives as "no
 // stream here". FORK.md change 75.
 app.on(MCP_METHODS, "*", async (c) => {
-  // The one thing this server logs per request (SMD-1849 has the rest): a
+  // The one thing this server logs per request (SMD-1849 has the rest; the
+  // root URL's line, noteLegacyRoute's, is once per key name): a
   // client that closes the connection before the response is complete, named
   // by method and tool, never by content. Registered first, so a client that
   // leaves during the key check, the registry resolve or the body read is
