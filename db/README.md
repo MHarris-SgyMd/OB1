@@ -2159,7 +2159,11 @@ of them real on a hand grading — two per hundred thoughts, half worth acceptin
 **Reviewing.** `--list` prints the queue most confident first, each with the
 judge's reason, both thoughts with their capture dates and `ID:` lines, and
 the two commands that decide it; the MCP tool `list_supersession_proposals`
-prints the same queue to a client. A row standing on a lineage pair — one
+prints the same queue to a client. The reason sits on one line behind its
+label (`reason:`, `Reason:` in the tool) and a review note on its status line,
+each line break a space and each cut at 400 characters, so a judge steered by
+a thought's text cannot start a line of its own — an `ID:` line a reader would
+take as a thought's (SMD-2533). A row standing on a lineage pair — one
 side's `derived_from` names the other, a page and its evidence — is tagged
 `LINEAGE PAIR` with the reject to run (`--reject <id> --note "lineage pair
 (066)"`); `--list lineage` lists the unreviewed ones, pending then stale, and
@@ -3213,7 +3217,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2398 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1055 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1057 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

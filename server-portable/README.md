@@ -574,7 +574,7 @@ The core's values are whole, for the REST core.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 502 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and the replies' fenced text and one-line metadata
+bun test-server.ts        # 514 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, and a proposal's one-line reason and note
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
