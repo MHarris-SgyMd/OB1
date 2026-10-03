@@ -209,6 +209,22 @@ console.log("\n[5] Auth failure — missing key, and an unparseable body");
   assert((await r2.json())?.id === null, "unparseable body → id: null");
 }
 
+console.log("\n[5a] A refused body is read only so far (SMD-2309): past REFUSAL_BODY_LIMIT, id: null");
+{
+  const { REFUSAL_BODY_LIMIT } = await import("./index.ts");
+  const request = (pad: number) => JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list", params: { pad: "x".repeat(pad) } });
+  const under = await fetch(BASE, { method: "POST", headers: H, body: request(REFUSAL_BODY_LIMIT - 200) });
+  assert((await under.json())?.id === 7, "a body under the limit still has its id echoed");
+  const over = await fetch(BASE, { method: "POST", headers: H, body: request(4 * 1024 * 1024) });
+  const overBody = await over.json();
+  assert(over.status === 200 && overBody?.error?.code === -32001 && overBody?.id === null, `a 4 MB body past the limit is refused with id: null (${over.status}, ${JSON.stringify(overBody?.id)})`);
+  // No Content-Length: the read stops at the limit as it goes.
+  const big = new TextEncoder().encode(request(4 * 1024 * 1024));
+  const stream = new ReadableStream<Uint8Array>({ start(c) { for (let i = 0; i < big.length; i += 16 * 1024) c.enqueue(big.subarray(i, i + 16 * 1024)); c.close(); } });
+  const chunked = await fetch(BASE, { method: "POST", headers: H, body: stream, duplex: "half" } as RequestInit);
+  assert((await chunked.json())?.id === null, "a streamed body past the limit is refused with id: null");
+}
+
 console.log("\n[5b] A refused NOTIFICATION (no id) gets no JSON-RPC body — 202, not a 200 envelope the client drops (SMD-2106)");
 {
   const post = (body: string, headers: Record<string, string> = H) => fetch(BASE, { method: "POST", headers, body });

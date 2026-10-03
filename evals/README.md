@@ -6735,9 +6735,9 @@ The consent-page mutants above hold its pages too.
     review. The deploy should check the resource before rotation, or accept it
     and document it.
 - **SMD-2382:** the `auth` profile's configured and reachable states.
-- **SMD-2309:** limits at the proxy and on `/mcp`, `/dashboard` and `/api`;
-  the server's own (sign-in, client authentication, registration) are
-  `deploy/auth/limits.ts`.
+- **SMD-2309:** the dashboard's sign-in. The authorization server's own
+  limits are `deploy/auth/limits.ts`; `/mcp`, `/api` and the proxy take none,
+  by design (`deploy/README.md`, "No rate limits on `/mcp`").
 
 ## Related
 

@@ -10,7 +10,7 @@
 # The profile is the stack's own Ollama, where the server's model endpoint
 # defaults; drop it when deploy/.env names another provider.
 #
-# Then point an MCP client at http://127.0.0.1:8000/mcp?key=$MCP_ACCESS_KEY
+# Then point an MCP client at http://127.0.0.1:8000/mcp?key=<your key>
 #
 # Secrets come from deploy/.env, which is gitignored. Copy .env.example first.
 # Nothing here is production-shaped — no TLS, no backups, no resource limits — it

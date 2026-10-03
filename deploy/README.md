@@ -69,7 +69,7 @@ OB1_SMOKE_KEY=<your-raw-key> ./deploy/smoke.sh
 ### 4. Connect a client
 
 ```
-http://127.0.0.1:8000/mcp?key=<MCP_ACCESS_KEY>
+http://127.0.0.1:8000/mcp?key=<your key>
 ```
 
 8000 is `SERVER_PORT`, set in `deploy/.env` when something on the host already
@@ -270,6 +270,30 @@ a public origin, is SMD-2382's. It keeps `Host` as the client sent it, deletes a
 header spelled with `_` or `.` that aliases another (`X_Brain_Key`), and passes
 an SSE stream through as it is written — the server's keepalive frame (every
 5 s on a long tool call, SMD-1864) reaches the client when it is sent.
+
+**No rate limits on `/mcp`, by design (SMD-2309).** A wrong key costs the
+server a SHA-256 or two per key form presented, no query, and a read of at
+most 64 KiB of the body for the refusal's JSON-RPC id. What a limit could hold off
+is guessing, and a key `keygen.ts` mints is 32 random bytes: out of reach at
+any rate. A limit cannot slow guessing without refusing before the key is
+checked, which refuses the right key from the same place too; delaying only
+wrong answers does not help, since a guesser opens connections in parallel.
+Per address that is a lockout anyone can set off from a platform's shared
+egress (a claude.ai or ChatGPT connector reaches `/mcp` from the platform's
+addresses, every user's alike); across addresses, from anywhere. So the key
+is the defence: mint it with `keygen.ts`, and never hash a chosen word into
+`MCP_ACCESS_KEYS`, since the server holds only the digest and cannot tell how
+strong the key was. A raw `MCP_ACCESS_KEY`, the one key it sees in plain, is
+refused under 32 characters by preflight, the image's entrypoint. Compose
+passes the server no raw key, so this is for the image run on its own
+(`docker run`, Kubernetes); a Workers deployment and the vendored servers run
+no preflight, so give them a 32-byte key yourself. The REST core's `/api`
+(SMD-2284) will check the same keys and take the same position. The proxy
+sets none either: an MCP client keeps its connection through a JSON-RPC
+refusal, and Traefik's limit answers a plain-text 429 instead; by default it
+also keys every client behind a tunnel to one address. The authorization
+server's sign-in is a password, not a key, and limits itself ("Authorization
+server", "Abuse limits").
 
 **Its access log never holds a query string.** A connector carries its key in
 `?key=`, and an OAuth redirect will carry its code and state there; a log line
@@ -1328,7 +1352,8 @@ everyone's. Two hops need the tunnel to write its client into
 `forwardedHeaders.trustedIPs`, which compose does not set); a tunnel that
 passes the header through unwritten lets the client name entry 2. A password from `--init`, or one of 12 characters
 or more, is what holds against many addresses guessing; the loopback
-break-glass sign-in is SMD-2286's.
+break-glass sign-in is SMD-2286's. The proxy in front sets no rate limit of
+its own, by design ("No rate limits on `/mcp`, by design" above).
 
 **Custody and backups.**
 - **The signing key** signs every token the server issues: a new key
@@ -1375,10 +1400,8 @@ job does the same.
 `/.well-known/oauth-protected-resource/mcp`, served by the MCP server while
 this one answers (SMD-2382, SMD-2286); passkey
 sign-in, which needs the public origin (SMD-2382, SMD-2286); the MCP server
-and the GUI as its clients (SMD-2286, SMD-2287); and rate limits at the
-proxy (SMD-2309), beside the server's own above. The release
-overlay does not pin an image for it yet, so the profile builds from a
-checkout.
+and the GUI as its clients (SMD-2286, SMD-2287). The release overlay does
+not pin an image for it yet, so the profile builds from a checkout.
 
 ## What this does not cover
 

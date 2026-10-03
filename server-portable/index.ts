@@ -318,38 +318,58 @@ const BUSY_MESSAGE =
   "Temporarily unavailable: the agent registry is busy and could not confirm this key. Retry in a few seconds.";
 
 /**
- * Read the request body as text. This CONSUMES the body: both callers return a
- * refusal right after, so nothing downstream needs it. Returns null on read
- * failure. No
- * bodyless-method branch: `req.text()` on a request without a body resolves to
- * "", and extractJsonRpcId("") is null, so the method never mattered here.
+ * The most of a keyless request's body read for its refusal's JSON-RPC id:
+ * the one cost a caller who has shown no key sets (SMD-2309 review:
+ * unbounded, a 100 MB body cost 0.6 s and hundreds of MB, measured). A request
+ * MCP clients send is a few KB. A refusal to a key that matched (revoked,
+ * busy) reads the whole body, as the accepted path does: a long capture's id
+ * must come back, or the client waits out its timeout (review pass 2).
  */
-async function readBodyText(req: Request): Promise<string | null> {
+export const REFUSAL_BODY_LIMIT = 64 * 1024;
+
+/**
+ * Read a refused request's body as text, at most `limit` bytes. This CONSUMES
+ * the body: both callers return a refusal right after, so nothing downstream
+ * needs it. Returns null on read failure, and for a body past the limit
+ * (declared, or read so far), which the refusal then answers with `id: null`
+ * as it does a body it cannot parse. No bodyless-method branch: a request
+ * without a body reads as "", and its id is null. Decoded as it is read, so a
+ * character split across chunks survives and no Buffer is needed (Workers).
+ */
+async function readBodyText(req: Request, limit = Infinity): Promise<string | null> {
   try {
-    return await req.text();
+    if (Number(req.headers.get("content-length")) > limit) return null;
+    if (!req.body) return "";
+    const reader = req.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        void reader.cancel().catch(() => {});
+        return null;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
   } catch {
     return null;
   }
 }
 
 /**
- * Best-effort extraction of the JSON-RPC `id` from a raw request body.
- * Returns null when the body is missing, not JSON, or not a JSON-RPC
- * shape with an id. Per the JSON-RPC 2.0 spec, id may be a string,
- * number, or null — we preserve any of those; anything else becomes null.
+ * Best-effort extraction of the JSON-RPC `id` from a parsed request body.
+ * Null when the body is missing, not JSON, or not a JSON-RPC shape with an
+ * id. Per the JSON-RPC 2.0 spec, id may be a string, number, or null — we
+ * preserve any of those; anything else becomes null.
  */
-function extractJsonRpcId(bodyText: string | null): string | number | null {
-  if (!bodyText) return null;
-  try {
-    const parsed = JSON.parse(bodyText);
-    if (parsed && typeof parsed === "object" && "id" in parsed) {
-      const id = (parsed as { id: unknown }).id;
-      if (typeof id === "string" || typeof id === "number" || id === null) {
-        return id;
-      }
-    }
-  } catch {
-    // fall through — malformed body
+function jsonRpcIdOf(parsed: unknown): string | number | null {
+  if (parsed && typeof parsed === "object" && "id" in parsed) {
+    const id = (parsed as { id: unknown }).id;
+    if (typeof id === "string" || typeof id === "number" || id === null) return id;
   }
   return null;
 }
@@ -369,13 +389,13 @@ function extractJsonRpcId(bodyText: string | null): string | number | null {
  * before this helper existed.
  */
 function refusalTarget(bodyText: string | null): { expectsReply: boolean; id: string | number | null } {
-  const id = extractJsonRpcId(bodyText);
   let parsed: unknown;
   try {
     parsed = bodyText ? JSON.parse(bodyText) : undefined;
   } catch {
-    return { expectsReply: true, id };
+    return { expectsReply: true, id: null };
   }
+  const id = jsonRpcIdOf(parsed);
   const messages = Array.isArray(parsed) ? parsed : [parsed];
   const isNotification = (m: unknown): boolean =>
     typeof m === "object" && m !== null && !Array.isArray(m)
@@ -764,7 +784,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     // error rather than a transport fault and keep the connection alive.
     // Best-effort echo of the inbound request id keeps the response
     // correlated; malformed/missing bodies fall back to id: null.
-    const bodyText = await readBodyText(c.req.raw);
+    const bodyText = await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT);
     const target = refusalTarget(bodyText);
     settled = true;
     // A notification (no id) gets no JSON-RPC body: 202, since no key never

@@ -19,6 +19,7 @@
 
 import { join, dirname } from "node:path";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
@@ -178,12 +179,21 @@ console.log("[1] Missing configuration fails, with an actionable fix");
          `…and nothing else prints between the data layer and the provider: schema plus the ${listedNames.length} names (${rows.length} rows)`);
 }
 
-console.log("\n[2] Weak secrets warn without blocking");
+console.log("\n[2] A short raw access key is refused (SMD-2309)");
 {
-  const r = await run({ ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x",
-                        OPENROUTER_API_KEY: "k", MCP_ACCESS_KEY: "short" });
-  assert(/only thing protecting/.test(r.out), "a short access key is called out");
-  assert(/openssl rand -hex 32/.test(r.out), "…with the command to generate a real one");
+  const base = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OPENROUTER_API_KEY: "k", MCP_ACCESS_KEYS: undefined };
+  const r = await run({ ...base, MCP_ACCESS_KEY: "short" });
+  assert(/✗\s+access key strength\s/.test(row(r.out, "access key strength")) && /alone opens the endpoint/.test(r.out), `a short access key fails its row: ${row(r.out, "access key strength")}`);
+  assert(/openssl rand -hex 32/.test(fix(r.out, "access key strength")), "…with the command to generate a real one");
+  const ok = await run({ ...base, MCP_ACCESS_KEY: "x".repeat(32) });
+  assert(/!\s+access keys\s/.test(row(ok.out, "access keys")) && row(ok.out, "access key strength") === "", `a 32-character raw key alone is the legacy warning and no strength row: ${row(ok.out, "access keys")}`);
+  // Beside a hashed list the raw key still authenticates (auth.ts), so it is judged there too.
+  const listed = `laptop:write:${createHash("sha256").update("y".repeat(64)).digest("hex")}`;
+  const both = await run({ ...base, MCP_ACCESS_KEYS: listed, MCP_ACCESS_KEY: "short" });
+  assert(/✓\s+access keys\s/.test(row(both.out, "access keys")) && /✗\s+access key strength\s/.test(row(both.out, "access key strength")) && /!\s+legacy access key\s/.test(row(both.out, "legacy access key")),
+         `a short raw key beside MCP_ACCESS_KEYS fails its row and is named as legacy: ${row(both.out, "access key strength")} | ${row(both.out, "legacy access key")}`);
+  const listedOnly = await run({ ...base, MCP_ACCESS_KEYS: listed });
+  assert(row(listedOnly.out, "legacy access key") === "" && row(listedOnly.out, "access key strength") === "", "MCP_ACCESS_KEYS alone prints neither row");
 }
 
 console.log("\n[3] Credentials are not echoed");

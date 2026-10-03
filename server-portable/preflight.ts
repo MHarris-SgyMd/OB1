@@ -681,11 +681,23 @@ if (!env.MCP_ACCESS_KEYS && !env.MCP_ACCESS_KEY) {
   add("access keys", "warn",
       "using the legacy single MCP_ACCESS_KEY — unhashed, unnamed, write scope, not individually revocable",
       "Move to MCP_ACCESS_KEYS: bun keygen.ts --name laptop --scope write");
-  if (env.MCP_ACCESS_KEY!.length < 32) {
-    add("access key strength", "warn",
-        `${env.MCP_ACCESS_KEY!.length} chars — this key is the only thing protecting the endpoint`,
-        "Generate 32 bytes: openssl rand -hex 32");
-  }
+}
+// The raw key authenticates whenever it is set, beside MCP_ACCESS_KEYS too
+// (auth.ts), so it is judged whenever it is set (SMD-2309 review: a short one
+// beside a hashed list passed silently).
+if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEYS) {
+  add("legacy access key", "warn",
+      "MCP_ACCESS_KEY is set beside MCP_ACCESS_KEYS — it still authenticates, unhashed, with write scope",
+      "Remove MCP_ACCESS_KEY once every client uses a key from MCP_ACCESS_KEYS");
+}
+// Refused, not warned (SMD-2309): nothing limits guessing a key at /mcp, by
+// design (deploy/README.md, "No rate limits on `/mcp`"), so a short one is the
+// endpoint's whole defence. The one key the server sees in plain; a hashed
+// MCP_ACCESS_KEYS entry is only as strong as what was hashed.
+if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
+  add("access key strength", "fail",
+      `${env.MCP_ACCESS_KEY.length} chars — this key alone opens the endpoint with write scope, and nothing limits guessing it`,
+      "Generate 32 bytes: openssl rand -hex 32 (or move to MCP_ACCESS_KEYS with bun keygen.ts --name laptop --scope write, and unset MCP_ACCESS_KEY)");
 }
 
 // The connection string comes from DATABASE_URL, or from SUPABASE_URL when it
