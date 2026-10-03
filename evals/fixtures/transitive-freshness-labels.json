@@ -1,8 +1,8 @@
 {
  "version": 1,
  "generated": "2026-10-02",
- "origin": "SMD-2271 panel: the top 10 hits of the planning, held-out and control queries under every candidate rule, on the dogfood stable brain (evals/eval-transitive-freshness.ts). Two blind Claude graders per round, given the rubric, the hits' text and the tickets' statuses only; disagreements adjudicated to one grader's label.",
- "note": "Fields are ids and numbers only (check 9, SMD-1295). A label is the index in [stale, current, neutral]: stale = everything the hit puts forward (recommends, picks, names as remaining or as the plan) is completed/canceled per the tickets' statuses on 2026-10-02; current = something it puts forward is still open, or it states something still true a planner needs (an open ticket row, a live plan); neutral = it puts nothing forward. labels is the adjudicated label; rounds[i].graders a and b are that round's two graders. Round 1's four disagreements went to grader b (dc8d9130, 56c49d44, f63da670) and grader a (d964133f); round 2 had none.",
+ "origin": "SMD-2271 panel on the dogfood stable brain (evals/eval-transitive-freshness.ts): round 1 the first registration's top 10s, round 2 what the second registration's queries and rules added to the top 10s, round 3 every unlabelled row a rule still undecided on (b) demotes in its (b) windows. Two blind Claude graders per round, given the rubric, the hits' text and the tickets' statuses only.",
+ "note": "Fields are ids and numbers only (check 9, SMD-1295). A label is the index in [stale, current, neutral]: stale = everything the hit puts forward (recommends, picks, names as remaining or as the plan) is completed/canceled per the tickets' statuses on 2026-10-02; current = something it puts forward is still open, or it states something still true a planner needs (an open ticket row, a live plan); neutral = it puts nothing forward. labels is the adjudicated label; rounds[i].graders a and b are that round's two graders. Round 1's four disagreements were adjudicated by the author, who knew the rules: grader b (dc8d9130, 56c49d44, f63da670) and grader a (d964133f). Round 2 had none. Round 3's two went to a third blind grader choosing between the two labels: grader b both times (aab09046 neutral, eec34f8c stale).",
  "labels": {
   "008b4199-c07c-43f6-92de-17e85b2cfae0": 1,
   "03ffd80c-c20a-4166-8a1d-82647c6db6c2": 2,
@@ -21,6 +21,7 @@
   "3c346ae2-2605-4a58-a9c9-23169102f8eb": 1,
   "47d0adc5-27cf-41d7-9e9b-20e943a774fe": 1,
   "50128ef5-de38-48c0-85e3-014916db828d": 2,
+  "526185f5-a8f3-4c2a-9ab9-1c77fb1b14ae": 0,
   "531b7697-b66a-4dde-8f2a-18b4f49dc522": 1,
   "56c49d44-cea3-4129-91c8-25b727dcd331": 2,
   "580e18c6-5c71-417d-8204-6a7bfabbbb5d": 2,
@@ -47,12 +48,14 @@
   "9d19b7fc-9253-4ca6-ada2-0a66f44a1259": 0,
   "a854b38a-2363-412c-abc7-5741edeec859": 0,
   "a9cf5e53-0ab8-4659-84f9-3bbd7b333099": 1,
+  "aab09046-e326-4c2b-9d36-73fed2d61809": 2,
   "ac30e612-cdb5-43cd-a930-4b21012690ad": 0,
   "ac7eff33-e5d7-48bf-ba5d-4b6650f6bd1e": 1,
   "af63ca3a-3ee5-4d97-9a8e-4e8f22763560": 1,
   "b6c254c9-3a9c-4d06-9a07-43d9a217ed04": 1,
   "b7cdd757-1819-4808-b7e7-65fe408f68e9": 2,
   "b91e095a-c4ac-457b-8b28-80f58db5dece": 2,
+  "b9683cd2-9b52-46d5-8b99-476be255b4c0": 0,
   "c35708ff-6bc2-4a73-85b6-536aa2118ac3": 2,
   "c4b68c0b-26cf-4ea1-bdd7-b169a296d517": 1,
   "c662ea48-d6d4-4763-bda2-eb9b702a7fe5": 2,
@@ -74,9 +77,12 @@
   "ecf8b69a-46aa-411c-8053-f8e6175ca7e2": 2,
   "ed5a3841-007d-42bc-b8c5-729531783a82": 1,
   "ee5c9d8e-1a3a-4f30-8821-2434613e81f3": 2,
+  "eec34f8c-1808-43c3-8453-22c4bec37e41": 0,
   "f24914a6-9c64-4595-8a17-a985a24c5e6d": 2,
   "f4b7e4ba-d8fc-4fff-a1d5-0aabff78e517": 0,
+  "f4da93f0-e9ce-4f69-855d-32aba5884c78": 0,
   "f63da670-40bc-4ea2-ab3e-05af4082d2b6": 0,
+  "f83113ab-2c2b-493d-984d-02e9d12f97fd": 2,
   "ff5eddb1-2dd3-41f7-b8eb-663ab1c70550": 1
  },
  "rounds": [
@@ -254,6 +260,32 @@
     "raw": 1.0,
     "kappa": 1.0,
     "adjudicated": 0
+   }
+  },
+  {
+   "generated": "2026-10-02",
+   "graders": {
+    "a": {
+     "526185f5-a8f3-4c2a-9ab9-1c77fb1b14ae": 0,
+     "aab09046-e326-4c2b-9d36-73fed2d61809": 0,
+     "b9683cd2-9b52-46d5-8b99-476be255b4c0": 0,
+     "eec34f8c-1808-43c3-8453-22c4bec37e41": 2,
+     "f4da93f0-e9ce-4f69-855d-32aba5884c78": 0,
+     "f83113ab-2c2b-493d-984d-02e9d12f97fd": 2
+    },
+    "b": {
+     "526185f5-a8f3-4c2a-9ab9-1c77fb1b14ae": 0,
+     "aab09046-e326-4c2b-9d36-73fed2d61809": 2,
+     "b9683cd2-9b52-46d5-8b99-476be255b4c0": 0,
+     "eec34f8c-1808-43c3-8453-22c4bec37e41": 0,
+     "f4da93f0-e9ce-4f69-855d-32aba5884c78": 0,
+     "f83113ab-2c2b-493d-984d-02e9d12f97fd": 2
+    }
+   },
+   "agreement": {
+    "raw": 0.6666666666666666,
+    "kappa": 0.24999999999999986,
+    "adjudicated": 2
    }
   }
  ]
