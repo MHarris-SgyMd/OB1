@@ -1,5 +1,5 @@
 -- ============================================================================
--- 077 — jobs.door: which server started a job, so a server's start-up
+-- 078 — jobs.door: which server started a job, so a server's start-up
 --        reconcile marks only its own jobs lost (SMD-2284)
 --
 -- Why
@@ -38,7 +38,7 @@ DO $qc$
 BEGIN
   IF to_regclass('public.jobs') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 077 needs 069 (the jobs table); this schema lacks it',
+      MESSAGE = 'migration 078 needs 069 (the jobs table); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -57,4 +57,4 @@ END
 $c$;
 
 COMMENT ON COLUMN jobs.door IS
-  'The server that started the job, by the door its writes record as thought_audit.origin (046): open-brain (the MCP server) or open-brain-api (the REST core). A server reconciles only its own live rows to lost at start-up, so two servers on one database leave each other''s jobs alone. Rows from before migration 077 take open-brain, the one serving process then. Migration 077 (SMD-2284).';
+  'The server that started the job, by the door its writes record as thought_audit.origin (046): open-brain (the MCP server) or open-brain-api (the REST core). A server reconciles only its own live rows to lost at start-up, so two servers on one database leave each other''s jobs alone. Rows from before migration 078 take open-brain, the one serving process then. Migration 078 (SMD-2284).';

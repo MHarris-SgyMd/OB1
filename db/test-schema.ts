@@ -82,6 +82,7 @@ import {
   resolveSubject, schemaProblem, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
+import { refsOf, transitiveDemotion } from "../evals/transitive-freshness.ts";
 import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, IDENTIFIER_SHAPES, normalizeEntityName, TRIM_RE } from "../server-portable/entity-gate.ts";
@@ -11816,8 +11817,8 @@ console.log("\n[68] Migration 075: min_trust on search_thoughts_hybrid and searc
   // The catalog: two forms each, the 8 with no default anywhere, the 7 the
   // 8 with NULL, both hybrids' estimate 100.
   const [h8, h7, c8, c7] = await Promise.all([fn(HY8), fn(HY7), fn(CU8), fn(CU7)]);
-  assert((await functionsNamed("search_thoughts_hybrid")) === 2 && (await functionsNamed("search_thoughts_current")) === 2 && lastDefinerOf("search_thoughts_current").startsWith("075"),
-    "two forms of each — 075 last defines both — the 7-argument one kept beside min_trust's 8");
+  assert((await functionsNamed("search_thoughts_hybrid")) === 2 && (await functionsNamed("search_thoughts_current")) === 2 && lastDefinerOf("search_thoughts_hybrid").startsWith("075") && lastDefinerOf("search_thoughts_current").startsWith("077"),
+    "two forms of each — 075 last defines the hybrid's, 077 search_thoughts_current's 8-argument body (SMD-2271) — the 7-argument one kept beside min_trust's 8");
   assert(!/DEFAULT/.test(h8.args) && !/DEFAULT/.test(c8.args) && /, min_trust text$/.test(h8.args) && /, min_trust text$/.test(c8.args),
     `the 8-argument forms take every argument, none defaulted, min_trust last — so no 7-argument call is ambiguous (${h8.args.slice(-60)})`);
   assert(/search_thoughts_hybrid\(query_embedding, query_text, match_threshold, match_count,\s+filter, recency_weight, half_life_days, NULL::text\)/.test(h7.src)
@@ -11872,6 +11873,162 @@ console.log("\n[68] Migration 075: min_trust on search_thoughts_hybrid and searc
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
+}
+
+// ── 69. Migration 077: prefer_current reads a thought's references (SMD-2271) ──
+//
+// node_state one hop out: a thought with no lifecycle of its own is also
+// demoted under prefer_current when the tickets it is about are all finished
+// (the rule evals/eval-transitive-freshness.ts chose, central+share-veto).
+// Held here: the two new functions' contract; ticket_references and
+// ticket_references_settled equal evals/transitive-freshness.ts's refsOf and
+// transitiveDemotion row for row, on hand cases and a seeded fuzz of the
+// shapes they could part on (a key beside a non-ASCII letter or `_`, a key in
+// the text after the first line's header, topics that are not an array of
+// strings, a lower-cased key); who search_thoughts_current demotes and why,
+// the weight once, the veto, a ticket row's and a note's own lifecycle first;
+// one ticket's completion moves exactly the thoughts that name it on the next
+// search and writes none of them; the columns, the 7-argument form and the
+// privileges kept.
+console.log("\n[69] Migration 077: prefer_current also ranks below a thought whose tickets are all finished — ticket_references and ticket_references_settled against evals/transitive-freshness.ts row for row and over a fuzz; who is demoted and why; the veto; a ticket row's own lifecycle first; one completion moves exactly the thoughts that name it, writing none; the columns and privileges kept (SMD-2271)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  // [68] re-ran 075, which put 075's body back over the 8-argument form.
+  await restoreShipped("search_thoughts_current");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+
+  // The contract.
+  const fns = await q<{ name: string; args: string; result: string; vol: string; lang: string; definer: boolean; strict: boolean }>(
+    `SELECT p.proname AS name, pg_get_function_arguments(p.oid) AS args, pg_get_function_result(p.oid) AS result, p.provolatile::text AS vol,
+            l.lanname AS lang, p.prosecdef AS definer, p.proisstrict AS strict
+       FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.proname IN ('ticket_references', 'ticket_references_settled') ORDER BY p.proname`);
+  assert(fns.length === 2 && fns.every((f) => f.args === "p_content text, p_metadata jsonb" && f.lang === "sql" && !f.definer && !f.strict)
+      && fns[0].result === "TABLE(issue text, in_body boolean, central boolean)" && fns[0].vol === "i" && fns[1].result === "text[]" && fns[1].vol === "s"
+      && lastDefinerOf("ticket_references").startsWith("077") && lastDefinerOf("ticket_references_settled").startsWith("077") && lastDefinerOf("search_thoughts_current").startsWith("077"),
+    `ticket_references (IMMUTABLE, a row per key) and ticket_references_settled (STABLE, the deciding keys), LANGUAGE sql, invoker, not strict; 077 last defines them and search_thoughts_current (${fns.map((f) => `${f.name} ${f.vol} ${f.result}`).join("; ")})`);
+  const hybridCols = (await q<{ r: string }>(`SELECT pg_get_function_result(to_regprocedure($1)) AS r`, [SEARCH_THOUGHTS_HYBRID_SIGNATURE]))[0].r.replace(/\)$/, "");
+  const cols = await q<{ r: string }>(`SELECT pg_get_function_result(to_regprocedure(s.sig)) AS r FROM unnest(ARRAY[$1::text, $2::text]) AS s(sig)`, [SEARCH_THOUGHTS_CURRENT_SIGNATURE, SEARCH_THOUGHTS_CURRENT_SIGNATURE_7]);
+  const [c7] = await q<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = to_regprocedure($1)`, [SEARCH_THOUGHTS_CURRENT_SIGNATURE_7]);
+  assert(cols.every((c) => c.r === `${hybridCols}, fused double precision, demoted text[], window_rows integer, window_known integer, window_demoted integer, window_synced_at text, window_exact boolean)`)
+      && /ob1:seven-calls-eight/.test(c7.src) && (await functionsNamed("search_thoughts_current")) === 2,
+    "search_thoughts_current keeps its columns (CREATE OR REPLACE, so --reapply's 075 still replaces it) and its two forms, the 7-argument one still calling the 8 with NULL");
+  await db.exec(`REVOKE ALL ON FUNCTION ${SEARCH_THOUGHTS_CURRENT_SIGNATURE} FROM PUBLIC`);
+  await restoreShipped("search_thoughts_current");
+  const [acl] = await q<{ a: string | null }>(`SELECT proacl::text AS a FROM pg_proc WHERE oid = to_regprocedure($1)`, [SEARCH_THOUGHTS_CURRENT_SIGNATURE]);
+  assert(acl.a !== null && !/(^|[{,])=X/.test(acl.a), `an operator's REVOKE on the 8-argument form survives 077's re-run (${acl.a})`);
+  await db.exec(`GRANT EXECUTE ON FUNCTION ${SEARCH_THOUGHTS_CURRENT_SIGNATURE} TO PUBLIC`);
+
+  // The heads: ticket rows, so 068's triggers build ob1_ticket_head as a sync would.
+  const Q = unit(0);
+  const { rnd } = seededRandom(2271);
+  const at = (cos: number) => {
+    const r = Array.from({ length: 32 }, () => rnd() - 0.5);
+    const n = Math.hypot(...r), s = Math.sqrt(1 - cos * cos);
+    const v = new Array(EMBEDDING_DIM).fill(0);
+    for (let k = 0; k < 32; k++) v[1 + k] = (r[k] / n) * s;
+    v[0] = cos;
+    return `[${v.join(",")}]`;
+  };
+  const put = async (content: string, cos: number, metadata: Record<string, unknown>, supersedes?: string) => {
+    const env: Record<string, unknown> = { metadata: { type: "note", ...metadata } };
+    if (supersedes) env.supersedes = supersedes;
+    return (await q<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(env), at(cos)]))[0].r.id;
+  };
+  const stamp = (id: string, keys: Record<string, unknown>) => db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify(keys)]);
+  const ticketOf = new Map<string, string>();
+  for (const [key, status, type] of [["SMD-1", "Done", "completed"], ["SMD-2", "Canceled", "canceled"], ["SMD-3", "In Progress", "started"], ["SMD-4", "Done", "completed"], ["SMD-5", "Backlog", "backlog"], ["SMD-9", "Odd", "weird"]]) {
+    const id = await put(`ticket ${key}`, 0.05, { kind: "ticket" });
+    await stamp(id, { source: "linear", issue: key, status, status_type: type, linear_updated_at: "2026-10-01T00:00:00.000Z" });
+    ticketOf.set(key, id);
+  }
+  const [types] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
+  const settled = new Set(types.settled);
+  const headsNow = async () => new Map((await q<{ issue: string; status_type: string }>(`SELECT issue, status_type FROM ob1_ticket_head`)).filter((h) => types.known.includes(h.status_type)).map((h) => [h.issue, h.status_type] as const));
+  let heads = await headsNow();
+  assert(heads.size === 5 && heads.get("SMD-3") === "started" && !heads.has("SMD-9"), `the heads 068 built from the ticket rows: five with a known status, SMD-9's "weird" left out (${[...heads].map(([k, v]) => `${k}:${v}`).join(" ")})`);
+
+  // Row for row against the JavaScript rule.
+  type Case = [string, unknown];
+  const hand: Case[] = [
+    ["Session summary — SMD-1 — claude-code — x\nsee SMD-3 and UTF-8, SMD-4x, xSMD-5, SMD-4. Again SMD-3", { topics: ["SMD-2", "ob1", "SMD-2"], action_items: ["Start SMD-3", 7] }],
+    ["éSMD-1 SMD-2é ÉMD-4 _SMD-3 SMD-5_ (SMD-4) [SMD-1]", {}],
+    ["x\nSession summary — SMD-4 — not the first line", {}],
+    ["Session summary — SMD-1 —", { topics: "SMD-3", action_items: { a: "SMD-3" } }],
+    ["nothing here", null],
+    ["SMD-1 SMD-2 SMD-4", []],
+    ["SMD-1 SMD-2", { topics: [["SMD-3"], "SMD-4"] }],
+    ["smd-3 is lower case; SMD-1 is not", { topics: ["smd-3"] }],
+    ["SMD-1-2 SMD-12345678901234567890 A1-2 AB-0", { action_items: ["SMD-9", "SMD-1\nSMD-4"] }],
+    ["Session summary — SMD-1 — recommends SMD-1 only", { topics: ["SMD-5"] }],
+  ];
+  const toks = ["SMD-1", "SMD-2", "SMD-3", "SMD-4", "SMD-5", "SMD-9", "SMD-12", "UTF-8", "é", "É", "_", "x", "a", "-", "1", " ", "\n", "Session summary — ", " — ", "smd-1", "SMD-", "-7", "ÀSMD-4", ".", "(", ")"];
+  const pick = <T,>(xs: T[]) => xs[Math.floor(rnd() * xs.length)];
+  const str = (n: number) => Array.from({ length: 1 + Math.floor(rnd() * n) }, () => pick(toks)).join("");
+  const val = (): unknown => { const r = rnd(); return r < 0.6 ? str(6) : r < 0.75 ? 42 : r < 0.85 ? { k: str(3) } : r < 0.92 ? null : [str(3)]; };
+  const meta = (): unknown => { const r = rnd(); if (r < 0.08) return null; if (r < 0.12) return [str(3)]; const m: Record<string, unknown> = {};
+    for (const k of ["topics", "action_items"]) { const t = rnd(); m[k] = t < 0.6 ? Array.from({ length: Math.floor(rnd() * 4) }, val) : t < 0.8 ? str(4) : t < 0.9 ? 7 : undefined; }
+    return m; };
+  const fuzz: Case[] = Array.from({ length: 400 }, () => [rnd() < 0.3 ? `Session summary — ${str(3)}${str(10)}` : str(14), meta()]);
+  const sameAs = async (cases: Case[]) => {
+    const misses: string[] = [];
+    const statusOf = (k: string) => heads.get(k);
+    for (const [content, metadata] of cases) {
+      const md = metadata === null ? null : JSON.stringify(metadata);
+      const rows = await q<{ issue: string; in_body: boolean; central: boolean }>(`SELECT issue, in_body, central FROM ticket_references($1, $2::jsonb)`, [content, md]);
+      const [s] = await q<{ s: string[] | null }>(`SELECT ticket_references_settled($1, $2::jsonb) AS s`, [content, md]);
+      const js = refsOf(content, metadata !== null && typeof metadata === "object" && !Array.isArray(metadata) ? metadata as Record<string, unknown> : null);
+      const jsDem = transitiveDemotion(js, statusOf, settled, "central+share-veto");
+      const sqlBody = rows.filter((r) => r.in_body).map((r) => r.issue).join(), sqlCentral = rows.filter((r) => r.central).map((r) => r.issue).join();
+      if (sqlBody !== js.body.join() || sqlCentral !== js.central.join() || JSON.stringify(s.s) !== JSON.stringify(jsDem))
+        misses.push(`${JSON.stringify(content).slice(0, 60)} ${md?.slice(0, 40)}: sql body ${sqlBody} central ${sqlCentral} → ${JSON.stringify(s.s)}; js body ${js.body} central ${js.central} → ${JSON.stringify(jsDem)}`);
+    }
+    return misses;
+  };
+  const handMiss = await sameAs(hand), fuzzMiss = await sameAs(fuzz);
+  const demotedInFuzz = (await Promise.all(fuzz.map(async ([c, m]) => (await q<{ s: string[] | null }>(`SELECT ticket_references_settled($1, $2::jsonb) AS s`, [c, m === null ? null : JSON.stringify(m)]))[0].s !== null))).filter(Boolean).length;
+  assert(handMiss.length === 0, `ticket_references and ticket_references_settled equal refsOf and transitiveDemotion(central+share-veto) on ${hand.length} hand cases — non-ASCII and _ beside a key, the header on line one only, topics as a string, an object or nested arrays, lower case, a key inside a longer one (${handMiss.slice(0, 2).join(" | ")})`);
+  assert(fuzzMiss.length === 0 && demotedInFuzz > 20 && demotedInFuzz < 380, `…and on a seeded fuzz of ${fuzz.length} texts and metadata built from the shapes they could part on, ${demotedInFuzz} of them demoted (${fuzzMiss.slice(0, 2).join(" | ")})`);
+
+  // Who search_thoughts_current demotes, and why.
+  type Row = { id: string; score: number; fused: number; demoted: string[] | null; window_demoted: number };
+  const current = (count = 10) => q<Row>(`SELECT id::text AS id, score, fused, demoted, window_demoted FROM search_thoughts_current($1::vector, 'alpha', 0.0::float, $2::int, '{"kind": "ref"}'::jsonb, 0.0::float, 90.0::float)`, [Q, count]);
+  const sumDone = await put("Session summary — SMD-1 — recommends SMD-1", 0.99, { kind: "ref" });
+  const sumVeto = await put("Session summary — SMD-1 — and names SMD-3", 0.98, { kind: "ref" });
+  const share = await put("notes on SMD-1, SMD-2 and SMD-4", 0.97, { kind: "ref" });
+  const two = await put("notes on SMD-1 and SMD-2", 0.96, { kind: "ref" });
+  const openRow = await put("the backlog ticket depends on SMD-1", 0.95, { kind: "ref" });
+  await stamp(openRow, { source: "linear", issue: "SMD-5", status: "Backlog", status_type: "backlog", linear_updated_at: "2026-10-02T00:00:00.000Z" });
+  const noteOpen = await put("a note about SMD-1 filed under an open ticket", 0.94, { kind: "ref", ticket: "SMD-5" });
+  const plain = await put("nothing referenced here", 0.93, { kind: "ref" });
+  const old = await put("Session summary — SMD-4 — the earlier checkpoint", 0.92, { kind: "ref" });
+  const newer = await put("Session summary — SMD-4 — the later checkpoint", 0.5, { kind: "ref" }, old);
+  const sumOpen = await put("Session summary — SMD-3 — recommends SMD-3", 0.91, { kind: "ref" });
+  heads = await headsNow();
+  const before = await current();
+  const why = (rows: Row[]) => new Map(rows.map((r) => [r.id, r.demoted === null ? "-" : r.demoted.join("+")]));
+  const w1 = why(before);
+  const order = [sumDone, sumVeto, share, two, openRow, noteOpen, plain, old, newer, sumOpen];
+  assert(order.map((id) => w1.get(id)).join() === "references settled work (SMD-1),-,references settled work (SMD-1, SMD-2, SMD-4),-,-,-,-,superseded+references settled work (SMD-4),references settled work (SMD-4),-",
+    `who is demoted and why: a summary whose header ticket is Done (its keys named); not one that also names an open ticket (the veto); three settled keys in the text; not two; not the backlog ticket's own row or a note filed under it, which carry their own lifecycle; not a thought naming nothing; a superseded summary twice over, weighed once, and the checkpoint that superseded it; not one whose ticket is open (${order.map((id) => w1.get(id)).join()})`);
+  const firstDemoted = before.findIndex((r) => r.demoted !== null);
+  assert(before.every((r) => r.score === (r.demoted === null ? r.fused : r.fused * 0.25)) && before.slice(firstDemoted).every((r) => r.demoted !== null) && before[0].window_demoted === 4,
+    `every current row first, a demoted one's score exactly 0.25 of its fused once, and window_demoted counts the transitive demotions (${before[0]?.window_demoted})`);
+
+  // One completion: SMD-3 goes Done the way a sync writes it.
+  const audit = async () => new Map((await q<{ id: string; c: number }>(`SELECT thought_id::text AS id, count(*)::int AS c FROM thought_audit GROUP BY thought_id`)).map((r) => [r.id, r.c]));
+  const touched = async () => new Map((await q<{ id: string; u: string }>(`SELECT id::text AS id, updated_at::text AS u FROM thoughts WHERE metadata->>'kind' = 'ref'`)).map((r) => [r.id, r.u]));
+  const [a0, t0] = [await audit(), await touched()];
+  await stamp(ticketOf.get("SMD-3")!, { status: "Done", status_type: "completed", linear_updated_at: "2026-10-02T01:00:00.000Z" });
+  const [a1, t1] = [await audit(), await touched()];
+  const after = why(await current());
+  const moved = order.filter((id) => w1.get(id) !== after.get(id));
+  const otherAudits = [...a1].filter(([id, c]) => id !== ticketOf.get("SMD-3") && a0.get(id) !== c);
+  assert(JSON.stringify(moved.sort()) === JSON.stringify([sumVeto, sumOpen].sort()) && after.get(sumOpen) === "references settled work (SMD-3)" && after.get(sumVeto) === "references settled work (SMD-1)"
+      && otherAudits.length === 0 && [...t1].every(([id, u]) => t0.get(id) === u),
+    `one ticket's completion moves exactly the thoughts that name it on the next search — the summary recommending it, and the one its open veto no longer holds — and writes none of them: no audit row and no updated_at but the ticket's own (moved ${moved.length}, other audits ${otherAudits.length})`);
+
+  await db.exec(`DELETE FROM thoughts`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

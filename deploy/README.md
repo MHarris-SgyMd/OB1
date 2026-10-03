@@ -324,7 +324,7 @@ from a header (`x-brain-key`, `x-access-key` or `Authorization: Bearer`), never
 from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
 on `/mcp`. Its writes record their door as `open-brain-api`
 (`thought_audit.origin`) beside the MCP server's `open-brain`, and the jobs it
-starts are its own (migration 077): either server's restart marks only its own
+starts are its own (migration 078): either server's restart marks only its own
 unfinished jobs lost.
 
 Measured on this stack (CI's "Full stack, no Supabase" job holds each): off,

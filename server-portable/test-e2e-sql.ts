@@ -162,6 +162,20 @@ async function call(name: string, args: Record<string, unknown> = {}, key = "e2e
   return joined;
 }
 
+// The whole result, for [3], [15] and [16]: structuredContent is the point (SMD-2283).
+const result = async (name: string, args: Record<string, unknown> = {}) => {
+  const r = await fetch(BASE, {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const t = await r.text();
+  const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+  if (b.error) throw new Error(`JSON-RPC error: ${JSON.stringify(b.error)}`);
+  const res = b.result as { content: { text: string }[]; isError?: boolean; structuredContent?: Record<string, any> };
+  return { text: res.content.map((c) => c.text).join("\n"), isError: res.isError === true, sc: res.structuredContent };
+};
+
 console.log(`  store: OB1_STORE unset (sql, the default), SUPABASE_URL unset\n`);
 
 console.log("[1] The server runs with no Supabase configuration at all");
@@ -252,9 +266,19 @@ console.log("\n[3] search_thoughts ranks over real pgvector");
   const demotedBlock = preferred.split("--- Result ").find((b) => /alpha thought about migrations/.test(b)) ?? "";
   const plainAgain = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1 });
   assert(!/alpha thought about migrations/.test(preferredFirst) && /\n↓ Ranked ×0\.25 — completed\n/.test(demotedBlock) && /^\d+ \(100\.0% match\) ---/.test(demotedBlock)
-      && /Current first \(prefer_current\): 1 of the top \d+ matches is settled or superseded and ranked below the current ones; 1 carries a lifecycle \(latest sync 2026-09-25T00:00:00\.000Z\)\./.test(preferred)
+      && /Current first \(prefer_current\): 1 of the top \d+ matches is settled, superseded or about finished tickets and ranked below the current ones; 1 carries a lifecycle \(latest sync 2026-09-25T00:00:00\.000Z\)\./.test(preferred)
       && /^1 \(100\.0% match\) ---/.test(plainAgain.split("--- Result ")[1] ?? "") && !/↓ Ranked|Current first/.test(plainAgain),
     `prefer_current demotes the completed alpha ticket below the current rows, says ×0.25 — completed on its block (its similarity still the cosine) and the window in the header; without it the ticket is first and unmarked (${demotedBlock.split("\n").slice(0, 3).join(" / ")})`);
+  // 077 over MCP (SMD-2271): a session summary about the now-Done SMD-9902,
+  // with no lifecycle of its own, is demoted too, its block naming the ticket,
+  // and its structured reason the closed word.
+  await call("capture_thought", { content: "Session summary — SMD-9902 — alpha follow-up recommends SMD-9902" });
+  const viaRefs = await result("search_thoughts", { query: "alpha", limit: 5, threshold: -1, prefer_current: true });
+  const refBlock = viaRefs.text.split("--- Result ").find((b) => /alpha follow-up recommends/.test(b)) ?? "";
+  const refHit = (viaRefs.sc?.hits as { demoted: string[] }[] | undefined)?.find((h) => h.demoted.includes("references_settled"));
+  assert(/\n↓ Ranked ×0\.25 — references settled work \(SMD-9902\)\n/.test(refBlock) && refHit !== undefined && /2 of the top \d+ matches are settled, superseded or about finished tickets/.test(viaRefs.text),
+    `prefer_current also demotes a summary whose ticket is Done, naming it on its block, the header counting it, the structured reason the closed word (${refBlock.split("\n").slice(0, 3).join(" / ")})`);
+  await sql`DELETE FROM thoughts WHERE content LIKE 'Session summary — SMD-9902%'`;
   // The tool's description states the weight 059 applies, and they agree.
   const listed = await fetch(BASE, { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }) });
   const listedText = await listed.text();
@@ -1972,19 +1996,6 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   await sql.close();
 }
 
-// The whole result, for [15] and [16]: structuredContent is the point (SMD-2283).
-const result = async (name: string, args: Record<string, unknown> = {}) => {
-  const r = await fetch(BASE, {
-    method: "POST",
-    headers: H,
-    body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }),
-  });
-  const t = await r.text();
-  const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
-  if (b.error) throw new Error(`JSON-RPC error: ${JSON.stringify(b.error)}`);
-  const res = b.result as { content: { text: string }[]; isError?: boolean; structuredContent?: Record<string, any> };
-  return { text: res.content.map((c) => c.text).join("\n"), isError: res.isError === true, sc: res.structuredContent };
-};
 // The rule, by construction (review pass 5): beside its `text`, a prose
 // tool's value and every refusal hold only short tokens — ids, timestamps,
 // counts, codes — never a word a thought, a key or a judge wrote, which
@@ -2256,14 +2267,14 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
   }
 }
 
-console.log("\n[18] The serving entry wires the durable job store when it first builds the store: a job a prior process left running is marked lost, and the REST core's live job on the same database is left alone (SMD-2318; root.ts's serveHere and migration 077, SMD-2284)");
+console.log("\n[18] The serving entry wires the durable job store when it first builds the store: a job a prior process left running is marked lost, and the REST core's live job on the same database is left alone (SMD-2318; root.ts's serveHere and migration 078, SMD-2284)");
 {
   // `bun index.ts` as Bun's entry, not an import: only the entry says it
   // serves (serveHere), and only then does the store's first build reconcile
   // the rows a prior process left live. Its first keyed request builds the
   // store (the registry lookup reads it); the reconcile runs detached after.
   // It reaches the MCP server's live rows (door open-brain), not the REST
-  // core's (open-brain-api): two servers on one database (077).
+  // core's (open-brain-api): two servers on one database (078).
   const sql = new SQL({ url: URL_, max: 1 });
   const jobId = crypto.randomUUID();
   const apiJob = crypto.randomUUID();

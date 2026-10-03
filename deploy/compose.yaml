@@ -451,7 +451,7 @@ services:
   # the default network too, where Postgres and the model providers are,
   # until the stack's network move (SMD-1846's follow-up, SMD-2294). Its
   # writes record their door as open-brain-api (thought_audit.origin), and
-  # the jobs it starts are its own (migration 077).
+  # the jobs it starts are its own (migration 078).
   api:
     build: *server-build
     command: ["api.ts"]

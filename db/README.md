@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2400 assertions: 2400 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy-seven (77) migrations applied, and
+`bun test-schema.ts` prints `2411 assertions: 2411 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-eight (78) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2284).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1005,15 +1005,36 @@ not survive a `--reapply` (059 drops and re-creates it — as on main), while it
 only for a search that names `min_trust`, so a brain before them answers every
 other search. test-schema [68], test-upgrade [20z].
 
-Migration 077 names the server that started a job (SMD-2284): `jobs.door`,
+Migration 077 has `prefer_current` read a thought's tickets as well as its own
+lifecycle (SMD-2271): `node_state` one hop out. `ticket_references(content,
+metadata)` lists the ticket keys a thought names — in its text, and centrally in
+`metadata.topics`, `metadata.action_items` or a session summary's header — read
+between ASCII lookarounds, which is how JavaScript's `\b` reads them, so the
+rule `evals/eval-transitive-freshness.ts` chose (`central+share-veto`, in
+`evals/transitive-freshness.ts`) is the same in both languages.
+`ticket_references_settled` applies it over 068's ticket heads: an open ticket
+named anywhere vetoes; else known central keys decide, all settled; else three or
+more known keys in the text, all settled. `search_thoughts_current` demotes a
+thought with no lifecycle of its own when it says so — the same weight, once —
+and names the deciding keys in `demoted` (`references settled work (SMD-…)`).
+Nothing is stored: one ticket's completion moves exactly the thoughts that name
+it on the next search and writes none of them. The columns, the 7-argument form
+and both forms' privileges are unchanged. Measured on a copy of the dogfood
+brain (1,464 thoughts, the panel's 12 queries, 480 interleaved pairs): +5.1 ms
+per search (paired median, +6.0 at p90) over 075's 4.5 ms, the hybrid alone
+1.7 ms — the references read from each window row's text; `eval-transitive-freshness.ts
+--sql-check` held the SQL to the rule on all 1,464 thoughts and the ranking to
+its oracle on all 12 queries. test-schema [69], test-upgrade [20aa].
+
+Migration 078 names the server that started a job (SMD-2284): `jobs.door`,
 `open-brain` for the MCP server and `open-brain-api` for the REST core, the door
 a write through each records as `thought_audit.origin`. A server writes its name
 on the jobs it starts and its start-up reconcile marks only those `lost`, so the
-two servers on one database leave each other's live jobs alone; before 077 the
+two servers on one database leave each other's live jobs alone; before 078 the
 one reconcile took every live row. Rows from before it take `open-brain`, the
 one serving process then, by the column's default, which also covers a server
-from before 077 writing against it. 077 refuses to apply without 069.
-test-upgrade [20aa], test-e2e-sql [18], test-rest-sql [9].
+from before 078 writing against it. 078 refuses to apply without 069.
+test-upgrade [20ab], test-e2e-sql [18], test-rest-sql [9].
 
 ## What changed relative to the guide
 
@@ -3222,7 +3243,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2400 assertions, PGlite, no container
+bun test-schema.ts                          # 2411 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1055 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

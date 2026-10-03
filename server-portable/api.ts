@@ -40,7 +40,7 @@ let bunServer: Stoppable | undefined;
 if (SERVES_ON_BUN) {
   // The store's first build wires the durable job store for this server: its
   // jobs carry its door and its start-up reconcile touches only those, so the
-  // MCP server's live jobs on the same database are left alone (migration 077).
+  // MCP server's live jobs on the same database are left alone (migration 078).
   serveHere(API_DOOR);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);

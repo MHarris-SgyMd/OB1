@@ -218,7 +218,7 @@ export function env(): Env {
  * before any request, and never by a suite that imports one. The store's
  * first build reads it to wire the durable job store (below) for that server
  * alone — its jobs carry the name, and its reconcile touches only those
- * (migration 077, SMD-2284).
+ * (migration 078, SMD-2284).
  */
 let serving: string | null = null;
 export function serveHere(door: string): void {
