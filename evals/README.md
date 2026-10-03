@@ -2837,12 +2837,21 @@ of 202. Labels are model graders', not the maintainer's; the panel is eight
 planning queries on one brain (1,462 thoughts on the final run, one more than
 the first).
 
-**Next (SMD-2271 PR 2):** `central+share-veto` in `search_thoughts_current`,
-inside `prefer_current` (the maintainer's call: no new flag), with its own reason
-on a demoted hit (`references settled work`), the SQL's references held to
-`refsOf` on every thought and its ranking to this oracle on the panel. A
-re-derivation of the summary is not this ticket's rank arm; it rides SMD-2243's
-pool.
+**Shipped (SMD-2271 PR 2, migration 077).** `central+share-veto` is in
+`search_thoughts_current`, inside `prefer_current` (the maintainer's call: no
+new flag): `ticket_references` reads the keys as `refsOf` does,
+`ticket_references_settled` applies the rule over 068's heads, and a demoted
+hit says `references settled work (SMD-…)`. The rule's code moved to
+`evals/transitive-freshness.ts`, which test-schema [69] imports to hold the SQL
+to it on hand cases and a 400-case fuzz. `--sql-check` holds it on a real
+corpus: on a copy of the dogfood brain restored and migrated to 077, the SQL
+equals the rule on all 1,464 thoughts (306 with settled keys) and
+`search_thoughts_current`'s top 10 equals the oracle's on all 12 panel queries;
+with the open veto dropped from the SQL it reports 583 thoughts and 11 queries
+differing. The cost, on the same copy (12 queries, 480 interleaved pairs): +5.1
+ms per search (paired median; +6.0 at p90) over 075's 4.5 ms, the hybrid alone
+1.7 ms — the references are read from each window row's text at search time,
+nothing stored. Re-deriving a stale summary rides SMD-2243's pool.
 
 ## LongMemEval: the fork on a public benchmark, and the floor it exposed
 

@@ -26,14 +26,16 @@
  *   A key whose head carries no known status_type (node_lifecycle_types()) is
  *   ignored, as 059 ignores an unknown status: no claim either way.
  *
- *   These are JavaScript's readings, and the SQL that ships them (PR 2) must
- *   reproduce them on every thought, not only on this panel's rankings. The
- *   known gaps: JS `\b` (no `u` flag) treats only ASCII as word characters,
- *   PostgreSQL's `\m`/`\M` (its `\b` is a backspace) follow the locale, so
- *   `éSMD-12` is a key here and not there; strings() keeps only string
- *   elements of an array, where jsonb_array_elements_text would stringify an
- *   object or number and refuse a scalar; and the pattern is case-sensitive in
- *   both, so a lower-cased topic (`smd-2074`) is no central reference.
+ *   These are JavaScript's readings (evals/transitive-freshness.ts); migration
+ *   077's ticket_references reproduces them in SQL, and --sql-check holds the two
+ *   to each other on every thought of a brain at 077. The places they could
+ *   part, and how 077 closes each: PostgreSQL's `\m`/`\M` read the locale's
+ *   letters as word characters (its `\b` is a backspace), so 077 reads keys
+ *   with ASCII lookarounds, which are JS `\b` (no `u` flag) beside an ASCII
+ *   letter or digit; jsonb_array_elements_text would stringify an object or
+ *   number in topics, so 077 keeps string elements alone, as strings() does;
+ *   and the pattern is case-sensitive in both, so a lower-cased topic
+ *   (`smd-2074`) is no central reference in either.
  *
  *   The candidate rules, each applied ONLY to a thought with no lifecycle of its
  *   own (node_state's open IS NULL — a ticket row's own status always wins):
@@ -152,6 +154,9 @@
  *   … eval-transitive-freshness.ts --dump-unlabelled <file>   every hit (b) or a
  *        top 10 needs and the labels lack, with its text, to label from (write
  *        it outside the repo)
+ *   … eval-transitive-freshness.ts --sql-check                on a brain at 077:
+ *        its SQL equals the rule on every thought, and search_thoughts_current
+ *        the oracle's central+share-veto ranking on every panel query
  *   bun eval-transitive-freshness.ts --self-check             the rules, the
  *        oracle, the verdict's arithmetic and the labels' provenance; no database
  */
@@ -162,80 +167,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEmbedder, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { egressRefusal } from "../db/worker-bootstrap.ts";
+import { DEMOTE_WEIGHT, refsOf, RULES, SHARE_MIN, transitiveDemotion, type Refs, type Rule, type StatusOf } from "./transitive-freshness.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LABELS_PATH = join(HERE, "fixtures", "transitive-freshness-labels.json");
 
 // ── The rules (pure) ─────────────────────────────────────────────────────────
 
-/** A ticket key: Linear's TEAM-123 shape, whole-word. */
-const KEY_RE = /\b([A-Z][A-Z0-9]+-[0-9]+)\b/g;
-/** The session hook's header: `Session summary — SMD-1234 — claude-code — …` names the branch's ticket. */
-const HEADER_RE = /^Session summary — ([A-Z][A-Z0-9]+-[0-9]+) —/;
-
-export const SHARE_MIN = 3;
-/** The settled share the share rules need, as a fraction compared in integers (2/3 × 3 is not exactly 2 in every float order). */
-export const SHARE = { num: 2, den: 3 } as const;
-/** search_demote_weight() (059): what a demoted row's fused score is multiplied by. */
-export const DEMOTE_WEIGHT = 0.25;
-
-export const RULES = ["none", "central", "central-topics", "central+share", "share", "central-veto", "central+share-veto"] as const;
-export type Rule = (typeof RULES)[number];
-
 type Kind = "planning" | "heldout" | "control" | "topical";
 /** A registration: its rules, the narrow ones (a wide rule must beat them by 2), the windows (b) reads, the stale@10 it is decided on, and whether (c) is part of it. */
 type Registration = { title: string; rules: readonly Rule[]; narrow: readonly Rule[]; bOver: readonly Kind[]; on: "planning" | "heldout"; withC: boolean };
 const FIRST: Registration = { title: "The first registration (P1–P4)", rules: ["central", "central-topics", "central+share", "share"], narrow: ["central", "central-topics"], bOver: ["planning", "control"], on: "planning", withC: true };
 const SECOND: Registration = { title: "The second registration (H1–H4)", rules: ["central-veto", "central+share-veto"], narrow: ["central-veto"], bOver: ["planning", "heldout", "control"], on: "heldout", withC: false };
-
-export type Refs = { central: string[]; centralTopics: string[]; body: string[] };
-
-function keysIn(text: string): string[] {
-  return [...new Set([...text.matchAll(KEY_RE)].map((m) => m[1]))].sort();
-}
-
-function strings(v: unknown): string[] {
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
-}
-
-/** A thought's ticket references: central (topics, action items, the summary header's key) and body (every key in its text). */
-export function refsOf(content: string, metadata: Record<string, unknown> | null): Refs {
-  const m = metadata ?? {};
-  const centralTopics = keysIn([...strings(m.topics), ...strings(m.action_items)].join("\n"));
-  const header = HEADER_RE.exec(content)?.[1];
-  const central = [...new Set([...centralTopics, ...(header ? [header] : [])])].sort();
-  return { central, centralTopics, body: keysIn(content) };
-}
-
-/** The status a key's ticket head carries, or undefined when the brain holds no head or the status is not a known lifecycle type. */
-export type StatusOf = (key: string) => string | undefined;
-
-/**
- * Whether `rule` demotes a lifecycle-less thought with these references, and
- * the settled keys that decide it (sorted); null when it does not. The caller
- * applies it only where node_state's open IS NULL.
- */
-export function transitiveDemotion(refs: Refs, statusOf: StatusOf, settled: ReadonlySet<string>, rule: Rule): string[] | null {
-  if (rule === "none") return null;
-  const known = (keys: string[]) => keys.filter((k) => statusOf(k) !== undefined);
-  const allSettled = (keys: string[]) => keys.every((k) => settled.has(statusOf(k)!));
-  const share = (keys: string[], min: number) => {
-    const s = keys.filter((k) => settled.has(statusOf(k)!));
-    return keys.length >= min && s.length * SHARE.den >= SHARE.num * keys.length ? s : null;
-  };
-  if (rule === "share") return share(known(refs.body), 1);
-  const central = known(rule === "central-topics" ? refs.centralTopics : refs.central);
-  const body = known(refs.body);
-  if (rule === "central-veto" || rule === "central+share-veto") {
-    // The open veto: a thought naming ANY open ticket, anywhere in its text, is
-    // never demoted — what it puts forward may be that ticket.
-    if (body.some((k) => !settled.has(statusOf(k)!))) return null;
-    if (central.length > 0) return allSettled(central) ? central : null;
-    return rule === "central+share-veto" && body.length >= SHARE_MIN ? body : null;
-  }
-  if (central.length > 0) return allSettled(central) ? central : null;
-  return rule === "central+share" ? share(body, SHARE_MIN) : null;
-}
 
 /** One row of the hybrid's window, with what node_state says of it. */
 export type WindowRow = { id: string; fused: number; ord: number; settled: boolean; superseded: boolean; lifecycle: boolean };
@@ -559,6 +502,70 @@ async function measure(url: string, dumpPath: string | undefined) {
   await sql.end();
 }
 
+// ── --sql-check: migration 077 against the rule, on a brain at 077 ──────────
+
+/**
+ * On a brain at 077 (read-only): ticket_references and ticket_references_settled
+ * equal refsOf and transitiveDemotion(central+share-veto) on EVERY thought, and
+ * search_thoughts_current's top 10 equals the oracle's central+share-veto
+ * ranking on every panel query. test-schema [69] holds the two on hand cases
+ * and a fuzz; this holds them on a real corpus. Exit 1 on any difference.
+ */
+async function sqlCheck(url: string) {
+  const sql = new SQL({ url, max: 1, connection: { default_transaction_read_only: "on" } });
+  const [has] = await sql`SELECT to_regprocedure('ticket_references_settled(text, jsonb)') IS NOT NULL AS ok`;
+  if (!has.ok) { console.error("--sql-check needs a brain at migration 077 (ticket_references_settled)"); process.exit(2); }
+  const [types] = await sql`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`;
+  const known = new Set<string>(types.known), settled = new Set<string>(types.settled);
+  const heads = new Map<string, string>();
+  for (const h of await sql`SELECT issue, status_type FROM ob1_ticket_head`) if (known.has(h.status_type)) heads.set(h.issue, h.status_type);
+  const statusOf: StatusOf = (k) => heads.get(k);
+  const rows = await sql`
+      SELECT t.id::text AS id, t.content, t.metadata, s.open IS NOT NULL AS lifecycle,
+             (SELECT coalesce(string_agg(r.issue, ',') FILTER (WHERE r.in_body), '') FROM ticket_references(t.content, t.metadata) r) AS body,
+             (SELECT coalesce(string_agg(r.issue, ',') FILTER (WHERE r.central), '') FROM ticket_references(t.content, t.metadata) r) AS central,
+             ticket_references_settled(t.content, t.metadata) AS settled_keys
+        FROM thoughts t LEFT JOIN node_state(NULL) s ON s.thought_id = t.id`;
+  const misses: string[] = [];
+  let demoted = 0;
+  const thoughts = new Map<string, { refs: Refs; lifecycle: boolean }>();
+  for (const r of rows) {
+    const refs = refsOf(r.content, r.metadata);
+    thoughts.set(r.id, { refs, lifecycle: r.lifecycle });
+    const js = transitiveDemotion(refs, statusOf, settled, "central+share-veto");
+    if (r.settled_keys !== null) demoted++;
+    if (r.body !== refs.body.join() || r.central !== refs.central.join() || JSON.stringify(r.settled_keys) !== JSON.stringify(js))
+      misses.push(`${r.id.slice(0, 8)}: sql body ${r.body} central ${r.central} → ${JSON.stringify(r.settled_keys)}; js body ${refs.body} central ${refs.central} → ${JSON.stringify(js)}`);
+  }
+  console.log(`ticket_references / ticket_references_settled against refsOf / transitiveDemotion(central+share-veto): ${rows.length} thoughts, ${misses.length} differing, ${demoted} with settled keys (lifecycle-less or not)`);
+  for (const m of misses.slice(0, 10)) console.log(`  ${m}`);
+
+  const embedCfg = resolveEmbedConfig(process.env as EmbedEnv);
+  const refused = egressRefusal(embedCfg.embeddings, embedCfg.egress, ["marker"]);
+  if (refused) { console.error(`the embeddings endpoint is not available (${refused}); declare it local (OB1_LLM_LOCAL=1)`); process.exit(2); }
+  const embedder = createEmbedder(() => embedCfg, { rememberRefusal: false });
+  let rankMisses = 0;
+  for (const p of PANEL) {
+    const qv = `[${(await embedder.getEmbedding(p.query, { kind: "query", content: p.query }, "query")).join(",")}]`;
+    const win = (await sql`
+        SELECT h.id::text AS id, h.score AS fused, h.ord::int AS ord,
+               coalesce(s.open = false, false) AS settled, s.superseded_by IS NOT NULL AS superseded, s.open IS NOT NULL AS lifecycle
+          FROM search_thoughts_hybrid(${qv}::vector, ${p.query}::text, 0::float, ${Math.min(100, 4 * N)}::int, '{}'::jsonb, 0::float, 90::float)
+               WITH ORDINALITY AS h(id, content, metadata, created_at, similarity, matched_needles, needles, needle_counts, common_needles, literal_only, score, ord)
+          LEFT JOIN node_state(NULL) s ON s.thought_id = h.id
+         ORDER BY h.ord`) as WindowRow[];
+    const shipped = (await sql`SELECT id::text AS id, demoted FROM search_thoughts_current(${qv}::vector, ${p.query}::text, 0::float, ${N}::int, '{}'::jsonb, 0::float, 90::float)`) as { id: string; demoted: string[] | null }[];
+    const oracle = rerank(win, N, (r) => { const th = thoughts.get(r.id); return th !== undefined && transitiveDemotion(th.refs, statusOf, settled, "central+share-veto") !== null; });
+    const same = shipped.map((x) => x.id).join() === oracle.map((x) => x.id).join()
+      && shipped.every((x, i) => (x.demoted !== null) === oracle[i].demoted && (x.demoted ?? []).some((d) => d.startsWith("references settled work (")) === oracle[i].transitive);
+    if (!same) rankMisses++;
+    console.log(`  ${p.name}: search_thoughts_current ${same ? "=" : "≠"} the oracle's central+share-veto top ${N}${same ? "" : `\n    shipped ${shipped.map((x) => x.id.slice(0, 8)).join(" ")}\n    oracle  ${oracle.map((x) => x.id.slice(0, 8)).join(" ")}`}`);
+  }
+  await sql.end();
+  console.log(misses.length === 0 && rankMisses === 0 ? "sql-check: OK" : `sql-check: ${misses.length} thought(s) and ${rankMisses} quer${rankMisses === 1 ? "y" : "ies"} differ`);
+  if (misses.length || rankMisses) process.exit(1);
+}
+
 // ── The self-check ───────────────────────────────────────────────────────────
 
 function selfCheck() {
@@ -666,6 +673,7 @@ if (import.meta.main) {
     }
     const url = process.env.DATABASE_URL;
     if (!url) { console.error("DATABASE_URL required (built inside the container from $POSTGRES_PASSWORD) — or --self-check"); process.exit(2); }
-    await measure(url, dump);
+    if (process.argv.includes("--sql-check")) await sqlCheck(url);
+    else await measure(url, dump);
   }
 }
