@@ -249,6 +249,15 @@ jobs:
         working-directory: evals
         run: bun eval-jev-gate.ts --self-check
 
+      # The transitive-freshness eval's rules (SMD-2271): a thought's ticket
+      # references (central and body), each candidate rule's demotion, 059's
+      # re-sort with the transitive reason beside the reflexive one, and the
+      # committed labels' shape — probed with hand-known answers. No database,
+      # no model; the measurement reads the dogfood brain.
+      - name: Transitive-freshness rules
+        working-directory: evals
+        run: bun eval-transitive-freshness.ts --self-check
+
       # The orchestration profile's provisioning rules (SMD-2210), with no real
       # n8n:
       # - the brain-key rule (write refused, the declared scope held, a key
