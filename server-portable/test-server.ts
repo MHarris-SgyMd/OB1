@@ -243,6 +243,7 @@ console.log("\n[5b] A refused NOTIFICATION (no id) gets no JSON-RPC body — 202
   // Retry-After is not CORS-safelisted, so it is exposed for browser clients to
   // read off the busy refusal (SMD-2106); corsHeaders carries it on every answer.
   assert((badMethod.headers.get("access-control-expose-headers") ?? "").includes("Retry-After"), "responses expose Retry-After so a browser client can read it");
+  assert(["Deprecation", "Link"].every((h) => (badMethod.headers.get("access-control-expose-headers") ?? "").split(/,\s*/).includes(h)), "…and Deprecation and Link, the root URL's window the proxy adds (SMD-2306)");
 }
 
 console.log("\n[6] Auth via ?key= — the documented connector path");
@@ -1616,6 +1617,77 @@ console.log("\n[18] Async job routes: keyed GETs, no key shown nothing, an id re
   for (const path of ["/jobs", "/jobs/"]) {
     const p = await probe(path, { headers: H });
     assert(p.status === 405, `GET ${path} (no id) → 405, not a match (${p.status})`);
+  }
+}
+
+console.log("\n[19] A key on the old root URL is logged once, by name, only when the proxy's legacy route marked the request (SMD-2306)");
+{
+  // The proxy's legacy route sets the marker and its /mcp route deletes it
+  // (deploy/compose.yaml); CI's deploy-stack job holds that half. Here: the
+  // server logs a marked request's key name once, after the key check, and
+  // never an unmarked one, which a server with no proxy in front only gets —
+  // from the MCP endpoint and from a keyed REST route alike (review pass 1:
+  // a script polling /worker-status at the root was never named). A fresh
+  // module, so its env holds the named keys below and its once-per-name set is new.
+  const { createHash } = await import("node:crypto");
+  const hash = (k: string) => createHash("sha256").update(k).digest("hex");
+  // A name per route, so each call site's line is its own (review pass 2:
+  // with one name shared by two routes, the second route's call was unheld).
+  const NAMED = { agent: "write", script: "read", poller: "read", monitor: "read", operator: "write", reader: "read" } as const;
+  const keyOf = (name: keyof typeof NAMED) => `legacy-${name}-key-0123456789`;
+  const SCRIPT_KEY = keyOf("script"), AGENT_KEY = keyOf("agent");
+  process.env.MCP_ACCESS_KEYS = Object.entries(NAMED).map(([n, scope]) => `${n}:${scope}:${hash(keyOf(n as keyof typeof NAMED))}`).join(",");
+  const specifier = "./index.ts?legacy-route"; // a variable, so tsc does not try to resolve the query string as a module
+  const fresh = (await import(specifier)) as { default: { fetch: (req: Request) => Response | Promise<Response> }; legacyRouteLine: (name: string, method: string, path: string) => string };
+  const srv = Bun.serve({ port: 0, fetch: fresh.default.fetch });
+  const MARK = { "x-ob1-legacy-route": "1" };
+  const warned: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  const send = (path: string, headers: Record<string, string>, method = "POST") =>
+    fetch(`http://localhost:${srv.port}${path}`, { method, headers, body: method === "POST" ? INIT : undefined, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 5) }).then((r) => r.text()).catch(() => "");
+  const said = () => warned.filter((w) => w.includes("old root URL"));
+  try {
+    await send("/", { ...H, "x-brain-key": AGENT_KEY });
+    await send("/", { ...H, ...MARK, "x-brain-key": AGENT_KEY, "x-ob1-legacy-route": "0" });
+    await send("/", { ...H, ...MARK, "x-brain-key": "not-a-configured-key" });
+    await send("/", { ...H, ...MARK });
+    await send("/worker-status", { ...MARK, "x-brain-key": "not-a-configured-key" }, "GET");
+    const before = said().length;
+    await send("/?x=1", { ...H, ...MARK, "x-brain-key": AGENT_KEY });
+    await send("/", { ...H, ...MARK, "x-brain-key": AGENT_KEY });
+    const mcp = said();
+    await send("/worker-status?x=1", { ...MARK, "x-brain-key": SCRIPT_KEY }, "GET");
+    await send("/jobs/00000000-0000-4000-8000-000000000000", { ...MARK, "x-brain-key": SCRIPT_KEY }, "GET");
+    const rest = said().slice(mcp.length);
+    // The other keyed routes, each with a name of its own; a read key on a
+    // write action is refused before the line, as a wrong key is.
+    const fromHere = said().length;
+    const action = (key: string) => fetch(`http://localhost:${srv.port}/worker-run`, { method: "POST", headers: { ...MARK, "x-brain-key": key, "Content-Type": "application/json" }, body: JSON.stringify({ work_type: "x", dry_run: true }), signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 5) }).then((r) => r.text()).catch(() => "");
+    await action(keyOf("reader"));
+    await action(keyOf("operator"));
+    await send("/jobs/00000000-0000-4000-8000-000000000000/stream", { ...MARK, "x-brain-key": keyOf("poller") }, "HEAD");
+    await send("/jobs/00000000-0000-4000-8000-000000000000", { ...MARK, "x-brain-key": keyOf("poller") }, "GET");
+    await send("/x/health", { ...MARK, "x-brain-key": keyOf("monitor") }, "GET");
+    const others = said().slice(fromHere);
+    await send("/a%22)%20key%20%22admin%22%20(", { ...H, ...MARK, "x-brain-key": KEY });
+    const forged = said().slice(fromHere + others.length);
+    assert(before === 0, `no line for an unmarked request, a marker other than 1, a wrong key or no key, on either route (${before})`);
+    assert(mcp.length === 1 && mcp[0] === fresh.legacyRouteLine("agent", "POST", "/"), `two marked MCP calls → one line naming the key, the method and the path, never the query (${mcp.join(" | ")})`);
+    assert(rest.length === 1 && rest[0] === fresh.legacyRouteLine("script", "GET", "/worker-status"), `a marked GET /worker-status, then /jobs/<id>, with another key → one line naming it (${rest.join(" | ")})`);
+    const expected = [
+      fresh.legacyRouteLine("operator", "POST", "/worker-run"),
+      fresh.legacyRouteLine("poller", "GET", "/jobs/00000000-0000-4000-8000-000000000000"),
+      fresh.legacyRouteLine("monitor", "GET", "/x/health"),
+    ];
+    assert(JSON.stringify(others) === JSON.stringify(expected), `a worker action, /jobs/<id> (its HEAD shown nothing first) and /health under a prefix each name their key once; a read key on the write action is not named (${others.join(" | ")})`);
+    assert(forged.length === 1 && forged[0].includes(`(POST "/a%22)%20key%20%22admin%22%20(")`) && !forged[0].includes(`key "admin"`), `the path is the raw one, quoted, so a client cannot write a key's name into the line (${forged[0]})`);
+    assert(fresh.legacyRouteLine("n", "POST", `/${"x".repeat(5000)}`).length < 500, "a long path is cut");
+    assert(!said().some((l) => [KEY, ...Object.keys(NAMED).map((n) => keyOf(n as keyof typeof NAMED))].some((k) => l.includes(k))), "no line carries a key itself");
+  } finally {
+    console.warn = realWarn;
+    srv.stop(true);
+    delete process.env.MCP_ACCESS_KEYS;
   }
 }
 

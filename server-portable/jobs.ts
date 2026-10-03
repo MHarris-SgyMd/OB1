@@ -75,11 +75,20 @@ export interface PublicJob {
 export interface JobHandle {
   jobId: string;
   status: "accepted";
-  /** The keyed REST poll route (relative). */
+  /** The keyed REST poll route, root-relative here; atEndpoint puts it under the endpoint the call came to. */
   poll: string;
-  /** The keyed REST SSE route (relative). */
+  /** The keyed REST SSE route, the same way. */
   stream: string;
 }
+
+/**
+ * The handle's routes under the endpoint the call came to (`/mcp` behind the
+ * proxy, nothing at a bare server's root): the server answers /jobs/<id> under
+ * any prefix (index.ts JOBS_PATH), and behind the proxy a root-relative link
+ * reached the server only through the legacy route, which v2.0.0 removes
+ * (SMD-2306). `endpoint` has no trailing slash.
+ */
+export const atEndpoint = (h: JobHandle, endpoint: string): JobHandle => ({ ...h, poll: endpoint + h.poll, stream: endpoint + h.stream });
 
 /** What a running job body is given: a way to report progress and a signal that aborts on stop or timeout. */
 export interface JobContext {

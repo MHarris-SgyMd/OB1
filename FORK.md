@@ -55,12 +55,16 @@ remembered:
 
 - **MAJOR** — a migration changes a shipped function's signature or return shape
   (020's `match_thoughts`, 014's sentinel), drops or renames a shipped
-  table/column/index a client can see, or changes the MCP tool surface
-  incompatibly (a tool removed, an argument's meaning changed). A client written
-  against `N.x` keeps working on `N.y`.
+  table/column/index a client can see, changes the MCP tool surface
+  incompatibly (a tool removed, an argument's meaning changed), or stops
+  answering a URL or transport a configured client uses (the origin root the
+  proxy's `/mcp` replaced closes with 2.0.0: SMD-2306, SMD-2532). A client
+  written against `N.x` keeps working on `N.y`; a URL it was given goes only
+  after a release has said so on every answer, in a `Deprecation` header.
 - **MINOR** — an additive migration (a new function; a new column with
   `IF NOT EXISTS`; an index swapped under the same names), a new tool, a new
-  worker, a new preflight check.
+  worker, a new preflight check, or a surface marked deprecated (SemVer §7;
+  the root URL's `Deprecation` header, SMD-2306).
 - **PATCH** — no schema change: server, docs, evals, tests, or a migration that
   only re-comments (028, 043).
 
