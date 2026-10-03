@@ -32,9 +32,15 @@ const KEYED_ANSWERS = {
   "404": refusal(`Nothing there: ${codesAt(404)}.`),
   "409": refusal(`The state conflicts: ${codesAt(409)}.`),
   "422": refusal(`A reference to nothing, or a refusal the store named: ${codesAt(422)}.`),
+  "405": refusal("A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does."),
   "500": refusal("A fault (FAILED, with its message; no retryable until SMD-2461)."),
   "501": refusal(`A mode not built: ${codesAt(501)}.`),
-  "503": refusal(`Retry, after Retry-After: the agent registry is busy (BUSY), capture's store fault (STORE_UNAVAILABLE), or ${codesAt(503)}.`),
+  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY), capture's store fault (STORE_UNAVAILABLE), or ${codesAt(503)}.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
+};
+/** A keyed operation's answers: every one of KEYED_ANSWERS but 501, which only an operation with a mode not built (run_worker's drain) gives. */
+const answersFor = (name: ToolName) => {
+  const { "501": notBuilt, ...rest } = KEYED_ANSWERS;
+  return name === "run_worker" ? { ...rest, "501": notBuilt } : rest;
 };
 
 export function openApiDocument(): Json {
@@ -59,14 +65,14 @@ export function openApiDocument(): Json {
       ...(parameters.length ? { parameters } : {}),
       ...(readsQuery(route.method) ? {} : { requestBody: { required: required.size > 0, content: { "application/json": { schema: input } } } }),
       responses: {
-        [String(route.ok)]: { description: name === "capture_thought" ? "The thought, with `embeddingAttached`; a key that cannot read is told its id, `embeddingCall`, `chunks` and `contextFailures` alone. A save whose vector did not attach is `{ id, embeddingAttached: false }`." : "The operation's value.", content: { "application/json": { schema: { type: "object" } } } },
-        ...KEYED_ANSWERS,
+        [String(route.ok)]: { description: name === "capture_thought" ? "The thought, with `embeddingAttached` — whether this capture wrote its vector with the row (false when the egress gate refused the embedding call); a key that cannot read is told its id, `embeddingCall`, `chunks` and `contextFailures` alone. A save whose vector did not attach (the PostgREST two-step) is `{ id, embeddingAttached: false }`." : "The operation's value.", content: { "application/json": { schema: { type: "object" } } } },
+        ...answersFor(name),
       },
       security: KEYED,
     };
   }
-  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call.", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": refusal("No key, a wrong key or a revoked one."), "503": KEYED_ANSWERS["503"] }, security: KEYED } };
-  paths["/v1/jobs/{job_id}/stream"] = { get: { operationId: "job_stream", summary: "A job's events", description: "The job's progress and its end as server-sent events, for the key that started it.", parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "An event stream.", content: { "text/event-stream": {} } }, "401": KEYED_ANSWERS["401"], "403": KEYED_ANSWERS["403"], "404": refusal("No such job for this key."), "503": KEYED_ANSWERS["503"] }, security: KEYED } };
+  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call.", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": refusal("No key, a wrong key or a revoked one."), "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
+  paths["/v1/jobs/{job_id}/stream"] = { get: { operationId: "job_stream", summary: "A job's events", description: "The job's progress and its end as server-sent events, for the key that started it.", parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "An event stream.", content: { "text/event-stream": {} } }, "401": KEYED_ANSWERS["401"], "403": KEYED_ANSWERS["403"], "404": refusal("No such job for this key."), "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
   paths["/health"] = { get: { operationId: "health", summary: "Liveness", description: "Internal only: the process is serving. No key, nothing about the brain.", responses: { "200": { description: "Serving." } }, security: [] } };
   return {
     openapi: "3.1.0",

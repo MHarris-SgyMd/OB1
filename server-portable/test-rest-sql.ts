@@ -150,29 +150,31 @@ const ids: string[] = [];
 
 console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST answer, text and structuredContent");
 {
-  type Case = [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, render: (v: never) => say.Reply];
+  // Each case names what makes its page non-empty, so no comparison is two empty pages.
+  type Case = [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, render: (v: never) => say.Reply, filled: (v: Record<string, unknown>) => boolean];
+  const has = (key: string) => (v: Record<string, unknown>) => Array.isArray(v[key]) && (v[key] as unknown[]).length > 0;
   const cases: Case[] = [
-    ["search", { query: "alpha" }, "POST", "/v1/search/compat", { query: "alpha" }, (v) => say.renderSearch(ok(v))],
-    ["fetch", { id: ids[1] }, "GET", `/v1/thoughts/${ids[1]}`, undefined, (v) => say.renderFetch(ok(v))],
-    ["search_thoughts", { query: "alpha", limit: 5 }, "POST", "/v1/search", { query: "alpha", limit: 5 }, (v) => say.renderSearchThoughts(ok(v), false)],
-    ["search_thoughts", { query: "beta", prefer_current: true }, "POST", "/v1/search", { query: "beta", prefer_current: true }, (v) => say.renderSearchThoughts(ok(v), true)],
-    ["search_thoughts_keyword", { query: "thought through" }, "POST", "/v1/search/keyword", { query: "thought through" }, (v) => say.renderSearchThoughtsKeyword(ok(v))],
-    ["list_thoughts", { limit: 5 }, "GET", "/v1/thoughts?limit=5", undefined, (v) => say.renderListThoughts(ok(v))],
-    ["list_thought_ids", { limit: 2 }, "GET", "/v1/thought-ids?limit=2", undefined, (v) => say.renderThoughtIds(ok(v))],
-    ["list_logged_searches", {}, "GET", "/v1/logged-searches", undefined, (v) => say.renderLoggedSearches(ok(v))],
-    ["list_supersession_proposals", { status: "all" }, "GET", "/v1/proposals?status=all", undefined, (v) => say.renderSupersessionProposals(ok(v))],
-    ["thought_stats", {}, "GET", "/v1/stats", undefined, (v) => say.renderThoughtStats(ok(v))],
-    ["thought_changes", { limit: 10, actions: ["capture"] }, "GET", "/v1/changes?limit=10&actions=capture", undefined, (v) => say.renderThoughtChanges(ok(v))],
-    ["worker_status", {}, "GET", "/v1/workers", undefined, (v) => say.renderWorkerStatus(ok(v))],
+    ["search", { query: "alpha" }, "POST", "/v1/search/compat", { query: "alpha" }, (v) => say.renderSearch(ok(v)), has("results")],
+    ["fetch", { id: ids[1] }, "GET", `/v1/thoughts/${ids[1]}`, undefined, (v) => say.renderFetch(ok(v)), (v) => v.id === ids[1]],
+    ["search_thoughts", { query: "alpha", limit: 5 }, "POST", "/v1/search", { query: "alpha", limit: 5 }, (v) => say.renderSearchThoughts(ok(v), false), has("hits")],
+    ["search_thoughts", { query: "beta", prefer_current: true }, "POST", "/v1/search", { query: "beta", prefer_current: true }, (v) => say.renderSearchThoughts(ok(v), true), has("hits")],
+    ["search_thoughts_keyword", { query: "thought through" }, "POST", "/v1/search/keyword", { query: "thought through" }, (v) => say.renderSearchThoughtsKeyword(ok(v)), has("hits")],
+    ["list_thoughts", { limit: 5 }, "GET", "/v1/thoughts?limit=5", undefined, (v) => say.renderListThoughts(ok(v)), has("thoughts")],
+    ["list_thought_ids", { limit: 2 }, "GET", "/v1/thought-ids?limit=2", undefined, (v) => say.renderThoughtIds(ok(v)), has("ids")],
+    ["list_logged_searches", {}, "GET", "/v1/logged-searches", undefined, (v) => say.renderLoggedSearches(ok(v)), has("searches")],
+    ["list_supersession_proposals", { status: "all" }, "GET", "/v1/proposals?status=all", undefined, (v) => say.renderSupersessionProposals(ok(v)), has("proposals")],
+    ["thought_stats", {}, "GET", "/v1/stats", undefined, (v) => say.renderThoughtStats(ok(v)), (v) => typeof v.total === "number" && v.total > 0],
+    ["thought_changes", { limit: 10, actions: ["capture"] }, "GET", "/v1/changes?limit=10&actions=capture", undefined, (v) => say.renderThoughtChanges(ok(v)), has("changes")],
+    ["worker_status", {}, "GET", "/v1/workers", undefined, (v) => say.renderWorkerStatus(ok(v)), has("pools")],
   ];
   const covered = new Set<string>();
-  for (const [tool, args, method, path, body, render] of cases) {
+  for (const [tool, args, method, path, body, render, filled] of cases) {
     const r = await rest(method, path, body);
     const m = await mcp(tool, args);
     const out = rendered(render, r.body);
     covered.add(tool);
     assert(r.status === 200 && !m.isError, `${tool}: both doors answer (${r.status}, ${m.isError ? "error" : "ok"})`);
-    assert(!/^\{"[a-z]+":\[\]/i.test(JSON.stringify(r.body)) && !same(r.body, { pools: [] }), `${tool}: …over something, not an empty page (${JSON.stringify(r.body).slice(0, 60)})`);
+    assert(filled(r.body), `${tool}: …over something, not an empty page (${JSON.stringify(r.body).slice(0, 60)})`);
     assert(out.content[0].text === m.text, `${tool}: the MCP text is the REST value rendered (${out.content[0].text === m.text ? "same" : `REST→ ${out.content[0].text.slice(0, 80)} | MCP ${m.text.slice(0, 60)}`})`);
     assert(same(out.structuredContent, m.sc), `${tool}: …and its structuredContent (first difference: ${firstDiff(out.structuredContent, m.sc)})`);
   }
@@ -226,9 +228,27 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   }
 }
 
+console.log("\n[3b] A GET sent with a body, as curl or n8n may send it: Bun drops the body, the REST core refuses the request rather than answer without it");
+{
+  // Bun's fetch will not send a GET body, so a raw request on a socket.
+  const { connect } = await import("node:net");
+  const raw = (request: string) => new Promise<string>((resolve, reject) => {
+    const sock = connect(apiServer.port!, "127.0.0.1", () => sock.write(request));
+    let got = "";
+    sock.on("data", (d) => { got += d.toString(); if (got.includes("\r\n\r\n")) { sock.destroy(); resolve(got); } });
+    sock.on("error", reject);
+    setTimeout(() => { sock.destroy(); resolve(got); }, 3_000);
+  });
+  const body = JSON.stringify({ limit: 1 });
+  const withBody = await raw(`GET /v1/thoughts HTTP/1.1\r\nHost: api\r\nx-brain-key: ${KEYS.writer}\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
+  assert(/^HTTP\/1\.1 400 /.test(withBody), `a GET carrying {"limit":1} is a 400, not every row (${withBody.split("\r\n")[0]})`);
+  const plain = await raw(`GET /v1/thoughts?limit=1 HTTP/1.1\r\nHost: api\r\nx-brain-key: ${KEYS.writer}\r\nConnection: close\r\n\r\n`);
+  assert(/^HTTP\/1\.1 200 /.test(plain), `…while the same GET with its input in the query is a 200 (${plain.split("\r\n")[0]})`);
+}
+
 console.log("\n[4] A job through REST: a handle on this server's routes, its poll the job_status tool's answer, its stream");
 {
-  const s = await rest("POST", "/v1/jobs/scan", { limit: 10 }, KEYS.reader);
+  const s = await rest("POST", "/v1/scans", { limit: 10 }, KEYS.reader);
   const jobId = String(s.body.jobId);
   const sm = await mcp("scan_thoughts", { limit: 10 }, KEYS.reader);
   assert(same(Object.keys(s.body).sort(), Object.keys(sm.sc).sort()) && s.body.status === sm.sc.status && sm.sc.poll === `/jobs/${sm.sc.jobId}`,

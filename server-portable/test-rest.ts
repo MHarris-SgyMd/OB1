@@ -66,13 +66,17 @@ console.log("\n[2] The OpenAPI document lists every operation the tools expose, 
   }
   assert(ops.includes("whoami") && ops.includes("job_stream"), "whoami and the job stream are operations");
   // Every status a keyed operation can answer is documented, each refusal's code under its own.
-  const statuses = new Set(["400", "401", "403", "500", "503", ...Object.values(REFUSAL_STATUS).map(String)]);
-  for (const r of Object.values(ROUTES)) {
-    const responses = (doc.paths[r.path][r.method.toLowerCase()] as unknown as { responses: Record<string, { description: string }> }).responses;
-    const missing = [...statuses].filter((s) => !(s in responses));
-    assert(missing.length === 0, `${r.method} ${r.path} documents every status it can answer${missing.length ? ` (missing ${missing.join(", ")})` : ""}`);
+  // 501 is the one status only an operation with a mode not built gives (run_worker's drain).
+  const statuses = new Set(["400", "401", "403", "405", "500", "503", ...Object.values(REFUSAL_STATUS).map(String)]);
+  const responsesOf = (r: { path: string; method: string }) => (doc.paths[r.path][r.method.toLowerCase()] as unknown as { responses: Record<string, { description: string; headers?: Record<string, unknown> }> }).responses;
+  for (const [name, r] of Object.entries(ROUTES)) {
+    const responses = responsesOf(r);
+    const want = [...statuses].filter((s) => s !== "501" || name === "run_worker");
+    const missing = want.filter((s) => !(s in responses));
+    assert(missing.length === 0 && ("501" in responses) === (name === "run_worker"), `${r.method} ${r.path} documents every status it can answer, and 501 only on run_worker${missing.length ? ` (missing ${missing.join(", ")})` : ""}`);
+    assert(responses["503"]?.headers?.["Retry-After"] !== undefined, `${r.method} ${r.path}: its 503 declares Retry-After`);
   }
-  const codeLines = Object.values((doc.paths["/v1/thoughts"].post as unknown as { responses: Record<string, { description: string }> }).responses).map((x) => x.description).join(" ");
+  const codeLines = Object.values(ROUTES).flatMap((r) => Object.values(responsesOf(r)).map((x) => x.description)).join(" ");
   assert(Object.keys(REFUSAL_STATUS).filter((c) => c !== "EMBEDDING_NOT_ATTACHED").every((c) => codeLines.includes(c)), "…and names every refusal code under its status");
 }
 
@@ -200,12 +204,15 @@ console.log("\n[7] A refusal answers its code, its status and its declared facts
   const created = await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
   const cb = await created.json() as Record<string, unknown>;
   assert(created.status === 201 && JSON.stringify(cb) === JSON.stringify({ id: "saved-id", embeddingAttached: false }) && created.headers.get("location") === "/v1/thoughts/saved-id", `a save whose vector did not attach is a creation, flagged (${created.status} ${JSON.stringify(cb)})`);
-  answer = async () => ok({ id: "new-id", reader: true });
+  answer = async () => ok({ id: "new-id", reader: true, embeddings: { allowed: true, reason: "allowed" } });
   const made = await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
   const mb = await made.json() as Record<string, unknown>;
   assert(made.status === 201 && mb.embeddingAttached === true && made.headers.get("location") === "/v1/thoughts/new-id", "a capture is 201 with its Location, its vector attached");
+  answer = async () => ok({ id: "bare-id", reader: true, embeddings: { allowed: false, reason: "refused: deny" } });
+  const bare = await (await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) })).json() as Record<string, unknown>;
+  assert(bare.embeddingAttached === false, `a capture whose embedding the gate refused is saved without a vector, and says so (${bare.embeddingAttached})`);
   answer = async () => ok({ jobId: "j1", status: "accepted", poll: "/jobs/j1", stream: "/jobs/j1/stream" });
-  r = await json(await hit("/v1/jobs/scan", { key: "read-raw", method: "POST", body: "{}" }));
+  r = await json(await hit("/v1/scans", { key: "read-raw", method: "POST", body: "{}" }));
   assert(r.status === 202 && r.body.poll === "/v1/jobs/j1" && r.body.stream === "/v1/jobs/j1/stream", `a job's handle points at this server's routes (${JSON.stringify(r.body)})`);
   answer = async () => { throw new Error("connection refused"); };
   r = await json(await hit("/v1/stats", { key: "read-raw" }));
@@ -219,8 +226,18 @@ console.log("\n[7b] HEAD answers standing without running the operation; input s
   calls.length = 0;
   let r = await hit("/v1/thoughts/the-id", { key: "read-raw", method: "HEAD" });
   assert(r.status === 200 && (await r.text()) === "" && calls.length === 0, `HEAD on a GET route is 200 with no body, and the operation does not run (${r.status}, ${calls.length} calls)`);
+  assert(r.headers.get("content-type") === "application/json", `…with the GET's content type (${r.headers.get("content-type")})`);
+  r = await hit("/v1/thoughts?limit=five", { key: "read-raw", method: "HEAD" });
+  assert(r.status === 400 && calls.length === 0, `HEAD checks the input as the GET would (${r.status})`);
   r = await hit("/v1/jobs/j1/stream", { key: "read-raw", method: "HEAD" });
-  assert(r.status === 200 && (await r.text()) === "", `HEAD on a job's stream subscribes to nothing (${r.status})`);
+  assert(r.status === 200 && (await r.text()) === "" && r.headers.get("content-type") === "text/event-stream", `HEAD on a job's stream subscribes to nothing (${r.status} ${r.headers.get("content-type")})`);
+  // Bun hands a GET's handler no body, whatever was sent; the headers that announced one remain.
+  let g = await json(await app.fetch(new Request("http://api/v1/thoughts", { headers: { "x-brain-key": "read-raw", "content-length": "11" } })));
+  assert(g.status === 400 && g.body.code === "REFUSED_INPUT", `a GET that announced a body is refused, though the body never arrives (${g.status})`);
+  g = await json(await app.fetch(new Request("http://api/v1/thoughts", { headers: { "x-brain-key": "read-raw", "transfer-encoding": "chunked" } })));
+  assert(g.status === 400, `…and one sent chunked (${g.status})`);
+  g = await json(await app.fetch(new Request("http://api/v1/thoughts", { headers: { "x-brain-key": "read-raw", "content-length": "0" } })));
+  assert(g.status === 200, `a GET declaring an empty body is a GET (${g.status})`);
   r = await hit("/v1/stats", { key: "cap-raw", method: "HEAD" });
   assert(r.status === 403, `HEAD keeps the scope's answer (${r.status})`);
   let b = await json(await hit("/v1/search?limit=5", { key: "read-raw", method: "POST", body: JSON.stringify({ query: "q" }) }));

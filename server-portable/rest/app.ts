@@ -132,8 +132,14 @@ export function createRestApp(deps: RestDeps): Hono {
 
   const refuse = (c: Context, status: 400 | 401 | 403 | 404 | 405 | 503, body: { code: TransportCode } & Record<string, unknown>, headers: Record<string, string> = {}) =>
     c.json(body, status, headers);
-  /** A HEAD is the GET's status and headers with no body, so it answers the caller's standing without running the operation (index.ts's job routes answer HEAD as liveness too). */
-  const headOnly = (c: Context) => c.req.method === "HEAD" ? c.body(null, 200) : null;
+  /**
+   * A HEAD answers what the GET would say before it looks anything up — the
+   * caller's standing and, on an operation, its input — with the GET's
+   * content type and no body, and never runs the operation: a fetch would
+   * write an action-log row for a probe, a stream would subscribe for no one.
+   * So a HEAD for a thought or a job that is not there is still a 200.
+   */
+  const headOnly = (c: Context, type = "application/json") => c.req.method === "HEAD" ? c.body(null, 200, { "content-type": type }) : null;
 
   /**
    * The caller, or the answer that refuses it: a key that authenticates (any
@@ -173,7 +179,7 @@ export function createRestApp(deps: RestDeps): Hono {
     if (p instanceof Response) return p;
     if (!mayCall(p, "job_status")) return refuse(c, 403, { code: "FORBIDDEN", needs: scopeOf("job_status") });
     // A HEAD would subscribe and keep a stream alive that no one reads.
-    const head = headOnly(c);
+    const head = headOnly(c, "text/event-stream");
     if (head) return head;
     const id = c.req.param("job_id");
     const stream = await subscribeJob(p, id);
@@ -190,10 +196,6 @@ export function createRestApp(deps: RestDeps): Hono {
       const p = await caller(c);
       if (p instanceof Response) return p;
       if (!mayCall(p, name)) return refuse(c, 403, { code: "FORBIDDEN", needs: scopeOf(name) });
-      // A HEAD on a GET route: the caller's standing, and not the operation —
-      // a fetch would write an action-log row for a probe.
-      const head = headOnly(c);
-      if (head) return head;
 
       // The input: the path's fields, then the query string or the body — and
       // only the one the route reads: input sent the other way is refused, not
@@ -201,7 +203,10 @@ export function createRestApp(deps: RestDeps): Hono {
       let rest: Record<string, unknown>;
       const query = new URL(c.req.url).searchParams;
       if (readsQuery(route.method)) {
-        if ((await c.req.text()).trim() !== "") return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${route.method} reads its input from the query string, not a body` }] });
+        // Bun hands a GET's handler no body, whatever was sent: the headers
+        // that announced one are what is left of it (review pass 2).
+        const announced = c.req.method !== "DELETE" && (Number(c.req.header("content-length") ?? "0") > 0 || c.req.header("transfer-encoding") !== undefined);
+        if (announced || (await c.req.text()).trim() !== "") return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${route.method} reads its input from the query string, not a body` }] });
         const read = inputFromQuery(name, query);
         if ("problem" in read) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: read.problem }] });
         rest = read.input;
@@ -222,6 +227,8 @@ export function createRestApp(deps: RestDeps): Hono {
       }
       const parsed = schema.safeParse({ ...rest, ...Object.fromEntries(fields.map((f) => [f, c.req.param(f)])) });
       if (!parsed.success) return refuse(c, 400, { code: "REFUSED_INPUT", issues: issuesOf(parsed.error) });
+      const head = headOnly(c);
+      if (head) return head;
 
       let outcome;
       try {
@@ -266,7 +273,7 @@ export function createRestApp(deps: RestDeps): Hono {
  * the egress gate's reasons or the extractor's tags (the maintainer's call,
  * SMD-2284 review pass 1). A reader is told the whole value.
  */
-type Captured = { id: string; existed?: boolean; embeddings: { allowed: boolean }; chunks: number; contextFailures: number };
+type Captured = Extract<Awaited<ReturnType<Core["capture"]>>, { ok: true }>["value"];
 const capturedFor = (p: Principal, v: Captured): object =>
   canRead(p) ? v : { id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }), embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures };
 
@@ -274,7 +281,11 @@ const capturedFor = (p: Principal, v: Captured): object =>
 function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: object, p: Principal): Response {
   if (name === "capture_thought") {
     const v = value as Captured;
-    return c.json({ ...capturedFor(p, v), embeddingAttached: true }, 201, { Location: `/v1/thoughts/${v.id}` });
+    // Attached: this capture wrote its vector with the row — the embedding
+    // call was made (the egress gate allowed it) and, on a re-capture, its
+    // vector refreshed the row's. A refused call writes the row without one
+    // (review pass 2: this said true either way).
+    return c.json({ ...capturedFor(p, v), embeddingAttached: v.embeddings.allowed }, 201, { Location: `/v1/thoughts/${v.id}` });
   }
   if (name === "scan_thoughts") {
     const { jobId } = value as { jobId: string };

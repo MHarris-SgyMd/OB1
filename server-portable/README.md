@@ -583,13 +583,16 @@ SMD-2284's next step; today it runs where you start it.
   /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST /v1/search` (and `/keyword`,
   `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
   `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
-  /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/jobs/scan`, `GET
+  /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/scans`, `GET
   /v1/jobs/{job_id}` and its `/stream`. A GET or DELETE reads its input from the
   query string, a POST or PATCH from a JSON body, and input sent the other way is
   refused; a search's text always rides a body. The input is the tool's own zod schema
-  (`core/schemas.ts`), held strictly: an unknown field is refused. A HEAD answers the
-  caller's standing without running the operation; a method a path does not take is a
-  405 naming those it does.
+  (`core/schemas.ts`), held strictly: an unknown field is refused. A GET whose headers
+  announce a body is refused too (Bun hands a GET's handler no body, so its input would
+  vanish). A HEAD answers what the GET would before it looks anything up — the caller's
+  standing and the input — with the GET's content type and no body, and never runs the
+  operation, so a HEAD for a thought that is not there is still a 200. A method a path
+  does not take is a 405 naming those it does.
 - **`GET /openapi.json`** is built from the same two sources, so it lists every
   operation with the input its route parses. **`GET /v1/whoami`** names the
   calling key, its scope, its agent id and the operations it may call.
@@ -599,12 +602,13 @@ SMD-2284's next step; today it runs where you start it.
   a 503 `BUSY` with `Retry-After`, a scope that does not reach the operation a 403
   `FORBIDDEN` naming the scope it needs.
 - **Answers.** A success is the operation's value, for a key that can read (a capture
-  is a 201 with its `Location` and `embeddingAttached`; a scan a 202 whose handle points
-  at `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
+  is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
+  vector with the row, false when the egress gate refused the embedding call; a scan a
+  202 whose handle points at `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
   `embeddingCall`, `chunks`, `contextFailures` — and not the provider's address, the
   egress gate's reasons or the extractor's tags. A refusal is its code, `retryable` and the facts its code declares
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
-  the status `rest/app.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
+  the status `rest/routes.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
   rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
   not built, 503 retry. A save whose vector did not attach (the PostgREST two-step)
   is a 201 with `embeddingAttached: false`, not a refusal, so a client does not
@@ -638,11 +642,11 @@ those its own way.
 ```bash
 bun test-server.ts        # 432 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 124 — scoped, hashed, named keys
-bun test-rest.ts          # 192 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-rest.ts          # 218 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
 bun run test:e2e          # 417 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 129 — the REST core beside the MCP server on one database: every operation through both
+../db/with-postgres.sh bun test-rest-sql.ts  # 131 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 
