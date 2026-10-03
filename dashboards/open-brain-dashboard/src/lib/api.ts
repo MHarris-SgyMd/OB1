@@ -42,7 +42,9 @@ async function callMcpTool(name: string, args: Record<string, unknown> = {}): Pr
 	return result.result;
 }
 
-function parseStatsFromText(text: string): {
+// The three parsers are exported for test-parsers.ts, which holds them to the
+// server's reply shapes; the app reaches them only through the calls below.
+export function parseStatsFromText(text: string): {
 	total: number;
 	types: Record<string, number>;
 	topics: Record<string, number>;
@@ -67,7 +69,9 @@ function parseStatsFromText(text: string): {
 		} else if (line === 'People mentioned:') {
 			section = 'people';
 		} else if (/^\s{2}\S/.test(line)) {
-			const match = line.trim().match(/^([^:]+):\s*(\d+)/);
+			// A row is `  <value>: <count>`; the value runs to the last `: `,
+			// since a type, topic or person may hold a colon (SMD-2510).
+			const match = line.trim().match(/^(.+):\s*(\d+)$/);
 			if (match) {
 				const [, key, value] = match;
 				if (section === 'types') stats.types[key] = parseInt(value);
@@ -121,7 +125,7 @@ export async function getThoughts(params: {
 	return parseListResults(text);
 }
 
-function parseSearchResults(text: string): Thought[] {
+export function parseSearchResults(text: string): Thought[] {
 	const thoughts: Thought[] = [];
 	const blocks = text.match(/--- Result \d+[\s\S]*?(?=(\n\n--- Result \d+|\n\nSearch strategy:|$))/g) || [];
 
@@ -173,7 +177,7 @@ function parseSearchResults(text: string): Thought[] {
 	return thoughts;
 }
 
-function parseListResults(text: string): Thought[] {
+export function parseListResults(text: string): Thought[] {
 	const thoughts: Thought[] = [];
 
 	if (text.includes('No thoughts found.')) {
@@ -196,7 +200,9 @@ function parseListResults(text: string): Thought[] {
 		const text = body[0]?.trim().startsWith('⚠ Ingested') ? body.slice(1) : body;
 		const fenced = text.length > 0 && text.every((l) => /^\s*│/.test(l));
 		const content = (fenced ? text.map((l) => l.replace(/^\s*│ ?/, '')) : lines).join('\n').trim();
-		const match = header.match(/^\d+\.\s*\[([^\]]+)\]\s*\(([^)]+)\)$/);
+		// The type and tags run to the header's last `)`: a tag may hold one,
+		// and is on the header's one line (SMD-2510).
+		const match = header.match(/^\d+\.\s*\[([^\]]+)\]\s*\((.+)\)$/);
 		if (!match || (!content && !fenced)) continue;
 
 		const [, dateStr, metaStr] = match;

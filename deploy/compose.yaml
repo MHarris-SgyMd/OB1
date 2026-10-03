@@ -1004,6 +1004,9 @@ services:
       OB1_AUTH_TIERS: ${OB1_AUTH_TIERS:-}
       OB1_AUTH_SERVICES: ${OB1_AUTH_SERVICES:-}
       OB1_AUTH_MAX_CLIENTS: ${OB1_AUTH_MAX_CLIENTS:-}
+      OB1_AUTH_REGISTRATIONS_PER_HOUR: ${OB1_AUTH_REGISTRATIONS_PER_HOUR:-}
+      OB1_AUTH_TRUSTED_PROXY: ${OB1_AUTH_TRUSTED_PROXY:-}
+      OB1_AUTH_FORWARDED_HOPS: ${OB1_AUTH_FORWARDED_HOPS:-}
       # deploy/.env's (the shell's, when it sets one), and never the command
       # line's --profile: the server refuses to start unless it names auth,
       # the stack's configured state (ADR decision 16; auth/config.ts). The

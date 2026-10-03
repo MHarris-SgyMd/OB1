@@ -960,8 +960,9 @@ before 073 is kept (a word off the ladder is replaced), and a text no audit
 row vouches for loses its trust with its marks. The read tools print it on
 the `By:` line (`not recorded` for none) and put a fixed notice on an ingested
 row, before its text — in `search_thoughts`, `search_thoughts_keyword` and
-`list_thoughts` a text fenced (every line starts `│`, SMD-2483) so no line of
-it can forge another row's block or `By:` line; `capture_thought`'s
+`list_thoughts` a text fenced (every line starts `│`, SMD-2483) and each
+metadata value (type, topic, person, action item) on one line (SMD-2510), so
+no line of either can forge another row's block or `By:` line; `capture_thought`'s
 `trust` declares it, and `min_trust` filters by it (074, 075). test-schema
 [66], test-upgrade [20x].
 

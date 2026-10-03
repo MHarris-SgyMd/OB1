@@ -103,8 +103,11 @@ export const LIMITS = {
   modelInputChars: 12000, // the assistant text handed to the model, tail-clipped
 };
 
-/** The brain's tool names — only THEIR results are read for thought ids, so a uuid printed by some other tool is never claimed as provenance. */
-const BRAIN_TOOLS = ["search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_supersession_proposals", "thought_stats", "capture_thought", "update_thought"];
+/**
+ * The brain's tool names — only THEIR results are read for thought ids, so a uuid printed by some other tool is never claimed as provenance.
+ * Not thought_stats: it prints no thought id, and each row of it starts with a type, topic or person, so a tag reading `ID: <uuid>` would read as one (SMD-2510, review pass 2).
+ */
+const BRAIN_TOOLS = ["search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_supersession_proposals", "capture_thought", "update_thought"];
 /** The two names every connector has (the MCP connector spec's pair): the brain's only under a server whose name says `brain` (eighth review pass — a Notion or Linear `search` prints uuid-shaped ids too). */
 const GENERIC_TOOLS = ["search", "fetch"];
 // The tool's own name after an MCP-style separator (`mcp__open-brain__search_thoughts`, `server/search`, `server.search`), or bare.

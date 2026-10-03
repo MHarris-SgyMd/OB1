@@ -136,7 +136,15 @@ export async function extractMetadata(text: string, subject: EgressSubject, cfg:
       return fallback("unexpected_json_shape");
     }
 
-    const out = parsed as Record<string, unknown>;
+    // The answer's tag keys and nothing else (SMD-2510): capture spreads this
+    // over the row's metadata, so a key the model was steered into adding
+    // would be written as the server's — `metadata_extraction_failed`, which
+    // the capture's reply prints, among them. `type_raw` is set below, from
+    // the type, never taken from the answer.
+    const answer = parsed as Record<string, unknown>;
+    const out: Record<string, unknown> = Object.fromEntries(
+      TAG_KEYS.filter((k) => k !== "type_raw" && k in answer).map((k) => [k, answer[k]]),
+    );
     // The entity graph's name gate (SMD-1935): a package, a ticket id or a
     // number is never a person, here as at record_thought_entities.
     if ("people" in out) out.people = gatePeople(out.people);
