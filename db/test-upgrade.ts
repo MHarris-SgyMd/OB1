@@ -611,12 +611,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // names at call time ([20y]); 075 adds an 8-argument search_thoughts_hybrid
   // and search_thoughts_current beside 027's and 068's and makes those two
   // call them, nothing to refuse either ([20z]); 076 upserts
-  // ob1_config.schema_version for the 1.5.0 cut, needing only 006's table — all recorded by the
+  // ob1_config.schema_version for the 1.5.0 cut, needing only 006's table;
+  // 077 adds a column to 069's jobs, refusing by name without 069 ([20aa]) — all recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 47, `030 is among the last forty-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 48, `030 is among the last forty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3298,6 +3299,44 @@ console.log("\n[20z] Migration 075: refused without 074 or 068, naming each; ont
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the075 });
   const again = (await sql`SELECT count(*)::int AS c FROM pg_proc p WHERE p.proname IN ('search_thoughts_hybrid', 'search_thoughts_current') AND p.pronamespace = 'public'::regnamespace`)[0].c;
   assert(Number(again) === 4 && (await reads()) === before, "a re-apply of 075 is a no-op: two forms of each, the same answers");
+  await sql.close();
+}
+
+console.log("\n[20aa] Migration 077: refused without 069, naming it; onto a jobs table at the file before it — every row the MCP server's (door open-brain), a new row too unless it names its own, an empty door refused; a re-apply a no-op (SMD-2284)");
+{
+  const the077 = MIGRATIONS.find((f) => f.endsWith("_jobs_door.sql"))!;  // by name: renumbered when main takes its number
+  const the069 = MIGRATIONS.find((f) => f.endsWith("_jobs.sql"))!;
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the069 });
+  const baselined = await migrate("--baseline");
+  let probe = new SQL({ url: URL_, max: 1 });
+  await probe`DELETE FROM schema_migrations WHERE name = ${the077}`;
+  await probe.close();
+  const plain = await migrate();
+  const refusedOk = baselined.code === 0 && plain.code === 1 &&
+    /_jobs_door\.sql\s+FAILED: migration 077 needs 069 \(the jobs table\); this schema lacks it/.test(plain.out);
+  assert(refusedOk, `077 on a schema without 069 is refused up front, naming 069 (exit ${plain.code})${refusedOk ? "" : `:\n${plain.out}`}`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the077 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const OWNER = "c".repeat(64);
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan_thoughts', ${OWNER}, 'a', 'running')`;
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, ended_at) VALUES (gen_random_uuid(), 'scan_thoughts', ${OWNER}, 'a', 'succeeded', now())`;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the077 });
+  const doors = (await sql`SELECT door, count(*)::int AS c FROM jobs GROUP BY door`) as { door: string; c: number }[];
+  assert(doors.length === 1 && doors[0].door === "open-brain" && doors[0].c === 2, `every row from before 077 is the MCP server's, the one serving process then (${JSON.stringify(doors)})`);
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (gen_random_uuid(), 'scan_thoughts', ${OWNER}, 'a', 'running')`;
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, door) VALUES (gen_random_uuid(), 'scan_thoughts', ${OWNER}, 'a', 'running', 'open-brain-api')`;
+  const [{ c: api }] = await sql`SELECT count(*)::int AS c FROM jobs WHERE door = 'open-brain-api'`;
+  const [{ c: mcp }] = await sql`SELECT count(*)::int AS c FROM jobs WHERE door = 'open-brain'`;
+  assert(Number(api) === 1 && Number(mcp) === 3, `a row that names no door is the MCP server's (a server from before 077), one that names its own keeps it (${api} api, ${mcp} mcp)`);
+  const empty = await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, door) VALUES (gen_random_uuid(), 'scan_thoughts', ${OWNER}, 'a', 'running', '')`.then(() => "accepted", (e: Error) => e.message);
+  assert(/jobs_door_named/.test(empty), `an empty door is refused (${empty})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the077 });
+  const [{ c: checks }] = await sql`SELECT count(*)::int AS c FROM pg_constraint WHERE conrelid = 'public.jobs'::regclass AND conname = 'jobs_door_named'`;
+  const [{ c: rows }] = await sql`SELECT count(*)::int AS c FROM jobs`;
+  assert(Number(checks) === 1 && Number(rows) === 4, `a re-apply of 077 is a no-op: one constraint, the rows unmoved (${checks}, ${rows})`);
   await sql.close();
 }
 

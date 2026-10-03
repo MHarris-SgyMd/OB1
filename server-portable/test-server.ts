@@ -1016,7 +1016,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
     }
   }
-  assert(graceFallbacks.length === 4 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+  // Five: the server and the REST core (SMD-2284) in compose.yaml, three tier servers.
+  assert(graceFallbacks.length === 5 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
     `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
 
   // Preflight refuses a value compose would render wrong, and reports one it reads.

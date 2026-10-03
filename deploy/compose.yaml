@@ -108,6 +108,16 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [auth-absent]
         service: auth
+      # The REST core's public path (SMD-2284), off unless the operator names
+      # deploy/compose.api-public.yaml, whose router (priority 36) wins over
+      # this one. Off, /api answers a bodyless 404 rather than falling to
+      # legacy, where the MCP server takes a POST at every path.
+      api-off:
+        rule: "Path(`/api`) || PathPrefix(`/api/`)"
+        priority: 35
+        entryPoints: [web]
+        middlewares: [api-off]
+        service: noop@internal
       mcp:
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
         priority: 30
@@ -135,6 +145,14 @@ x-proxy-routes: &proxy-routes |
           service: noop@internal
           statusRewrites:
             "502": 404
+      # noop@internal answers 418; the same errors middleware turns it into
+      # the 404 a path nothing serves gets (measured on this pin).
+      api-off:
+        errors:
+          status: ["418"]
+          service: noop@internal
+          statusRewrites:
+            "418": 404
     services:
       server:
         loadBalancer:
@@ -251,7 +269,7 @@ services:
 
   # Replaces: the Supabase Edge Function, and `supabase functions deploy`.
   server:
-    build:
+    build: &server-build
       # Repo root, not server-portable/, because preflight.ts imports
       # ../db/config.mjs — the single definition of the embedding contract, shared
       # with migrate.ts so the runner and the server cannot disagree about it. A
@@ -425,6 +443,43 @@ services:
     extra_hosts: &host-alias
       - "host.docker.internal:host-gateway"
 
+  # The REST core (SMD-2284): every operation the MCP tools expose, as JSON,
+  # over the same core — the server's image run as `bun api.ts`, with the
+  # server's environment and preflight. Internal by default: no port, reached
+  # on the mesh as api.ob1.internal (the GUI, n8n, a worker), and through the
+  # proxy at /api only where deploy/compose.api-public.yaml is named. Still on
+  # the default network too, where Postgres and the model providers are,
+  # until the stack's network move (SMD-1846's follow-up, SMD-2294). Its
+  # writes record their door as open-brain-api (thought_audit.origin), and
+  # the jobs it starts are its own (migration 077).
+  api:
+    build: *server-build
+    command: ["api.ts"]
+    environment: *server-env
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      jev:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+    extra_hosts: *host-alias
+    networks:
+      default: {}
+      mesh:
+        aliases: [api.ob1.internal]
+    # The image's check POSTs to the MCP endpoint at /, which the REST core
+    # answers 405; its own liveness is a keyless GET of /health.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
   # The stack's one origin (SMD-1846): a reverse proxy, and the only service
   # without a profile that publishes a port. Each service is a path on it —
   # the routes are x-proxy-routes above — so a new one is a router, not a port
@@ -458,7 +513,10 @@ services:
       # backends as the `-` header it aliases; deleted here, so a client
       # cannot supply one header twice under two spellings.
       TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: delete
-      TRAEFIK_PROVIDERS_FILE_FILENAME: /etc/traefik/routes.yaml
+      # A directory, not one file: the route table below is routes.yaml in
+      # it, and deploy/compose.api-public.yaml adds api.yaml beside it — the
+      # operator's opt-in to the REST core's public path (SMD-2284).
+      TRAEFIK_PROVIDERS_FILE_DIRECTORY: /etc/traefik/dynamic
       # The access log: one JSON line per request, with no query string and
       # no header. A connector carries its key as `?key=` (the documented
       # form, deploy/README.md) and an OAuth redirect will carry its code and
@@ -486,7 +544,7 @@ services:
       TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false"
     configs:
       - source: proxy-routes
-        target: /etc/traefik/routes.yaml
+        target: /etc/traefik/dynamic/routes.yaml
     # The route table again, as a label nothing reads: compose copies an
     # inline config into the container when it creates it, and a changed
     # config alone does not recreate it (measured on Compose 5.5, docker/compose

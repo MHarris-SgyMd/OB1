@@ -220,6 +220,7 @@ paths today:
 | Path | Answered by |
 | --- | --- |
 | `/auth` and everything under it, `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, the bare `/.well-known/oauth-authorization-server` | `auth` (`--profile auth`), as `auth.ob1.internal` on the `mesh` network — the issuer, sign-in, registration and the three discovery documents outside the issuer's path (the bare one is the only one Claude Code reads). Only while it answers: with the profile off, the server stopped or still starting, the proxy's own bodiless 404, so an origin without it says "no OAuth here" as before. Its own answers pass through untouched, the registration cap's 503 and `Retry-After` included |
+| `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `GET`/`HEAD /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key |
 | `/.well-known` and everything else under it | the proxy: a 404, `/.well-known/oauth-protected-resource/mcp` included until the server serves it (SMD-2382). A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246). The 404 carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
@@ -228,8 +229,10 @@ paths today:
 The path reaches the server as it came, prefix and all: the server answers POST
 at every path and `/health` under any prefix, so `/mcp` needs no setting there.
 The routes are `x-proxy-routes` at the top of `compose.yaml`, which compose
-hands the proxy as an inline config, so a release's `compose.yaml` carries them
-and there is no second file to fetch. The same text is a label on the proxy, so
+hands the proxy as an inline config (`routes.yaml` in the directory Traefik's
+file provider reads), so a release's `compose.yaml` carries them and there is no
+second file to fetch; an overlay may add a file beside it, as
+`compose.api-public.yaml` does. The same text is a label on the proxy, so
 an `up` after a route changed recreates it: compose does not recreate a
 container for a changed inline config alone (docker/compose#11900, measured on
 5.5).
@@ -254,8 +257,8 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 through the container engine's socket, which is root on the host, and the
 proxy is the one process a client on the network reaches —
 `docs/orchestration-tool.md` declined the same socket for n8n. The
-authorization server came this way (the `auth` router); the dashboard and the
-REST core's opt-in `/api` arrive the same way with their own tickets
+authorization server came this way (the `auth` router) and the REST core's
+`api-off`; the dashboard arrives the same way with its own ticket
 (`docs/operator-surface-tiers.md`). A service under a profile gets the `auth`
 router's shape: an `errors` middleware that turns Traefik's 502 for a name
 that does not resolve into a 404, so its paths answer only while it runs, and
@@ -289,6 +292,47 @@ http://127.0.0.1:<port>/health` answered, the Mac's `curl` got nothing), and so
 was any container's port on that compose network; recreating the network
 (`compose down` then `up`) restored it where restarting or recreating the proxy
 did not. The eval kit's auth stack meets a similar race (`evals/eval-auth.ts`).
+
+## The REST core and its opt-in `/api`
+
+The `api` service is the REST core (SMD-2284): every operation the MCP tools
+expose, as JSON, over the same core — the server's image run as `bun api.ts`,
+with the server's environment and its preflight
+(`server-portable/README.md`, "The REST core"). It publishes no port. On the
+`mesh` network it is `api.ob1.internal:8000`, for a client in the stack (the
+operator GUI, n8n, a worker); it is on the default network too, where Postgres
+and the model providers are, until the stack's network move (SMD-2294).
+
+```bash
+# from a container on the mesh — the proxy is one:
+docker compose -f compose.yaml exec proxy wget -qO- --header "x-brain-key: $KEY" http://api.ob1.internal.:8000/v1/whoami
+```
+
+**Public only where you turn it on.** Without the overlay the proxy answers
+`/api` with its bodiless 404. Naming it routes `/api` to the REST core:
+
+```bash
+docker compose -f compose.yaml -f compose.api-public.yaml up -d
+curl -H "x-brain-key: $KEY" http://127.0.0.1:${SERVER_PORT:-8000}/api/v1/whoami
+curl http://127.0.0.1:${SERVER_PORT:-8000}/api/openapi.json        # the contract, no key
+```
+
+Keep naming the file on every later `up` (with the other `-f` files and
+profiles); an `up` without it recreates the proxy without the route, and `/api`
+is the 404 again — which is also how to turn it off. The REST core takes its key
+from a header (`x-brain-key`, `x-access-key` or `Authorization: Bearer`), never
+from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
+on `/mcp`. Its writes record their door as `open-brain-api`
+(`thought_audit.origin`) beside the MCP server's `open-brain`, and the jobs it
+starts are its own (migration 077): either server's restart marks only its own
+unfinished jobs lost.
+
+Measured on this stack (CI's "Full stack, no Supabase" job holds each): off,
+`/api` is a 404 and a POST there never reaches the MCP server; on the mesh
+`api.ob1.internal` answers; on, `/api/v1/whoami` answers, a key in `?key=` alone
+is a 401, a scan's poll link reads `/api/v1/jobs/…`; dropped again, a 404. The
+REST core's log is one line per request — method, route template, status, time —
+and neither its log nor the proxy's holds a key.
 
 ## Expected outcome
 
@@ -353,7 +397,7 @@ their first thought, with the real error buried inside a tool response.
 On Supabase this mattered less: the platform injected the database credentials, so
 they could not be wrong. Off Supabase every one is hand-written.
 
-So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun index.ts`. A
+So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun index.ts` (the REST core's service runs `api.ts` instead). A
 misconfigured deployment crashloops, which is visible, instead of looking healthy,
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
 OpenRouter and checks the embedding width still matches the schema.

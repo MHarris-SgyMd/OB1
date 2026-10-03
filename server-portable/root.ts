@@ -213,13 +213,16 @@ export function env(): Env {
 }
 
 /**
- * Whether this process serves requests: set by the entry module Bun runs,
+ * The server this process serves as, by its door (`open-brain`, the MCP
+ * server; `open-brain-api`, the REST core): set by the entry module Bun runs,
  * before any request, and never by a suite that imports one. The store's
- * first build reads it to wire the durable job store (below).
+ * first build reads it to wire the durable job store (below) for that server
+ * alone — its jobs carry the name, and its reconcile touches only those
+ * (migration 077, SMD-2284).
  */
-let serving = false;
-export function serveHere(): void {
-  serving = true;
+let serving: string | null = null;
+export function serveHere(door: string): void {
+  serving = door;
 }
 
 // Built once, on first use. createStore() dynamically imports whichever backend
@@ -242,10 +245,11 @@ export function db(): Promise<ThoughtStore> {
     // gate on it, the SQL store returns a sink, the PostgREST store returns null
     // (the registry stays in-memory), and a store that fails to build leaves it
     // in-memory too. A suite drives the sink itself (it holds the store).
-    if (serving && !jobStoreWired) {
+    const door = serving;
+    if (door !== null && !jobStoreWired) {
       jobStoreWired = true;
       void _store.then(async (store) => {
-        const s = store.jobSink();
+        const s = store.jobSink(door);
         if (!s) return;
         // Reconcile BEFORE wiring the sink: only after setJobSink does a job of
         // this process get persisted as running, so running the reconcile first

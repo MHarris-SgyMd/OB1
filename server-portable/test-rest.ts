@@ -216,6 +216,14 @@ console.log("\n[7] A refusal answers its code, its status and its declared facts
   answer = async () => ok({ jobId: "j1", status: "accepted", poll: "/jobs/j1", stream: "/jobs/j1/stream" });
   r = await json(await hit("/v1/scans", { key: "read-raw", method: "POST", body: "{}" }));
   assert(r.status === 202 && r.body.poll === "/v1/jobs/j1" && r.body.stream === "/v1/jobs/j1/stream", `a job's handle points at this server's routes (${JSON.stringify(r.body)})`);
+  // Through the proxy's opt-in /api, the prefix Traefik strips comes back on every link.
+  const viaApi = await app.fetch(new Request("http://api/v1/scans", { method: "POST", body: "{}", headers: { "x-brain-key": "read-raw", "content-type": "application/json", "x-forwarded-prefix": "/api" } }));
+  const vb = await viaApi.json() as Record<string, unknown>;
+  assert(vb.poll === "/api/v1/jobs/j1" && vb.stream === "/api/v1/jobs/j1/stream" && viaApi.headers.get("location") === "/api/v1/jobs/j1", `behind /api the handle and Location carry the prefix (${JSON.stringify(vb)})`);
+  for (const bad of ["https://evil.example", "//evil", "/api/../x", "/a b", "/" + "x".repeat(10) + "/1/2/3/4"]) {
+    const res = await app.fetch(new Request("http://api/v1/scans", { method: "POST", body: "{}", headers: { "x-brain-key": "read-raw", "content-type": "application/json", "x-forwarded-prefix": bad } }));
+    assert(((await res.json()) as Record<string, unknown>).poll === "/v1/jobs/j1", `a prefix that is not a plain path (${bad}) moves no link`);
+  }
   answer = async () => { throw new Error("connection refused"); };
   r = await json(await hit("/v1/stats", { key: "read-raw" }));
   assert(r.status === 500 && JSON.stringify(r.body) === JSON.stringify({ code: "FAILED", message: "connection refused" }), `a fault is FAILED 500 with no verdict (${JSON.stringify(r.body)})`);

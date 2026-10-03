@@ -251,7 +251,7 @@ export function createRestApp(deps: RestDeps): Hono {
       // Saved, but its vector did not attach (the PostgREST two-step): the row
       // is there, so the answer is the creation, flagged — a client that read a
       // refusal as "not written" would capture again.
-      if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false }, 201, { Location: `/v1/thoughts/${r.id}` });
+      if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false }, 201, { Location: `${linkBase(c)}/v1/thoughts/${r.id}` });
       const status = REFUSAL_STATUS[r.code];
       return c.json(refusalValue(r), status, status === 503 ? RETRY_AFTER : {});
     });
@@ -282,6 +282,18 @@ type Captured = Extract<Awaited<ReturnType<Core["capture"]>>, { ok: true }>["val
 const capturedFor = (p: Principal, v: Captured): object =>
   canRead(p) ? v : { id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }), embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures };
 
+/**
+ * Where this server's routes sit in the URL its caller used: "" on the mesh,
+ * `/api` through the proxy's opt-in route, which strips that prefix and names
+ * it in `X-Forwarded-Prefix` (Traefik's stripPrefix sets it, replacing any the
+ * client sent). A value that is not a plain path prefix is ignored, so a
+ * header can move a link within this server's own paths and no further.
+ */
+export function linkBase(c: Context): string {
+  const prefix = c.req.header("x-forwarded-prefix")?.trim() ?? "";
+  return /^(?:\/[A-Za-z0-9_-]+){1,4}$/.test(prefix) ? prefix : "";
+}
+
 /** A success as JSON: the operation's value, with a creation's Location, and a job's links on this server's own routes. */
 function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: object, p: Principal): Response {
   if (name === "capture_thought") {
@@ -293,11 +305,12 @@ function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: ob
     // row keeps the one it had (073's upsert) — so false says what this
     // capture did, not what the row holds, which a key that cannot read may
     // not learn (whether the text was already a thought).
-    return c.json({ ...capturedFor(p, v), embeddingAttached: v.embeddings.allowed }, 201, { Location: `/v1/thoughts/${v.id}` });
+    return c.json({ ...capturedFor(p, v), embeddingAttached: v.embeddings.allowed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
   }
   if (name === "scan_thoughts") {
     const { jobId } = value as { jobId: string };
-    return c.json({ ...value, poll: `/v1/jobs/${jobId}`, stream: `/v1/jobs/${jobId}/stream` }, 202, { Location: `/v1/jobs/${jobId}` });
+    const base = linkBase(c);
+    return c.json({ ...value, poll: `${base}/v1/jobs/${jobId}`, stream: `${base}/v1/jobs/${jobId}/stream` }, 202, { Location: `${base}/v1/jobs/${jobId}` });
   }
   return c.json(value, status);
 }

@@ -1461,9 +1461,12 @@ export interface ThoughtStore {
    * returns a sink; the PostgREST store returns null, so the Workers/PostgREST
    * path stays pure in-memory (no long-lived process to persist or resume a
    * detached run). root.ts injects the result into jobs.ts (`setJobSink`) at
-   * startup and runs the reconcile once.
+   * startup and runs the reconcile once. `door` names the server it writes
+   * for (077's jobs.door): the jobs it starts carry it, and its reconcile
+   * touches only rows bearing it, so two servers on one database leave each
+   * other's live jobs alone (SMD-2284).
    */
-  jobSink(): JobSink | null;
+  jobSink(door: string): JobSink | null;
 
   close(): Promise<void>;
 }

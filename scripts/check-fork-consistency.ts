@@ -5382,7 +5382,7 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ['import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
   ['// import { decideCalls } from "./egress.ts";\n', false],
   ["const msg = \"copied from './egress.ts' once\";\nconst t = `moved from \"./x.ts\"`;\n", false],
-  ["let _store: Promise<ThoughtStore> | null = null;\nexport function db(): Promise<ThoughtStore> {\n  if (!_store) _store = createStore(env());\n  void _store.then((s) => s.jobSink());\n  return _store;\n}\n", false, ROOT_ROLE],
+  ["let _store: Promise<ThoughtStore> | null = null;\nexport function db(): Promise<ThoughtStore> {\n  if (!_store) _store = createStore(env());\n  void _store.then((s) => s.jobSink(serving));\n  return _store;\n}\n", false, ROOT_ROLE],
   ["export function closeStore(): Promise<boolean> {\n  return _store ? _store.then(async (s) => { await s.close(); return true; }) : Promise.resolve(false);\n}\n", false, ROOT_ROLE],
   ["const identity = await agents().resolve(db(), principal);\n", false],
   ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],
