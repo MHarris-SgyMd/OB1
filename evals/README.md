@@ -2712,6 +2712,147 @@ to the current row, then to the hybrid's order, in 059 and in the oracle alike;
 the numbers above are unchanged (no eval query is literal-only), and
 test-schema [55] holds the case.
 
+## A thought whose tickets are finished, ranked below on request (SMD-2271)
+
+`eval-transitive-freshness.ts` (SMD-2271). Read-only against the dogfood brain
+(every connection opens with `default_transaction_read_only` on) from a one-off
+container on its network, the query embedded with the brain's own model through
+the egress gate (the file's header has the command); `--self-check` holds the
+rules, the oracle, the verdict's arithmetic and the labels' provenance with no
+database, in CI.
+
+`prefer_current` (059) demotes a thought whose OWN lifecycle is settled, or that
+a newer thought supersedes. A session summary has neither: it carries no ticket,
+and its one `supersedes` slot holds its own checkpoint chain, so consolidation
+cannot retire it either (SMD-2271's 2026-10-01 note). So on "what should we work
+on next" the top hits were summaries recommending SMD-2074, SMD-1295 and SMD-1875,
+all Done, above the correct ticket rows. The ticket's fix is `node_state` one hop
+out: a thought with no lifecycle of its own inherits "references settled work"
+from the tickets it is about. This prices WHICH tickets it is about, before any
+SQL. The oracle is 059's re-sort with a transitive reason beside the reflexive
+one; its control rule equals `search_thoughts_current`'s top 10 on all 12 panel
+queries, and with every ticket head read as open every rule gives that ranking.
+
+A thought's references are the ticket keys in its text that the brain holds a
+head for (`ob1_ticket_head`, 068); a head with no known status is ignored, as
+059 ignores one. **Central** references are the keys in `metadata.topics` and
+`metadata.action_items` (the capture-time extractor's "about" and "asks for")
+and the key a session summary's header names; **body** references are every key
+in the text. These are JavaScript's readings; the header lists where
+PostgreSQL's would differ (word characters, non-string array elements), which
+PR 2's SQL must be held to on every thought.
+
+**The gold.** 80 hits labelled `stale` (everything it puts forward is finished),
+`current` (something it puts forward is open, or it states something still true
+a planner needs) or `neutral` (it puts nothing forward), each by two graders
+given only the rubric, the hits' text and the tickets' statuses — nothing of the
+rules. Round 1, the first registration's top 10s: 49 hits, κ 0.876, four
+disagreements adjudicated by the author (who knew the rules). Round 2, what the
+second registration added to the top 10s: 25 hits, agreement 1.000. Round 3,
+after the first review pass, every unlabelled row a still-undecided rule demotes
+anywhere in its windows: 6 hits, κ 0.250, two disagreements (stale or neutral —
+neither grader called any of the six current) settled by a third blind grader
+choosing between the two labels. `evals/fixtures/transitive-freshness-labels.json`
+holds ids and numbers only.
+
+**The first registration failed.** Four rules — central, central without the
+header key, central with a body-share fallback (≥ 3 known body keys, ≥ 2/3
+settled), and the body share alone — on four planning queries (P1–P4, the ones
+SMD-2271 and its comments measured) and a release-plan control. Every rule
+flipped the measured case (the SMD-2074 recommendation demoted) and cut the
+planning top 10s' stale hits from 21 to between 4 and 11, but **every rule
+demoted a hit both graders call current**: SMD-1846's session summary (3c346ae2;
+its own ticket is Done, its body puts forward the open SMD-2306/2307) under all
+four, and SMD-2131's session summary (8f511d57, labelled in round 2; it also names the
+open SMD-1931/2133) under the central three; the share rules also a release digest (008b4199, the open
+SMD-1805/1806) and the roadmap summary (dc8d9130, the open SMD-1729/1795; split
+by the graders, adjudicated current). Every miss names an open ticket. Two
+amendments, both marked in the file's header: (b) as first coded read only each
+rule's top 10, which cannot see a current hit demoted OUT of it — it now reads
+the whole window, rows shipped `prefer_current` already demotes excepted; and
+(c) was written as "the plan stays first", but shipped `prefer_current` ranks it
+second (the premise came from a search without the flag), so it reads "no worse
+than shipped" — every first-registration rule kept it second.
+
+**The second registration.** Every miss names an open ticket. So two rules with
+an **open veto** — a thought naming any open ticket anywhere in its text is never
+demoted — were written after the first verdict, before they were run, to be
+decided on four new planning phrasings (H1–H4): `central-veto` (central, all
+settled, no open key anywhere) and `central+share-veto` (that; or, with no known
+central key, ≥ 3 known body keys, all settled). Its conditions are (a), (b) over
+every planning, held-out and control window, and (d); (c) is reported beside it.
+
+| rule | thoughts moved (of 563)¹ | summaries / other | P1–P4 stale@10 | H1–H4 stale@10 | H, outside every P/C window | current hit demoted |
+|---|---:|---:|---:|---:|---:|---|
+| prefer_current as shipped | 0 | — | 21 | 17 | 1 | — |
+| central | 202 | 193 / 9 | 11 | 6 | — | yes (3c346ae2, 8f511d57) |
+| central+share | 235 | 209 / 26 | 4 | 1 | — | yes (3c346ae2, 8f511d57, 008b4199, dc8d9130) |
+| central-veto | 139 | 133 / 6 | 17 | 11 | 0 | none |
+| **central+share-veto** | **146** | **138 / 8** | **14** | **8** | **0** | **none** |
+
+¹ The lifecycle-less thoughts nothing supersedes (747 have no lifecycle; 184 of
+them are superseded, already demoted by 059). stale@10 counts occurrences: the
+8 are 5 distinct thoughts, the 11 seven. The first registration was decided on
+P1–P4; its rules' H1–H4 counts are shown for comparison and were not split by
+window.
+
+**Verdict, as registered: `central+share-veto`** — it qualifies (the measured
+case flipped, no current hit demoted in any of its windows once every demoted
+row carried a label, drop-the-mechanism exact), as does `central-veto`, and it
+has 3 fewer held-out stale hits (the rule asked for 2). The plan keeps its rank
+under both.
+
+**What "held out" bought, and what it did not (the first review pass).** The
+QUERIES are new; their hits mostly are not: 35 of the 53 hits in H1–H4's top 10s
+sit in a P or C window, and every stale hit either veto rule leaves in H1–H4 is
+one of them — outside every P and C window both veto rules leave 0 and shipped
+search leaves 1. So the held-out stale comparison is not out-of-sample evidence
+that one veto rule beats the other: the same handful of summaries recur. The
+out-of-sample evidence is (b): the current hits only rounds 2 and 3 labelled —
+among them 8f511d57, which the central rules demote — none of which a veto rule
+demotes. And (b) has little power against a veto rule by construction: it can
+fail only on a current hit that names no open ticket in its text.
+
+**The salience bound.** One settled key helps decide at most 6 demotions (p50 1,
+p90 3, nearest rank). Under the central rules a passing (body-only) mention
+cannot decide a demotion at all — the deciding set is the central keys — so
+their 0s in the hub table are by construction. The share fallback is where a
+passing mention can count: of the most-mentioned keys (SMD-2074, 1804, 1997,
+2304 — 19 to 22 lifecycle-less thoughts each), a passing mention helps decide at
+most 2 `central+share-veto` demotions, each of a thought whose every named
+ticket is settled; under the unvetoed `central+share`, up to 6.
+
+**What it does not do.** Stale hits remain — 14 of 21 on P1–P4, 8 of 17 on
+H1–H4 — mostly summaries that put forward finished work and also name an open
+ticket somewhere (SMD-1302 in an aside, the SMD-1729 epic as "the strategic
+spine"): the price of never demoting a current hit on this panel. A finished
+plan with no ticket key (merge and tag v1.5.0) is invisible to it. On a topical
+query the cost is of the kind 059 already takes for a note under a Done ticket:
+"how does node_state read a ticket's lifecycle" loses five session summaries
+whose central tickets are all Done (SMD-1994, 2061, 2074, 2116, 2255, 2256 among
+them) from its top 10; the other two topical queries lose one and two. The
+header key couples the rule to the session hook's header format (`Session
+summary — SMD-1234 — …`); without it the central rule moves 129 thoughts instead
+of 202. Labels are model graders', not the maintainer's; the panel is eight
+planning queries on one brain (1,462 thoughts on the final run, one more than
+the first).
+
+**Shipped (SMD-2271 PR 2, migration 077).** `central+share-veto` is in
+`search_thoughts_current`, inside `prefer_current` (the maintainer's call: no
+new flag): `ticket_references` reads the keys as `refsOf` does,
+`ticket_references_settled` applies the rule over 068's heads, and a demoted
+hit says `references settled work (SMD-…)`. The rule's code moved to
+`evals/transitive-freshness.ts`, which test-schema [69] imports to hold the SQL
+to it on hand cases and a 400-case fuzz. `--sql-check` holds it on a real
+corpus: on a copy of the dogfood brain restored and migrated to 077, the SQL
+equals the rule on all 1,464 thoughts (306 with settled keys) and
+`search_thoughts_current`'s top 10 equals the oracle's on all 12 panel queries;
+with the open veto dropped from the SQL it reports 583 thoughts and 11 queries
+differing. The cost, on the same copy (12 queries, 480 interleaved pairs): +5.1
+ms per search (paired median; +6.0 at p90) over 075's 4.5 ms, the hybrid alone
+1.7 ms — the references are read from each window row's text at search time,
+nothing stored. Re-deriving a stale summary rides SMD-2243's pool.
+
 ## LongMemEval: the fork on a public benchmark, and the floor it exposed
 
 `eval-longmemeval.ts`, run as `bun run longmemeval` (SMD-1039, the second

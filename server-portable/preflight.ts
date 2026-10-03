@@ -132,9 +132,11 @@ const DIRECT_CHECKS = [
  * 6-argument match_thoughts beside 074's, every 6-argument call ambiguous; so
  * the signature remedies name all three, in order.
  */
-const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql, 074_min_trust.sql and 075_min_trust_hybrid.sql (075 and 074 the last definers of search_thoughts_hybrid and match_thoughts, 027's body the hybrid's).";
+const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql, 074_min_trust.sql, 075_min_trust_hybrid.sql and 077_references_settled.sql (075 and 074 the last definers of search_thoughts_hybrid and match_thoughts, 077 of search_thoughts_current's 8-argument body, 027's body the hybrid's).";
 const APPLY_074 = "Apply db/migrations/074_min_trust.sql.";
-const APPLY_075 = "Apply db/migrations/075_min_trust_hybrid.sql.";
+// 075 also re-creates search_thoughts_current's 8-argument form; 077 last
+// defines its body (SMD-2271), so a hand apply of 075 is followed by 077's.
+const APPLY_075 = "Apply db/migrations/075_min_trust_hybrid.sql, then 077_references_settled.sql (077 last defines search_thoughts_current's 8-argument body).";
 /**
  * PostgREST answers a call it cannot resolve with PGRST202 both when the
  * function is missing and while its schema cache predates the migration that
@@ -142,7 +144,7 @@ const APPLY_075 = "Apply db/migrations/075_min_trust_hybrid.sql.";
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/075_min_trust_hybrid.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 075 and 074 last define search_thoughts_hybrid and match_thoughts, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/077_references_settled.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 075 and 074 last define search_thoughts_hybrid and match_thoughts, 077 search_thoughts_current's 8-argument body, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
 /** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
 const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
@@ -2509,7 +2511,7 @@ if (configFailed) {
         if (Number(hybrid[0].c) >= 1) add("hybrid search", "ok", "search_thoughts_hybrid present");
         else add("hybrid search", "fail",
                  "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
-                 "Apply the migrations through db/migrations/027_search_thoughts_relative_floor.sql (017_search_thoughts_hybrid.sql defines it; 020_match_thoughts_recency.sql redefines it with the arguments the server sends; 027's body is the one that stands — stopping at 020 would leave 020's body over 027's). Then db/migrations/074_min_trust.sql and 075_min_trust_hybrid.sql: 020's file re-creates match_thoughts' 6-argument form, which beside 074's 7-argument one makes every 6-argument call 'function is not unique', and 075 last defines the hybrid, its 8-argument min_trust form beside the 7 (SMD-1724).");
+                 "Apply the migrations through db/migrations/027_search_thoughts_relative_floor.sql (017_search_thoughts_hybrid.sql defines it; 020_match_thoughts_recency.sql redefines it with the arguments the server sends; 027's body is the one that stands — stopping at 020 would leave 020's body over 027's). Then db/migrations/074_min_trust.sql, 075_min_trust_hybrid.sql and 077_references_settled.sql: 020's file re-creates match_thoughts' 6-argument form, which beside 074's 7-argument one makes every 6-argument call 'function is not unique', 075 last defines the hybrid, its 8-argument min_trust form beside the 7 (SMD-1724), and 077 search_thoughts_current's 8-argument body (SMD-2271).");
 
         /**
          * Migration 024's function. On the SQL path thought_stats calls
@@ -2748,7 +2750,7 @@ if (configFailed) {
             const extra = [...mt.filter((r) => r.nargs !== mtKeep), ...hy.filter((r) => r.nargs !== 7 && r.nargs !== 8)].map((r) => r.sig);
             // 075 refuses without 074, so a brain needing both is told both,
             // in order (second review pass: 075 alone was named, and refused).
-            const then075 = mt020Only ? "Apply db/migrations/074_min_trust.sql, then 075_min_trust_hybrid.sql." : APPLY_075;
+            const then075 = mt020Only ? "Apply db/migrations/074_min_trust.sql, then 075_min_trust_hybrid.sql and 077_references_settled.sql." : APPLY_075;
             const behind = [
               ...(mt020Only ? ["match_thoughts' is 020's, from before migration 074"] : []),
               ...(hy8 ? [] : ["search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075"]),

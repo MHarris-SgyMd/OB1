@@ -1007,16 +1007,16 @@ else {
   const twoBehind = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("027") || f.startsWith("074") || f.startsWith("075") });
   const twoBack = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(pre075.code === 0 && /search signatures[^\n]*search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075: every search answers, and min_trust \(SMD-1724\) does not reach the hybrid the search tools read/.test(pre075.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql\./.test(pre075.out),
+  assert(pre075.code === 0 && /search signatures[^\n]*search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075: every search answers, and min_trust \(SMD-1724\) does not reach the hybrid the search tools read/.test(pre075.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql, then 077_references_settled\.sql \(077 last defines search_thoughts_current's 8-argument body\)\./.test(pre075.out),
     "a brain before 075 — the hybrid's 7-argument form alone, 027's body — starts with a warning naming 075");
   assert(wrapperAlone.code === 1 && /search signatures[^\n]*is 075's 7-argument search_thoughts_hybrid, which calls its 8-argument form, and that form is missing/.test(wrapperAlone.out),
     "…075's wrapper with its 8-argument form dropped fails the start: every search would fail");
   assert(no7.code === 1 && /search signatures[^\n]*the 7-argument search_thoughts_hybrid the servers call is missing beside 075's 8-argument form/.test(no7.out) && bothBack.code === 0 && /search signatures[^\n]*with min_trust's 8-argument hybrid beside them \(075\)/.test(bothBack.out),
     "…its 8-argument form alone fails the start, the servers' call gone; 075 re-applied is the shipped pair again");
-  assert(stale7.code === 0 && /search signatures[^\n]*search_thoughts_hybrid's 7-argument form is not 075's — an earlier migration re-applied by hand over it — so the servers' call runs that body/.test(stale7.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql\./.test(stale7.out),
+  assert(stale7.code === 0 && /search signatures[^\n]*search_thoughts_hybrid's 7-argument form is not 075's — an earlier migration re-applied by hand over it — so the servers' call runs that body/.test(stale7.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql, then 077_references_settled\.sql \(077 last defines search_thoughts_current's 8-argument body\)\./.test(stale7.out),
     "…and a 7-argument form that is not 075's wrapper beside the 8 — 027 re-applied by hand — is a warning naming 075 (first review pass, run-it)");
   assert(twoBehind.code === 0 && /search signatures[^\n]*match_thoughts' is 020's, from before migration 074; and search_thoughts_hybrid's 7-argument form is not 075's/.test(twoBehind.out)
-      && /Apply db\/migrations\/074_min_trust\.sql, then 075_min_trust_hybrid\.sql\./.test(twoBehind.out)
+      && /Apply db\/migrations\/074_min_trust\.sql, then 075_min_trust_hybrid\.sql and 077_references_settled\.sql\./.test(twoBehind.out)
       && twoBack.code === 0 && /search signatures[^\n]*with min_trust's 8-argument hybrid beside them \(075\)/.test(twoBack.out),
     "…020 re-applied over both, its 6 alone, is a warning naming 074 then 075 — 075 alone refuses without 074 — and the two re-applied are the shipped pair (second review pass, run-it)");
 

@@ -287,8 +287,10 @@ strong the key was. A raw `MCP_ACCESS_KEY`, the one key it sees in plain, is
 refused under 32 characters by preflight, the image's entrypoint. Compose
 passes the server no raw key, so this is for the image run on its own
 (`docker run`, Kubernetes); a Workers deployment and the vendored servers run
-no preflight, so give them a 32-byte key yourself. The REST core's `/api`
-(SMD-2284) will check the same keys and take the same position. The proxy
+no preflight, so give them a 32-byte key yourself. The REST core
+(`server-portable/rest/`, SMD-2284) checks the same keys, from headers alone,
+and refuses a wrong one before reading the body; it takes the same position,
+and the proxy does not route `/api` yet. The proxy
 sets none either: an MCP client keeps its connection through a JSON-RPC
 refusal, and Traefik's limit answers a plain-text 429 instead; by default it
 also keys every client behind a tunnel to one address. The authorization
