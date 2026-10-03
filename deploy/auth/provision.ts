@@ -25,8 +25,10 @@
  * its environment, and reports every problem at once. It also reports a hash
  * that does not match the password, a secret the server needs that
  * deploy/compose.yaml's `auth` service does not pass (a service client's,
- * which needs a line of its own there), and whether the profile is configured
- * (COMPOSE_PROFILES names `auth`; docs/operator-surface-tiers.md, decision 16).
+ * which needs a line of its own there). A file whose COMPOSE_PROFILES does not
+ * name `auth` is one of the problems, since the server refuses to start
+ * without it (docs/operator-surface-tiers.md, decision 16); one that does is
+ * reported as configured.
  */
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -35,7 +37,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "../../db/env.ts";
 import { setEnvValues, singleQuoted } from "../env-file.ts";
-import { argon2idProblem, configFromEnv, wholeArgon2id } from "./config.ts";
+import { argon2idProblem, configFromEnv, configuredIn, wholeArgon2id } from "./config.ts";
 import { REGISTRATION_PATH, RegistrationGate } from "./registration.ts";
 import { clientIds, originFromEnv, secretName, servicesFromEnv, TIER_PREFIX, tiersFromEnv, type TierName } from "./layout.ts";
 
@@ -63,6 +65,8 @@ export const COMPOSE_PASSES = [
   "OB1_AUTH_REGISTRATIONS_PER_HOUR",
   "OB1_AUTH_TRUSTED_PROXY",
   "OB1_AUTH_FORWARDED_HOPS",
+  // deploy/.env's, so the server can refuse a start the file does not configure (config.ts).
+  "COMPOSE_PROFILES",
   ...clientIds(Object.keys(TIER_PREFIX) as TierName[], {}).map(secretName),
 ];
 
@@ -169,8 +173,8 @@ export async function checkEnvFile(envFile: string, composeFile = COMPOSE_FILE):
   } catch {
     // The layout's own problems are reported above.
   }
-  const profiles = (env.COMPOSE_PROFILES ?? "").split(",").map((p) => p.trim());
-  notes.push(profiles.includes("auth") ? "configured: COMPOSE_PROFILES names auth, so every `up` starts the server" : "not configured: COMPOSE_PROFILES does not name auth — start it with --profile auth, or add auth to COMPOSE_PROFILES");
+  // Not configured is one of the problems above: config.ts refuses it.
+  if (configuredIn(env)) notes.push("configured: COMPOSE_PROFILES names auth, so every `up` starts the server and the proxy routes /auth to it");
   return { problems, notes };
 }
 
@@ -210,6 +214,7 @@ async function selfCheck(): Promise<number> {
       OB1_AUTH_OPERATOR_PASSWORD_HASH: await Bun.password.hash("a-long-password", { algorithm: "argon2id" }),
       OB1_AUTH_SECRET_GUI: hex(32),
       OB1_AUTH_SECRET_MCP: hex(32),
+      COMPOSE_PROFILES: "auth",
     };
 
     // config.ts: every problem at once.
@@ -218,8 +223,8 @@ async function selfCheck(): Promise<number> {
     const none = refusal(() => configFromEnv({}));
     const lines = none.split("\n").slice(1);
     expect(
-      "an empty environment is refused once, naming the origin, the keys, the cookie keys, the hash and both secrets",
-      lines.length === 5 && ["OB1_PUBLIC_ORIGIN", "OB1_AUTH_JWKS", "OB1_AUTH_COOKIE_KEYS", "OB1_AUTH_OPERATOR_PASSWORD_HASH", "OB1_AUTH_SECRET_GUI, OB1_AUTH_SECRET_MCP are not set"].every((n) => none.includes(n)),
+      "an empty environment is refused once, naming the origin, the keys, the cookie keys, the hash, both secrets and the profile",
+      lines.length === 6 && ["OB1_PUBLIC_ORIGIN", "OB1_AUTH_JWKS", "OB1_AUTH_COOKIE_KEYS", "OB1_AUTH_OPERATOR_PASSWORD_HASH", "OB1_AUTH_SECRET_GUI, OB1_AUTH_SECRET_MCP are not set", "COMPOSE_PROFILES does not name auth"].every((n) => none.includes(n)),
       none,
     );
     const both = refusal(() => configFromEnv({ ...good, OB1_AUTH_TIERS: "stable,nope", OB1_AUTH_OPERATOR_PASSWORD_HASH: "" }));
@@ -241,10 +246,18 @@ async function selfCheck(): Promise<number> {
       ["a canary tier's secret", { OB1_AUTH_TIERS: "stable,canary" }, /OB1_AUTH_SECRET_MCP_CANARY is not set/],
       ["a service's secret, with where it goes", { OB1_AUTH_SERVICES: "runner=brain:capture@stable" }, /OB1_AUTH_SECRET_RUNNER is not set .*a line of its own in the auth service's environment/],
       ["a tier's secret, with no word of compose (the service passes it)", { OB1_AUTH_TIERS: "stable,working" }, /OB1_AUTH_SECRET_MCP_WORKING is not set — run `bun deploy\/auth\/provision.ts --init`, which writes it into deploy\/.env$/],
+      // The configured state (ADR decision 16): deploy/.env's COMPOSE_PROFILES, not the command line's --profile.
+      ["a stack not configured: COMPOSE_PROFILES unset", { COMPOSE_PROFILES: "" }, /COMPOSE_PROFILES does not name auth \(""\) — add auth to COMPOSE_PROFILES in deploy\/.env/],
+      ["a stack not configured: other profiles only", { COMPOSE_PROFILES: "local-models,orchestration" }, /COMPOSE_PROFILES does not name auth \("local-models,orchestration"\)/],
+      ["a stack not configured: a profile that only contains the word", { COMPOSE_PROFILES: "authx,oauth" }, /COMPOSE_PROFILES does not name auth/],
     ];
     for (const [what, over, want] of cases) {
       const got = refusal(() => configFromEnv({ ...good, ...over }));
       expect(`refused: ${what}`, want.test(got), got || "accepted");
+    }
+    for (const profiles of ["auth", "local-models,auth", " local-models , auth ", "auth,jev"]) {
+      const got = refusal(() => configFromEnv({ ...good, COMPOSE_PROFILES: profiles }));
+      expect(`configured: COMPOSE_PROFILES "${profiles}" is accepted`, got === "", got);
     }
     const h = good.OB1_AUTH_OPERATOR_PASSWORD_HASH;
     const cutsTaken = Array.from({ length: h.length - 1 }, (_, i) => h.slice(0, i + 1)).filter((cut) => argon2idProblem(cut) === "");
@@ -350,11 +363,11 @@ async function selfCheck(): Promise<number> {
     expect("an env file others can write but not read draws the warning too", /readable or writable by others \(mode 602\)/.test(readableWarning(shared)));
     writeFileSync(file, `OB1_PUBLIC_ORIGIN=https://brain.example.com\n${readFileSync(file, "utf8")}`);
     const written = parseEnv(readFileSync(file, "utf8"));
-    expect("what --init writes is what the server accepts", refusal(() => configFromEnv(written)) === "", refusal(() => configFromEnv(written)));
+    expect("what --init writes is what the server accepts, once COMPOSE_PROFILES names auth", refusal(() => configFromEnv({ ...written, COMPOSE_PROFILES: "auth" })) === "", refusal(() => configFromEnv({ ...written, COMPOSE_PROFILES: "auth" })));
     expect("the hash verifies the password, and its line and the keys' are single-quoted", (await Bun.password.verify(written.OB1_AUTH_OPERATOR_PASSWORD, written.OB1_AUTH_OPERATOR_PASSWORD_HASH)) && singleQuoted(file, "OB1_AUTH_OPERATOR_PASSWORD_HASH") && singleQuoted(file, "OB1_AUTH_JWKS"));
     expect("--init a second time writes nothing", (await initOk(file)).length === 0);
     const checked = await checkEnvFile(file);
-    expect("the check passes what --init wrote, and says the profile is not configured", checked.problems.length === 0 && /^not configured/.test(checked.notes[0]), checked.problems.join("; "));
+    expect("the check refuses what --init wrote for the one thing --init leaves to the operator, COMPOSE_PROFILES, and says nothing is configured", checked.problems.length === 1 && /^COMPOSE_PROFILES does not name auth/.test(checked.problems[0]) && checked.notes.length === 0, checked.problems.join("; "));
 
     writeFileSync(file, `${readFileSync(file, "utf8")}OB1_AUTH_OPERATOR_PASSWORD=another-long-password\nCOMPOSE_PROFILES=local-models,auth\n`);
     const mismatch = await checkEnvFile(file);
@@ -417,7 +430,7 @@ async function selfCheck(): Promise<number> {
       expect(`an unquoted password with ${what} is refused by --init, writing nothing, and reported by the check`, /single-quote it/.test(refusedInit) && !parseEnv(readFileSync(bare, "utf8")).OB1_AUTH_JWKS && checkSays, refusedInit || "accepted");
     }
     const phrase = join(dir, "passphrase.env");
-    writeFileSync(phrase, "OB1_PUBLIC_ORIGIN=https://brain.example.com\nOB1_AUTH_OPERATOR_PASSWORD='correct horse # battery $staple'\n");
+    writeFileSync(phrase, "OB1_PUBLIC_ORIGIN=https://brain.example.com\nCOMPOSE_PROFILES=auth\nOB1_AUTH_OPERATOR_PASSWORD='correct horse # battery $staple'\n");
     await initOk(phrase);
     const phraseEnv = parseEnv(readFileSync(phrase, "utf8"));
     writeFileSync(phrase, `${readFileSync(phrase, "utf8")}OB1_AUTH_TIERS=stable,canary\n`);
@@ -545,6 +558,7 @@ if (import.meta.main) {
     }
     const env = parseEnv(readFileSync(envFile, "utf8"));
     if (!env.OB1_PUBLIC_ORIGIN) console.log("still to set: OB1_PUBLIC_ORIGIN, the brain's public origin (https://…), which the server will not start without");
+    if (!configuredIn(env)) console.log("still to set: COMPOSE_PROFILES=auth (beside any other profiles, comma-separated), which the server will not start without: it is the stack's configured state, and --profile auth on the command line alone is refused");
     console.log("back up OB1_AUTH_JWKS, OB1_AUTH_COOKIE_KEYS, OB1_AUTH_OPERATOR_PASSWORD and every OB1_AUTH_SECRET_* with POSTGRES_PASSWORD; if the server was running, recreate it (compose up -d --wait auth, with compose as in deploy/README.md, Authorization server; not `compose restart`, which keeps the old values)");
     process.exit(0);
   }

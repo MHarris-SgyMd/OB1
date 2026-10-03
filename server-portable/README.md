@@ -505,23 +505,36 @@ MCP tools do rather than a copy of it:
   egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
   `core/writes.ts` holds `capture_thought`, `update_thought` and `delete_thought`: the
   shapes, a capture-only key's trimmed provenance and owned pointers, the egress gate,
-  the model calls, the write and its cites. Each returns its typed value or a typed
-  refusal (`core/refusal.ts`: a `code`, whether it is `retryable`, and the facts to say
-  it with), and throws a fault. `core/context.ts` is what they run against: the store,
+  the model calls, the write and its cites. `core/workers.ts` holds the worker actions
+  (`retry_failed`, `release_stale_leases`, `run_worker`'s dry run), which the keyed REST
+  POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too. Each
+  returns its typed value or a typed refusal (`core/refusal.ts`: a `code`, whether it is
+  `retryable`, and the facts to say it with), and throws a fault. `core/context.ts` is what they run against: the store,
   the provider settings and the one embedder, the query log, the door a write records.
 - **`render.ts`** — the words: each tool's reply rendered from that value, the text the
   tools have always said.
 - **`index.ts`** — the Hono app, authentication, and the registration that joins the
-  two: validate (the SDK runs the spec's schema), call the operation, render.
+  two: validate (the SDK runs the spec's schema), call the operation, render. It
+  builds no store and makes no egress or embedding call: it hands root.ts's readers to
+  the core, says it serves (`serveHere()`) and closes the store at a stop.
+- **`root.ts`** — the process root a serving entry builds on (SMD-2284): `type Env`,
+  the one list of what the container's process reads; `initEnv()` and `env()`; the
+  store's wiring — `db()` builds it and wires the job sink, `closeStore()` closes it at a
+  stop; and the agent registry the keys are looked up through. `sse.ts` keeps an event
+  stream alive while a call runs (SMD-1864). Both are moved out of `index.ts` so the
+  REST core (SMD-2284) can build on them rather than on a copy.
 
-Every tool's reply carries a typed answer as `structuredContent` beside the text
-(the worker actions' from SMD-2283's last pull request). Claude Code, VS Code and
-Codex show the model `structuredContent` alone when it is present, so:
+`scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts` and `root.ts`
+for what a move would leave behind: an import outside the file's list, a SQL call or
+`fetch`, the store named outside `root.ts`'s wiring.
+
+Every tool's reply carries a typed answer as `structuredContent` beside the text.
+Claude Code, VS Code and Codex show the model `structuredContent` alone when it is present, so:
 
 - A tool whose text is its value's JSON (`search`, `fetch`, `list_thought_ids`,
-  `list_logged_searches`, `worker_status`, `job_status`, `scan_thoughts`) answers
-  the value itself. A value is always an object, so `worker_status`'s rows ride
-  under `pools` while its text stays the bare array.
+  `list_logged_searches`, `worker_status`, `job_status`, `scan_thoughts`, the three
+  worker actions) answers the value itself. A value is always an object, so
+  `worker_status`'s rows ride under `pools` while its text stays the bare array.
 - A tool whose text is prose answers its `text` plus fields that cannot carry a
   word a thought, a key or a judge wrote: ids, timestamps, counts, scores, booleans,
   enum codes (a search hit's id, scores, `supersededBy` and demotion reasons; a
@@ -548,23 +561,25 @@ Codex show the model `structuredContent` alone when it is present, so:
   `currentUpdatedAt`, to retry from without a re-read), `REFUSED_DUPLICATE_CONTENT`,
   `REFUSED_SUPERSEDES_UNKNOWN`, `REFUSED_WOULD_CYCLE`, `REFUSED_CITED` (with
   `citedBy`), and `REFUSED` for a refusal the store names that this server does not
-  know.
+  know. The worker actions': `REFUSED_EMPTY_WORK_TYPE`, `REFUSED_LIVE_LEASE_NEEDS_WORKER`,
+  `RUN_WORKER_DRAIN_NOT_AVAILABLE` — the codes their REST POSTs answer as a 400. Which
+  facts a refusal carries is declared beside its code (`core/refusal.ts`'s `FACTS`),
+  so a new code does not compile until they are.
 - A fault answers `{ code: "FAILED", text }`, with no `retryable` yet —
   classifying faults is SMD-2461 — except capture's, `STORE_UNAVAILABLE` and
   retryable, which the session hook keys on (SMD-1978).
 
-The core's values are whole, for the REST core. The worker actions move into
-`core/` in SMD-2283's last pull request; until then they keep their own codes.
+The core's values are whole, for the REST core.
 
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 374 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-server.ts        # 432 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun run test:local        # 170 — fully local provider, no credential
-bun run test:sql          # 196 — store conformance, real Postgres in a container
-bun run test:e2e          # 364 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-bun run cf:build          # ~353 KiB gzipped (measured 2026-10-01, SMD-2283 PR 2; the PostgREST store and supabase-js are in it)
+bun run test:sql          # 203 — store conformance, real Postgres in a container
+bun run test:e2e          # 417 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
@@ -634,7 +649,7 @@ stored in the same write").
   the tool returns. A capture whose model calls took ten seconds was closed under
   the client with nothing in the server's log (SMD-1864). Every event stream now
   carries a `: keepalive` comment frame every 5 s (`SSE_KEEPALIVE_MS` in
-  `index.ts`), a line SSE parsers discard by specification, for as long as the
+  `sse.ts`), a line SSE parsers discard by specification, for as long as the
   tool runs — up to ten minutes (`SSE_KEEPALIVE_MAX_MS`), past which the frames
   stop, one line says `request still running after N s: …` and, on Bun, the
   idle timeout reaps the stream (not logged again as a client leaving); on Node

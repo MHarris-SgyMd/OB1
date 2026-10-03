@@ -110,6 +110,9 @@ async function upsertThought(content, metadata, embedding, createdAt, sourceType
       metadata: { ...metadata, source: "x_twitter_import", source_type: sourceType },
       embedding: JSON.stringify(embedding),
       created_at: createdAt,
+      // SMD-1724: an export is outside text — the write event declares it, and
+      // the database stamps the thought's trust ingested whatever the key.
+      event: { trust: "ingested" },
     },
   });
   if (error) throw new Error(`upsert_thought failed: ${error.message}`);

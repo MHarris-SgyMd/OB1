@@ -188,6 +188,12 @@ export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 export type WriterKind = "operator" | "agent" | "ingested";
 
+/** A hit's text as stored, from its fenced lines (render.ts fenceText, SMD-2483); a reply from before the fence is its text already. */
+export function unfence(fenced: string): string {
+  const lines = fenced.split("\n");
+  return lines.every((l) => l.startsWith("│")) ? lines.map((l) => l.replace(/^│ ?/, "")).join("\n") : fenced;
+}
+
 export type Hit = {
   id: string;
   /** The `⚠ Superseded by a newer thought` line was present. */
@@ -201,8 +207,9 @@ export type Hit = {
  * The hits in a `search_thoughts` reply, in rank order. A block runs from its
  * `--- Result N (…) ---` header to the next; the header lines are read by
  * name (`ID:`, the superseded mark, `By:`), and the content is what follows
- * the first blank line — the shape index.ts renders, which nothing parses by
- * position past the id (SMD-1726's rule, held here as a reader too).
+ * the first blank line, each of its lines fenced `│ ` (SMD-2483), unfenced
+ * here — the shape render.ts renders, which nothing parses by position past
+ * the id (SMD-1726's rule, held here as a reader too).
  */
 export function parseHits(reply: string): Hit[] {
   const blocks = reply.split(/^--- Result \d+ \([^)]*\) ---\n/m).slice(1);
@@ -210,12 +217,13 @@ export function parseHits(reply: string): Hit[] {
   for (const block of blocks) {
     const cut = block.indexOf("\n\n");
     const header = (cut >= 0 ? block.slice(0, cut) : block).split("\n");
-    const content = cut >= 0 ? block.slice(cut + 2).replace(/\n+$/, "") : "";
+    const content = cut >= 0 ? unfence(block.slice(cut + 2).replace(/\n+$/, "")) : "";
     const idLine = header.find((l) => l.startsWith("ID: "));
     const id = idLine?.slice(4).trim() ?? "";
     if (!UUID_RE.test(id)) continue;
     const by = header.find((l) => l.startsWith("By: "));
-    const kind = by ? /\((operator|agent|ingested)\)\s*$/.exec(by)?.[1] ?? null : null;
+    // The kind is the parenthesis before the line's trust (SMD-1724), or its end on a reply from before it.
+    const kind = by ? /\((operator|agent|ingested)\)(?: · trust (?:operator|agent|ingested|not recorded))?\s*$/.exec(by)?.[1] ?? null : null;
     hits.push({ id: id.toLowerCase(), superseded: header.some((l) => l.startsWith("⚠ Superseded by a newer thought")), writer: kind as WriterKind | null, content });
   }
   return hits;

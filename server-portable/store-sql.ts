@@ -59,6 +59,7 @@ import type {
   ThoughtStore,
   UpdateProvenance,
   UpdateResult,
+  WriteEvent,
 } from "./store.ts";
 
 /** pgvector accepts a bracketed list; a JS number[] does not bind as a vector. */
@@ -143,18 +144,30 @@ export class SqlStore implements ThoughtStore {
     limit: number;
     offset: number;
     filter: Record<string, unknown>;
+    minTrust?: string;
   }): Promise<ThoughtKeywordMatch[]> {
     // Call the function rather than inlining the ILIKE, for the same reason
     // matchThoughts calls match_thoughts: the wildcard escaping and the stable
     // ORDER BY are correctness, and two copies of them is one copy too many.
-    const rows = await this.sql`
-      SELECT id, content, metadata, created_at, occurrences, total_count
-      FROM search_thoughts_keyword(
-        ${opts.query}::text,
-        ${opts.limit}::int,
-        ${opts.offset}::int,
-        ${opts.filter}::jsonb
-      )`;
+    // min_trust (074, SMD-1724) is its fifth argument, sent only when set.
+    const rows = opts.minTrust === undefined
+      ? await this.sql`
+          SELECT id, content, metadata, created_at, occurrences, total_count
+          FROM search_thoughts_keyword(
+            ${opts.query}::text,
+            ${opts.limit}::int,
+            ${opts.offset}::int,
+            ${opts.filter}::jsonb
+          )`
+      : await this.sql`
+          SELECT id, content, metadata, created_at, occurrences, total_count
+          FROM search_thoughts_keyword(
+            ${opts.query}::text,
+            ${opts.limit}::int,
+            ${opts.offset}::int,
+            ${opts.filter}::jsonb,
+            ${opts.minTrust}::text
+          )`;
     return rows.map(normaliseKeywordRow);
   }
 
@@ -165,6 +178,7 @@ export class SqlStore implements ThoughtStore {
     limit: number;
     filter: Record<string, unknown>;
     preferCurrent?: boolean;
+    minTrust?: string;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]> {
     // The function extracts the needles and does the fusion, so neither store
     // has a copy of either rule to get out of step — the same reason the two
@@ -173,6 +187,10 @@ export class SqlStore implements ThoughtStore {
     // template cannot bind a function name, so the two calls are two literals.
     const weight = opts.recencyWeight ?? RECENCY_DEFAULTS.weight;
     const halfLife = opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays;
+    // min_trust (SMD-1724) is the eighth argument of 075's forms, which take
+    // every argument; sent only when set, so the seven-argument call stays the
+    // one a brain before 075 answers.
+    if (opts.minTrust !== undefined) return this.hybridAtTrust(opts, weight, halfLife, opts.minTrust);
     const rows = opts.preferCurrent === true
       ? await this.sql`
           SELECT id, content, metadata, created_at, similarity,
@@ -202,6 +220,39 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
+  /** hybridThoughts with min_trust: 075's 8-argument forms, the same columns as the 7's. */
+  private async hybridAtTrust(opts: { query: string; embedding: number[]; threshold: number; limit: number; filter: Record<string, unknown>; preferCurrent?: boolean }, weight: number, halfLife: number, minTrust: string): Promise<ThoughtHybridMatch[]> {
+    const rows = opts.preferCurrent === true
+      ? await this.sql`
+          SELECT id, content, metadata, created_at, similarity,
+                 matched_needles, needles, needle_counts, common_needles, literal_only, score,
+                 fused, demoted, window_rows, window_known, window_demoted, window_synced_at, window_exact
+          FROM search_thoughts_current(
+            ${toVector(opts.embedding)}::vector,
+            ${opts.query}::text,
+            ${opts.threshold}::float,
+            ${opts.limit}::int,
+            ${opts.filter}::jsonb,
+            ${weight}::float,
+            ${halfLife}::float,
+            ${minTrust}::text
+          )`
+      : await this.sql`
+          SELECT id, content, metadata, created_at, similarity,
+                 matched_needles, needles, needle_counts, common_needles, literal_only, score
+          FROM search_thoughts_hybrid(
+            ${toVector(opts.embedding)}::vector,
+            ${opts.query}::text,
+            ${opts.threshold}::float,
+            ${opts.limit}::int,
+            ${opts.filter}::jsonb,
+            ${weight}::float,
+            ${halfLife}::float,
+            ${minTrust}::text
+          )`;
+    return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
+  }
+
   async getThought(id: string): Promise<ThoughtRecord | null> {
     // `id` is a uuid column, so a malformed value is a cast error rather than a
     // not-found. Treat it as not-found: an MCP client passing a bad id should get
@@ -220,6 +271,9 @@ export class SqlStore implements ThoughtStore {
     // Undefined filters are passed as NULL and short-circuited in SQL, which keeps
     // this a single prepared statement instead of a concatenated query.
     const since = f.days ? new Date(Date.now() - f.days * 86_400_000).toISOString() : null;
+    // The ladder's words (SMD-1724) as an array literal, toUuidArray's way: Bun
+    // binds a JS array comma-joined, without braces. Enum words, no quoting.
+    const trustIn = f.trustIn ? `{${f.trustIn.join(",")}}` : null;
 
     const rows = await this.sql`
       SELECT id, content, metadata, created_at
@@ -229,6 +283,7 @@ export class SqlStore implements ThoughtStore {
         AND (${f.person ?? null}::text IS NULL OR metadata @> jsonb_build_object('people', jsonb_build_array(${f.person ?? null}::text)))
         AND (${f.saidBy ?? null}::text IS NULL OR metadata @> jsonb_build_object('actor_kind', ${f.saidBy ?? null}::text))
         AND (${f.actor?.trim() || null}::text IS NULL OR metadata @> jsonb_build_object('actor_name', ${f.actor?.trim() || null}::text))
+        AND (${trustIn}::text[] IS NULL OR metadata->>'trust' = ANY(${trustIn}::text[]))
         AND (${since}::timestamptz IS NULL OR created_at >= ${since}::timestamptz)
       ORDER BY created_at DESC
       LIMIT ${f.limit}::int`;
@@ -526,6 +581,7 @@ export class SqlStore implements ThoughtStore {
     derivedFrom?: string[];
     supersedes?: string;
     lineage?: Lineage;
+    event?: WriteEvent;
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
@@ -557,7 +613,7 @@ export class SqlStore implements ThoughtStore {
     // 061: the lineage envelope — the windows' and the tags' recipes — rides
     // the same way, and upsert_thought records them with the write.
     const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel,
-      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage);
+      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage, opts.event);
 
     const rows = chunks.length
       ? await this.sql`

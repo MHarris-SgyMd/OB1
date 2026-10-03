@@ -1,0 +1,137 @@
+# 247. The content's trust on the row, read back on every thought a tool returns — metadata.trust from the key and the write's declaration, never the payload; a raise clamped and filed; min_trust on 014's route; the label, the notice and the declaration over MCP; every vendored capture path declaring it (SMD-1724)
+
+**What changed.** PRs 1, 2a, 2b, 3 and 4 of SMD-1724's.
+- 073: `metadata.trust` is the database's third key, beside 050's two
+  marks: the `thought_audit.trust` of the write that put the standing text
+  there (`ob1_trust_ceiling` of the key's kind and the event's declaration),
+  absent for an unclassified key unless it declared `ingested`.
+  - `ob1_actor_stamp(jsonb, text)` stamps it, `ob1_actor_stamp_kept` keeps
+    it on the same text. `ob1_declared_trust(event, metadata, old)` reads a
+    payload's `metadata.trust` (a string, cut to 64) as the declaration when
+    the event names none: a lower word stands, a higher one is clamped and
+    filed under `claimed`. On a write that leaves the text the row's own
+    trust is an echo and declares nothing; a new text weighs every word (the
+    lower label is the safe error).
+  - The 2- and 3-argument `upsert_thought` and `update_thought` (sentinel
+    `ob1:write-stamps-trust`), in the body because since 060 OB002 refuses a
+    row that is not its event's after-image; the raw path reads the
+    `ob1.event` handoff. `backfill_thought_actors` never raises a trust: the
+    lowest of the writing audit row's (or its claim), the kind now, and the
+    row's own ladder word. Preflight names 073 as the writers' last definer.
+- 074: `match_thoughts` gains `min_trust text DEFAULT NULL` and
+  `search_thoughts_keyword` `p_min_trust`, keeping rows at or above the word
+  (none is below every word; a word off the ladder is refused). The 6- and
+  4-argument forms dropped, their privileges replayed (020's mechanism). NULL
+  runs 041's every statement byte for byte; a min_trust's stand beside them —
+  the gate's sample, a collection by `thoughts_trust_rank_idx`, the walk with
+  the rank inside both scans, EXECUTEd so each call is planned with its values.
+- 075: `search_thoughts_hybrid` and `search_thoughts_current` gain an
+  8-argument form, every argument required, beside the 7 the stores call,
+  which now call the 8 with NULL. Not 074's shape: 059's `LANGUAGE sql`
+  current, re-created by `--reapply`, would find a defaulted 8 beside 027's 7
+  "not unique" (test-schema [2]). 075 refuses to apply without 074 or 068;
+  preflight reads the pair by the 7's body (`ob1:seven-calls-eight`).
+- PR 3, on SMD-2283's core, no migration:
+  - `By: <key> (<kind>) · trust <word>` (`not recorded` for none) on
+    search_thoughts, search_thoughts_keyword and list_thoughts, and
+    `INGESTED_NOTICE` before an ingested row's text; ChatGPT's shapes carry
+    it in-band (fetch's `text` starts with it, its and search's titles
+    with `[ingested]`), the shapes exact. Each hit's value field `trust`.
+  - `min_trust` on the three, the stores sending 074's and 075's forms only
+    when it is set, so a brain before them answers every other search
+    (list_thoughts: `metadata->>'trust'` in `trustAtOrAbove`'s words). A
+    min_trust search writes no query_log row: no column to replay it by.
+  - `capture_thought`'s `trust` rides the payload as 046's write event.
+  - evals/write-path.ts reads the kind before the line's trust.
+- PR 4: check 26 — a vendored file with an `upsert_thought` RPC or a client's
+  `capture_thought` call carries the declaration a write reads (the payload's
+  `event: { trust }`, the tool's `trust:`; whole-file, comments blanked); a
+  raw row cannot declare, so TRUST_EXCEPTIONS counts each (four importers
+  awaiting their port, entity-wiki's rerun PATCH and two fallbacks, three
+  own-database deployments, check 10's fixtures). Twenty-one paths declare: the importers
+  and Readwise `ingested`, the workers `agent`, the dashboard `operator`, the
+  session hook `agent`; five servers forward the client's word, refusing any
+  other (smart-ingest keeps it on a dry run's job), and provenance-chains'
+  tool says `agent` unless told `ingested`.
+
+**Why.** 046 recorded trust on every audit row and nothing carried it to the
+thought or read it: a page the ingester copied in and a note the operator
+typed came back alike, and an ingested key could write `metadata.trust:
+operator` with nothing filed (test-upgrade [20x] shows it at 072). "Operator
+or agent" is not one containment, so 014's filter could not ask for it.
+
+**Held.**
+- test-schema [66] (40): the poisoned page through the ingester's key stored
+  `ingested`, the operator's copy `operator`; the payload raise filed; the
+  event's clamp, a lowering, an off-ladder word, the echo cells, the raw path,
+  every row equal to its writing audit row, the backfill in every state.
+- test-schema [67] (21) and [68] (10): every min_trust with and without a
+  filter exact on the exact branch; the walk with ingested rows planted at
+  each query; the hybrid under min_trust on both arms; each 7 as its 8 with
+  NULL; each REVOKE carried. [20] ties 074's statements to 041's text.
+- test-live [21b]: min_trust operator scans the rank index inside the call;
+  the poisoned page, the top hit without it, excluded. test-upgrade [20x],
+  [20y], [20z]: each migration onto a populated brain, row for row.
+- test-e2e-sql [10d], the ticket's Verify over MCP: the ingested capture
+  returned by every body tool with its label and the notice before its text,
+  the operator's copy without; `trust` lowering and its raise filed; min_trust
+  on each arm, prefer_current included, unlogged; trustAtOrAbove held to
+  ob1_trust_rank. test-store-sql/-postgrest [16]: a brain before 074 and 075
+  answers every search without min_trust. test-server [16g]: the renderers.
+- test-writes (17, and the revision's): each forwarding door under an `operator` key — undeclared
+  `operator`, declared `ingested`, an off-ladder word or a non-string refused, `null` none, a client's
+  `metadata.trust` dropped; check 26's 36 probes; the hook declares `agent`.
+
+**Mutant.** The stamp taking the declaration without the key's ceiling fails
+[66]'s payload-raise assertion; the fold ignoring the row's trust, the
+backfill without its claim, cap or row word, and the fold taking a
+non-string fail theirs (3, 3, 1, 2, 1). PR 3's fifteen, each caught (the
+label, the notice, the log, both stores, the event, both ChatGPT marks, the
+hints, the ladder, the value's field). PR 4's, each caught: a declaration
+removed (five), a raw POST added, a count off by one, every server's forward
+or schema dropped (twelve), smart-ingest's job and revision forgetting it.
+
+**Review passes.** A cold reader and a run-it reviewer each pass, per PR.
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | an echo of a read (rest-api's enrich) was filed as a raise, made a no-op an event and lowered an edit | cold read | the fold weighs the row's own trust as no declaration |
+| 1 | the backfill raised a write that declared its key's kind after a reclassification up, a pre-073 lowering, and a multi-row statement's later rows | cold read, run-it | the backfill never raises |
+| 1 | THEN_073 on a brain merely behind; a non-string trust filed verbatim; the claim arm and the JSON-null arms untested | cold read, mutant | the suffix gated on the ledger; strings only, cut; tests |
+| 2 | pass 1's echo rule dropped an explicit lowering on a text edit when it equalled the row's trust | cold read, run-it | the echo rule on a write that leaves the text only (the maintainer's call) |
+| 2 | the writers' remedy named 073 on a brain at 060; an unvouched text kept `ingested`; two arms untested; the record's rule sentences stale | cold read, run-it | 061 named below it; the row's word only lowers a supported trust; tests; the record rewritten |
+| 2a.1 | the min_trust walk fell to plpgsql's generic plan on a connection's sixth call: a bitmap and a sort, 20 to 450 ms at 50,000 rows, its rows changing (041's walk too: SMD-2468) | run-it | the walk EXECUTEd with its locals as parameters |
+| 2a.1 | the walk-index remedy said to apply 039 alone, which re-creates the 6-argument form beside 074's; a NULL filter, the walk's chunk side, the gate twin and the 7-before-6 catalog read untested | cold read, run-it, mutant | 074 named after 039; tests, each mutant killed |
+| 2b.1 | the wrapper alone (its 8 dropped) read as "every search answers" and every search failed; 075 applied by hand ahead of 074 succeeded and every call failed | cold read | preflight reads the 7's body; a guard naming 074 |
+| 2b.1 | a stale 7 beside the 8 (020 re-applied by hand) read green while the servers ran 020's floor; the named-argument rule undocumented; the hybrid wrapper lost `jit = off` | run-it, cold read | a warning naming 075; the header and COMMENT; the clause |
+| 2a.2 | nothing above low, the stop signal: the hybrid- and keyword-missing remedies still left a second form; a $5-for-$6 swap in the walk's final SELECT passed; the EXECUTE's revert is held by [20]'s text alone (the behaviour needs 50,000 rows; measured in review: flat at twelve calls, ids as force_custom_plan's) | cold read, run-it | 074 named after them; [20] ties the walk to its LIMIT |
+| 2b.2 | nothing above low, the stop signal: with match_thoughts 020's alone, preflight named 075 alone, which refuses without 074; the guard's 068 arm untested (074 lands without 068) | run-it, mutant | 074 then 075 named; [20z] drives the 068 arm |
+| 3.1 | nothing of PR 3's above low, the stop signal (160 min_trust combinations against SQL, 0 differing): ingested text forges a block reading `trust operator`, the renderers' raw text since before it (the maintainer's call: SMD-2483) | run-it | filed |
+| 4.1 | a schema key, a parameter or a positional `trust` satisfied the rule, so five servers passed with the declaration deleted (provenance-chains untested); entity-wiki's reruns rewrite the text with a raw PATCH, stamped the key's | cold read | the rule reads the write's own shape; the PATCH counted, the reason true |
+| 4.1 | smart-ingest let `source_metadata.trust` past its refusal into a claim; `null` and `["agent"]` read unevenly; the revision forward, two schemas and the PostgREST path, reordered or Python MCP calls untested or unread | cold read, run-it, mutant | dropped; one rule; each mutant killed, the detector widened |
+| 4.2 | a client's `metadata.trust` reached rest-api's, open-brain-rest's and enhanced-mcp's payloads, a declaration past the door's refusal filed as a claim (pass 1 had closed smart-ingest's alone); the non-string refusal untested | run-it, mutant | dropped at each door; tests, each mutant killed |
+| 3.1 | the `trust` argument promised the lower of it and the key on a re-capture, which keeps the row's; fetch's title unmarked; an e2e assertion passing with its row missing; two wordings | cold read, run-it | the description; `[ingested]` on fetch's title; the assertion; the record |
+
+**Not taken.**
+- A column on `thoughts` (050's metadata pattern is the house shape), and a
+  ladder key folded into the containment filter for min_trust: the maintainer
+  chose the parameter, twice — the second time against the measured cost.
+- A `LEAST(old, new)` rule on a text edit: an edit takes the editor's trust
+  as it takes the editor's mark; trust through edits and derivations is
+  SMD-1734's. The ticket's "default operator" backfill: 046's rule keeps an
+  unclassified key's rows unmarked until `set_agent_kind` and the backfill.
+- `metadata: null` loses the key with the rest (SMD-1976's, from 060); a
+  padded key name gives row and log different kinds (050's). `update_thought`
+  takes no `trust` (the plan's cut: capture's declaration first), so an agent
+  key's text edit of an ingested row makes it `agent`, as its own capture
+  would. Before 073 `metadata.trust` is a caller's key and the label reads it.
+  list_thoughts' `min_trust` reads no index (it walks `created_at` until the
+  limit fills), and its notice follows the item's tag line. Check 25 reads no
+  RPC name in a variable, no shell curl; a model's summary of ingested text
+  is declared `agent` (derivation's trust is SMD-1734's).
+
+**Follow-ups.** SMD-2479: a `query_log.min_trust` column, so a
+min_trust search is logged and replayed. SMD-2480: the trust and notice on
+`list_supersession_proposals` and `thought_changes`, whose functions return
+no trust. SMD-2483: a thought's text cannot forge a result block. SMD-2493:
+the four export importers' 2-argument upsert_thought, which stores no vector.

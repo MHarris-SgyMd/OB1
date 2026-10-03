@@ -10,7 +10,7 @@ import type { StoreEnv, ThoughtStore } from "../store.ts";
 import { queryLogEnabled } from "../../db/config.mjs";
 import type { Principal } from "../auth.ts";
 
-/** The settings the core reads: the provider's, the store's, and the four of its own. index.ts's `Env` is one. */
+/** The settings the core reads: the provider's, the store's, and the four of its own. root.ts's `Env` is one. */
 export type CoreEnv = EmbedEnv & JevEnv & StoreEnv & {
   OB1_TIER?: string;
   OB1_GIT_SHA?: string;

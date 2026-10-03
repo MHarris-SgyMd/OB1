@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2396 assertions: 2396 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy-five (75) migrations applied, and
+`bun test-schema.ts` prints `2398 assertions: 2398 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-six (76) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -223,7 +223,8 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.1.0+upstream.9543c29`, the second (`049..051`), and 057 writes
 `1.2.0+upstream.9543c29`, the third (`052..057`), and 062 writes
 `1.3.0+upstream.9543c29`, the fourth (`058..062`), and 072 writes
-`1.4.0+upstream.9543c29`, the fifth (`063..072`). `preflight` prints the
+`1.4.0+upstream.9543c29`, the fifth (`063..072`), and 076 writes
+`1.5.0+upstream.9543c29`, the sixth (`073..076`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -255,7 +256,7 @@ and it stamps `backfilled_at`. Preflight's `audit events` counts the keys and
 rows still waiting. `source` keeps its name and now carries one vocabulary, the
 row's own `metadata.source`. The event rides `p_payload.event` on both
 inserting `upsert_thought` forms and a tenth, defaulted `p_event` on
-`update_thought`; nothing over MCP sends one yet (SMD-1724, 1725, 1733). Since 073 the trust it declares is also the row's (`metadata.trust`, below).
+`update_thought`. Over MCP one key is sent: `capture_thought`'s `trust` (SMD-1724), the content's trust as the write declares it, which since 073 is also the row's (`metadata.trust`, below); nothing sends the rest yet (SMD-1725, 1733).
 
 Migration 049 widens `ob1_agent_keys.scope`'s CHECK from `read, write` to
 `read, write, capture` (dropping every CHECK on the column first, whatever name a
@@ -275,7 +276,7 @@ overwritten or removed. The actor follows the content: a capture and a
 content-changing edit stamp from the key present, a metadata-only edit keeps the
 mark. In metadata rather than columns because 014's `metadata @> filter` route
 over 001's GIN index already reaches it: `said_by` and `actor` on the search and
-list tools are that filter, and every hit prints `By: <key> (<kind>)`.
+list tools are that filter, and every hit prints `By: <key> (<kind>) · trust <word>` (073's trust beside the two).
 `SELECT backfill_thought_actors();` — called once by the file — sets both keys
 on every thought to what the audit row that wrote its current text derives
 (the update row whose after-text is the row's, else the capture when no update
@@ -956,9 +957,13 @@ key was unclassified), the key's kind now, and the row's own word, so a key
 reclassified down takes its rows down, one reclassified up leaves their trust
 where it was (a text-changing edit restamps a row), a lowering a writer set
 before 073 is kept (a word off the ladder is replaced), and a text no audit
-row vouches for loses its trust with its marks. Nothing reads it yet;
-the tools' label and `min_trust` are SMD-1724's later PRs. test-schema [66],
-test-upgrade [20x].
+row vouches for loses its trust with its marks. The read tools print it on
+the `By:` line (`not recorded` for none) and put a fixed notice on an ingested
+row, before its text — in `search_thoughts`, `search_thoughts_keyword` and
+`list_thoughts` a text fenced (every line starts `│`, SMD-2483) so no line of
+it can forge another row's block or `By:` line; `capture_thought`'s
+`trust` declares it, and `min_trust` filters by it (074, 075). test-schema
+[66], test-upgrade [20x].
 
 Migration 074 reads it (SMD-1724): `match_thoughts` gains a seventh argument,
 `min_trust text DEFAULT NULL`, and `search_thoughts_keyword` a fifth,
@@ -995,7 +1000,9 @@ beside 027's 7 would make its call "not unique". A call by name that names `min_
 all eight. 075 refuses to apply without 074, and preflight reads the pair by the
 7's body. An operator's REVOKE on the 7-argument `search_thoughts_current` does
 not survive a `--reapply` (059 drops and re-creates it — as on main), while its
-8's does. test-schema [68], test-upgrade [20z].
+8's does. The server calls the 8-argument forms (and 074's 5-argument keyword)
+only for a search that names `min_trust`, so a brain before them answers every
+other search. test-schema [68], test-upgrade [20z].
 
 ## What changed relative to the guide
 
@@ -2159,7 +2166,7 @@ side's `derived_from` names the other, a page and its evidence — is tagged
 naming the reject unless `--force` says the pointer is meant — a guard on the
 one accept door, not a verdict — and a row accepted before the pair became one
 is tagged under `--list accepted` with `--reject <id>`, which clears the pointer
-(029), as the repair. `--limit` is the pass's cap and is refused beside `--list`. Such a pair is never proposed since 066, and a
+(029), as the repair. `--limit` is the pass's cap and is refused beside `--list`. `--dry-run` and `--status` are refused beside a decision, which they never stopped from being written (`--accept <id> --dry-run` accepted the proposal), and beside `--list` or `--stale`, which take the pass's place (SMD-2405); `--list` and `--stale` beside a decision read after it is written. Such a pair is never proposed since 066, and a
 standing row is the reviewer's alone: the pass never replaces a pending one,
 and settles a stale one on its next run (067). `--accept` writes the pointer
 on the thought the verdict names as current (or the one `--direction` names — required for an
@@ -3204,8 +3211,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2396 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1048 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2398 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1055 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -3220,7 +3227,9 @@ per script of what each flag takes, scanned before anything else runs. A flag
 the script does not have, one given twice, one that takes a value followed by nothing, another flag or a
 blank, a value joined with `=`, or a value where no flag takes one exits 2 with
 the script's flag list; `--help` prints the list and exits 0; a number is
-decimal digits only. A refusal names the argument's position, never its text —
+decimal digits only. An engine's `run()` refuses a blank option first, in the
+scanner's words, through `cli.ts`'s `blankProblem` (`reembed.ts` since SMD-2304,
+`extract-entities.ts` and `consolidate.ts` since SMD-2425). A refusal names the argument's position, never its text —
 an argument can be a password or a key. Before it, `consolidate.ts`
 and `extract-entities.ts` ignored a flag they did not know, so `--K 10` ran the
 default `--k` and exited 0 (SMD-2015). `test-cli.ts` holds the scanner's rules,

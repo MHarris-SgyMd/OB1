@@ -153,7 +153,8 @@ function parseSearchResults(text: string): Thought[] {
 				if (!inContent) inContent = true;
 				else contentLines.push('');
 			} else if (inContent) {
-				contentLines.push(line.trimStart());
+				// The server fences every line of a thought's text with `│ ` (SMD-2483).
+				contentLines.push(line.trimStart().replace(/^│ ?/, ''));
 			}
 		}
 
@@ -185,9 +186,18 @@ function parseListResults(text: string): Thought[] {
 	for (const chunk of chunks) {
 		const lines = chunk.split('\n');
 		const header = lines.shift()?.trim() || '';
-		const content = lines.join('\n').trim();
+		// The thought's text is its fenced lines (`   │ `, SMD-2483): every line
+		// between the header (or an ingested row's notice) and the item's ID:
+		// line — not the notice, ID: or By: lines around it. A reply from before
+		// the fence, whose text lines are not all fenced, is read whole as it
+		// always was (review pass 1: a tree drawn in old text is not a fence).
+		const idAt = lines.findIndex((l) => /^\s*ID: [0-9a-f-]{36}\s*$/i.test(l));
+		const body = idAt >= 0 ? lines.slice(0, idAt) : lines;
+		const text = body[0]?.trim().startsWith('⚠ Ingested') ? body.slice(1) : body;
+		const fenced = text.length > 0 && text.every((l) => /^\s*│/.test(l));
+		const content = (fenced ? text.map((l) => l.replace(/^\s*│ ?/, '')) : lines).join('\n').trim();
 		const match = header.match(/^\d+\.\s*\[([^\]]+)\]\s*\(([^)]+)\)$/);
-		if (!match || !content) continue;
+		if (!match || (!content && !fenced)) continue;
 
 		const [, dateStr, metaStr] = match;
 		const [type, ...topicParts] = metaStr.split(' - ');
@@ -210,7 +220,9 @@ function parseListResults(text: string): Thought[] {
 }
 
 export async function captureThought(content: string): Promise<Thought> {
-	const result = await callMcpTool('capture_thought', { content });
+	// SMD-1724: what the operator typed into the capture box, declared as theirs;
+	// the server clamps it to the key's kind.
+	const result = await callMcpTool('capture_thought', { content, trust: 'operator' });
 	const text = result.content[0]?.text || '';
 	
 	// Response: "Captured as observation — topic1, topic2"

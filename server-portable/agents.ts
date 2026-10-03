@@ -187,7 +187,7 @@ export class AgentResolver {
   /**
    * Resolve the principal's agent id, consulting the cache first.
    *
-   * `store` is passed per call rather than held: index.ts builds the store
+   * `store` is passed per call rather than held: root.ts builds the store
    * lazily on first use, and a resolver that captured it at construction would
    * force the connection open during startup — on Workers, before any request
    * has arrived to justify it.

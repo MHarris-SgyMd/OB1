@@ -106,7 +106,8 @@
  * thought is recorded failed when ANY of its pairs was malformed or timed out,
  * so --retry-failed re-judges its pairs (the ones already proposed are skipped
  * by the candidate rule). A rate limit, a server error or a lost connection is
- * paused and retried three times; if it persists, the thought in hand is
+ * paused and retried three times — a stop wakes the pause, and the thought
+ * goes back to the pool (SMD-2401); if it persists, the thought in hand is
  * recorded failed with the error (so a thought that reliably draws a 500 is
  * visible rather than cycling for ever) and the worker stops, its other
  * leases returning to the pool. A 401/403/404, or a 400 about the request
@@ -128,7 +129,7 @@ import {
 import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
-import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
+import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
 /**
@@ -282,15 +283,28 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
  * The review flags' own rules — which combine, what a --list word may be, a
  * proposal id's shape, a note's marker — as the refusal of the first broken,
  * in the CLI's order and words, or null. Pure: no database, no output; run()
- * and the CLI both refuse through it (SMD-2304).
+ * and the CLI both refuse through it (SMD-2304). A review takes the pass's
+ * place, so --status and --dry-run, which report on the pass, are refused
+ * beside one: beside a decision the decision was written anyway, and beside
+ * --list or --stale they were dropped without a word (SMD-2405). --list and
+ * --stale do combine with a decision: they only read, after it is written.
  */
-export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" | "reject" | "direction" | "force" | "note" | "limit">): string | null {
+export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" | "reject" | "direction" | "force" | "note" | "limit" | "stale" | "status" | "dryRun">): string | null {
   const { list, accept, reject, direction, note } = { list: opts.list ?? undefined, accept: opts.accept ?? undefined, reject: opts.reject ?? undefined, direction: opts.direction ?? undefined, note: opts.note ?? undefined };
   if (list !== undefined && !LIST_STATUSES.includes(list)) return "--list takes pending, accepted, rejected, stale, lineage or all (or nothing, for pending).";
   for (const [name, v] of [["accept", accept], ["reject", reject]] as const) {
     if (v !== undefined && !UUID_RE.test(v)) return `--${name} needs a proposal id (a UUID from --list or the list_supersession_proposals tool).`;
   }
   if (accept && reject) return "--accept and --reject are one decision each; pass one.";
+  const report = opts.dryRun === true ? "--dry-run" : opts.status === true ? "--status" : undefined;
+  // A decision writes whatever else is asked: `--accept <id> --dry-run` accepted the proposal (SMD-2405).
+  if (report !== undefined && (accept !== undefined || reject !== undefined)) {
+    return `${report} writes nothing, and ${accept !== undefined ? "--accept" : "--reject"} writes a decision; pass one (--list shows the proposal without deciding it).`;
+  }
+  // A listing takes the pass's place: the pass's report beside it was dropped without a word (SMD-2015's kind, SMD-2405).
+  if (report !== undefined && (list !== undefined || (opts.stale ?? 0) > 0)) {
+    return `${report} reports on the pass, and ${list !== undefined ? "--list" : "--stale"} takes the pass's place, so ${report} would be dropped without a word; pass one.`;
+  }
   if (direction !== undefined && (!accept || !["newer", "older"].includes(direction))) return "--direction takes newer or older, and only with --accept.";
   if (opts.force === true && !accept) return "--force goes with --accept: it accepts a proposal whose thought was edited after it was judged, one gone stale, or one standing on a lineage pair (070).";
   // The pass's thought cap: beside --list it would be dropped without a word (SMD-2015's kind) — the
@@ -317,6 +331,13 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" |
  */
 export async function run(opts: ConsolidateOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
+  // A blank value where the CLI's scanner refuses one first, in its words and
+  // with its flag list: `--job ""` reaches no run (SMD-2425, as reembed's).
+  const blank = blankProblem(FLAGS, { dump: opts.dump, list: opts.list, accept: opts.accept, reject: opts.reject, direction: opts.direction, note: opts.note });
+  if (blank !== null) {
+    err(`${blank}\n${flagList(FLAGS, HINTS)}`);
+    return 2;
+  }
   // databaseUrl's two refusals without its exit, then the numbers and the
   // review flags. A URL beside a caller's client is the worker key's (above),
   // so it is held to the rule too.
@@ -797,9 +818,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    */
   let hardStopped = false;
   /**
-   * Aborted by the first stop and by the hard stop: a follower's sleep wakes
-   * on the first; the judge's call in hand and a transient pause on the hard,
-   * so neither holds run() nor sends a pair again after the leases are gone
+   * Aborted by the first stop and by the hard stop: a follower's sleep and a
+   * transient pause wake on the first (SMD-2401), the judge's call in hand on
+   * the hard, so none holds run() nor sends a pair again on a stopping pass
    * (db/lease.ts's sleepUnless keeps nothing per sleep).
    */
   const onStop = new AbortController();
@@ -1144,12 +1165,20 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   stopping = true;
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
                   return;
-                } else if (attempt < TRANSIENT_PAUSES_MS.length && !stopping) {
+                } else if (stopping) {
+                  // A transient error on a stopping pass: neither called again
+                  // nor recorded failed — the thought goes back to the pool with
+                  // the leases the finally returns (SMD-2401).
+                  return;
+                } else if (attempt < TRANSIENT_PAUSES_MS.length) {
                   err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
-                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onHardStop.signal);
-                  if (hardStopped) return;
+                  // A first stop wakes the pause too, and the thought goes back
+                  // the same way: main slept the pause out, called again, and
+                  // recorded the thought failed "after 3 retries" after one (SMD-2401).
+                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onStop.signal);
+                  if (stopping) return;
                 } else {
-                  outcome = { outcome: "failed", error: `provider error after ${TRANSIENT_PAUSES_MS.length} retries: ${msg}` };
+                  outcome = { outcome: "failed", error: `provider error after ${attempt} retries: ${msg}` };
                   stopAfter = true;
                 }
               }
@@ -1167,6 +1196,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 err(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
               }
               if (recorded) failed++;
+              // The hard stop's release beat this one: the caller's own stop, not a lapse (SMD-2425).
+              else if (hardStopped) return;
               else {
                 // Not ours to record: the lease lapsed during the pauses, or the
                 // row was returned by hand. Counted with the rows this worker lost.
@@ -1206,6 +1237,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             continue;
           }
           if (!ok) {
+            // The hard stop's release beat this one to the row: not a lapse to
+            // report, the caller's own stop; a release that went through first
+            // is counted below as any is — as reembed's (SMD-2425).
+            if (hardStopped) return;
             // Not ours to finish: counted with the rows this worker lost, not
             // the ones it finished, so the workers' summaries add up.
             err(`  ${b.thought_id}: the claim was no longer this worker's at release — its lease lapsed (no beat reached the database for ${TTL} s) or it was returned by hand with release_claims_for_worker; the row is the pool's or another worker's now`);
@@ -1402,7 +1437,7 @@ if (import.meta.main) {
   // The review flags' rules before the client, where the script refused them:
   // a URL Bun's client rejects then still meets a bad --list word first, as on
   // main (review pass 3). run() refuses through the same function.
-  const review = reviewProblem({ list, accept: cli.value("accept"), reject: cli.value("reject"), direction: cli.value("direction"), force: cli.has("force"), note: cli.value("note"), limit });
+  const review = reviewProblem({ list, accept: cli.value("accept"), reject: cli.value("reject"), direction: cli.value("direction"), force: cli.has("force"), note: cli.value("note"), limit, stale, status: cli.has("status"), dryRun: cli.has("dry-run") });
   if (review !== null) {
     console.error(review);
     process.exit(2);

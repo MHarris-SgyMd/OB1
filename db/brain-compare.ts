@@ -304,16 +304,20 @@ export async function searchIds(ep: BrainEndpoint, arm: ReplayArm, query: string
 /**
  * The result ids of a search reply, in rank order. Each hit is a block that opens
  * `--- Result N (…) ---` and carries `ID: <uuid>` as its FIRST field line (both
- * search tools, SMD-1248). Anchoring to that header is what makes this content-safe:
- * the hit's own text is appended raw after the fields, so a thought whose content
- * holds its own `ID: <uuid>` line (a memory quoting a search result) would be
- * counted as an extra id by a bare `ID:` match — the header-anchored match never
- * sees it, because content lines are not preceded by a Result header (review pass 1).
- * A "Superseded … ID <id>" marker has no colon and is excluded regardless.
+ * search tools, SMD-1248). A thought whose content holds its own `ID: <uuid>`
+ * line (a memory quoting a search result) would be counted as an extra id by a
+ * bare `ID:` match; the header-anchored match is content-safe because the
+ * server fences a hit's text (`│ ` before every line, SMD-2483), so no line of
+ * it is a header or a field. Before the fence a content line quoting a whole
+ * header and its `ID:` line was counted (review pass 1 called this safe), and
+ * against a brain from before it — `tier --compare` reads across versions — a
+ * quoted header at a line's start still is; the match is held to a line's
+ * start, which rules out one mid-line. A "Superseded … ID <id>" marker has no
+ * colon and is excluded regardless.
  */
 export function parseResultIds(text: string): string[] {
   const ids: string[] = [];
-  const re = /--- Result[^\n]*---\r?\n\s*ID:\s*([0-9a-fA-F-]{36})/g;
+  const re = /^--- Result[^\n]*---\r?\n\s*ID:\s*([0-9a-fA-F-]{36})/gm;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) ids.push(m[1].toLowerCase());
   return ids;

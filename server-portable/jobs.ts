@@ -20,7 +20,7 @@
  * stream sees a terminal answer rather than hanging.
  *
  * Durability is an optional write-through sink (SMD-2318, migration 069's `jobs`
- * table), injected by index.ts on the Bun/SQL server via `setJobSink`: the
+ * table), injected by root.ts in the serving process via `setJobSink`: the
  * registry mirrors each state change to it, and a poll for a job no longer in
  * the Map — evicted under the cap, or held by a prior process before a restart —
  * reads the row back through it. So a job that finished before a restart is
@@ -108,7 +108,7 @@ export interface JobRow {
 
 /**
  * A durable backing store for the registry (SMD-2318, migration 069's `jobs`
- * table). index.ts injects the SQL implementation on the Bun server; left unset,
+ * table). root.ts injects the SQL implementation in the serving process; left unset,
  * the registry is pure in-memory — the SMD-2273 behaviour, which is what Workers
  * (no long-lived process) and any suite without a database run. The live SSE
  * fan-out and the detached runner always stay in this process; the sink holds
@@ -136,7 +136,7 @@ let sink: JobSink | null = null;
 /** How often a running job's progress is written through to the sink; the running-transition and every terminal state are always written. */
 const PERSIST_THROTTLE_MS = 1_000;
 
-/** index.ts sets the durable store once at startup (SQL server) or clears it (a suite). */
+/** root.ts sets the durable store once, in the serving process (SQL server), or a suite sets or clears it. */
 export function setJobSink(s: JobSink | null): void {
   sink = s;
 }
@@ -146,7 +146,7 @@ export async function reconcileDurableJobsLost(): Promise<number> {
   return sink ? sink.reconcileRunningLost() : 0;
 }
 
-/** Tunables index.ts feeds from env(); each has a default so this module stands alone in tests. */
+/** Tunables the caller feeds from env(); each has a default so this module stands alone in tests. */
 export interface StartJobOptions {
   /** How long a terminal record is kept before eviction. */
   retentionMs?: number;

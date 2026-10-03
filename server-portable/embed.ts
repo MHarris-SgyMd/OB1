@@ -14,8 +14,9 @@
  * thing either supplies is configuration. The configuration is resolved from an
  * environment record by `resolveEmbedConfig`, with the defaulting rules index.ts
  * used to hold, so the two cannot disagree about what an unset variable means
- * either. index.ts passes `() => resolveEmbedConfig(env())` because it reads its
- * environment lazily (Cloudflare Workers bindings arrive per request);
+ * either. core/context.ts passes `() => resolveEmbedConfig(env())` because the
+ * server reads its environment lazily (Cloudflare Workers bindings arrive per
+ * request);
  * reembed.ts passes process.env once.
  *
  * Nothing in here imports a database client or a framework, so it builds for
@@ -46,7 +47,7 @@ import {
 } from "../db/config.mjs";
 import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressDecision, type EgressPolicy, type EgressSubject } from "./egress.ts";
 
-/** The environment keys this module reads. A subset of index.ts's Env. */
+/** The environment keys this module reads. A subset of root.ts's Env. */
 export type EmbedEnv = {
   OB1_LLM_BASE_URL?: string;
   OB1_LLM_API_KEY?: string;
@@ -626,7 +627,7 @@ export type Embedder = {
 
 /**
  * Build an embedder over a configuration source. The source is a function
- * because index.ts reads its environment lazily; it is called on every request
+ * because the server reads its environment lazily; it is called on every request
  * to the provider, which is what the server did before this file existed.
  *
  * One piece of state lives in the returned object: whether the provider has

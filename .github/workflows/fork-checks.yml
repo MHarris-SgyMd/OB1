@@ -1234,23 +1234,60 @@ jobs:
       # grace period's SIGKILL. The container goes at the end; the volume, the
       # networks and the auth lines in .env stay to the job's end (tier.sh
       # hands tier.ts no OB1_AUTH_* line).
+      # Through the proxy (SMD-1846 PR 2), its auth router: before the server
+      # starts and after it stops, the bare discovery path is a bodiless 404,
+      # not Traefik's 502 for a name that does not resolve; while it runs, the
+      # bare path and RFC 8414's under the issuer answer its document, issuer
+      # and all; and at the cap the proxy hands on its 503 and Retry-After,
+      # which a rewrite of every 5xx would have turned into a 404. The proxy
+      # has no DNS search domains, a configured-off start (COMPOSE_PROFILES
+      # without auth) is refused, and a sign-in's session cookie is Path=/auth
+      # (review pass 1).
       - name: The authorization server starts, refuses a bad setting, and keeps its state across a restart
         working-directory: deploy
         run: |
           auth() { docker compose -f compose.yaml --profile auth "$@"; }
-          printf 'OB1_PUBLIC_ORIGIN=https://brain.example.test\nOB1_AUTH_MAX_CLIENTS=3\nOB1_AUTH_TRUSTED_PROXY=127.0.0.1\n' >> .env
+          # The proxy's answer for a path: "<status> <issuer or the body's first 40 bytes>".
+          via_proxy() {
+            local code
+            code=$(curl -s --max-time 10 -o /tmp/auth-via-proxy -w '%{http_code}' -D /tmp/auth-via-proxy.h "$@")
+            printf '%s %s' "$code" "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("issuer") or "-")' /tmp/auth-via-proxy 2> /dev/null || head -c 40 /tmp/auth-via-proxy)"
+          }
+          absent() { [ "$(via_proxy http://127.0.0.1:8010/.well-known/oauth-authorization-server)" = "404 " ] || { echo "$1: the bare discovery path through the proxy answered \"$(via_proxy http://127.0.0.1:8010/.well-known/oauth-authorization-server)\", not an empty 404"; exit 1; }; }
+          absent "before the authorization server starts"
+          # No search domains in the proxy: an absent server's name is never
+          # tried again under the runner's (where a resolver that answered would
+          # be sent /auth traffic).
+          # Read once, and it must name a resolver, so an empty read cannot pass.
+          resolv=$(docker compose -f compose.yaml exec -T proxy cat /etc/resolv.conf)
+          grep -q '^nameserver ' <<<"$resolv" || { echo "the proxy's resolv.conf names no resolver: \"$resolv\""; exit 1; }
+          if grep -E '^search' <<<"$resolv" | grep -qv -E '^search[[:space:]]+\.?[[:space:]]*$'; then
+            echo "the proxy resolves under search domains:"; echo "$resolv"; exit 1
+          fi
+          # COMPOSE_PROFILES=auth: the stack configured (ADR decision 16), which
+          # the server refuses to start without (SMD-1846 PR 2). It stays in
+          # .env to the job's end: every later compose call names its services
+          # but two that harm nothing (the failure log, and the teardown's
+          # `down -v`, which removes auth-data too), and canary.sh sets its own.
+          # The refusal below waits 30 s before its exit 2 (no hot restart
+          # loop), so this step takes that much longer.
+          printf 'OB1_PUBLIC_ORIGIN=https://brain.example.test\nOB1_AUTH_MAX_CLIENTS=3\nCOMPOSE_PROFILES=auth\nOB1_AUTH_TRUSTED_PROXY=127.0.0.1\n' >> .env
           bun auth/provision.ts --init
           bun auth/provision.ts
           set +e
-          out=$(auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth auth 2>&1)
+          out=$(auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth 2>&1)
           code=$?
           set -e
-          echo "$out" | tail -4
+          echo "$out" | tail -5
           [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
-          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone"; do
+          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone" 'COMPOSE_PROFILES does not name auth ("local-models")'; do
             grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
           done
           auth up -d --build --wait --wait-timeout 120 --no-deps auth
+          for path in /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/auth; do
+            got=$(via_proxy "http://127.0.0.1:8010$path")
+            [ "$got" = "200 https://brain.example.test/auth" ] || { echo "GET $path through the proxy answered \"$got\", not the server's document"; exit 1; }
+          done
           auth exec -T auth bun restart-check.ts --register > /tmp/auth-client.json
           auth restart auth
           auth up -d --wait --wait-timeout 60 --no-deps auth
@@ -1260,6 +1297,11 @@ jobs:
           [ "$starts" = 2 ] || { echo "the log shows $starts starts, not 2: the restart did not restart the server"; exit 1; }
           auth up -d --force-recreate --wait --wait-timeout 60 --no-deps auth
           auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
+          # The session cookie a sign-in sets is the issuer's path alone, so on
+          # the shared origin it never rides a request to /mcp or the rest.
+          pw=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
+          cookie_path=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --session-cookie < /tmp/auth-client.json)
+          [ "$cookie_path" = /auth ] || { echo "the session cookie's Path is \"$cookie_path\", not /auth"; exit 1; }
           [ "$(auth exec -T auth stat -c '%U %a' /data)" = "bun 700" ] || { echo "/data is not the server's alone"; exit 1; }
           bogus=$(auth exec -T auth bun -e 'const r = await fetch("http://127.0.0.1:3000/auth/interaction/not-a-uid"); console.log(r.status, (await r.text()).includes("cookie not found"))')
           [ "$bogus" = "400 true" ] || { echo "an interaction with no session answered \"$bogus\", not 400 naming the missing cookie"; exit 1; }
@@ -1276,6 +1318,8 @@ jobs:
           full=$(auth exec -T auth bun -e 'const out = []; for (const p of ["/auth/reg", "/auth/REG", "/auth/reg/"]) { const r = await fetch("http://127.0.0.1:3000" + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); out.push(`${r.status} ${(await r.json()).error} ${r.headers.get("retry-after")}`); } console.log(out.join(" | "))')
           want="503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600"
           [ "$full" = "$want" ] || { echo "registrations past the cap answered \"$full\", not \"$want\""; exit 1; }
+          got=$(via_proxy -X POST -H 'content-type: application/json' -d '{"redirect_uris":["https://client.example/callback"],"token_endpoint_auth_method":"none"}' http://127.0.0.1:8010/auth/reg)
+          if ! { [ "$got" = "503 -" ] && grep -qi '^retry-after: 3600' /tmp/auth-via-proxy.h; }; then echo "a registration past the cap through the proxy answered \"$got\" ($(grep -i '^retry-after' /tmp/auth-via-proxy.h || echo 'no Retry-After')), not the server's 503 with Retry-After 3600"; exit 1; fi
           # SMD-2309: twenty failed authentications for one client from one forwarded address, then the token endpoint
           # refuses that client from there for now, and neither another address nor another client from the same one;
           # a client that does not exist, or the public one registered above (no secret to guess), is never counted.
@@ -1291,6 +1335,7 @@ jobs:
           [ "$(docker inspect -f '{{.State.ExitCode}}' "$id")" = 0 ] || { echo "the stop did not exit 0"; exit 1; }
           [ "$took" -lt 5 ] || { echo "the stop took ${took} s: the server did not stop on SIGTERM"; exit 1; }
           grep -qF "stopped on SIGTERM" <<<"$(docker logs "$id" 2>&1)" || { echo "the server's stop line is missing"; exit 1; }
+          absent "with the authorization server stopped"
           auth rm -sfv auth
 
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
@@ -1530,7 +1575,9 @@ jobs:
       # - the access log never holds a query string or userinfo: after calls
       #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
       #   part of an absolute-form target, no log line carries it, and the
-      #   callback's own line is there with its bare path, so the log is on;
+      #   callback's own line is there with its bare path, so the log is on
+      #   (the callback reaches the auth router, the authorization server
+      #   gone by then: its 404, logged at the entrypoint all the same);
       # - an SSE stream passes through as it is written: with the stub's
       #   embedding held 6 s, the server's 5 s keepalive frame must arrive a
       #   good second before the result. A buffering proxy delivers both

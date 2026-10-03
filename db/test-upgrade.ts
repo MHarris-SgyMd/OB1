@@ -610,12 +610,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // a function of its own — nothing to refuse, a function body binds its
   // names at call time ([20y]); 075 adds an 8-argument search_thoughts_hybrid
   // and search_thoughts_current beside 027's and 068's and makes those two
-  // call them, nothing to refuse either ([20z]) — all recorded by the
+  // call them, nothing to refuse either ([20z]); 076 upserts
+  // ob1_config.schema_version for the 1.5.0 cut, needing only 006's table — all recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 46, `030 is among the last forty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 47, `030 is among the last forty-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&

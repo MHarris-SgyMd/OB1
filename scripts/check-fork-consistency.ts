@@ -68,7 +68,7 @@
  *      publish through compose.host-ports.yaml, a second -f. The files are
  *      parsed with Bun.YAML (SMD-1844); no exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
- *      `OPEN_BRAIN_*` name server-portable/index.ts declares in its `type Env`
+ *      `OPEN_BRAIN_*` name server-portable/root.ts declares in its `type Env`
  *      (the block's other names — DATABASE_URL, the key material, SUPABASE_*,
  *      the legacy MCP_ACCESS_KEY — are the stack's own wiring or another
  *      target's, outside this rule) — and a server source reading one
@@ -246,6 +246,42 @@
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
  *      remaining size (SMD-2126)
+ *  25. a tripwire on server-portable/index.ts and the process root it builds
+ *      on, root.ts, for the logic a move to server-portable/core/ leaves
+ *      behind (SMD-2283, SMD-2284): each file's import and export statements
+ *      name only its own TRANSPORT_FILES list's modules, whole or by the names
+ *      listed and under those names (never egress.ts, embed.ts, metadata.ts
+ *      or a store backend; root.ts's readers, the store's module,
+ *      core/reads.ts, core/filter.ts and db/config.mjs by name), and nothing
+ *      is imported for effect or dynamically; with comments and strings
+ *      blanked, no `sql` template, `new SQL`, `.unsafe(` or `fetch(`, bare or
+ *      on globalThis; the store's builder `db` named only in the root's
+ *      import, at root.ts's declaration, as createCore's `store:`, in
+ *      `agents().resolve(db(), …)` and as an object key; and the store itself
+ *      (`_store`, `createStore`) named only in root.ts's STORE_WIRING bodies,
+ *      db() and closeStore() (the factory in db() alone), and the store
+ *      module's import — a second db() or closeStore(), in root.ts or
+ *      index.ts, is a hit. A value passed on (the agent
+ *      registry's lookups) and a global's alias are not followed;
+ *      transportLeaksIn is a pure function its probes run on in-memory text;
+ *      no exceptions
+ *  26. every vendored capture path names the trust of what it writes
+ *      (SMD-1724): a code file under the seven category directories that
+ *      captures through the function — an `upsert_thought` RPC by any client,
+ *      JS, TS or Python, or its PostgREST path — or calls the MCP
+ *      `capture_thought` tool (a client's call, not a server registering it)
+ *      carries the declaration that write reads — upsert_thought's payload
+ *      `event: { trust … }`, capture_thought's `trust:` argument — which the
+ *      database clamps to the key's kind (073): an importer says `ingested`,
+ *      a worker writing a model's output `agent`, a server relaying a
+ *      client's text forwards the client's word. Whole-file, comments
+ *      blanked. A raw row — a POST to `rest/v1/thoughts`, a helper's
+ *      `.post("thoughts", …)` or text-rewriting `.patch("thoughts?…")`, or
+ *      check 10's raw insert — cannot declare (073's trigger strips a
+ *      payload's trust and nothing sets the event handoff over PostgREST),
+ *      so TRUST_EXCEPTIONS counts each such line with the reason and the
+ *      ticket that ports it; a port that lands fails until its entry goes,
+ *      and its new call must declare
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20 and 23 parse YAML with Bun.YAML)
@@ -2657,7 +2693,8 @@ await checkToolsManifest();
  * failed in 7 ms with "Unable to connect" and the server logged nothing.
  *
  * So the universe is what the SERVER declares — the `OB1_*` and `OPEN_BRAIN_*`
- * names in server-portable/index.ts's `type Env`; the block's other names
+ * names in server-portable/root.ts's `type Env` (the process root both
+ * serving entries build on, SMD-2284); the block's other names
  * (DATABASE_URL, the key material, SUPABASE_*, the legacy MCP_ACCESS_KEY) are
  * the stack's own wiring or another target's, and outside this rule — held
  * honest by a scan of
@@ -2686,7 +2723,7 @@ await checkToolsManifest();
  * pass found the readers and the messages probed and the decision itself not,
  * so a dropped branch stayed invisible while the real file complied.
  */
-const SERVER_ENV_SOURCE = "server-portable/index.ts";
+const SERVER_ENV_SOURCE = "server-portable/root.ts";
 const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
 /** The one shape a knob is forwarded in — `${NAME}` or `${NAME:-default}` — with the default captured; the fallback rule reads the capture. */
 const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
@@ -2717,7 +2754,7 @@ function declaredEnvIn(source: string): string[] | null {
 /**
  * The knob names a source reads straight from an environment object —
  * `process.env.OB1_X`, `env.OB1_X`, `env?.OB1_X`, `env["OB1_X"]`, `ENV.OB1_X`,
- * `bindings.OB1_X`, index.ts's accessor `env().OB1_X` — as `[name, index]`
+ * `bindings.OB1_X`, root.ts's accessor `env().OB1_X` — as `[name, index]`
  * pairs, deduplicated, in order of first read, the index that of the read
  * itself (a docblock naming the knob above it is not the read). A name a
  * module reads this way without declaring it in `type Env` is the class the
@@ -3071,7 +3108,7 @@ function checkServerEnvForwarded() {
   if (!declared.some((n) => KNOB.test(n))) { fail(SERVER_ENV_SOURCE, `\`type Env\` declares no OB1_* or OPEN_BRAIN_* name — check 14 has nothing to hold the compose file to, which cannot be right (SMD-1843)`); return; }
 
   // The declaration is held honest: a source the container's process loads —
-  // every non-test server-portable/*.ts, index.ts included (its `env().X`
+  // every non-test server-portable/*.ts, root.ts and index.ts included (their `env().X`
   // reads are matched and declared by construction, since env() returns Env;
   // a `process.env.OB1_X` there would not be), and db/config.mjs,
   // which the server imports and which reads eight knobs through its ENV
@@ -5089,6 +5126,432 @@ function checkPostgrestClients() {
   for (const rel of POSTGREST_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 24's exception names a file the scan does not reach — stale, or the file is gone: remove the entry");
 }
 checkPostgrestClients();
+
+// ── 25: the MCP server's index.ts is transport; the logic is core/'s (SMD-2283) ──
+//
+// SMD-2283 moved every tool's logic — the store reads and writes, the egress
+// gate, the embedding and extraction calls, the action log — into
+// server-portable/core/, so index.ts validates (the SDK runs core/schemas.ts's
+// zod), calls a core operation and renders its answer (render.ts), and the REST
+// core (SMD-2284) calls the same operations: one gateway, not two (SMD-1931).
+// The process root both entries build on — the environment, the store and the
+// agent registry — is root.ts (SMD-2284). This is a tripwire for the forms a
+// move leaves behind, not a proof: a text scan cannot follow a value. In each
+// of TRANSPORT_FILES:
+//   - every import and re-export statement (comments and strings blanked, so
+//     a sentence naming a file is not one) names a module the file's own list
+//     allows, whole or by the names it lists, under their own names — for
+//     index.ts the root's readers, core/reads.ts's deadlines, core/filter.ts's
+//     parsers; for root.ts the store's factory, a notice, its kind and its
+//     type, and db/config.mjs's two env helpers — never egress.ts, embed.ts,
+//     metadata.ts or a store backend; no side-effect import, no dynamic import
+//     or require;
+//   - strings blanked too: no `sql` template, `new SQL`, `.unsafe(`, or
+//     `fetch(` bare or on globalThis (a provider call is the core's);
+//   - the store's builder `db` named only in the root's import, where root.ts
+//     declares it, handed to the core (`createCore({ …, store: db })`), called
+//     for the agent registry (`agents().resolve(db(), …)`), or as an object
+//     key — an alias, `(db)()`, another caller or another `store:` is a hit;
+//   - the store itself (`_store`, `createStore`, called or not) named only in
+//     root.ts, inside STORE_WIRING's bodies — db() builds it and wires the job
+//     sink to it, closeStore() closes it at a stop; the factory in db() alone —
+//     at its declaration and in the store module's import. A second db() or
+//     closeStore(), in either of TRANSPORT_FILES, is a hit.
+// What it does not see: a store method reached through a value it cannot name
+// (a parameter, the agent registry's own lookups, a context the core hands
+// back), an alias of a global (`Bun.sql`), and a module the allowlist admits
+// doing more than its name says. Probes run on in-memory text.
+/** What a file may import: a module whole ("*"), or only the names listed. */
+type TransportImports = ReadonlyMap<string, "*" | ReadonlySet<string>>;
+/** A file check 25 reads: what it may import, whether it holds the store's wiring, and an import its reader must find (so a broken reader is not a clean file). */
+type TransportRole = { imports: TransportImports; wiring: boolean; mustImport: string };
+const INDEX_ROLE: TransportRole = {
+  imports: new Map<string, "*" | ReadonlySet<string>>([
+    ["@modelcontextprotocol/server", "*"], ["hono", "*"],
+    // The process root's readers: the environment, the store's builder and closer, the agent registry.
+    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "serveHere", "Env"])],
+    ["./auth.ts", "*"], ["./version.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./tools.ts", "*"], ["./sse.ts", "*"],
+    ["./core/index.ts", "*"], ["./render.ts", "*"],
+    // The core's deadlines and filter parser — its operations are reached through createCore.
+    ["./core/reads.ts", new Set(["HEALTH_DEADLINE_MS", "BRAIN_INFO_TOOL_DEADLINE_MS"])],
+    ["./core/filter.ts", new Set(["parseFilter", "withActorFilter"])],
+  ]),
+  wiring: false,
+  mustImport: "./core/index.ts",
+};
+const ROOT_ROLE: TransportRole = {
+  imports: new Map<string, "*" | ReadonlySet<string>>([
+    // The factory, for db() alone (STORE_WIRING); a notice, the store's kind and its type.
+    ["./store.ts", new Set(["createStore", "postgrestOnBunNotice", "storeKind", "ThoughtStore"])],
+    ["../db/config.mjs", new Set(["tierProblem", "trimmedEnv"])],
+    ["./agents.ts", "*"],
+    ["./jobs.ts", new Set(["setJobSink"])],
+  ]),
+  wiring: true,
+  mustImport: "./store.ts",
+};
+const TRANSPORT_FILES = new Map<string, TransportRole>([
+  ["server-portable/index.ts", INDEX_ROLE],
+  ["server-portable/root.ts", ROOT_ROLE],
+]);
+/** The functions whose bodies are the store's wiring: build it once (and wire the job sink), close it at a stop. */
+const STORE_WIRING = ["db", "closeStore"];
+/** [start, end) of each STORE_WIRING function's body in `bare` (strings and comments blanked); a name not found is absent. */
+function wiringSpans(bare: string): Map<string, [number, number]> {
+  const spans = new Map<string, [number, number]>();
+  for (const name of STORE_WIRING) {
+    // The body opens with the `{` that ends the signature's line, so a brace in
+    // a return type or a parameter (`Promise<{ closed: boolean }>`) is not it.
+    const m = new RegExp(`\\bfunction\\s+${name}\\s*\\([^\\n]*\\{[ \\t]*$`, "m").exec(bare);
+    if (!m) continue;
+    const open = m.index + m[0].lastIndexOf("{");
+    let depth = 0, i = open;
+    for (; i < bare.length; i++) {
+      if (bare[i] === "{") depth++;
+      else if (bare[i] === "}" && --depth === 0) break;
+    }
+    spans.set(name, [m.index, i + 1]);
+  }
+  return spans;
+}
+/** The lines of `text` (one of TRANSPORT_FILES, read as `role`) that reach past the core, each with what it reached. Pure over a text. */
+function transportLeaksIn(text: string, role: TransportRole = INDEX_ROLE): { line: number; what: string }[] {
+  const hits: { line: number; what: string }[] = [];
+  const lineAt = (i: number) => text.slice(0, i).split("\n").length;
+  const code = blanked(text, false); // comments blanked: a specifier is read here
+  const bare = blanked(text, true); // strings too: a statement is found here, so a sentence naming a file is not one
+  const specAt = (q: number) => code.slice(q + 1, code.indexOf(code[q], q + 1));
+  /**
+   * Each import statement's span by its module: `db` may be named in the
+   * root's, the store in the store module's — and nowhere else for being in a
+   * statement (review pass 1).
+   */
+  const imports: [spec: string, start: number, end: number][] = [];
+  // A statement's keyword stands alone — not a member (`cfg.import`) or part of
+  // a name — and its clause holds no `=`, `(` or `)`, which no import or
+  // export clause has: without them a line with no semicolon (`export const
+  // PORT = 8080`, `import X = NS.y`) read on to the next `from "` and made the
+  // lines between one statement (review pass 2).
+  for (const m of bare.matchAll(/(?<![.\w$])(import|export)\s+(?:type\s+)?([^;"'`=()]*?)\s*\bfrom\s*["']/g)) {
+    const spec = specAt(m.index + m[0].length - 1);
+    const reexport = m[1] === "export";
+    if (!reexport) imports.push([spec, m.index, m.index + m[0].length]);
+    const allowed = role.imports.get(spec);
+    if (!allowed) { hits.push({ line: lineAt(m.index), what: `imports ${spec}` }); continue; }
+    if (allowed === "*") continue;
+    const list = /\{([^}]*)\}/.exec(m[2]);
+    if (!list || /\*/.test(m[2]) || /^[\w$]+\s*(?:,|$)/.test(m[2].trim())) { hits.push({ line: lineAt(m.index), what: `imports ${spec} whole, where only ${[...allowed].join(", ")} may be named` }); continue; }
+    for (const entry of list[1].split(",").map((s) => s.trim().replace(/^type\s+/, "")).filter(Boolean)) {
+      // Under its own name: a rename would hide the name the rules below look for.
+      const [name, alias] = entry.split(/\s+as\s+/);
+      if (!allowed.has(name)) hits.push({ line: lineAt(m.index), what: `imports ${name} from ${spec}` });
+      else if (alias !== undefined && alias !== name) hits.push({ line: lineAt(m.index), what: `imports ${name} from ${spec} as ${alias}` });
+      // Handed on, the store's builder or closer is out of every rule below (review pass 1).
+      else if (reexport && STORE_WIRING.includes(name)) hits.push({ line: lineAt(m.index), what: `re-exports ${name} from ${spec}` });
+    }
+  }
+  const inImportOf = (spec: string, i: number) => imports.some(([from, s, e]) => from === spec && i >= s && i < e);
+  for (const m of bare.matchAll(/\bimport\s*["']/g)) hits.push({ line: lineAt(m.index), what: `a side-effect import of ${specAt(m.index + m[0].length - 1)}` });
+  for (const m of bare.matchAll(/\b(?:import|require)\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a dynamic import" });
+  for (const m of bare.matchAll(/\bsql\s*`|\bnew\s+(?:Bun\s*\.\s*)?SQL\b|\.unsafe\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a SQL call" });
+  for (const m of bare.matchAll(/(?<![.\w$])fetch\s*\(|\bglobalThis\s*\.\s*fetch\b/g)) hits.push({ line: lineAt(m.index), what: "a fetch (a provider call is the core's)" });
+  const wiring = role.wiring ? wiringSpans(bare) : new Map<string, [number, number]>();
+  const spans = [...wiring.values()];
+  // In a transport file every declaration of db() or closeStore() is a second
+  // one; in the root, every one after the first (review pass 2).
+  for (const name of STORE_WIRING) {
+    const declared = [...bare.matchAll(new RegExp(`\\bfunction\\s+${name}\\b`, "g"))];
+    for (const m of declared.slice(role.wiring ? 1 : 0)) hits.push({ line: lineAt(m.index), what: `a second ${name}() — the store's wiring is root.ts's db() and closeStore()` });
+  }
+  for (const m of bare.matchAll(/(?<![.\w$])db\b/g)) {
+    const before = bare.slice(0, m.index), after = bare.slice(m.index + 2);
+    if (inImportOf("./root.ts", m.index)) continue; // named in the root's import — the list above holds which
+    if (/\bcreateCore\(\s*\{[^{}]*\bstore\s*:\s*$/.test(before) && /^\s*[,}]/.test(after)) continue; // handed to the core, uncalled
+    if (/\bagents\(\)\s*\.\s*resolve\(\s*$/.test(before) && /^\s*\(\s*\)/.test(after)) continue; // the agent registry's lookup
+    if (/[{,]\s*$/.test(before) && /^\s*:/.test(after)) continue; // an object key, not the builder
+    if (/\bfunction\s+$/.test(before)) continue; // a second db(): said once, above
+    hits.push({ line: lineAt(m.index), what: "the store's builder db named past the core" });
+  }
+  const inWiring = (i: number) => spans.some(([s, e]) => i >= s && i < e);
+  // The factory builds the store in db() alone; closeStore() closes what db() built.
+  const inDb = (i: number) => { const span = wiring.get("db"); return span !== undefined && i >= span[0] && i < span[1]; };
+  for (const m of bare.matchAll(/(?<![.\w$])(?:_store|createStore)\b/g)) {
+    const allowed = m[0] === "createStore" ? inDb(m.index) : inWiring(m.index);
+    if (inImportOf("./store.ts", m.index) || allowed || (role.wiring && /\blet\s+$/.test(bare.slice(0, m.index)))) continue;
+    hits.push({ line: lineAt(m.index), what: role.wiring ? `the store (${m[0]}) named outside ${STORE_WIRING.map((n) => `${n}()`).join(" and ")}` : `the store (${m[0]}) named outside root.ts` });
+  }
+  return hits;
+}
+/** [text, hit, role] — what check 25 must catch, and what it must not; the role is index.ts's unless named. */
+const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
+  ['import { decideCalls } from "./egress.ts";\n', true],
+  ["import type { EmbedConfig } from './embed.ts'\n", true],
+  ['export { extractMetadata } from "./metadata.ts";\n', true],
+  ['import "./store-sql.ts";\n', true],
+  ['const egress = await import("./egress.ts");\n', true],
+  ['const t = require("./thoughts.ts");\n', true],
+  ['import { workerStatus } from "./core/reads.ts";\n', true],
+  ['import * as reads from "./core/reads.ts";\n', true],
+  ['import { createStore, isoTimestamp } from "./store.ts";\n', true, ROOT_ROLE],
+  ["const r = await (await db()).retryFailed(workType);\n", true],
+  ["const s = await db();\nawait s.retryFailed(workType);\n", true],
+  ["void db().then((s) => s.logActions(rows));\n", true],
+  ["const s = db;\nawait (await s()).retryFailed(workType);\n", true],
+  ["await (db)().then((s) => s.close());\n", true],
+  ["await db?.();\n", true],
+  ["await Promise.resolve(db()).then((s) => s.retryFailed(workType));\n", true],
+  ["const r = await (await _store!).retryFailed(workType);\n", true],
+  ["const s = await createStore(env());\n", true],
+  ["const rows = await sql`select 1`;\n", true],
+  ["const pg = new SQL(url);\n", true],
+  ['await s.unsafe("select 1");\n', true],
+  ['const r = await fetch("https://openrouter.ai/api/v1/embeddings", { method: "POST" });\n', true],
+  ["const r = await globalThis.fetch(url);\n", true],
+  // Review pass 2: the factory renamed, aliased or applied, and a store: that is not the core's.
+  ['import { createStore as mk } from "./store.ts";\nconst s = await mk(env());\n', true, ROOT_ROLE],
+  ["const mk = createStore;\n", true, ROOT_ROLE],
+  ["const s = await createStore.call(null, env());\n", true, ROOT_ROLE],
+  ["const o = { store: db() };\n", true],
+  ["const c = createContext({ env, store: db, door });\n", true],
+  ["const core = createCore({ env, store: db(), door });\n", true],
+  // SMD-2284: the root's readers by name, and nowhere else the wiring.
+  ['import { db as store } from "./root.ts";\n', true],
+  ['import { createStore } from "./store.ts";\n', true],
+  ["let _store: Promise<ThoughtStore> | null = null;\n", true],
+  ["function db(): Promise<ThoughtStore> {\n  return _store!;\n}\n", true],
+  ["export function closeStore(): Promise<boolean> {\n  return Promise.resolve(false);\n}\n", true],
+  ['import { decideCalls } from "./egress.ts";\n', true, ROOT_ROLE],
+  // SMD-2284 review pass 1: the builder handed on, a statement read on past its line, a second db() naming no store.
+  ['export { db } from "./root.ts";\n', true],
+  ['export { closeStore } from "./root.ts";\n', true],
+  ['export const s = db\nimport { canRead } from "./auth.ts";\n', true],
+  ['export const s = createStore(env())\nimport { setJobSink } from "./jobs.ts";\n', true, ROOT_ROLE],
+  ["function db() {\n  return Promise.reject(new Error(\"elsewhere\"));\n}\n", true],
+  // …and a builder or a factory of the same name from another module the file may import whole.
+  ['import { db } from "./jobs.ts";\n', true],
+  ['import { createStore } from "./agents.ts";\n', true, ROOT_ROLE],
+  // Review pass 2: a keyword that is a member, a line with no semicolon, a second declaration in the root, the factory in closeStore().
+  ['const ldr = cfg.import\nconst leaked = db\nimport { initEnv } from "./root.ts";\n', true],
+  ['void cfg.import\nvoid db\nimport { env } from "./root.ts";\n', true],
+  ['const ldr = cfg.import\nconst s = createStore(env())\nimport { setJobSink } from "./jobs.ts";\nimport { storeKind } from "./store.ts";\n', true, ROOT_ROLE],
+  ['import X = NS.y\nconst q = db\nimport { env } from "./root.ts";\n', true],
+  ['export function db(): Promise<ThoughtStore> {\n  return _store!;\n}\nexport function closeStore(): Promise<boolean> {\n  function closeStore() { return Promise.resolve(true); }\n  return closeStore();\n}\n', true, ROOT_ROLE],
+  ['export function db(): Promise<ThoughtStore> {\n  return _store!;\n}\nexport function closeStore(): Promise<boolean> {\n  return createStore(env()).then(() => true);\n}\n', true, ROOT_ROLE],
+  ['export const PORT = 8080\nimport { db } from "./root.ts";\nconst core = createCore({ env, store: db, door });\n', false],
+  ['export const X = 1\nimport { createStore, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
+  // Review pass 1's root probe: a store call past the wiring, in the root itself.
+  ["const r = await (await db()).retryFailed(workType);\n", true, ROOT_ROLE],
+  ['import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";\n', false],
+  ["drainOnSignal({ server: () => bunServer, close: closeStore });\n", false],
+  ['import { createCore, SPECS } from "./core/index.ts";\n', false],
+  ['import type { ToolName } from "./tools.ts";\nexport { parseFilter } from "./core/filter.ts";\n', false],
+  ['import { HEALTH_DEADLINE_MS } from "./core/reads.ts";\nexport { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";\n', false],
+  ['import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
+  ['// import { decideCalls } from "./egress.ts";\n', false],
+  ["const msg = \"copied from './egress.ts' once\";\nconst t = `moved from \"./x.ts\"`;\n", false],
+  ["let _store: Promise<ThoughtStore> | null = null;\nexport function db(): Promise<ThoughtStore> {\n  if (!_store) _store = createStore(env());\n  void _store.then((s) => s.jobSink());\n  return _store;\n}\n", false, ROOT_ROLE],
+  ["export function closeStore(): Promise<boolean> {\n  return _store ? _store.then(async (s) => { await s.close(); return true; }) : Promise.resolve(false);\n}\n", false, ROOT_ROLE],
+  ["const identity = await agents().resolve(db(), principal);\n", false],
+  ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],
+  ["const core = createCore({\n  env,\n  store: db,\n  door: SERVER_NAME,\n});\n", false],
+  ['import {\n  createStore,\n  storeKind,\n  type ThoughtStore,\n} from "./store.ts";\n', false, ROOT_ROLE],
+  ['return c.json({ db: "up", store: "sql" });\n', false],
+  ["function closeStore(): Promise<{ closed: boolean }> {\n  return _store ? _store.then(() => ({ closed: true })) : Promise.resolve({ closed: false });\n}\n", false, ROOT_ROLE],
+  ["export default { port, fetch: app.fetch };\nconst r = await app.fetch(req);\n", false],
+  ['// (await db()).retryFailed(workType) — said in a comment\nconst s = "await db() and sql`x` in a string";\n', false],
+];
+function checkTransportOnly() {
+  for (const [probe, hit, role] of TRANSPORT_PROBES) {
+    const n = transportLeaksIn(probe, role).length;
+    const as = role === ROOT_ROLE ? " as root.ts" : "";
+    if (hit && n === 0) fail(SELF, `check 25 no longer catches its probe${as}: ${JSON.stringify(probe)} (its own probe)`);
+    if (!hit && n > 0) fail(SELF, `check 25 catches a non-probe${as}: ${JSON.stringify(probe)} — ${transportLeaksIn(probe, role).map((h) => h.what).join("; ")} (its own probe)`);
+  }
+  for (const [file, role] of TRANSPORT_FILES) {
+    const path = join(ROOT, file);
+    if (!existsSync(path)) { fail(file, "check 25's file is gone — move the check with it"); continue; }
+    const text = readFileSync(path, "utf8");
+    if (!new RegExp(`\\bfrom\\s*["']${role.mustImport.replace(/[.]/g, "\\.")}["']`).test(blanked(text, false))) fail(file, `check 25 reads no import of ${role.mustImport} — the reader is broken, not the file clean`);
+    if (role.wiring) {
+      const spans = wiringSpans(blanked(text, true));
+      for (const name of STORE_WIRING) if (!spans.has(name)) fail(file, `check 25 finds no function ${name}() — STORE_WIRING names the functions that build and close the store; rename it there with the function`);
+    }
+    for (const { line, what } of transportLeaksIn(text, role)) {
+      fail(`${file}:${line}`, `${what} — the MCP server's index.ts validates, calls a core operation and renders its answer (SMD-2283), over the process root in root.ts (SMD-2284); the store, the egress gate and the model calls are server-portable/core/'s, so the REST core (SMD-2284) makes the same calls: move the logic into core/, or, for a module or name that holds no logic, add it to the file's TRANSPORT_FILES list`);
+    }
+  }
+}
+checkTransportOnly();
+
+// ── 26: every vendored capture path names its trust ──────────────────────────
+//
+// SMD-1724. Migration 073 stamps every thought with the trust of the write
+// that put its text there — the key's registry kind, or what the write
+// declared below it — and the read tools label it, with a notice on outside
+// text. A key's kind is a ceiling, not a description: an importer whose key
+// is an operator's would label a scraped page `operator` unless the write
+// says what it carries. So every vendored path that captures says so:
+//   - a capture through the function — `.rpc("upsert_thought", …)`,
+//     `callRpc(…)`, supabase-py's `.rpc("upsert_thought", {…})` — or a
+//     client's call of the MCP `capture_thought` tool (`{ name:
+//     "capture_thought", arguments }`, `callTool("capture_thought", {…})`;
+//     a server registering the tool — `server.registerTool(…)`,
+//     `server.tool(…)` — is not a call) makes the file a capture path;
+//   - a capture path carries a `trust` key — `trust: "ingested"`,
+//     `event: { trust }`, Python's `"trust": "ingested"` — comments blanked;
+//     whole-file, as checks 8 and 10 bind a name: one declaration answers
+//     the file's every call. The value is the file's to choose: a word, or a
+//     client's forwarded (the database clamps it either way);
+//   - a raw row cannot declare: 073's trigger strips a payload's trust, and
+//     the event handoff is a transaction setting nothing sets over PostgREST.
+//     So a raw capture — a POST to `rest/v1/thoughts`, a `.post("thoughts",
+//     …)`, or check 10's raw insert — is listed in TRUST_EXCEPTIONS with the
+//     reason and the exact count of its lines: a port that lands fails until
+//     its entry goes, and the port's call must declare.
+// Scanned: every .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.py/.sh under the
+// seven category directories (docs/ holds no capture path; a README's sample
+// is prose).
+/** A capture through the function: an `upsert_thought` RPC by any client, the name a string literal — or its PostgREST path, `rpc/upsert_thought`, which a port of the Python importers would POST to (first review pass). */
+const UPSERT_RPC = [/\b\w*rpc\s*\(\s*(["'`])upsert_thought\1\s*,/gi, /\brpc\/upsert_thought\b/g];
+/** A JSON-RPC tools/call of capture_thought: its params object, keys quoted or not, in either order (first review pass). */
+const MCP_CAPTURE_PARAMS = [/(["']?)name\1\s*:\s*(["'`])capture_thought\2\s*,\s*(["']?)arguments\3\s*:/g, /(["']?)arguments\1\s*:[^{}\n]*,\s*(["']?)name\2\s*:\s*(["'`])capture_thought\3/g];
+/** A call whose first argument is the tool's name and second its arguments object — a client's, unless the callee registers a tool. */
+const MCP_CAPTURE_CALL = /(?<![\w$])([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(\s*(["'`])capture_thought\2\s*,\s*\{/g;
+/** The callees that register a tool rather than call one: the SDK's two, reached as a method. */
+const REGISTERS_TOOL = /\.\s*(?:registerTool|tool)$/;
+/**
+ * A declaration in the shape a write reads it. upsert_thought's is the payload's write event — `event: { trust … }`,
+ * a key or a shorthand, Python's `"event": {"trust": …}` — and capture_thought's is the arguments' `trust:` key. Not
+ * any `trust` in the file: a schema's key, a parameter or a positional argument passed for the call site's deleted
+ * declaration in five files (first review pass), so the RPC's form is the event object alone.
+ */
+const EVENT_TRUST_DECLARED = /(["']?)event\1\s*:\s*\{\s*(["']?)trust\2\s*[:,}]/;
+const TOOL_TRUST_DECLARED = /(?<![\w$.])(["'`]?)trust\1\s*:\s*(?!z\.|string\b|Trust\b)/;
+/** A raw capture over PostgREST: the table's own path, closed (a `?` query is a read or an edit), a helper's `.post("thoughts", …)`, or a helper's `.patch("thoughts?…", { content … })` — a raw rewrite of the text, stamped from the key's kind (first review pass). */
+const RAW_CAPTURE_FORMS = [/\brest\/v1\/thoughts["'`]/g, /\.post\(\s*(["'`])thoughts\1\s*,/g, /\.patch\(\s*["'`]thoughts\?[^,\n]*,\s*\{[^}\n]*\bcontent\b/g];
+
+/** A file's capture call sites and raw captures, by line, comments blanked by its kind (check 24's blankers). */
+function capturePathsIn(text: string, rel: string): { calls: number[]; raw: number[]; declares: boolean } {
+  const hash = HASH_COMMENT_FILE.test(rel);
+  const code = hash ? hashCommentsBlanked(text, SHELL_FILE.test(rel)) : blanked(text, false);
+  const lineOf = lineIndexer(code);
+  const calls = new Set<number>();
+  let rpc = false, tool = false;
+  for (const re of UPSERT_RPC) for (const m of code.matchAll(re)) { calls.add(lineOf(m.index!)); rpc = true; }
+  // Python's MCP clients too (`session.call_tool("capture_thought", {…})`, a dict's `"name"`); shell's curl is not read.
+  if (!SHELL_FILE.test(rel)) {
+    for (const re of MCP_CAPTURE_PARAMS) for (const m of code.matchAll(re)) { calls.add(lineOf(m.index!)); tool = true; }
+    for (const m of code.matchAll(MCP_CAPTURE_CALL)) if (!REGISTERS_TOOL.test(m[1])) { calls.add(lineOf(m.index!)); tool = true; }
+  }
+  const raw = new Set<number>();
+  for (const re of RAW_CAPTURE_FORMS) for (const m of code.matchAll(re)) raw.add(lineOf(m.index!));
+  // Check 10's raw insert, read on the file's own text (it blanks SQL comments itself).
+  if (!hash) for (const line of thoughtWritesAroundIn(text)) raw.add(line);
+  // A file that does both answers both: each kind of call its own declaration.
+  const declares = (rpc || tool) && (!rpc || EVENT_TRUST_DECLARED.test(code)) && (!tool || TOOL_TRUST_DECLARED.test(code));
+  return { calls: [...calls].sort((a, b) => a - b), raw: [...raw].sort((a, b) => a - b), declares };
+}
+
+/** [text, file name, calls, raw, declares] — the shapes in the tree, and the neighbours the rule must not reach. */
+const TRUST_PROBES: [string, string, number, number, boolean][] = [
+  // The function, by every client in the tree: supabase-js and the shim, a helper, supabase-py, a call over lines.
+  ['await supabase.rpc("upsert_thought", { p_content: c, p_payload: { metadata, event: { trust: "ingested" } } });', "x.mjs", 1, 0, true],
+  ['await supabase.rpc("upsert_thought", { p_content: c, p_payload: { metadata } });', "x.ts", 1, 0, false],
+  ["const r = await callRpc('upsert_thought', { p_content: c, p_payload: {} });", "x.mjs", 1, 0, false],
+  ['const r = await sb.rpc(\n  "upsert_thought",\n  { p_content: c },\n);', "x.mjs", 1, 0, false],
+  ['supabase.rpc(\n    "upsert_thought",\n    {"p_content": c, "p_payload": {"event": {"trust": "ingested"}}},\n).execute()', "x.py", 1, 0, true],
+  // MCP: the params object, a helper call, a bare one; a declaration by shorthand.
+  ['rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });', "x.mjs", 1, 0, false],
+  ["const result = await callMcpTool('capture_thought', { content, trust: 'operator' });", "x.ts", 1, 0, true],
+  ['const cap = await tool("capture_thought", { content: "x" });', "x.ts", 1, 0, false],
+  ['await client.callTool("capture_thought", { content });', "x.ts", 1, 0, false],
+  ['const declared = trust ? { event: { trust } } : {};\nawait supabase.rpc("upsert_thought", { p_payload: { ...declared } });', "x.ts", 1, 0, true],
+  // Raw rows: PostgREST's table path, a helper's post, check 10's insert.
+  ['resp = requests.post(f"{SUPABASE_URL}/rest/v1/thoughts", headers=h, json=body)', "x.py", 0, 1, false],
+  ["const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts`, { method: 'POST', body });", "x.ts", 0, 1, false],
+  ['const inserted = await sb.post(\n  "thoughts",\n  { content, metadata },\n);', "x.mjs", 0, 1, false],
+  ['await supabase.from("thoughts").insert({ content, embedding, metadata });', "x.ts", 0, 1, false],
+  // Not the rule's: a server registering the tool, a tool list, a gate on the name, a read, an edit,
+  // the function in a comment, a docstring, a log line, a regex literal, prose naming trust.
+  ['server.registerTool(\n  "capture_thought",\n  { title: "Capture" },\n  handler,\n);', "x.ts", 0, 0, false],
+  ['server.tool("capture_thought", "Save a thought", { content: z.string() }, async () => {});', "x.ts", 0, 0, false],
+  ['const BRAIN_TOOLS = ["search_thoughts", "capture_thought"];', "x.mjs", 0, 0, false],
+  ["if (name === 'capture_thought' && !session.canCapture) return deny();", "x.ts", 0, 0, false],
+  ["let url = `${SUPABASE_URL}/rest/v1/thoughts?select=id,content&limit=${limit}`;", "x.ts", 0, 0, false],
+  ["const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts?id=eq.${id}`, { method: 'PATCH', body });", "x.ts", 0, 0, false],
+  ['// await supabase.rpc("upsert_thought", { p_content: c });\nconst n = 1;', "x.ts", 0, 0, false],
+  // A Python string is read, as check 24 reads one: a docstring quoting the call is a call, answered by naming the trust.
+  ['"""Store each highlight through supabase.rpc("upsert_thought", ...)."""', "x.py", 1, 0, false],
+  ['throw new Error(`upsert_thought failed: ${error.message}`);', "x.ts", 0, 0, false],
+  ['if (/\\brpc\\/upsert_thought\\b/.test(msg)) retry();', "x.mjs", 0, 0, false],
+  ['// the trust: the key decides\nawait supabase.rpc("upsert_thought", { p_content: c });', "x.ts", 1, 0, false],
+  // The first review pass: a `trust` that is not the write's — a schema key, a parameter, a positional argument, a
+  // string — declares nothing; the PostgREST path, JSON-quoted params, reversed keys and Python's MCP call are calls.
+  ['const schema = z.object({ trust: z.enum(["agent"]).optional() });\nawait supabase.rpc("upsert_thought", { p_payload: { metadata } });', "x.ts", 1, 0, false],
+  ['function f(trust: string) { return run(a, trust, b); }\nawait supabase.rpc("upsert_thought", { p_payload: { metadata } });', "x.ts", 1, 0, false],
+  ['const note = "trust: none";\nawait supabase.rpc("upsert_thought", { p_payload: {} });', "x.ts", 1, 0, false],
+  ['resp = httpx.post(f"{URL}/rest/v1/rpc/upsert_thought", json={"p_content": c, "p_payload": {"event": {"trust": "ingested"}}})', "x.py", 1, 0, true],
+  ["const r = await fetch(`${BASE}/rest/v1/rpc/upsert_thought`, { method: 'POST', body });", "x.ts", 1, 0, false],
+  ['const body = { "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "capture_thought", "arguments": a } };', "x.ts", 1, 0, false],
+  ['send({ method: "tools/call", params: { arguments: args, name: "capture_thought" } });', "x.mjs", 1, 0, false],
+  ['result = await session.call_tool("capture_thought", {"content": text, "trust": "ingested"})', "x.py", 1, 0, true],
+  ['const args = { content, trust: "agent" };\nawait supabase.rpc("upsert_thought", { p_payload: {} });\nrpc(cfg, "tools/call", { name: "capture_thought", arguments: args });', "x.mjs", 2, 0, false],
+  // A raw rewrite of the text through a helper's PATCH; a vector-only or metadata-only patch is not one.
+  ["await sb.patch(`thoughts?id=eq.${id}`, { content, metadata, embedding });", "x.mjs", 0, 1, false],
+  ["await sb.patch(`thoughts?id=eq.${id}`, { embedding });", "x.mjs", 0, 0, false],
+];
+
+const RAW_IMPORT = (ticket: string): CountedException["why"] =>
+  `an import that POSTs its rows raw, so they carry no declared trust (073's trigger strips a payload's, and PostgREST sets no event handoff); its port onto the ingestion contract (${ticket}) writes through db/ingest-records.ts, whose rows take the ingester key's kind — classify that key \`ingested\``;
+const RAW_FALLBACK = "the plain insert its upsert_thought call falls back to on a brain without the function; that call declares, the raw row cannot (SMD-2143 moves the script onto the shim)";
+const RAW_OWN_DATABASE = "a deployment with a database of its own and none of the fork's migrations: no 073, so no trust to declare (check 10 counts the same insert)";
+/**
+ * file → why its raw captures cannot declare, and the exact count of their lines. A line past the count fails (a
+ * new raw capture), a count no line reaches fails as stale (a port landed: lower it, or remove the entry), a file
+ * that is gone fails until its entry goes.
+ */
+const TRUST_EXCEPTIONS = new Map<string, CountedException>([
+  ["recipes/chatgpt-conversation-import/import-chatgpt.py", { why: RAW_IMPORT("SMD-2147"), lines: 1 }],
+  ["recipes/perplexity-conversation-import/import-perplexity.py", { why: RAW_IMPORT("SMD-2148"), lines: 1 }],
+  ["recipes/google-activity-import/import-google-activity.mjs", { why: RAW_IMPORT("SMD-2150"), lines: 1 }],
+  ["recipes/email-history-import/pull-gmail.ts", { why: `${RAW_IMPORT("SMD-2021")}; the second line is the retry`, lines: 2 }],
+  ["recipes/entity-wiki/generate-wiki.mjs", { why: "a rerun rewrites an existing dossier's text with a raw PATCH, and a failed upsert_thought call (any error, not only a missing function) falls back to a raw insert: both stamped from the key's kind, so a regenerated dossier reads as the key's and not `agent`; only the first capture's call declares (SMD-2143 moves the script onto the shim, through update_thought and upsert_thought)", lines: 2 }],
+  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", { why: RAW_FALLBACK, lines: 1 }],
+  ["integrations/kubernetes-deployment/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
+  ["recipes/vercel-neon-telegram/src/lib/db.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
+  ["recipes/schema-aware-routing/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
+  ["extensions/test-writes.ts", { why: "the fixtures check 10 counts: rows planted as an older write left them, and a restricted twin — test rows, not captures", lines: 2 }],
+]);
+
+function checkCaptureTrust() {
+  for (const [probe, name, calls, raw, declares] of TRUST_PROBES) {
+    const got = capturePathsIn(probe, name);
+    if (got.calls.length !== calls || got.raw.length !== raw || got.declares !== declares) {
+      fail(SELF, `check 26 reads its probe as ${got.calls.length} call(s), ${got.raw.length} raw, declares ${got.declares} — expected ${calls}, ${raw}, ${declares}: ${JSON.stringify(probe)} (${name}; its own probe)`);
+    }
+  }
+  const files = textFilesUnder(CATEGORIES.map((c) => ({ dir: join(ROOT, c), rel: c }))).filter((f) => POSTGREST_CODE_FILE.test(f));
+  if (files.length === 0) fail(SELF, "check 26 found no code file under the seven category directories — the listing is broken, not the tree clean");
+  const MSG = "captures a thought without naming its trust — the database stamps the key's kind, a ceiling and not a description, so an importer behind an operator's key labels outside text `operator`; declare what the content is: `event: { trust: \"ingested\" }` in upsert_thought's payload (`agent` for a model's output; a server relaying a client forwards the client's word), or `trust` among capture_thought's arguments (SMD-1724)";
+  const seen = new Set<string>();
+  let capturePaths = 0;
+  for (const file of files) {
+    const rel = relOf(file);
+    const { calls, raw, declares } = capturePathsIn(readFileSync(file, "utf8"), rel);
+    if (calls.length) capturePaths++;
+    if (calls.length && !declares) for (const line of calls) fail(`${rel}:${line}`, MSG);
+    const excepted = TRUST_EXCEPTIONS.get(rel);
+    if (excepted) {
+      seen.add(rel);
+      if (raw.length !== excepted.lines) fail(rel, `check 26's exception covers ${excepted.lines} raw capture line(s) and the file has ${raw.length} (${raw.join(", ") || "none"}) — ${raw.length > excepted.lines ? "a new raw capture beside the documented ones" : "a port landed on those lines, so the exception is stale: lower the count, or remove the entry when none remains"} (${excepted.why})`);
+    } else {
+      for (const line of raw) fail(`${rel}:${line}`, "writes a thought as a raw row, which cannot declare its trust — 073's trigger strips a payload's, and nothing sets the event handoff over PostgREST; capture through upsert_thought with `event: { trust }` in the payload, or list the file in TRUST_EXCEPTIONS with its line count and the reason (SMD-1724)");
+    }
+  }
+  if (capturePaths === 0) fail(SELF, "check 26 found no capture path under the seven category directories — the detector is broken, not the tree clean");
+  for (const rel of TRUST_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 26's exception names a file the scan does not reach — stale, or the file is gone: remove the entry");
+}
+checkCaptureTrust();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

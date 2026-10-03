@@ -151,7 +151,7 @@ the repo root, with whatever `-f` files the stack was started with:
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` and, on the `mesh` network, `auth.ob1.internal:3000` (resolved with no search domains) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `server` | `server:8000` — the proxy, and n8n | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
@@ -159,7 +159,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which nothing in the stack dials until the proxy's `/auth` route (SMD-1846 PR 2); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres` until SMD-1846 moves the stack onto the mesh, and it holds no Postgres credential | Nothing. `compose exec auth …` for the backup below | Not yet: the proxy's `/auth` route comes with SMD-1846 PR 2 |
+| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the REST core (SMD-2284), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -219,9 +219,10 @@ paths today:
 
 | Path | Answered by |
 | --- | --- |
+| `/auth` and everything under it, `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, the bare `/.well-known/oauth-authorization-server` | `auth` (`--profile auth`), as `auth.ob1.internal` on the `mesh` network — the issuer, sign-in, registration and the three discovery documents outside the issuer's path (the bare one is the only one Claude Code reads). Only while it answers: with the profile off, the server stopped or still starting, the proxy's own bodiless 404, so an origin without it says "no OAuth here" as before. Its own answers pass through untouched, the registration cap's 503 and `Retry-After` included |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `GET`/`HEAD /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key |
-| `/.well-known` and everything under it | the proxy: a 404. A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246). The 404 carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
+| `/.well-known` and everything else under it | the proxy: a 404, `/.well-known/oauth-protected-resource/mcp` included until the server serves it (SMD-2382). A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246). The 404 carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
 | anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>` (the poll links `scan_thoughts` returns are root-relative). It keeps every client configured before SMD-1846 working; SMD-2306 gives it a deprecation window and then removes it, after which `/` is the proxy's 404 |
 
 The path reaches the server as it came, prefix and all: the server answers POST
@@ -252,10 +253,14 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 `legacy` (1). Not container labels: Traefik's label-driven registry reads them
 through the container engine's socket, which is root on the host, and the
 proxy is the one process a client on the network reaches —
-`docs/orchestration-tool.md` declined the same socket for n8n. The dashboard,
-the authorization server (`/auth` and its `/.well-known/` routes, only while
-the `auth` profile is configured) and the REST core's opt-in `/api` arrive this
-way with their own tickets (`docs/operator-surface-tiers.md`).
+`docs/orchestration-tool.md` declined the same socket for n8n. The
+authorization server came this way (the `auth` router); the dashboard and the
+REST core's opt-in `/api` arrive the same way with their own tickets
+(`docs/operator-surface-tiers.md`). A service under a profile gets the `auth`
+router's shape: an `errors` middleware that turns Traefik's 502 for a name
+that does not resolve into a 404, so its paths answer only while it runs, and
+the service's own 5xx pass through. The service also joins a network the
+proxy is on (`mesh`, for the authorization server).
 
 **What the proxy does not do.** No authentication: the key travels to the
 server untouched, as `x-brain-key` or `?key=`, and the server checks it. No TLS:
@@ -1164,10 +1169,11 @@ commercial product built on OB1 that competes with it is outside OB1's.
 OAuth for the brain (SMD-2285; `../docs/operator-surface-tiers.md`, decisions
 13–16): oidc-provider 9.12.2 in a small Bun service of the fork's own
 (`auth/server.ts`), which won the proof of concept (`../evals/README.md`). The
-`auth` profile runs it. **Nothing routes to it yet:** it publishes no port,
-and the proxy's `/auth` and discovery routes on the public origin come with
-SMD-1846's PR 2 (the proxy itself is in front of the server already). Until then the profile is for standing the server up and
-holding its state, not for signing a client in.
+`auth` profile runs it. It publishes no port: the proxy routes `/auth` and
+the three discovery paths outside it to it while it answers, and answers them
+404 itself while it does not ("One origin", above). Nothing signs in through
+it yet: the MCP server and the GUI become its clients with SMD-2286/2287, and
+the protected-resource document that sends a client to it comes with SMD-2382.
 
 Below, `compose` stands for `podman compose -f deploy/compose.yaml --profile
 auth`, or docker compose, with whatever other `-f` files the stack was
@@ -1177,17 +1183,34 @@ must be set even to start this one.
 
 ```bash
 # deploy/.env: OB1_PUBLIC_ORIGIN=https://brain.example.com (yours; --init does not write it)
+#              COMPOSE_PROFILES=auth   (with any other profiles, comma-separated)
 bun deploy/auth/provision.ts --init   # once: the profile's secrets into deploy/.env (it keeps every value it finds)
 bun deploy/auth/provision.ts          # what the server would refuse, read from deploy/.env
-compose up -d --wait --wait-timeout 60 auth   # builds and starts this one service, and waits for it to be healthy
+compose up -d --wait --wait-timeout 60 auth proxy   # builds and starts it, the proxy beside it, and waits for both
 ```
 
-`--wait` matters: a server that refuses its settings exits 2 and is
-restarted, and `up` without it returns 0 all the same; with it, `up` fails
-naming the exit (measured: 4 s). It needs Docker Compose v2 or `podman
+`COMPOSE_PROFILES=auth` in `deploy/.env` is the switch (ADR decision 16): the
+server refuses to start without it, exit 2 naming it, so `--profile auth` on
+the command line alone never puts it on the public origin. With it, every
+`up` of the stack starts it. Two compose rules bear on that:
+- a `COMPOSE_PROFILES` set in the shell beats the file's, both ways (the
+  server reads what compose interpolated);
+- a `--profile` on the command line replaces `COMPOSE_PROFILES` for that
+  command, so `--profile local-models up` alone does not start this server.
+  List every profile there instead (`--profile local-models --profile auth`).
+
+`proxy` is named because a proxy from before SMD-1846's PR 2 has no `/auth`
+route and is not on the mesh, and `up auth` alone would leave it so, with
+`/auth` still answered by the MCP server; on a current stack it is a no-op.
+
+`--wait` matters: a server that refuses its settings says why, exits 2 after
+30 s and is restarted (the import runner's pattern: one restart each 30 s, not
+a hot loop), and `up` without it returns 0 all the same. With it, `up` fails
+at its `--wait-timeout` (measured: `application not healthy after 1m0s`, one
+restart in that minute); the log names the setting. Stop the refusing one
+with `compose stop auth` until it is fixed. It needs Docker Compose v2 or `podman
 compose` backed by it, as the canary's section says; the Python
-podman-compose has no `--wait`. With `auth` in `COMPOSE_PROFILES` instead,
-every `up` of the stack starts it.
+podman-compose has no `--wait`.
 
 `--init` writes the signing key `OB1_AUTH_JWKS` (one P-256 key), two cookie
 keys `OB1_AUTH_COOKIE_KEYS`, the operator's password
@@ -1221,8 +1244,8 @@ pass a variable it does not name: `provision.ts` says which line.
 **Its state** — sessions, grants, refresh tokens and dynamically registered
 clients — is one SQLite file in the `auth-data` volume, so a restart keeps
 it, and so does an upgrade, which rebuilds and recreates the container. The server holds
-no Postgres credential, and until the proxy moves the stack onto the mesh
-(SMD-1846) it shares no network with Postgres either. On a stop it finishes
+no Postgres credential, and until the REST core moves the stack onto the mesh
+(SMD-2284) it shares no network with Postgres either. On a stop it finishes
 what is in flight, closes the store and exits. The library's in-memory store,
 which the proof of concept first ran on, forgot all of it at every restart.
 
@@ -1290,16 +1313,20 @@ checks in a flood is locked out after six, so one address cannot hold them.
   your next connect through it until the oldest is an hour old.
 
 While the name does not resolve, the per-address limits are off and the log
-says so every five minutes; compose's `proxy` resolves only once it shares a
-network with `auth` (SMD-1846).
+says so every five minutes. Compose's `proxy` shares `mesh` with `auth`, so
+`OB1_AUTH_TRUSTED_PROXY=proxy` resolves.
 
 Leave `OB1_AUTH_TRUSTED_PROXY` unset unless the proxy's entry is each
-client's own. Behind a host tunnel (cloudflared, `tailscale funnel`, caddy),
-the proxy sees one peer for the whole internet, and one hop names the
-tunnel: a lockout there is everyone's. Set it with 2 hops only once the
-tunnel writes its client into `X-Forwarded-For` and the proxy trusts that
-header (SMD-1846); a tunnel that passes the header through unwritten lets
-the client name entry 2. A password from `--init`, or one of 12 characters
+client's own. Compose's proxy trusts no forwarded header, so with one hop the
+entry is the proxy's own peer: each client's address when the published port
+faces clients directly (a Linux host's port forwarding keeps the source),
+but one address for everyone behind a host tunnel (cloudflared, `tailscale
+funnel`, caddy) or a forwarder that rewrites the source (rootless podman on
+macOS showed every client as its gateway, measured). A lockout there is
+everyone's. Two hops need the tunnel to write its client into
+`X-Forwarded-For` and the proxy to trust that header (Traefik's
+`forwardedHeaders.trustedIPs`, which compose does not set); a tunnel that
+passes the header through unwritten lets the client name entry 2. A password from `--init`, or one of 12 characters
 or more, is what holds against many addresses guessing; the loopback
 break-glass sign-in is SMD-2286's.
 
@@ -1344,7 +1371,9 @@ re-runs the proof of concept against the new image
 (`bun evals/eval-auth.ts --up oidc-provider`, then `--verify`); CI's auth-poc
 job does the same.
 
-**Not yet.** The `/auth` route and the discovery paths (SMD-1846); passkey
+**Not yet.** The protected-resource document at
+`/.well-known/oauth-protected-resource/mcp`, served by the MCP server while
+this one answers (SMD-2382, SMD-2286); passkey
 sign-in, which needs the public origin (SMD-2382, SMD-2286); the MCP server
 and the GUI as its clients (SMD-2286, SMD-2287); and rate limits at the
 proxy (SMD-2309), beside the server's own above. The release
@@ -1400,8 +1429,8 @@ checkout.
   what it proposes.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
-  The `auth` profile's authorization server runs, but nothing routes to it
-  until the proxy's `/auth` route (SMD-1846 PR 2; "Authorization server", above).
+  The `auth` profile's authorization server runs behind the proxy's `/auth`,
+  but nothing signs in through it yet ("Authorization server", above).
 
 ## Related
 
