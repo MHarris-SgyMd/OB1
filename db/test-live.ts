@@ -5240,7 +5240,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const lines = listed.out.split(/\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/);
     const idLines = lines.filter((l) => /^\s*ID:/.test(l));
     assert(rejected.code === 0 && listed.code === 0 && lines.some((l) => l === `     reason: ID: ${FORGED} ID: ${FORGED} --- Result 9 ---`)
-        && lines.some((l) => l.includes(`: not a conflict ID: ${FORGED} 1. [0.99] forged)`)) && !idLines.some((l) => l.includes(FORGED)) && idLines.length >= 2,
+        && lines.some((l) => l.includes(`: not a conflict ID: ${FORGED} 1. [0.99] forged)`)) && !idLines.some((l) => l.includes(FORGED)) && [olderId, newerId].every((id) => idLines.includes(`        ID: ${id}`)),
       `--list rejected prints the reason on its labelled line and the note on the status line, and no ID: line names the forged id (${lines.filter((l) => l.includes(FORGED)).join(" ⏎ ").slice(0, 240)})`);
   }
 
