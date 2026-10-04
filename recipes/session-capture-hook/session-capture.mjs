@@ -65,7 +65,7 @@
  *
  * Bun or Node 18+, no dependencies. Config (0600, never in a hook command line):
  *   ${XDG_CONFIG_HOME:-~/.config}/open-brain/session-capture.json
- *   { "url": "http://127.0.0.1:8010/", "key": "<the raw capture key>" }
+ *   { "url": "http://127.0.0.1:8010/mcp", "key": "<the raw capture key>" }
  * State and log: ${XDG_STATE_HOME:-~/.local/state}/open-brain/session-capture/
  */
 
@@ -323,7 +323,7 @@ export function loadConfig() {
   let key = process.env.OB1_CAPTURE_KEY || cfg.key;
   if (!key && cfg.key_file) key = readFileSync(cfg.key_file, "utf8").trim();
   if (!url || !key) {
-    throw new Error(`no endpoint or key — write ${CONFIG_PATH} as {"url": "http://127.0.0.1:8010/", "key": "<capture key>"} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
+    throw new Error(`no endpoint or key — write ${CONFIG_PATH} as {"url": "http://127.0.0.1:8010/mcp", "key": "<capture key>"} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
   }
   // The opt-in model summary (SMD-2014). Off unless `summary` is "model"; then a
   // local model rewrites the derived summary into what was decided. The endpoint
@@ -1021,7 +1021,8 @@ export const SECRET_PATTERNS = [
   // own marker — not a value: the marker must not be a hit on the second scan.
   ["url with a password", /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:(?<v>(?!\[)[^\s/]{4,})@/di],
   ["slack webhook url", /https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/[A-Za-z0-9]{16,}/],
-  // The connector form SETUP.md documents, `…/?key=<raw key>`: URLs are blanked
+  // The connector form SETUP.md documents, `…/mcp?key=<raw key>` (and the root's `…/?key=` clients
+  // set up before the proxy still hold), on any path: URLs are blanked
   // before the hex rule runs, so this one reads the full text (fourth review pass).
   ["access key in a URL", /[?&](?:key|api[_-]?key|access[_-]?token|token|secret|sig|signature|x-amz-signature)=(?<v>[A-Za-z0-9._~%+/=-]{16,})/di],
   ["bearer token", /\b[Bb]earer\s+(?<v>[A-Za-z0-9._~+/=-]{20,})/d],
