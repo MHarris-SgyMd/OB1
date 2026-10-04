@@ -648,7 +648,7 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 515 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, and the old root URL's once-per-key line
+bun test-server.ts        # 527 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
 bun test-auth.ts          # 124 — scoped, hashed, named keys
 bun test-rest.ts          # 223 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
