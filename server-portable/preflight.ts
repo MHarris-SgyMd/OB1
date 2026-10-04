@@ -180,6 +180,7 @@ const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
 const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
 const APPLY_070 = "Apply db/migrations/070_listing_flags_lineage_pair.sql.";
 const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
+const APPLY_078 = "Apply db/migrations/078_distinct_tickets_not_paired.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -2187,6 +2188,8 @@ if (configFailed) {
                      to_regprocedure('public.settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS has_067,
                      (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
+                     -- 078 (SMD-2448): the candidate body leaves out two different tickets (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
+                     (SELECT w.prosrc LIKE '%ob1:distinct-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
                      -- 070 (SMD-2313): the listing flags a lineage pair (its sentinel) and stands in one form — 029 re-applied by hand lands its
                      -- two-argument form BESIDE 070's, and a call passing fewer than three arguments is then ambiguous (42725, not unique) and fails.
                      (SELECT w.prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.list_supersession_proposals(text, int, boolean)')) AS lists_lineage,
@@ -2194,7 +2197,7 @@ if (configFailed) {
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; lists_lineage: boolean | null; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_lineage: boolean | null; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
@@ -2324,6 +2327,12 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but consolidation_candidates is from before 066 (migration 066 not yet applied, or 063 re-applied by hand over it): the judge is asked whether a page supersedes its own evidence, and a digest its sources (SMD-2292). ${coverage}`,
                   ledgerRemedy("066", APPLY_066));
+            } else if (bodies.has_063 && bodies.excludes_tickets !== true) {
+              // 078 (SMD-2448): 063's or 066's candidate body over 078's — the
+              // pass asks the judge whether one ticket supersedes another.
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but consolidation_candidates is from before 078 (migration 078 not yet applied, or 063 or 066 re-applied by hand over it): the judge is asked whether one ticket supersedes another, a pair of two records each with its own lifecycle (SMD-2448). ${coverage}`,
+                  ledgerRemedy("078", APPLY_078));
             } else if (reopenOlder) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but rebuild_derived is from before 067 (063 re-applied by hand over it): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again (SMD-2297). ${coverage}`,

@@ -5468,6 +5468,37 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     for (const id of ids) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
+  // 078 (SMD-2448): two different tickets are never judged against each
+  // other. A fresh corpus — an older row of each of two tickets, a note, and
+  // a newer row of the first ticket, all on one axis mentioning billing:
+  // --status and --dry-run count the one pair the next run leaves out, and
+  // the run judges the newer row against its own ticket's row and the note
+  // alone, saying it left one pair out.
+  {
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM ob1_entities`;
+    const ticket = async (content: string, metadata: Record<string, unknown>, daysAgo: number) => {
+      const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata }}::jsonb, ${unit(7)}::vector) AS r`)[0].r as { id: string }).id;
+      await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+      await sql`SELECT record_thought_entities(${id}::uuid, ${EXTRACT}, ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
+      return id;
+    };
+    await ticket("SMD-9001: tickets bill monthly", { source: "linear", issue: "SMD-9001" }, 10);
+    await ticket("SMD-9002: tickets bill on the first", { source: "linear", issue: "SMD-9002" }, 10);
+    await ticket("a note: tickets and billing", { source: "test" }, 10);
+    await ticket("SMD-9001: tickets bill weekly now", { source: "linear", issue: "SMD-9001" }, 0);
+    const statusT = await consolidate("--status");
+    const dryT = await consolidate("--dry-run");
+    const from = seen.length;
+    const runT = await consolidate("--workers", "1");
+    const judgedT = seen.slice(from);
+    assert(statusT.code === 0 && /tickets: 1 pair\(s\) between two different tickets left out of the 4 thought\(s\) still to judge \(078\)/.test(statusT.out)
+        && /tickets: 1 pair\(s\) between two different tickets left out of the 4 thought\(s\) still to judge \(078\)/.test(dryT.out),
+      `--status and --dry-run count the one pair between two different tickets the next run leaves out (${statusT.out.split("\n").find((l) => /tickets:/.test(l))?.trim()})`);
+    assert(runT.code === 0 && judgedT.length === 2 && judgedT.every((p) => !/SMD-9002/.test(p.a + p.b)) && /; 1 pair\(s\) between two different tickets left out \(078\)/.test(runT.out),
+      `the run judges the newer SMD-9001 row against its own ticket's row and the note, never SMD-9002, and says it left one pair out (${judgedT.length} judged; ${runT.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
+  }
+
   judge.stop(true);
   try { unlinkSync(dump); } catch { /* already gone */ }
   await sql`DELETE FROM thoughts`;
