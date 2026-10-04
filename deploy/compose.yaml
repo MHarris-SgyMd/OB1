@@ -272,9 +272,13 @@ services:
     # Named, so the REST core below runs this image by name — one build, the
     # two servers always on one code (review pass 1: an image of its own fell
     # behind after `up --build server`, as orchestration-runner-role's did).
-    # The name is compose's own default for this service, so nothing that
-    # built it before sees a different image.
+    # Docker Compose v2 named the build this already; the Python podman-compose
+    # and --compatibility named it <project>_server, so their next `up` builds
+    # it once under this name. Never pulled, as migrate: `pull` and a fresh
+    # `up` build it rather than ask a registry for a name no registry holds
+    # (review pass 2). The release overlay pulls its pinned server instead.
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
+    pull_policy: never
     build:
       # Repo root, not server-portable/, because preflight.ts imports
       # ../db/config.mjs — the single definition of the embedding contract, shared

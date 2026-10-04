@@ -116,6 +116,7 @@ mkdir ob1 && cd ob1
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.yaml
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.release.yaml
 curl -fsSL -o .env https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/env.example
+curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.api-public.yaml   # optional: /api on the proxy, a third -f ("The REST core" below)
 # fill in .env as step 1 says, then:
 docker compose -f compose.yaml -f compose.release.yaml pull
 docker compose -f compose.yaml -f compose.release.yaml up -d --wait   # --profile local-models on both for the stack's own Ollama
@@ -154,7 +155,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` and, on the `mesh` network, `auth.ob1.internal:3000` and — with `compose.api-public.yaml` named — `api.ob1.internal:8000` (resolved with no search domains) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `server` | `server:8000` — the proxy, and n8n | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
 | `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on the default one, which every container there can reach until the network move (SMD-2294) — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
-| `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
+| `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` and `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
@@ -247,7 +248,10 @@ loading; an SDK client connected across it saw one 404 and went on (measured).
 On that first `up` name the proxy wherever you name the server (`up -d --build
 server proxy`): `up server` alone recreates the server without its port and
 never creates the proxy. Once the proxy runs, recreating the server alone is
-fine — the proxy keeps the port and finds the new container by name. **Rolling back** to
+fine for the proxy — it keeps the port and finds the new container by name —
+but a rebuild names the REST core too, or the proxy, which depends on it ("The
+REST core", below): `api` runs the server's image, and a container keeps the
+image it started on. **Rolling back** to
 a `compose.yaml` from before it needs `up -d --remove-orphans`: without it the
 proxy, now an orphan, keeps the port and the old server cannot bind it
 (measured: "address already in use", the stack down).
@@ -303,6 +307,9 @@ with the server's environment and its preflight
 `mesh` network it is `api.ob1.internal:8000`, for a client in the stack (the
 operator GUI, n8n, a worker); it is on the default network too, where Postgres
 and the model providers are, until the stack's network move (SMD-2294).
+It has no build of its own: an `up` that names it without `server` on a stack
+that never built the server's image stops at "no such image" — name `server`
+too, or build it first.
 
 ```bash
 # from a container on the mesh — the proxy is one:
@@ -708,7 +715,7 @@ stable is redeployed:
 
    Stable with no tier stamp is stamped `tier=stable`. When stable's server
    runs without `OB1_TIER=stable` it says so; set that in the env file and
-   recreate the server.
+   recreate the servers (`up -d server api`).
 2. It starts the canary's Postgres, and refreshes it from stable through
    `tier.sh` on both networks: the dump, the settings, a migration with this
    checkout, the stamp and the mark ("Refreshing a tier", above).
@@ -851,7 +858,7 @@ bun deploy/orchestration/provision.ts        # --env-file for another file; --ro
 # Optional, for a template that captures into the brain (none ships yet): a CAPTURE key
 cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
 #   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS,
-#   then recreate the server (compose up -d server; a restart keeps the old keys) and provision again
+#   then recreate the servers (compose up -d server api; a restart keeps the old keys) and provision again
 ```
 
 `--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
@@ -1070,8 +1077,8 @@ lines naming the same one are refused.
     - a provider that did not answer, or a start that met another claimer:
       the next run tries again.
   - The runner takes the server's model and egress settings when it is
-    created. After changing them, recreate it with the server: `compose up
-    -d --force-recreate server orchestration-runner`.
+    created. After changing them, recreate it with the servers: `compose up
+    -d --force-recreate server api orchestration-runner`.
 - **The deadline.** One run, emitter to reembed, is bounded by
   `OB1_RUNNER_TIMEOUT_S` (3600), the wait for another pipeline's reembed
   included. n8n waits that long and a minute more. The runner reads the

@@ -274,10 +274,11 @@ export function db(): Promise<ThoughtStore> {
 }
 
 /**
- * The stop's close: the pool only if a request opened one — a store that
- * failed to build has none, and the PostgREST store holds no pooled connection
- * to close. True when a SQL pool was closed. Beside db(), so the store's wiring
- * is these two bodies (check 25).
+ * The stop's close: the pool the store opened — at a serving entry's start
+ * (serveHere), or at the first request where nothing called that — while a
+ * store that failed to build has none, and the PostgREST store holds no pooled
+ * connection to close. True when a SQL pool was closed. Beside db(), so the
+ * store is named in these two bodies alone (check 25).
  */
 export function closeStore(): Promise<boolean> {
   return _store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : Promise.resolve(false);

@@ -384,12 +384,20 @@ CANARY_PG="$(container_of "$CANARY" postgres)"
 # A standing canary's server would serve the copy mid-restore (through the
 # registered connector, stamped stable by the restore until the refresh
 # stamps it), and write rows the restore then collides with; it is recreated
-# below either way.
+# below either way. So would a REST core (SMD-2284), which this script does
+# not start — one someone started in the canary's project is stopped with it
+# and recreated on the new image below.
 STOPPED_SERVER=""
 if [ -n "$(container_of "$CANARY" server)" ]; then
   say "canary server stopped for the refresh"
   canary_compose stop server >/dev/null
   STOPPED_SERVER=1
+fi
+STOPPED_API=""
+if [ -n "$(container_of "$CANARY" api)" ]; then
+  say "canary REST core stopped for the refresh"
+  canary_compose stop api >/dev/null
+  STOPPED_API=1
 fi
 # Whether stable holds a thought the probe could use (a vector from the
 # brain's model), read before the refresh: a canary with none after it is a
@@ -410,6 +418,9 @@ fi
 
 say "canary server at 127.0.0.1:$PORT/mcp (commit $GIT_SHA)"
 canary_compose up -d --build --no-deps --force-recreate server
+# The REST core runs the server's image by name: recreated, it runs the build
+# just made, not the one it was stopped on.
+[ -z "$STOPPED_API" ] || canary_compose up -d --no-deps --force-recreate api
 # The proxy in front of it (SMD-1846), left running across a refresh: while
 # the server is stopped it answers 502, and the server's new container is the
 # same name on the network. Recreated only when its own configuration changed
