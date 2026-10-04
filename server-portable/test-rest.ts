@@ -284,6 +284,12 @@ console.log("\n[7c] A 503 says when to retry; capture's fault is the transient t
   assert(thrown.status === 500 && /application\/json/.test(thrown.headers.get("content-type") ?? "") && (await thrown.json() as { code: string }).code === "FAILED", `a throw outside an operation is a JSON FAILED (${thrown.status} ${thrown.headers.get("content-type")})`);
 }
 
+console.log("\n[7d] The served OpenAPI document names its base as the caller reached it");
+{
+  const served = async (prefix?: string) => (await (await app.fetch(new Request("http://api/openapi.json", { headers: prefix ? { "x-forwarded-prefix": prefix } : {} }))).json() as { servers?: { url: string }[] }).servers;
+  assert(same(await served(), [{ url: "/" }]) && same(await served("/api"), [{ url: "/api" }]), "the served document names its base: the root on the mesh, /api behind the proxy's route");
+}
+
 console.log("\n[8] One log line per request: method, route, status, time — no query, key, id or content");
 {
   lines.length = 0;
@@ -291,7 +297,8 @@ console.log("\n[8] One log line per request: method, route, status, time — no 
   await hit("/v1/changes?agent=someone-secret", { key: "read-raw" });
   await hit("/v1/search", { key: "write-raw", method: "POST", body: JSON.stringify({ query: "the private query" }) });
   await hit("/nope");
-  assert(lines.length === 4, `four requests, four lines (${lines.length})`);
+  await hit("/health");
+  assert(lines.length === 4, `four requests, four lines — the liveness probe's 200 is not one (${lines.length})`);
   assert(/^api GET \/v1\/thoughts\/:id \d{3} \d+ms$/.test(lines[0] ?? ""), `the route's template, not its id (${lines[0]})`);
   const all = lines.join("\n");
   for (const s of ["9f0c1e2a", "someone-secret", "private query", "read-raw", "write-raw", "x=1"]) assert(!all.includes(s), `no ${s} in the log`);

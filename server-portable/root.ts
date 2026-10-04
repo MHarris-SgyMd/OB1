@@ -223,6 +223,14 @@ export function env(): Env {
 let serving: string | null = null;
 export function serveHere(door: string): void {
   serving = door;
+  // The store built now, not at the first keyed request, so the reconcile of
+  // this server's jobs a prior run left live happens at start-up: an internal
+  // REST core may wait long for its first caller, and meanwhile the other
+  // server's polls would read those dead jobs as running (SMD-2284 PR 3
+  // review pass 1). A store that fails to build here fails again, and says
+  // so, at the first request.
+  initEnv();
+  void db().catch(() => {});
 }
 
 // Built once, on first use. createStore() dynamically imports whichever backend

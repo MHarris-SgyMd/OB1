@@ -151,15 +151,16 @@ the repo root, with whatever `-f` files the stack was started with:
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` and, on the `mesh` network, `auth.ob1.internal:3000` (resolved with no search domains) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` and, on the `mesh` network, `auth.ob1.internal:3000` and — with `compose.api-public.yaml` named — `api.ob1.internal:8000` (resolved with no search domains) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `server` | `server:8000` — the proxy, and n8n | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
+| `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on the default one, which every container there can reach until the network move (SMD-2294) — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the REST core (SMD-2284), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
+| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2294), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -317,15 +318,20 @@ curl -H "x-brain-key: $KEY" http://127.0.0.1:${SERVER_PORT:-8000}/api/v1/whoami
 curl http://127.0.0.1:${SERVER_PORT:-8000}/api/openapi.json        # the contract, no key
 ```
 
-Keep naming the file on every later `up` (with the other `-f` files and
-profiles); an `up` without it recreates the proxy without the route, and `/api`
-is the 404 again — which is also how to turn it off. The REST core takes its key
+Keep naming the file on every later `up` that names the proxy, or names no
+service (with the other `-f` files and profiles), the rebuild below included:
+such an `up` without it recreates the proxy without the route, and `/api` is the
+404 again — which is also how to turn it off; an `up` of other services alone
+leaves the proxy, and `/api`, as they were. With the file named and the REST
+core down or starting, `/api` answers the proxy's 502. The REST core takes its key
 from a header (`x-brain-key`, `x-access-key` or `Authorization: Bearer`), never
 from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
 on `/mcp`. Its writes record their door as `open-brain-api`
 (`thought_audit.origin`) beside the MCP server's `open-brain`, and the jobs it
-starts are its own (migration 078): either server's restart marks only its own
-unfinished jobs lost.
+starts are its own (migration 078): either server's start marks only its own
+unfinished jobs lost. A job is read by the key that started it through either
+server; its stream, from the server that did not run it, is the job's state
+as recorded, then ends.
 
 Measured on this stack (CI's "Full stack, no Supabase" job holds each): off,
 `/api` is a 404 and a POST there never reaches the MCP server; on the mesh
@@ -378,6 +384,10 @@ always does (wrangler has no build arg). Rebuild with it:
 ```bash
 OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy
 ```
+
+The REST core runs the server's image by name, and the proxy depends on it,
+so this rebuilds and recreates it too; add `-f compose.api-public.yaml` where
+`/api` is on.
 
 `proxy` named beside `server`: the proxy waits on the server, nothing waits on
 the proxy, so `up server` alone on a stack from before SMD-1846 recreates the
@@ -1288,8 +1298,8 @@ pass a variable it does not name: `provision.ts` says which line.
 **Its state** — sessions, grants, refresh tokens and dynamically registered
 clients — is one SQLite file in the `auth-data` volume, so a restart keeps
 it, and so does an upgrade, which rebuilds and recreates the container. The server holds
-no Postgres credential, and until the REST core moves the stack onto the mesh
-(SMD-2284) it shares no network with Postgres either. On a stop it finishes
+no Postgres credential, and until the network move puts the stack on the mesh
+(SMD-2294) it shares no network with Postgres either. On a stop it finishes
 what is in flight, closes the store and exits. The library's in-memory store,
 which the proof of concept first ran on, forgot all of it at every restart.
 

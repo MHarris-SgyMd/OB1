@@ -866,7 +866,7 @@ let bunServer: Stoppable | undefined;
 /** Set once the stop closes what is still in flight at its bound, so the route's close line names the stop, not the client. */
 let cutByStop = false;
 if (SERVES_ON_BUN) {
-  serveHere(SERVER_NAME); // the store's first build wires the durable job store for this server (root.ts)
+  serveHere(SERVER_NAME); // builds the store now and wires the durable job store for this server (root.ts)
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
   drainOnSignal({

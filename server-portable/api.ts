@@ -2,9 +2,9 @@
 // every operation the MCP tools expose, over the same core and the same
 // process root as the MCP server (root.ts). Its routes, its authorization and
 // its OpenAPI document are rest/'s; this file builds the core under its own
-// door and serves it. Run as `bun api.ts`; reached as api.ob1.internal on the
-// stack's mesh once SMD-2284's PR 3 adds the service, public only where the
-// operator turns /api on.
+// door and serves it. Run as `bun api.ts` — the stack's `api` service,
+// reached as api.ob1.internal on the mesh, and at /api only where the operator
+// names deploy/compose.api-public.yaml.
 
 import { agents, closeStore, db, env, initEnv, serveHere } from "./root.ts";
 import { createCore } from "./core/index.ts";

@@ -2293,16 +2293,18 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
     const deadline = Date.now() + 15_000;
     let answered = false;
     while (!answered && Date.now() < deadline) {
-      answered = await realFetch(`http://127.0.0.1:${port}/health`, { headers: { "x-brain-key": "e2e-key" }, signal: AbortSignal.timeout(2_000) })
+      // Keyless: liveness, which reads no store — the reconcile below is the
+      // start-up's, not a request's (SMD-2284 PR 3 review pass 1).
+      answered = await realFetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) })
         .then((r) => r.ok, () => false);
       if (!answered) await Bun.sleep(100);
     }
-    assert(answered, "the entry answers a keyed /health, which builds its store");
+    assert(answered, "the entry answers a keyless /health, which builds no store");
     while (status === "running" && Date.now() < deadline) {
       status = (await sql`SELECT status FROM jobs WHERE id = ${jobId}::uuid`)[0]?.status;
       if (status === "running") await Bun.sleep(100);
     }
-    assert(status === "lost", `the job a prior process left running is reconciled to lost (${status})`);
+    assert(status === "lost", `the job a prior process left running is reconciled to lost at start-up, before any keyed request (${status})`);
     const [{ status: other }] = await sql`SELECT status FROM jobs WHERE id = ${apiJob}::uuid`;
     assert(other === "running", `…and the REST core's live job on the same database is not (${other})`);
   } finally {

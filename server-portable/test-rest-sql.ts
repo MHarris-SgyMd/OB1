@@ -404,15 +404,16 @@ console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the
     const deadline = Date.now() + 15_000;
     let answered = false;
     while (!answered && Date.now() < deadline) {
-      answered = await realFetch(`http://127.0.0.1:${port}/v1/whoami`, { headers: { "x-brain-key": KEYS.reader }, signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false);
+      // Keyless liveness reads no store: the reconcile is the start-up's (review pass 1).
+      answered = await realFetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false);
       if (!answered) await Bun.sleep(100);
     }
-    assert(answered, "the REST core answers a keyed request as Bun's entry, which builds its store");
+    assert(answered, "the REST core answers its keyless /health as Bun's entry, which builds no store");
     while (mineStatus === "running" && Date.now() < deadline) {
       mineStatus = await status(mine);
       if (mineStatus === "running") await Bun.sleep(100);
     }
-    assert(mineStatus === "lost", `the REST core's own job left running is reconciled to lost (${mineStatus})`);
+    assert(mineStatus === "lost", `the REST core's own job left running is reconciled to lost at start-up, before any keyed request (${mineStatus})`);
     assert((await status(theirs)) === "running", "…and the MCP server's live job on the same database is not");
     const scan = await realFetch(`http://127.0.0.1:${port}/v1/scans`, { method: "POST", headers: { "x-brain-key": KEYS.reader, "content-type": "application/json" }, body: JSON.stringify({ limit: 5 }) });
     const { jobId } = await scan.json() as { jobId: string };

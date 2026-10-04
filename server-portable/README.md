@@ -653,7 +653,7 @@ those its own way.
 ```bash
 bun test-server.ts        # 503 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and the replies' fenced text and one-line metadata
 bun test-auth.ts          # 124 — scoped, hashed, named keys
-bun test-rest.ts          # 229 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-rest.ts          # 230 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
 bun run test:e2e          # 424 — the whole server over MCP with no Supabase at all, OB1_STORE unset

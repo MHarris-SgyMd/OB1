@@ -5219,8 +5219,8 @@ const TRANSPORT_FILES = new Map<string, TransportRole>([
   ["server-portable/rest/routes.ts", REST_ROLE],
   ["server-portable/rest/openapi.ts", REST_ROLE],
 ]);
-/** The functions whose bodies are the store's wiring: build it once (and wire the job sink), close it at a stop. */
-const STORE_WIRING = ["db", "closeStore"];
+/** The functions whose bodies are the store's wiring: build it once (and wire the job sink), close it at a stop, and build it at a serving entry's start (SMD-2284). */
+const STORE_WIRING = ["db", "closeStore", "serveHere"];
 /** [start, end) of each STORE_WIRING function's body in `bare` (strings and comments blanked); a name not found is absent. */
 function wiringSpans(bare: string): Map<string, [number, number]> {
   const spans = new Map<string, [number, number]>();
@@ -5291,6 +5291,7 @@ function transportLeaksIn(text: string, role: TransportRole = INDEX_ROLE): { lin
   for (const m of bare.matchAll(/(?<![.\w$])db\b/g)) {
     const before = bare.slice(0, m.index), after = bare.slice(m.index + 2);
     if (inImportOf("./root.ts", m.index)) continue; // named in the root's import — the list above holds which
+    if (role.wiring && spans.some(([s, e]) => m.index >= s && m.index < e) && /^\s*\(\s*\)/.test(after)) continue; // called by the root's own wiring (serveHere's start-up build)
     if (/\bcreateCore\(\s*\{[^{}]*\bstore\s*:\s*$/.test(before) && /^\s*[,}]/.test(after)) continue; // handed to the core, uncalled
     if (/\bagents\(\)\s*\.\s*resolve\(\s*$/.test(before) && /^\s*\(\s*\)/.test(after)) continue; // the agent registry's lookup
     if (/[{,]\s*$/.test(before) && /^\s*:/.test(after)) continue; // an object key, not the builder
@@ -5372,6 +5373,9 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ['import { db } from "./root.ts";\nconst s = await db();\n', true, API_ROLE],
   ['import { failure, refusalValue, type Refusal, type RefusalCode } from "../core/refusal.ts";\n', false, REST_ROLE],
   ['import { refuse } from "../core/refusal.ts";\n', true, REST_ROLE],
+  // SMD-2284 PR 3: the root's serveHere builds the store at a serving entry's start — the wiring calling itself.
+  ["export function serveHere(door: string): void {\n  serving = door;\n  initEnv();\n  void db().catch(() => {});\n}\n", false, ROOT_ROLE],
+  ["export function startUp(): void {\n  void db().catch(() => {});\n}\n", true, ROOT_ROLE],
   // Review pass 1's root probe: a store call past the wiring, in the root itself.
   ["const r = await (await db()).retryFailed(workType);\n", true, ROOT_ROLE],
   ['import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";\n', false],

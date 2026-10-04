@@ -116,19 +116,27 @@ export function createRestApp(deps: RestDeps): Hono {
 
   // One line per request: the method, the route's template — never the path
   // it was given (an id), the query string, a key or a body — the status and
-  // the time. Registered first, so every answer below is counted.
+  // the time. Registered first, so every answer below is counted — but the
+  // liveness probe's: the container's healthcheck asks every 30 s, and half
+  // the log was its 200 (SMD-2284 PR 3 review pass 1). A /health that is not
+  // a 200 is still logged.
   app.use("*", async (c, next) => {
     deps.init();
     const started = performance.now();
     await next();
     const template = c.req.routePath === "*" || c.req.routePath === "/*" ? "-" : c.req.routePath;
+    if (template === "/health" && c.res.status === 200) return;
     log(`api ${c.req.method} ${template} ${c.res.status} ${Math.round(performance.now() - started)}ms`);
   });
 
   // Liveness, for the container's healthcheck: no key, no store, no answer
   // about the brain. Internal only — the public /health is the MCP server's.
   app.get("/health", (c) => c.json({ status: "ok" }));
-  app.get("/openapi.json", (c) => c.json(doc));
+  // The document names where its paths are, as the caller reached it: `/api`
+  // through the proxy's opt-in route, the root on the mesh — so a client
+  // generated from it calls this server, not the origin's root, which is the
+  // MCP server's (review pass 1).
+  app.get("/openapi.json", (c) => c.json({ ...doc, servers: [{ url: linkBase(c) || "/" }] }));
 
   const refuse = (c: Context, status: 400 | 401 | 403 | 404 | 405 | 503, body: { code: TransportCode } & Record<string, unknown>, headers: Record<string, string> = {}) =>
     c.json(body, status, headers);
@@ -284,10 +292,12 @@ const capturedFor = (p: Principal, v: Captured): object =>
 
 /**
  * Where this server's routes sit in the URL its caller used: "" on the mesh,
- * `/api` through the proxy's opt-in route, which strips that prefix and names
- * it in `X-Forwarded-Prefix` (Traefik's stripPrefix sets it, replacing any the
- * client sent). A value that is not a plain path prefix is ignored, so a
- * header can move a link within this server's own paths and no further.
+ * `/api` through the proxy's opt-in route, whose stripPrefix adds it as
+ * `X-Forwarded-Prefix` — after the entrypoint has dropped any the client sent,
+ * an untrusted forwarded header (Traefik's default; measured through the
+ * stack). A caller on the mesh may send its own; it shapes only that caller's
+ * links. A value that is not a plain path of one to four segments is ignored,
+ * so a link stays on this origin.
  */
 export function linkBase(c: Context): string {
   const prefix = c.req.header("x-forwarded-prefix")?.trim() ?? "";

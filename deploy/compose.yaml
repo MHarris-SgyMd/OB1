@@ -269,7 +269,13 @@ services:
 
   # Replaces: the Supabase Edge Function, and `supabase functions deploy`.
   server:
-    build: &server-build
+    # Named, so the REST core below runs this image by name — one build, the
+    # two servers always on one code (review pass 1: an image of its own fell
+    # behind after `up --build server`, as orchestration-runner-role's did).
+    # The name is compose's own default for this service, so nothing that
+    # built it before sees a different image.
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
+    build:
       # Repo root, not server-portable/, because preflight.ts imports
       # ../db/config.mjs — the single definition of the embedding contract, shared
       # with migrate.ts so the runner and the server cannot disagree about it. A
@@ -453,7 +459,12 @@ services:
   # writes record their door as open-brain-api (thought_audit.origin), and
   # the jobs it starts are its own (migration 078).
   api:
-    build: *server-build
+    # The server's image, by the server's name, never pulled or built here:
+    # `up --build server` rebuilds it, and the proxy's dependency on this
+    # service brings it along whenever the proxy is named. The release
+    # overlay pins it to the release's server image.
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
+    pull_policy: never
     command: ["api.ts"]
     environment: *server-env
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
@@ -568,7 +579,8 @@ services:
     # The default network, where the server is and where the port is
     # published (a container only on an internal network publishes none), and
     # `mesh`, where the authorization server answers as auth.ob1.internal.
-    # The rest of the stack moves onto the mesh with the REST core (SMD-2284).
+    # The REST core is on the mesh too, as api.ob1.internal (SMD-2284); the
+    # rest of the stack moves there with the network move (SMD-2294).
     networks: [default, mesh]
     # No search domains. With the authorization server absent, a name that
     # does not resolve on the networks would be tried again under each of the
@@ -591,9 +603,13 @@ services:
     # recreates the old server, which held the port, before it creates this.
     # The other way round, this would bind while the old server still held it.
     # It also means `up server` alone never starts the proxy: name both
-    # (deploy/README.md, "One origin").
+    # (deploy/README.md, "One origin"). The REST core too, so the documented
+    # `up -d --build server proxy` recreates it on the server's new image
+    # rather than leaving it on the old one (SMD-2284 review pass 1).
     depends_on:
       server:
+        condition: service_started
+      api:
         condition: service_started
     restart: unless-stopped
 
@@ -1031,7 +1047,7 @@ services:
   # paths outside it here, as auth.ob1.internal on the mesh, while it answers
   # (x-proxy-routes, the auth router; SMD-1846). It joins two networks of
   # its own and not the default one, so it cannot reach Postgres, Ollama or
-  # n8n, which stay off the mesh until the REST core (SMD-2284): `mesh`,
+  # n8n, which stay off the mesh until the network move (SMD-2294): `mesh`,
   # internal, where the proxy meets it now and the MCP server and the GUI
   # will; and `egress`, for the
   # client metadata documents it fetches (each through its fetch guard, which
@@ -1104,9 +1120,10 @@ services:
 
 networks:
   # The ADR's two networks (docs/operator-surface-tiers.md, "Two networks"):
-  # the mesh holds the authorization server and the proxy (which is on the
-  # default network too); the rest of the stack stays on compose's default
-  # network until the REST core (SMD-2284) moves it.
+  # the mesh holds the authorization server, the REST core (api.ob1.internal)
+  # and the proxy (the last two on the default network too); the rest of the
+  # stack stays on compose's default network until the network move
+  # (SMD-2294).
   mesh:
     internal: true
   egress: {}

@@ -1137,7 +1137,8 @@ jobs:
           # SMD-2210: the orchestration profile adds n8n's one port, also on
           # loopback, with its image pinned by digest. Its import runner
           # (SMD-2212) publishes none. Without a profile a plain config
-          # names exactly the four services it should: SMD-1846 added the proxy.
+          # names exactly the five services it should: SMD-1846 added the proxy,
+          # SMD-2284 the REST core (`api`, the server's image by name).
           docker compose -f compose.yaml --profile orchestration config --format json \
             | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
           # SMD-2285: the authorization server publishes nothing, joins only
@@ -1145,7 +1146,9 @@ jobs:
           # Postgres credential, no plain password and not the POC's switch.
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
-          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "migrate postgres proxy server " ]
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
+          docker compose -f compose.yaml config --format json \
+            | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a
