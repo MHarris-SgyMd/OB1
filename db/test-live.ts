@@ -5469,11 +5469,14 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   }
 
   // 078 (SMD-2448): two different tickets are never judged against each
-  // other. A fresh corpus — an older row of each of two tickets, a note, and
-  // a newer row of the first ticket, all on one axis mentioning billing:
-  // --status and --dry-run count the one pair the next run leaves out, and
-  // the run judges the newer row against its own ticket's row and the note
-  // alone, saying it left one pair out.
+  // other. A fresh corpus — an older row of each of two tickets, a dated
+  // section filed under the second (metadata.ticket, as board-sync writes
+  // one), a note, and a newer row of the first ticket, all on one axis
+  // mentioning billing. At --k 3 the newer row's list under 066 would be
+  // its own ticket's row, the note and one of the two SMD-9002 rows; under
+  // 078 it is the first two, so one judge call is saved — what --status,
+  // --dry-run and the run say. With 066 re-applied by hand over 078 (the
+  // count stands, the rule is gone) they say such pairs are still judged.
   {
     await sql`DELETE FROM thoughts`;
     await sql`DELETE FROM ob1_entities`;
@@ -5484,19 +5487,35 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       return id;
     };
     await ticket("SMD-9001: tickets bill monthly", { source: "linear", issue: "SMD-9001" }, 10);
-    await ticket("SMD-9002: tickets bill on the first", { source: "linear", issue: "SMD-9002" }, 10);
+    const other = await ticket("SMD-9002: tickets bill on the first", { source: "linear", issue: "SMD-9002" }, 10);
+    await ticket("## Update: SMD-9002's billing moved", { source: "linear", ticket: "SMD-9002" }, 10);
     await ticket("a note: tickets and billing", { source: "test" }, 10);
-    await ticket("SMD-9001: tickets bill weekly now", { source: "linear", issue: "SMD-9001" }, 0);
+    const newerT = await ticket("SMD-9001: tickets bill weekly now", { source: "linear", issue: "SMD-9001" }, 0);
+    const line = (out: string, re: RegExp) => out.split("\n").find((l) => re.test(l))?.trim();
     const statusT = await consolidate("--status");
     const dryT = await consolidate("--dry-run");
+    const saved = /tickets: 1 judge call\(s\) fewer over the 5 thought\(s\) still to judge — pairs of two different tickets left out at --k 3 \(078\)/;
+    assert(statusT.code === 0 && saved.test(statusT.out) && saved.test(dryT.out),
+      `--status and --dry-run count the one judge call the k cut no longer spends on another ticket's rows (${line(statusT.out, /tickets:/)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("066_") });
+    const undone = await consolidate("--status");
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("078_") });
+    assert(/tickets: pairs of two different tickets are still judged — consolidation_candidates is from before migration 078/.test(undone.out),
+      `with 066 re-applied by hand over 078 the count still stands but the rule is gone, and --status says such pairs are still judged (${line(undone.out, /tickets:/)})`);
     const from = seen.length;
     const runT = await consolidate("--workers", "1");
     const judgedT = seen.slice(from);
-    assert(statusT.code === 0 && /tickets: 1 pair\(s\) between two different tickets left out of the 4 thought\(s\) still to judge \(078\)/.test(statusT.out)
-        && /tickets: 1 pair\(s\) between two different tickets left out of the 4 thought\(s\) still to judge \(078\)/.test(dryT.out),
-      `--status and --dry-run count the one pair between two different tickets the next run leaves out (${statusT.out.split("\n").find((l) => /tickets:/.test(l))?.trim()})`);
-    assert(runT.code === 0 && judgedT.length === 2 && judgedT.every((p) => !/SMD-9002/.test(p.a + p.b)) && /; 1 pair\(s\) between two different tickets left out \(078\)/.test(runT.out),
-      `the run judges the newer SMD-9001 row against its own ticket's row and the note, never SMD-9002, and says it left one pair out (${judgedT.length} judged; ${runT.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
+    assert(runT.code === 0 && judgedT.length === 2 && judgedT.every((p) => !/SMD-9002/.test(p.a + p.b)) && /; 1 judge call\(s\) not spent on a pair of two different tickets \(078\)/.test(runT.out),
+      `the run judges the newer SMD-9001 row against its own ticket's row and the note, never SMD-9002's row or its section, and says one call was saved (${judgedT.length} judged; ${line(runT.out, /pair\(s\) judged/)})`);
+    // A proposal on the two tickets gone stale (judged before 078, a text
+    // moved since): the next pass re-pools the newer row, does not find the
+    // pair, and settles the row naming 078's rule (067's leftover path).
+    const [{ id: staleT }] = await sql`SELECT record_supersession_proposal(${other}::uuid, ${newerT}::uuid, 'newer_supersedes_older', 0.8, 'judged before 078', 0.9, ${KEY}, NULL) AS id`;
+    await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${staleT}::uuid`;
+    const settleRun = await consolidate("--workers", "1");
+    const [settled] = await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${staleT}::uuid`;
+    assert(settleRun.code === 0 && settled.status === "rejected" && /no longer a candidate pair — two different tickets — each its own record \(078's rule\)/.test(String(settled.review_note)),
+      `a stale proposal on two tickets is settled by the pass, the note naming 078's rule (${settled.status}: ${settled.review_note})`);
   }
 
   judge.stop(true);

@@ -11,10 +11,11 @@
 --   paired two thoughts carrying different ticket identities
 --   (metadata->>'issue', written by board-sync): a parent and its child,
 --   tickets Linear already relates or blocks, a ticket and its follow-up.
---   Counted over every proposal the brain holds (2026-10-04): 93 of 128 —
---   24 of 24 under @p2 (2026-09-21) and 69 of 104 under @p3 — all rejected;
---   no proposal paired two rows of one ticket, and neither accepted proposal
---   involves a ticket row. Two different tickets are two records, each with
+--   Counted over every proposal the brain holds (2026-10-04), reading a
+--   thought's ticket as node_state does (below): 109 of 128 — 24 of 24
+--   under @p2 (2026-09-21) and 85 of 104 under @p3 — all rejected; no
+--   proposal paired two rows of one ticket, and neither accepted proposal
+--   pairs two tickets. Two different tickets are two records, each with
 --   its own status, which board-sync keeps current and node_state (058, 068)
 --   reads; one "superseding" the other would archive a record that is still
 --   valid. The judge reads a finished ticket's Problem statement as a live
@@ -22,20 +23,26 @@
 --
 -- THE RULE
 --   A pair both of whose thoughts carry a ticket identity, and the two
---   identities differ, is not a candidate. The identity is
---   metadata->>'issue' exactly as 068's projection keys a ticket (the text,
---   no normalisation): the board's own key, never a ticket id matched in
---   free text. Two rows with ONE identity — two writers of one ticket, the
---   SMD-1958 case — stay candidates: those can be genuine duplicates. A
---   thought with no identity (a note, a session summary, a page) is judged
---   against a ticket row as before. This is the sixth restriction beside
---   029's four and 066's; it is stated here and in db/README.md because 029
---   is frozen by release 1.0.0 (check-fork-consistency, SMD-1804).
---   Not taken: the text rule (a note that names ticket X paired with X's
---   row is lineage, not a conflict) — measured on the 128 it would leave out
---   10 more pairs, all rejected, and none of the accepted two, but 35 pairs
---   without two identities are too few to call it clean; it waits on a
---   larger review set (SMD-2448's third Work item).
+--   identities differ, is not a candidate. A thought's identity is the
+--   ticket node_state reads it under (058, 068, 071):
+--   coalesce(metadata->>'ticket', metadata->>'issue') — a ticket's own row
+--   by its issue, a dated section or a reference filed under a ticket by
+--   its ticket. The text exactly, no normalisation, as 068 keys a head:
+--   board-sync writes the identifier alone (every one of the dogfood's 725
+--   such rows reads KEY-N), though its own reader also takes "SMD-12
+--   (old)" as SMD-12 — a hand-written suffix here is another identity.
+--   Never a ticket id matched in free text. Two rows with ONE identity —
+--   two writers of one ticket (SMD-1958), a ticket and its section (which
+--   066 already keeps apart through derived_from) — stay candidates: those
+--   can be genuine duplicates. A thought with no identity (a note, a
+--   session summary, a page) is judged against a ticket row as before.
+--   This is the sixth restriction beside 029's four and 066's; it is
+--   stated here and in db/README.md because 029 is frozen by release 1.0.0
+--   (check-fork-consistency, SMD-1804).
+--   Not taken: the text rule (a thought that names ticket X in its text,
+--   paired with a thought filed under X, is lineage, not a conflict) — on
+--   the 128 it would leave out 11 more pairs, one of them an ACCEPTED
+--   proposal; not clean (SMD-2448's third Work item).
 --
 -- WHAT
 --   consolidation_candidates redefined on 066's body, verbatim, plus the
@@ -43,15 +50,25 @@
 --   pair: a side with no identity has NULL there, and `NOT NULL` would drop
 --   every row. The sentinel `ob1:distinct-tickets-not-paired` marks the body
 --   for preflight, which warns naming this file when 063 or 066 is re-applied
---   by hand over it. consolidation_ticket_pairs_left_out(thought, floor)
---   counts the pairs this rule removes for one thought — every other term of
---   the candidate rule met, at or above the floor, with no p_k cut — so
---   `db/consolidate.ts` says how many pairs a run left out and how many the
---   next run would (--dry-run, --status). Its body is the candidate body
---   with the new condition turned round: the kept candidates and the count
---   partition 066's list (test-schema [70] holds the sum). Neither needs an
---   index: o is reached by primary key from the shared-entity join, and the
---   identity is a per-row read of rows already fetched.
+--   by hand over it, and for db/consolidate.ts, which reports the rule only
+--   where the body carries it. consolidation_ticket_pairs_left_out(thought,
+--   floor) counts the pairs this rule removes for one thought — every other
+--   term of the candidate rule met, at or above the floor, with no p_k cut;
+--   db/consolidate.ts turns it into judge calls not spent (the k cut over
+--   066's list less the cut over this one) for a run's summary and for
+--   --status / --dry-run. Its body is the candidate body copied with the new
+--   condition turned round, so the kept list and the count partition 066's:
+--   test-schema [70] holds the sum for every thought of a corpus that
+--   exercises each shared term. (One body behind both was weighed: it would
+--   move 063's and 066's sentinels, which preflight and the suites read in
+--   consolidation_candidates' own text.) Neither needs an index: o is
+--   reached by primary key from the shared-entity join, and the identity is
+--   a per-row read of rows already fetched. Measured at the shipped
+--   defaults (k 3, cosine 0.6) over the dogfood's 1,238 pooled thoughts: a
+--   full pass makes 3,427 judge calls before this file and 2,190 after
+--   (-36.1%; a brain with none of its proposals yet, 3,431 -> 2,194), the
+--   read taking 3.3 s — which is also what --status and --dry-run now spend
+--   on a pool that size, one neighbour read per thought still to judge.
 --
 -- SAFETY
 --   One body redefined on its own text with no arity change (CREATE OR
@@ -111,7 +128,7 @@ LANGUAGE sql
 STABLE
 AS $$
   WITH me AS (
-    SELECT t.id, t.embedding, t.created_at, t.supersedes, t.derived_from, t.metadata->>'issue' AS issue
+    SELECT t.id, t.embedding, t.created_at, t.supersedes, t.derived_from, coalesce(t.metadata->>'ticket', t.metadata->>'issue') AS issue
       FROM thoughts t
      WHERE t.id = p_thought_id
        AND t.embedding IS NOT NULL
@@ -147,14 +164,14 @@ AS $$
      -- records, each with its own lifecycle — never one superseding the other.
      -- COALESCE: a side with no ticket identity is "no identity", not unknown;
      -- one identity on both sides (two writers of one ticket) stays a pair.
-     AND NOT COALESCE(me.issue <> o.metadata->>'issue', false)
+     AND NOT COALESCE(me.issue <> coalesce(o.metadata->>'ticket', o.metadata->>'issue'), false)
      AND 1 - (o.embedding <=> me.embedding) >= COALESCE(p_min_similarity, 0)
    ORDER BY o.embedding <=> me.embedding, o.id
    LIMIT GREATEST(COALESCE(p_k, 5), 1)
 $$;
 
 COMMENT ON FUNCTION consolidation_candidates(uuid, int, float) IS
-  'The older thoughts a thought is judged against for a supersession: sharing at least one entity (016), captured at least a calendar day (UTC) earlier, nearest by exact cosine, at or above p_min_similarity, at most p_k; pairs already proposed and thoughts already superseded are left out — since 063 a pair whose proposal is stale (rebuild_derived found a text moved) is judged again; since 066 a pair one side of which names the other in derived_from (a page and its evidence, a digest and its sources) is never judged: re-deriving is rebuild_derived''s door, not supersession''s; since 078 a pair whose two thoughts carry two different ticket identities (metadata->>''issue'') is never judged: two tickets are two records, each with its own lifecycle. Migrations 029, 063, 066, 078.';
+  'The older thoughts a thought is judged against for a supersession: sharing at least one entity (016), captured at least a calendar day (UTC) earlier, nearest by exact cosine, at or above p_min_similarity, at most p_k; pairs already proposed and thoughts already superseded are left out — since 063 a pair whose proposal is stale (rebuild_derived found a text moved) is judged again; since 066 a pair one side of which names the other in derived_from (a page and its evidence, a digest and its sources) is never judged: re-deriving is rebuild_derived''s door, not supersession''s; since 078 a pair whose two thoughts carry two different ticket identities (metadata->>''ticket'', else metadata->>''issue'', as node_state reads them) is never judged: two tickets are two records, each with its own lifecycle. Migrations 029, 063, 066, 078.';
 
 -- The candidate body with 078's condition turned round and no p_k cut: the
 -- pairs the rule removes for one thought, every other term met.
@@ -167,7 +184,7 @@ LANGUAGE sql
 STABLE
 AS $$
   WITH me AS (
-    SELECT t.id, t.embedding, t.created_at, t.supersedes, t.derived_from, t.metadata->>'issue' AS issue
+    SELECT t.id, t.embedding, t.created_at, t.supersedes, t.derived_from, coalesce(t.metadata->>'ticket', t.metadata->>'issue') AS issue
       FROM thoughts t
      WHERE t.id = p_thought_id
        AND t.embedding IS NOT NULL
@@ -193,9 +210,9 @@ AS $$
      AND NOT COALESCE(me.derived_from @> jsonb_build_array(o.id::text), false)
      AND NOT COALESCE(o.derived_from @> jsonb_build_array(me.id::text), false)
      -- ob1:distinct-tickets-not-paired, turned round: the pairs it removes.
-     AND COALESCE(me.issue <> o.metadata->>'issue', false)
+     AND COALESCE(me.issue <> coalesce(o.metadata->>'ticket', o.metadata->>'issue'), false)
      AND 1 - (o.embedding <=> me.embedding) >= COALESCE(p_min_similarity, 0)
 $$;
 
 COMMENT ON FUNCTION consolidation_ticket_pairs_left_out(uuid, float) IS
-  'How many older thoughts consolidation_candidates leaves out of one thought''s list because the two carry different ticket identities (metadata->>''issue''), every other term of the candidate rule met at or above p_min_similarity, with no p_k cut — what db/consolidate.ts reports a run left out and --dry-run / --status say the next run would. Read-only. Migration 078 (SMD-2448).';
+  'How many older thoughts consolidation_candidates leaves out of one thought''s list because the two carry different ticket identities (metadata->>''ticket'', else metadata->>''issue''), every other term of the candidate rule met at or above p_min_similarity, with no p_k cut — db/consolidate.ts turns it into the judge calls a run did not spend. Read-only. Migration 078 (SMD-2448).';

@@ -3366,11 +3366,18 @@ console.log("\n[20aa] Migration 077: refused without 068 or 075, naming each; on
   await sql.close();
 }
 
-console.log("\n[20ab] Migration 078: refused by name without 063; onto a populated brain at the file before it — the candidate filter redefined on 066's body plus the ticket rule and the count added, an operator's REVOKE kept, no audit row and no row moved, a proposal standing on two tickets left as it stands; a newer ticket row listed another ticket before the file and lists its own ticket's row and the note alone after it; a re-apply a no-op (SMD-2448)");
+console.log("\n[20ab] Migration 078: refused by name without 025, 029 or 063; onto a populated brain at the file before it — the candidate filter redefined on 066's body plus the ticket rule and the count added, an operator's REVOKE kept, no audit row and no row moved, a proposal standing on two tickets left as it stands; a newer ticket row listed another ticket before the file and lists its own ticket's row and the note alone after it; a re-apply a no-op (SMD-2448)");
 {
   const the078 = MIGRATIONS.find((f) => f.endsWith("_distinct_tickets_not_paired.sql"))!;  // by name: renumbered when main takes its number
-  // The guard, driven: a schema at 062 has 029's candidate filter but not
-  // 063's stale status, which the body reads.
+  // The guard, driven, one probe at a time: a schema at 024 lacks 025's
+  // derived_from (which 066's terms read), one at 028 lacks 029's queue and
+  // filter, and one at 062 has 029's filter but not 063's stale status.
+  for (const [upTo, needs] of [["025", "migration 078 needs 025 (thoughts.derived_from); this schema lacks it"], ["029", "migration 078 needs 029 (supersession_proposals, consolidation_candidates); this schema lacks it"]] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < upTo });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the078 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `078 on a schema stopped before ${upTo} is refused up front, naming ${upTo} (${refused})`);
+  }
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "063" });
   const no063 = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the078 }).then(() => "applied", (e: Error) => e.message);

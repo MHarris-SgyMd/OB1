@@ -171,7 +171,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2421 assertions: 2421 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2425 assertions: 2425 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports seventy-eight (78) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1028,22 +1028,28 @@ its oracle on all 12 queries. test-schema [69], test-upgrade [20aa].
 
 Migration 078 never pairs two different tickets for judgement (SMD-2448):
 `consolidation_candidates` leaves out a pair whose two thoughts both carry a
-ticket identity (`metadata->>'issue'`, exactly as 068 keys a ticket) and the
-identities differ. Two tickets are two records, each with its own status, which
+ticket identity and the identities differ — the ticket `node_state` reads a
+thought under, `coalesce(metadata->>'ticket', metadata->>'issue')` (a ticket's
+row by its issue, a dated section filed under it by its ticket), the text
+exactly. Two tickets are two records, each with its own status, which
 board-sync keeps current; one "superseding" the other archives a record that
-still holds. On the stable dogfood brain 93 of the 128 proposals ever recorded
-paired two different tickets, all rejected, and neither accepted one involved a
-ticket row; at the shipped defaults (k 3, cosine 0.6) a full pass makes 26.6%
-fewer judge calls (3,427 → 2,516; 9,896 of 42,026 eligible pairs left out).
-Two rows of one ticket stay candidates (two writers of one identity can be
-genuine duplicates); a thought with no identity is judged against a ticket row
-as before. `consolidation_ticket_pairs_left_out(thought, floor)` counts what the
-rule removes for one thought, so a run says how many pairs it left out and
-`--dry-run`/`--status` say how many the next run would. The body carries
-`ob1:distinct-tickets-not-paired`; preflight's `lineage` check warns naming 078
-when 063 or 066 is re-applied by hand over it. Not taken: matching a ticket id
-in free text (10 more of the 128, all rejected, on too few pairs to call clean).
-test-schema [70], test-live [16], test-upgrade [20ab].
+still holds. On the stable dogfood brain 109 of the 128 proposals ever recorded
+paired two different tickets, all rejected, and neither accepted one did; at
+the shipped defaults (k 3, cosine 0.6) a full pass makes 36.1% fewer judge
+calls (3,427 → 2,190 over 1,238 pooled thoughts). Two rows of one ticket stay
+candidates (two writers of one identity can be genuine duplicates); a thought
+with no identity is judged against a ticket row as before.
+`consolidation_ticket_pairs_left_out(thought, floor)` counts what the rule
+removes for one thought, every other term met; `db/consolidate.ts` turns it
+into judge calls not spent at `--k` — in a run's summary, and in `--status`
+and `--dry-run` over the thoughts still to judge (one neighbour read each:
+3.3 s for the dogfood's pool) — and settles a stale proposal on two tickets
+naming the rule. The body carries `ob1:distinct-tickets-not-paired`, which the
+worker reads before it reports the rule and preflight's `lineage` check reads
+to warn naming 078 when 063 or 066 is re-applied by hand over it. Not taken:
+matching a ticket id in free text — on the 128 it would leave out 11 more
+pairs, one of them accepted. test-schema [70], test-live [16], test-upgrade
+[20ab].
 
 ## What changed relative to the guide
 
@@ -2130,8 +2136,9 @@ sections were generated from, a digest and its sources) never judged: a
 derivation says what its input says by construction, and re-deriving is
 `rebuild_derived`'s door, not supersession's (SMD-2292; direct members only,
 the array is one level), and, since 078, a pair whose two thoughts carry two
-different ticket identities (`metadata->>'issue'`) never judged: two tickets are
-two records, each with its own lifecycle (SMD-2448). Older-only means a pair is reached from its newer
+different ticket identities (`metadata->>'ticket'`, else `metadata->>'issue'`,
+as `node_state` reads them) never judged: two tickets are two records, each
+with its own lifecycle (SMD-2448). Older-only means a pair is reached from its newer
 side once, with no memory needed; the day rule keeps an import's burst from
 being compared with itself (and means a same-day contradiction is not found,
 stated rather than hidden). The shared-entity restriction is the cheap signal
@@ -3258,8 +3265,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2421 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1059 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2425 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1061 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
