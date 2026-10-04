@@ -201,6 +201,8 @@ export function snipText(text: string, max: number): string {
 const TYPE_MAX = 40;
 const TAG_MAX = 80;
 const ACTION_MAX = 200;
+/** Where a proposal's judge reason and review note are cut (SMD-2533): 400, where parseJudgement cuts a reason. consolidate.ts --list cuts at it too. */
+export const PROPOSAL_TEXT_MAX = 400;
 
 /**
  * A thought's metadata value — its type, a topic, a person, an action item —
@@ -606,18 +608,25 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     const results = data.map((p, i) => {
       const edited = p.older.edited || p.newer.edited;
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
+      // SMD-2533: the judge's reason and the review note on one line each, the
+      // reason behind its label — a reason reading `ID: <uuid>` (a judge reads
+      // both thoughts' text, which can steer it) starts no line a reader takes
+      // as a thought's id, and a NEL in either breaks none. The queue's row
+      // keeps both whole (the value carries neither, safeProposals).
+      const reason = p.reason === null ? "" : snipText(p.reason, PROPOSAL_TEXT_MAX);
+      const note = p.reviewNote === null ? "" : snipText(p.reviewNote, PROPOSAL_TEXT_MAX);
       // 070: the CLI refuses an accept on a lineage pair without --force.
       const review = p.status === "pending"
         ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited || p.lineage ? " --force" : ""}   reject: … --reject ${p.id}` +
           (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
-        : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${p.reviewNote ? `: ${cleanForDisplay(p.reviewNote)}` : ""}`;
+        : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${note ? `: ${note}` : ""}`;
       // 070 (SMD-2313): a lineage pair — one side derived from the other
       // — is never proposed since 066; a row standing on one is the
       // reviewer's to reject, said with the command while it is theirs.
       const lineageLine = p.lineage
         ? `\n   LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066${p.status === "pending" || p.status === "stale" ? `; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} --note "lineage pair (066)"` : p.status === "accepted" ? `; accepted while the derivation names its input — cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} clears the pointer (029)` : ""}`
         : "";
-      return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${p.reason ? `\n   ${cleanForDisplay(p.reason)}` : ""}${lineageLine}` +
+      return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${reason ? `\n   Reason: ${reason}` : ""}${lineageLine}` +
         `\n   newer [${day(p.newer.created_at)}]${p.newer.edited ? " (edited since judged)" : ""}: ${snip(p.newer.content)}\n      ID: ${p.newer.id}` +
         `\n   older [${day(p.older.created_at)}]${p.older.edited ? " (edited since judged)" : ""}: ${snip(p.older.content)}\n      ID: ${p.older.id}` +
         `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;

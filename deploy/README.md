@@ -63,13 +63,13 @@ Four services, in order (six with the profile):
 ### 3. Verify
 
 ```bash
-OB1_SMOKE_KEY=<your-raw-key> ./deploy/smoke.sh
+OB1_SMOKE_KEY=<your key> ./deploy/smoke.sh
 ```
 
 ### 4. Connect a client
 
 ```
-http://127.0.0.1:8000/mcp?key=<MCP_ACCESS_KEY>
+http://127.0.0.1:8000/mcp?key=<your key>
 ```
 
 8000 is `SERVER_PORT`, set in `deploy/.env` when something on the host already
@@ -77,7 +77,8 @@ publishes it (a devcontainer publishing 8000 on the podman VM was the case met);
 the URL, `smoke.sh` and the `lsof` line below follow it. It is the proxy's port,
 and `/mcp` the server's path on it. A client configured before SMD-1846 at the
 root (`http://127.0.0.1:8000/?key=…`) still works, through the proxy's legacy
-route ("One origin" below); give new clients `/mcp`.
+route ("One origin" below), until v2.0.0; give new clients `/mcp`, and move
+the old ones ("Moving a client to /mcp").
 
 That URL works from this machine and nowhere else, by default — a client on
 this machine, such as Claude Code at user scope
@@ -224,9 +225,9 @@ paths today:
 | `/auth` and everything under it, `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, the bare `/.well-known/oauth-authorization-server` | `auth` (`--profile auth`), as `auth.ob1.internal` on the `mesh` network — the issuer, sign-in, registration and the three discovery documents outside the issuer's path (the bare one is the only one Claude Code reads). Only while it answers: with the profile off, the server stopped or still starting, the proxy's own bodiless 404, so an origin without it says "no OAuth here" as before. Its own answers pass through untouched, the registration cap's 503 and `Retry-After` included |
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
-| `GET`/`HEAD /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key |
+| `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
 | `/.well-known` and everything else under it | the proxy: a 404, `/.well-known/oauth-protected-resource/mcp` included until the server serves it (SMD-2382). A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246). The 404 carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
-| anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>` (the poll links `scan_thoughts` returns are root-relative). It keeps every client configured before SMD-1846 working; SMD-2306 gives it a deprecation window and then removes it, after which `/` is the proxy's 404 |
+| anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>`. It keeps every client configured before SMD-1846 working until v2.0.0, and every answer says so: a `Deprecation` header and a `Link` to "Moving a client to /mcp" below, where the server's line naming each key still on it is too (SMD-2306). SMD-2532 removes it, and `/` becomes the proxy's 404 |
 
 The path reaches the server as it came, prefix and all: the server answers POST
 at every path and `/health` under any prefix, so `/mcp` needs no setting there.
@@ -278,6 +279,32 @@ a public origin, is SMD-2382's. It keeps `Host` as the client sent it, deletes a
 header spelled with `_` or `.` that aliases another (`X_Brain_Key`), and passes
 an SSE stream through as it is written — the server's keepalive frame (every
 5 s on a long tool call, SMD-1864) reaches the client when it is sent.
+
+**No rate limits on `/mcp`, by design (SMD-2309).** A wrong key costs the
+server a SHA-256 or two per key form presented, no query, and a read of at
+most 64 KiB of the body for the refusal's JSON-RPC id. What a limit could
+hold off is guessing, and a key `keygen.ts` mints is 32 random bytes: out of
+reach at any rate. A limit cannot slow guessing without refusing before the key is
+checked, which refuses the right key from the same place too; delaying only
+wrong answers does not help, since a guesser opens connections in parallel.
+Per address that is a lockout anyone can set off from a platform's shared
+egress (a claude.ai or ChatGPT connector reaches `/mcp` from the platform's
+addresses, every user's alike); across addresses, from anywhere. So the key
+is the defence: mint it with `keygen.ts`, and never hash a chosen word into
+`MCP_ACCESS_KEYS`, since the server holds only the digest and cannot tell how
+strong the key was. A raw `MCP_ACCESS_KEY`, the one key it sees in plain, is
+refused under 32 characters by preflight, the image's entrypoint. Compose
+passes the server no raw key, so this is for the image run on its own
+(`docker run`, Kubernetes); a Workers deployment and the vendored servers run
+no preflight, so give them a 32-byte key yourself. The REST core
+(`server-portable/rest/`, SMD-2284) checks the same keys, from headers alone,
+and refuses a wrong one before reading the body; it takes the same position,
+and the proxy does not route `/api` yet. The proxy
+sets none either: an MCP client keeps its connection through a JSON-RPC
+refusal, and Traefik's limit answers a plain-text 429 instead; by default it
+also keys every client behind a tunnel to one address. The authorization
+server's sign-in is a password, not a key, and limits itself ("Authorization
+server", "Abuse limits").
 
 **Its access log never holds a query string.** A connector carries its key in
 `?key=`, and an OAuth redirect will carry its code and state there; a log line
@@ -347,6 +374,78 @@ is a 401, a scan's poll link reads `/api/v1/jobs/…`; dropped again, a 404. The
 REST core's log is one line per request — method, route template, status, time —
 and neither its log nor the proxy's holds a key.
 
+## Moving a client to /mcp
+
+Before SMD-1846 the server answered at the origin root, so every client was
+given the root: `http://127.0.0.1:8000/?key=…`, or `https://host/?key=…`
+through a tunnel. The proxy's legacy route still answers there, for a window
+that closes with **v2.0.0**, and no sooner than two weeks after the first
+release carrying this section (SMD-2306). After the window the root is the
+proxy's 404, and a client still on it stops working (SMD-2532). The port does
+not change, since the proxy publishes the same `SERVER_PORT`. Only the path
+changes: add `/mcp`.
+
+**During the window.** Every answer through the legacy route carries two
+headers:
+
+```
+Deprecation: @1790899200
+Link: <https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel="deprecation"; type="text/html"
+```
+
+The server also logs a line the first time each key name reaches it there,
+from an MCP client or a keyed REST call (`/worker-status`, the worker actions,
+`/jobs/<id>`) alike:
+
+```
+key "session-hook" reached the brain at the old root URL (POST "/") through the proxy's legacy route — move its client to /mcp; …
+```
+
+**Finding the clients still on the root.** Run
+`compose logs -t server | grep 'old root URL'` (with the `-f` files the stack
+runs with). Each line names a key from `MCP_ACCESS_KEYS`, which is where a key
+per client pays off: the single-key form, `MCP_ACCESS_KEY`, is named
+`MCP_ACCESS_KEY` for every client, so its line says only that some client is
+on the root. A name is logged the first time it is seen in a server
+process, so a line says the client was on the root at that time, not that it
+still is. Restart the server after moving clients, and a name that comes back
+is still on the root. The proxy's access log has a line for every such
+request, with `"RouterName":"legacy@file"`, the path, and the client's address
+but no key; a keyless request is only there. On podman for macOS that address
+is the VM's gateway, not the client. `smoke.sh` run with no URL probes the root
+without a key, so it adds no name, and expects both headers (check 11).
+
+| Client | Before | After |
+| --- | --- | --- |
+| Claude Code (`claude mcp add`) | `http://127.0.0.1:<SERVER_PORT>/` | `claude mcp get open-brain` names the scope (and prints the key); then `claude mcp remove open-brain -s <scope>` and `claude mcp add --transport http --scope <scope> open-brain http://127.0.0.1:<SERVER_PORT>/mcp --header "x-brain-key: <key>"`. Without `--transport http` the add makes a stdio entry. A project-scope entry is the `url` in `.mcp.json`: edit it there |
+| Claude Desktop or claude.ai custom connector | `https://host/?key=…` | `https://host/mcp?key=…`: remove the connector and add it with the new URL |
+| The session-capture hook | `"url": "http://127.0.0.1:<port>/"` in `~/.config/open-brain/session-capture.json` (or the file `OB1_SESSION_CAPTURE_CONFIG` names) | `"url": "http://127.0.0.1:<port>/mcp"`, then `bun recipes/session-capture-hook/session-capture.mjs --check`. `OB1_BRAIN_URL` in the hook's environment overrides the file: move it too |
+| `db/tier.ts --compare` (`db/brain-compare.ts`) | `http://127.0.0.1:<port>/`, or a connector name it reads with `claude mcp get` | `http://127.0.0.1:<port>/mcp`; a connector name follows the Claude Code row |
+| curl, a script, a monitor | `/worker-status`, `/jobs/<id>`, `POST /worker-retry-failed`, `/worker-release-leases`, `/worker-run`, `/health` at the root | the same under `/mcp` (`/mcp/worker-status`, …). `GET /health` at the root stays: it is the health route, not the legacy one. A `scan_thoughts` handle's links are now under the endpoint the call came to |
+| n8n | `http://server:8000/` in a workflow node you built | no change needed: n8n reaches the server on the compose network, not through the proxy |
+| any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge, a dashboard's `MCP_URL` | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
+
+A stack run with `compose.tiers.yaml` publishes its tiers' servers directly
+(stable on 8010), with no proxy in front: there the root has no window, no
+headers and no line, and `/mcp` works too, since the server answers at every
+path. Moving those clients now is harmless and saves doing it later.
+
+Two more things belong here, though neither applies until the stack has a
+public origin and serves protected-resource metadata (SMD-2382):
+
+- **A sign-in prompt will usually mean a bad key.** Today a revoked or rotated
+  `?key=` gets an error: a 200 carrying a JSON-RPC refusal. Once the server
+  answers a public-origin request for a bad key with a 401 and
+  `WWW-Authenticate` (the plan in `docs/operator-surface-tiers.md`), claude.ai
+  meets it with an OAuth sign-in instead. A valid key never gets one, so a
+  prompt on a key-based connector will mean the key is the problem.
+- **Changing the public origin later costs a re-enrolment.** Every passkey has
+  to be enrolled again and every connector registered again.
+
+The compose side of the upgrade is in "Upgrading a stack from before
+SMD-1846" above: name `proxy` beside `server` on the first `up`, and roll back
+with `--remove-orphans`.
+
 ## Expected outcome
 
 `migrate` exits 0 having applied every migration under `db/migrations/` (its image,
@@ -361,7 +460,7 @@ Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) —
 endpoint, or whatever URL you configure outside the proxy; the exact match rule
 is the `HEALTH_PATH` comment in `server-portable/index.ts` (FORK.md change 75).
 The MCP endpoint serves POST only: `GET /mcp` answers 405 (and `GET /` too,
-through the legacy route; the proxy's 404 once SMD-2306 removes it), so a
+through the legacy route; the proxy's 404 once SMD-2532 removes it), so a
 platform-default probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK` POSTs to the endpoint instead, which also
 proves the MCP path serves; either is fine. Opening the connector URL in a
 browser shows `Method Not Allowed`, which is expected.
@@ -1389,7 +1488,8 @@ everyone's. Two hops need the tunnel to write its client into
 `forwardedHeaders.trustedIPs`, which compose does not set); a tunnel that
 passes the header through unwritten lets the client name entry 2. A password from `--init`, or one of 12 characters
 or more, is what holds against many addresses guessing; the loopback
-break-glass sign-in is SMD-2286's.
+break-glass sign-in is SMD-2286's. The proxy in front sets no rate limit of
+its own, by design ("No rate limits on `/mcp`, by design" above).
 
 **Custody and backups.**
 - **The signing key** signs every token the server issues: a new key
@@ -1436,10 +1536,8 @@ job does the same.
 `/.well-known/oauth-protected-resource/mcp`, served by the MCP server while
 this one answers (SMD-2382, SMD-2286); passkey
 sign-in, which needs the public origin (SMD-2382, SMD-2286); the MCP server
-and the GUI as its clients (SMD-2286, SMD-2287); and rate limits at the
-proxy (SMD-2309), beside the server's own above. The release
-overlay does not pin an image for it yet, so the profile builds from a
-checkout.
+and the GUI as its clients (SMD-2286, SMD-2287). The release overlay does
+not pin an image for it yet, so the profile builds from a checkout.
 
 ## What this does not cover
 

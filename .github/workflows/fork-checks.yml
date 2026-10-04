@@ -1609,7 +1609,15 @@ jobs:
       #   Found" — so a claude.ai connector's discovery at the root gets its
       #   404 whatever the server does;
       # - the connector form clients hold today still answers at the root:
-      #   `POST /?key=` (the legacy router, until SMD-2306 closes it);
+      #   `POST /?key=` (the legacy router, until SMD-2532 closes it);
+      # - its window (SMD-2306): a legacy answer carries the Deprecation
+      #   header (smoke.sh check 11 holds the POST's), and no /mcp, /health
+      #   or OPTIONS /health answer does; the server named the capture key
+      #   for its `POST /?key=` here, the query form, under a name nothing
+      #   before this step has used (the smoke at the root already named
+      #   `ci`, and the server says a name once: review pass 2), and never
+      #   the read key, whose marker it set itself on /mcp and /health, which
+      #   the proxy deletes;
       # - the access log never holds a query string or userinfo: after calls
       #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
       #   part of an absolute-form target, no log line carries it, and the
@@ -1636,6 +1644,31 @@ jobs:
           stats=$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' "$B/?key=$OB1_SMOKE_KEY")
           grep -qF 'Total thoughts: ' <<<"$stats" || { echo "POST /?key= at the root no longer reaches the brain: ${stats:0:200}" >&2; exit 1; }
+          # The status and how many Deprecation headers came back: "200 1".
+          dep() { curl -s --max-time 10 -D - -o /dev/null "$@" | tr -d '\r' | awk 'NR == 1 { code = $2 } tolower($0) ~ /^deprecation: @/ { n++ } END { print code, n + 0 }'; }
+          got=$(dep "$B/worker-status")
+          [ "$got" = "200 1" ] || { echo "GET /worker-status through the legacy route: '$got', expected 200 with a Deprecation header" >&2; exit 1; }
+          for probe in "$B/health" "$B/mcp/health"; do
+            got=$(dep "$probe")
+            [ "$got" = "200 0" ] || { echo "GET $probe: '$got', expected 200 with no Deprecation header" >&2; exit 1; }
+          done
+          got=$(dep -X OPTIONS -H 'Origin: https://client.example' -H 'Access-Control-Request-Method: GET' "$B/health")
+          [ "$got" = "200 0" ] || { echo "OPTIONS /health: '$got', expected 200 with no Deprecation header (the health route's, not the legacy route's)" >&2; exit 1; }
+          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'X-OB1-Legacy-Route: 1' \
+            -H "x-brain-key: $OB1_SMOKE_READ_KEY" -d '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}' "$B/mcp")
+          [ "$code" = 200 ] || { echo "the read key's tools/list at /mcp got HTTP $code, so the absence of its line proves nothing" >&2; exit 1; }
+          [ "$(curl -s --max-time 10 -H 'X-OB1-Legacy-Route: 1' -H "x-brain-key: $OB1_SMOKE_READ_KEY" "$B/health" | head -c 1)" = "{" ] || { echo "the read key's GET /health got no record, so the absence of its line proves nothing" >&2; exit 1; }
+          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}' "$B/?key=$OB1_SMOKE_CAPTURE_KEY")
+          [ "$code" = 200 ] || { echo "the capture key's POST /?key= got HTTP $code" >&2; exit 1; }
+          # Polled briefly: the server writes the line before it answers, but docker copies it into its log on its own time.
+          for _ in 1 2 3 4 5 6; do
+            SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
+            grep -qF 'key "ci-capture" reached the brain at the old root URL (POST "/")' <<<"$SLOG" && break
+            sleep 0.5
+          done
+          grep -qF 'key "ci-capture" reached the brain at the old root URL (POST "/")' <<<"$SLOG" || { echo "the server did not name the capture key for its POST /?key= at the root:" >&2; grep 'old root URL' <<<"$SLOG" >&2; exit 1; }
+          if grep -qF 'key "ci-read" reached' <<<"$SLOG"; then echo "a marker the client set on /mcp or /health reached the server and was logged" >&2; exit 1; fi
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
           # Answered by the server, so Traefik took the absolute form and logged it:
           # a refusal before the log would leave the userinfo half untested.
