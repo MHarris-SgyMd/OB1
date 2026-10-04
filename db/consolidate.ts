@@ -122,12 +122,13 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import {
-  actorKindOf, cleanForDisplay, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
+  actorKindOf, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
 import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
+import { PROPOSAL_TEXT_MAX, snipText } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
@@ -549,9 +550,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     `     lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066${p.status === "pending" || p.status === "stale" ? `; reject it: ${rejectLineage(p.id)}` : p.status === "accepted" ? `; accepted while the derivation names its input — --reject ${p.id} clears the pointer (029)` : ""}`;
   /** review_supersession_proposal's answer (029/036), plus the CLI's own LINEAGE_PAIR refusal (070). */
   type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
-  // Thought content and entity names are untrusted; cleanForDisplay strips what
-  // would move the cursor or rewrite the ID: line a reviewer is about to paste.
-  const snippet = (s: string, n = 160) => { const t = cleanForDisplay(s).replace(/\s+/g, " ").trim(); return t.slice(0, n) + (t.length > n ? "…" : ""); };
+  // Thought content, the judge's reason, a review note and entity names are
+  // untrusted; snipText (the MCP replies' cleaner) puts each on one line —
+  // every break a reader may take, NEL among them, a space — and strips what
+  // would move the cursor or rewrite the ID: line a reviewer is about to paste
+  // (SMD-2533).
+  const snippet = (s: string, n = 160) => snipText(s, n);
   // SMD-1803: the CLI twin of the server's proposal renderer. Through the store's
   // canonical rule (isoDay), not new Date().toISOString(), which fabricated
   // 1970-01-01 on a NULL created_at and THREW on an infinity-dated one, taking
@@ -589,8 +593,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // row the pass settled needs no tag: its note begins with the marker.)
     const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
     rows.forEach((p, i) => {
-      out(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${p.status !== "pending" ? `  (${p.status}${p.status === "stale" ? ` — ${staleStandingText(standing.get(p.id) ?? { s: "waiting", keys: [] }, JOB)}` : ""}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
-      if (p.reason) out(`     ${cleanForDisplay(p.reason)}`);
+      // SMD-2533: a note cleaned to nothing prints nothing, as the reply's does.
+      const note = p.review_note ? snippet(p.review_note, PROPOSAL_TEXT_MAX) : "";
+      out(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${p.status !== "pending" ? `  (${p.status}${p.status === "stale" ? ` — ${staleStandingText(standing.get(p.id) ?? { s: "waiting", keys: [] }, JOB)}` : ""}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${note ? `: ${note}` : ""})` : ""}`);
+      // SMD-2533: behind its label, so a reason reading `ID: <uuid>` starts no line of its own.
+      const reason = p.reason ? snippet(p.reason, PROPOSAL_TEXT_MAX) : "";
+      if (reason) out(`     reason: ${reason}`);
       out(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
       out(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
       out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${p.judge_key} on ${day(p.judged_at)}`);
@@ -622,8 +630,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     }
     out(`  stale: ${rows.length} entit${rows.length === 1 ? "y" : "ies"} nothing has mentioned in ${days} days (oldest first; reported, not acted on):`);
     // Names are one line each: control characters stripped and whitespace
-    // collapsed, so a name cannot start a forged row (review pass 4).
-    for (const r of rows) out(`    ${r.entity_type.padEnd(12)} ${cleanForDisplay(r.name).replace(/\s+/g, " ").slice(0, 50).padEnd(50)} ${r.thoughts} thought(s), last ${day(r.newest_at)}`);
+    // collapsed, so a name cannot start a forged row (review pass 4) — NEL
+    // among the breaks (SMD-2533). Cut as before, at 50 UTF-16 units with no
+    // ellipsis, so the column keeps its width.
+    for (const r of rows) out(`    ${r.entity_type.padEnd(12)} ${snippet(r.name, Infinity).slice(0, 50).padEnd(50)} ${r.thoughts} thought(s), last ${day(r.newest_at)}`);
   }
 
   if (REVIEW_ONLY) {
