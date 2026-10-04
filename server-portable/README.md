@@ -234,8 +234,14 @@ its score multiplied by 0.25. Under the hybrid's fusion that puts every current
 match in the window first, then the demoted ones in their own order (a demoted
 exact hit keeps a quarter of its literal bonus, so on a query of literals only,
 or holding several of the query's literals, it can still outrank current rows —
-the header says when one does); each
-demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`),
+the header says when one does). Since migration 077 (SMD-2271) a thought with no
+ticket of its own is demoted too when every ticket it is about is finished:
+the keys in its topics, action items or session-summary header all Done or
+Canceled — or, naming none of those, three or more keys in its text, all
+finished — and no open ticket named anywhere in it. Each
+demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`,
+`references settled work (SMD-…)` with the deciding keys; the structured reply's
+`demoted` carries the token `references_settled`),
 and the header says how many of the window were demoted, how many carry a
 lifecycle and the latest sync among them — and, when the window held fewer
 current matches than asked for, that one past it may have been missed (raise
@@ -571,18 +577,88 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
 
 The core's values are whole, for the REST core.
 
+## The REST core (SMD-2284)
+
+`bun api.ts` serves every operation the tools expose as JSON, over the same core and
+the same process root (`root.ts`) as the MCP server. Its compose service, reached as
+`api.ob1.internal` and public at `/api` only where the operator turns that on, is
+SMD-2284's next step; today it runs where you start it.
+
+- **Routes** come from `rest/routes.ts`, one per tool in the manifest (a tool
+  without one does not compile): `GET /v1/thoughts`, `GET`/`PATCH`/`DELETE
+  /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST /v1/search` (and `/keyword`,
+  `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
+  `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
+  /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/scans`, `GET
+  /v1/jobs/{job_id}` and its `/stream`. A GET or DELETE reads its input from the
+  query string, a POST or PATCH from a JSON body, and input sent the other way is
+  refused; a search's text always rides a body. The input is the tool's own zod schema
+  (`core/schemas.ts`), held strictly: an unknown field is refused. A GET whose headers
+  announce a body is refused too (Bun hands a GET's handler no body, so its input would
+  vanish). A HEAD answers what the GET would before it looks anything up — the caller's
+  standing and the input as the schema holds it — with the GET's content type and no
+  body, and never runs the operation, so a HEAD for a thought that is not there, or with
+  a `since` or `after` the operation itself would refuse, is still a 200. A method a path
+  does not take is a 405 naming those it does.
+- **`GET /openapi.json`** is built from the same two sources, so it lists every
+  operation with the input its route parses. **`GET /v1/whoami`** names the
+  calling key, its scope, its agent id and the operations it may call.
+- **Authorization** is the key's: `x-brain-key`, `x-access-key` or `Authorization:
+  Bearer` — never `?key=`, which only URL-only MCP connectors need. No key or a
+  wrong one is a 401 `UNAUTHORIZED`, a revoked one a 401 `REVOKED`, a busy registry
+  a 503 `BUSY` with `Retry-After`, a scope that does not reach the operation a 403
+  `FORBIDDEN` naming the scope it needs.
+- **Answers.** A success is the operation's value, for a key that can read (a capture
+  is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
+  vector with the row, false when the egress gate refused the embedding call (on a
+  re-capture the row then keeps the vector it had); a scan a 202 whose handle points at
+  `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
+  `embeddingCall`, `chunks`, `contextFailures` — and not the provider's address, the
+  egress gate's reasons or the extractor's tags. A refusal is its code, `retryable` and the facts its code declares
+  (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
+  the status `rest/routes.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
+  rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
+  not built, 503 retry. A save whose vector did not attach (the PostgREST two-step)
+  is a 201 with `embeddingAttached: false`, not a refusal, so a client does not
+  capture again. A refused input is a 400 `REFUSED_INPUT` naming each field and
+  zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
+  gives it, and no `retryable` until SMD-2461 — but capture's is a 503
+  `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
+  carries `Retry-After`. Loose core inputs that reach Postgres (an unbounded
+  `list_thoughts` limit, a non-UUID id on update or delete) are still faults
+  through both doors (SMD-2534).
+- **The log** is one line per request — the method, the route's template, the
+  status and the time — with no query string, key, id or content in it.
+- **`GET /health`** is liveness with no key, for the container's healthcheck; the
+  keyed BrainInfo is `GET /v1/brain`. A write through the REST core records its door
+  as `open-brain-api` (thought_audit.origin).
+- **Jobs** stay in this process's memory until SMD-2284's PR 3: the durable job store's
+  start-up reconcile marks every live job in the table lost, the MCP server's too, so
+  it is wired here only once that reconcile is scoped to the server that started each
+  job.
+
+`test-rest-sql.ts` runs every operation through both servers on one database, over
+data each has something to say about, and holds that the MCP reply to a success is what
+`render.ts` makes of the REST answer, text and `structuredContent` both — so every word
+MCP shows is in the REST answer, which may carry more — and that a refusal is the same
+code and facts through both. A refusal's MCP text reads facts REST withholds (the
+caller's input, the store's words), so the MCP server as a REST client (SMD-2287) words
+those its own way.
+
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 514 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, and a proposal's one-line reason and note
+bun test-server.ts        # 527 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
 bun test-auth.ts          # 124 — scoped, hashed, named keys
+bun test-rest.ts          # 223 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
-bun run test:e2e          # 422 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 429 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+../db/with-postgres.sh bun test-rest-sql.ts  # 131 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 
-`test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
+`test:sql`, `test:e2e` and `test-rest-sql.ts` need podman or docker; they use `../db/with-postgres.sh`
 to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 ## Testing

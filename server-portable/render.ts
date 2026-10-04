@@ -102,8 +102,14 @@ export const storeUnavailable = (err: unknown): Reply => failed(err, { verdict: 
 
 /** An enum the store reads from a constrained column, kept only when it is one of the words it may be. */
 const oneOf = <W extends string>(words: readonly W[], v: unknown): W | null => (words as readonly unknown[]).includes(v) ? v as W : null;
-/** The reasons prefer_current demotes a row (059): the function's own words. */
-const DEMOTIONS = ["completed", "canceled", "superseded"] as const;
+/**
+ * The reasons prefer_current demotes a row (059): the function's own words,
+ * one token each as guard() holds a structured string. 077's reason carries
+ * the deciding keys, `references settled work (SMD-1, SMD-2)`; the structured
+ * field says `references_settled` and leaves the words and keys to the text.
+ */
+const DEMOTIONS = ["completed", "canceled", "superseded", "references_settled"] as const;
+const demotionOf = (d: unknown) => oneOf(DEMOTIONS, typeof d === "string" && /^references settled work \(/.test(d) ? "references_settled" : d);
 
 /** A row's trust (073, SMD-1724): one of the ladder's words, else null — no trust recorded, or a word the stamp never writes. */
 const trustOf = (m: Record<string, unknown> | null | undefined): (typeof TRUST)[number] | null => oneOf(TRUST, m?.trust);
@@ -116,7 +122,7 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   window: v.window,
   hits: v.hits.map((h) => ({
     id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
-    supersededBy: h.supersededBy, demoted: h.demoted.map((d) => oneOf(DEMOTIONS, d)).filter((d) => d !== null),
+    supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
     trust: trustOf(h.metadata),
   })),
 });
@@ -334,7 +340,7 @@ export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">
   const above = rows.filter((r, i) => isDemoted(r) && rows.slice(i + 1).some((x) => !isDemoted(x))).length;
   const exception = above === 0 ? ""
     : ` — ${above} of the demoted, holding the query's literal, still rank${above === 1 ? "s" : ""} above a current one here`;
-  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones${exception}; ${lifecycle}.`;
+  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled, superseded or about finished tickets and ranked below the current ones${exception}; ${lifecycle}.`;
   if (w.exact) return note;
   const current = w.rows - w.demoted;
   const held = current === 0 ? `No current match was in the top ${w.rows}, so every row here is a demoted one`

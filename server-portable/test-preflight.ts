@@ -19,6 +19,7 @@
 
 import { join, dirname } from "node:path";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
@@ -178,12 +179,21 @@ console.log("[1] Missing configuration fails, with an actionable fix");
          `…and nothing else prints between the data layer and the provider: schema plus the ${listedNames.length} names (${rows.length} rows)`);
 }
 
-console.log("\n[2] Weak secrets warn without blocking");
+console.log("\n[2] A short raw access key is refused (SMD-2309)");
 {
-  const r = await run({ ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x",
-                        OPENROUTER_API_KEY: "k", MCP_ACCESS_KEY: "short" });
-  assert(/only thing protecting/.test(r.out), "a short access key is called out");
-  assert(/openssl rand -hex 32/.test(r.out), "…with the command to generate a real one");
+  const base = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OPENROUTER_API_KEY: "k", MCP_ACCESS_KEYS: undefined };
+  const r = await run({ ...base, MCP_ACCESS_KEY: "short" });
+  assert(/✗\s+access key strength\s/.test(row(r.out, "access key strength")) && /alone opens the endpoint/.test(r.out), `a short access key fails its row: ${row(r.out, "access key strength")}`);
+  assert(/openssl rand -hex 32/.test(fix(r.out, "access key strength")), "…with the command to generate a real one");
+  const ok = await run({ ...base, MCP_ACCESS_KEY: "x".repeat(32) });
+  assert(/!\s+access keys\s/.test(row(ok.out, "access keys")) && row(ok.out, "access key strength") === "", `a 32-character raw key alone is the legacy warning and no strength row: ${row(ok.out, "access keys")}`);
+  // Beside a hashed list the raw key still authenticates (auth.ts), so it is judged there too.
+  const listed = `laptop:write:${createHash("sha256").update("y".repeat(64)).digest("hex")}`;
+  const both = await run({ ...base, MCP_ACCESS_KEYS: listed, MCP_ACCESS_KEY: "short" });
+  assert(/✓\s+access keys\s/.test(row(both.out, "access keys")) && /✗\s+access key strength\s/.test(row(both.out, "access key strength")) && /!\s+legacy access key\s/.test(row(both.out, "legacy access key")),
+         `a short raw key beside MCP_ACCESS_KEYS fails its row and is named as legacy: ${row(both.out, "access key strength")} | ${row(both.out, "legacy access key")}`);
+  const listedOnly = await run({ ...base, MCP_ACCESS_KEYS: listed });
+  assert(row(listedOnly.out, "legacy access key") === "" && row(listedOnly.out, "access key strength") === "", "MCP_ACCESS_KEYS alone prints neither row");
 }
 
 console.log("\n[3] Credentials are not echoed");
@@ -997,16 +1007,16 @@ else {
   const twoBehind = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("027") || f.startsWith("074") || f.startsWith("075") });
   const twoBack = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(pre075.code === 0 && /search signatures[^\n]*search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075: every search answers, and min_trust \(SMD-1724\) does not reach the hybrid the search tools read/.test(pre075.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql\./.test(pre075.out),
+  assert(pre075.code === 0 && /search signatures[^\n]*search_thoughts_hybrid has no 8-argument min_trust form, from before migration 075: every search answers, and min_trust \(SMD-1724\) does not reach the hybrid the search tools read/.test(pre075.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql, then 077_references_settled\.sql \(077 last defines search_thoughts_current's 8-argument body\)\./.test(pre075.out),
     "a brain before 075 — the hybrid's 7-argument form alone, 027's body — starts with a warning naming 075");
   assert(wrapperAlone.code === 1 && /search signatures[^\n]*is 075's 7-argument search_thoughts_hybrid, which calls its 8-argument form, and that form is missing/.test(wrapperAlone.out),
     "…075's wrapper with its 8-argument form dropped fails the start: every search would fail");
   assert(no7.code === 1 && /search signatures[^\n]*the 7-argument search_thoughts_hybrid the servers call is missing beside 075's 8-argument form/.test(no7.out) && bothBack.code === 0 && /search signatures[^\n]*with min_trust's 8-argument hybrid beside them \(075\)/.test(bothBack.out),
     "…its 8-argument form alone fails the start, the servers' call gone; 075 re-applied is the shipped pair again");
-  assert(stale7.code === 0 && /search signatures[^\n]*search_thoughts_hybrid's 7-argument form is not 075's — an earlier migration re-applied by hand over it — so the servers' call runs that body/.test(stale7.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql\./.test(stale7.out),
+  assert(stale7.code === 0 && /search signatures[^\n]*search_thoughts_hybrid's 7-argument form is not 075's — an earlier migration re-applied by hand over it — so the servers' call runs that body/.test(stale7.out) && /Apply db\/migrations\/075_min_trust_hybrid\.sql, then 077_references_settled\.sql \(077 last defines search_thoughts_current's 8-argument body\)\./.test(stale7.out),
     "…and a 7-argument form that is not 075's wrapper beside the 8 — 027 re-applied by hand — is a warning naming 075 (first review pass, run-it)");
   assert(twoBehind.code === 0 && /search signatures[^\n]*match_thoughts' is 020's, from before migration 074; and search_thoughts_hybrid's 7-argument form is not 075's/.test(twoBehind.out)
-      && /Apply db\/migrations\/074_min_trust\.sql, then 075_min_trust_hybrid\.sql\./.test(twoBehind.out)
+      && /Apply db\/migrations\/074_min_trust\.sql, then 075_min_trust_hybrid\.sql and 077_references_settled\.sql\./.test(twoBehind.out)
       && twoBack.code === 0 && /search signatures[^\n]*with min_trust's 8-argument hybrid beside them \(075\)/.test(twoBack.out),
     "…020 re-applied over both, its 6 alone, is a warning naming 074 then 075 — 075 alone refuses without 074 — and the two re-applied are the shipped pair (second review pass, run-it)");
 

@@ -180,6 +180,9 @@ const FUNCTIONS = [
   SEARCH_THOUGHTS_HYBRID_SIGNATURE_7,
   SEARCH_THOUGHTS_CURRENT_SIGNATURE_7,
   "search_demote_weight()",
+  // 077 (SMD-2271): string bodies, so no dependency orders their drops.
+  "ticket_references(text, jsonb)",
+  "ticket_references_settled(text, jsonb)",
   // 068 (SMD-2256): the triggers go with thoughts; their function is named here.
   "ob1_node_projection_sync()",
   "ob1_node_projection_truncate()",

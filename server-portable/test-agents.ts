@@ -234,6 +234,13 @@ console.log("\n[6] A revoked key is refused, and its history stays queryable");
   assert(refused.error?.code === -32001, "the next request from that key is refused");
   assert(/revoked/i.test(refused.error?.message ?? ""),
          `…saying the key was revoked rather than that it is invalid (${refused.error?.message})`);
+  // A key that matched has its whole body read for the refusal's id, past the
+  // keyless 64 KiB bound (SMD-2309 review pass 2): a long capture's refusal
+  // answers its id, or the client waits out its timeout.
+  const longCapture = JSON.stringify({ jsonrpc: "2.0", id: 42, method: "tools/call", params: { name: "capture_thought", arguments: { content: "x".repeat(100 * 1024) } } });
+  const long = await fetch(BASE, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY_A }, body: longCapture });
+  const longBody = (await long.json()) as { id?: unknown; error?: { message?: string } };
+  assert(longBody.id === 42 && /revoked/i.test(longBody.error?.message ?? ""), `a revoked key's 100 KB request is refused as revoked with its id (${JSON.stringify(longBody.id)})`);
 
   /**
    * Two mirrors, because "refused" on its own is what a broken server does too.

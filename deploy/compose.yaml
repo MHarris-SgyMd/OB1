@@ -10,7 +10,7 @@
 # The profile is the stack's own Ollama, where the server's model endpoint
 # defaults; drop it when deploy/.env names another provider.
 #
-# Then point an MCP client at http://127.0.0.1:8000/mcp?key=$MCP_ACCESS_KEY
+# Then point an MCP client at http://127.0.0.1:8000/mcp?key=<your key>
 #
 # Secrets come from deploy/.env, which is gitignored. Copy .env.example first.
 # Nothing here is production-shaped — no TLS, no backups, no resource limits — it
@@ -77,15 +77,17 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #           domains, so an absent server is never looked for under the host's
 #           (the proxy's dns_search);
 #   mcp     /mcp and everything under it — the endpoint clients are given;
-#   health  GET and HEAD /health at the origin root, for a GET-only probe;
+#   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
+#           probe and a browser's CORS preflight;
 #   legacy  everything but /.well-known — what clients reach today at the root
 #           (`POST /?key=`, /worker-status, /jobs/<id>, and
 #           `GET /`, whose 405 an MCP SDK client takes as "no stream here";
 #           the proxy's 404 there made v1 and v2 clients report an error on
 #           every connect, measured), kept so the upgrade that lands the proxy
-#           breaks no configured client. SMD-2306 owns its window: a
-#           deprecation header, the upgrade guide, then its removal, after
-#           which `/` is the proxy's 404 too.
+#           breaks no configured client. Its window (SMD-2306): every answer
+#           carries a Deprecation header and a Link to the upgrade guide, and
+#           the server names each key still on it; it closes with v2.0.0,
+#           when SMD-2532 removes it and `/` is the proxy's 404 too.
 # No router matches /.well-known or anything under it but the auth router's
 # three, so the proxy answers the rest 404 itself and the server never sees
 # them: a claude.ai connector at https://host/mcp asks
@@ -112,18 +114,43 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
         priority: 30
         entryPoints: [web]
+        middlewares: [not-legacy]
         service: server
+      # OPTIONS too: a browser's CORS preflight for a keyed GET /health is
+      # the server's to answer, not the legacy route's.
       health:
-        rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`))"
+        rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
         entryPoints: [web]
+        middlewares: [not-legacy]
         service: server
+      # The root URL clients were given before SMD-1846, kept for a
+      # compatibility window that closes with v2.0.0 (SMD-2306; SMD-2532
+      # deletes this router). Every answer says so in its headers, and the
+      # server logs each key name that comes this way once.
       legacy:
         rule: "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))"
         priority: 1
         entryPoints: [web]
+        middlewares: [legacy-window]
         service: server
     middlewares:
+      # Deprecation (RFC 9745) since 2026-10-02, and a Link to the upgrade
+      # guide. The request is marked for the server, which logs the key
+      # names still on the root; set, so a client's own value is replaced.
+      legacy-window:
+        headers:
+          customRequestHeaders:
+            X-OB1-Legacy-Route: "1"
+          customResponseHeaders:
+            Deprecation: "@1790899200"
+            Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel="deprecation"; type="text/html"'
+      # An empty value deletes the header: a client cannot send the marker
+      # on /mcp and be logged as a straggler.
+      not-legacy:
+        headers:
+          customRequestHeaders:
+            X-OB1-Legacy-Route: ""
       # Any 502: Traefik's own (no such name, nothing listening, or a request
       # the server dropped mid-flight, as its registration stall does at
       # 30 s), since the server never answers 502 itself. noop@internal
