@@ -1715,11 +1715,11 @@ jobs:
           jq -e '.scope == "write" and (.operations | index("capture_thought"))' <<<"$inside" >/dev/null || { echo "api.ob1.internal on the mesh did not answer whoami: ${inside:0:200}" >&2; exit 1; }
           docker compose -f compose.yaml -f compose.api-public.yaml up -d --wait --wait-timeout 120 proxy
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
-          [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null || { echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; }
+          if ! { [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null; }; then echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; fi
           c=$(code "$B/api/v1/whoami?key=$OB1_SMOKE_KEY")
           [ "$c" = 401 ] || { echo "a key in /api's query string was taken ($c): the REST core reads header keys only" >&2; exit 1; }
           c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"limit":5}' "$B/api/v1/scans")
-          [ "$c" = 202 ] && jq -e '.poll | startswith("/api/v1/jobs/")' /tmp/api-body >/dev/null || { echo "a scan through /api answered $c or a link without the prefix: $(head -c 200 /tmp/api-body)" >&2; exit 1; }
+          if ! { [ "$c" = 202 ] && jq -e '.poll | startswith("/api/v1/jobs/")' /tmp/api-body >/dev/null; }; then echo "a scan through /api answered $c or a link without the prefix: $(head -c 200 /tmp/api-body)" >&2; exit 1; fi
           [ "$(code "$B/api/openapi.json")" = 200 ] || { echo "/api/openapi.json is not served through the overlay" >&2; exit 1; }
           docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
