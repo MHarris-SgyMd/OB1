@@ -597,7 +597,7 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(judged(`a${ch(0x9b)}b${ch(0x85)}${ch(0x202e)}c${ch(0x2066)}d${ch(0x200f)}`) === "ab cd", "a C1 control and the bidi marks are dropped from the reason, and its NEL is a space");
   const emoji = String.fromCodePoint(0x1f600);
   const cut = judged("a" + emoji.repeat(450));
-  assert(cut === "a" + emoji.repeat(399) && judged(emoji.repeat(400)) === emoji.repeat(400) && !/[\ud800-\udbff]$/.test(cut),
+  assert(cut === "a" + emoji.repeat(399) && judged(emoji.repeat(400)) === emoji.repeat(400),
     "the reason is cut at 400 code points: an emoji at the bound is kept or dropped whole, never half a surrogate pair, and 400 emoji (800 UTF-16 units) are not cut");
 
   // The display cleaner: control characters and ESC go, tab/newline/return stay.

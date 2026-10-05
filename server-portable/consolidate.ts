@@ -219,6 +219,8 @@ export const LINE_BREAK = /\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/;
  * (an ESC sequence or a backspace moves a terminal's cursor back over the
  * fence), DEL, and the bidirectional controls, which lay a line out
  * right-to-left with its fence at the far end (SMD-2483, review pass 1).
+ * Global, for `.replace`: a `.test` or `.exec` on it would carry `lastIndex`
+ * from one call to the next.
  */
 // eslint-disable-next-line no-control-regex
 export const UNSHOWN = /[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
