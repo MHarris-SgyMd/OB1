@@ -196,6 +196,35 @@ console.log("\n[2] A short raw access key is refused (SMD-2309)");
   assert(row(listedOnly.out, "legacy access key") === "" && row(listedOnly.out, "access key strength") === "", "MCP_ACCESS_KEYS alone prints neither row");
 }
 
+console.log("\n[2a] The public origin: configured for OAuth, or keys only (SMD-2382)");
+{
+  const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x" };
+  const on = await run({ ...base, COMPOSE_PROFILES: "local-models,auth", OB1_PUBLIC_ORIGIN: "https://brain.example.com/" });
+  assert(/✓\s+public origin\s+https:\/\/brain\.example\.com — configured for OAuth: https:\/\/brain\.example\.com\/mcp is advertised while this server reaches the authorization server/.test(row(on.out, "public origin")), `configured with a sound origin: an ok row naming the resource (${row(on.out, "public origin")})`);
+  const missing = await run({ ...base, COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: undefined });
+  assert(/!\s+public origin\s+OB1_PUBLIC_ORIGIN is not set, and COMPOSE_PROFILES names auth — this server advertises no OAuth/.test(row(missing.out, "public origin")), `configured without an origin: a warning, not a failure (${row(missing.out, "public origin")})`);
+  assert(/→ Set OB1_PUBLIC_ORIGIN in deploy\/\.env/.test(fix(missing.out, "public origin")), "…with the setting to add");
+  const plain = await run({ ...base, COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "http://brain.example.com" });
+  assert(/!\s+public origin\s+OB1_PUBLIC_ORIGIN must be https:\/\/ unless its host is loopback/.test(row(plain.out, "public origin")), `configured with plain http off loopback: a warning (${row(plain.out, "public origin")})`);
+  const secret = await run({ ...base, COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "https://user:hunter2@brain.example.com" });
+  assert(/!\s+public origin\s/.test(row(secret.out, "public origin")) && !/hunter2/.test(secret.out), "an origin holding credentials is a warning, and never echoed");
+  const keysOnly = await run({ ...base, COMPOSE_PROFILES: "local-models", OB1_PUBLIC_ORIGIN: "https://brain.example.com/" });
+  assert(/✓\s+public origin\s+https:\/\/brain\.example\.com — COMPOSE_PROFILES does not name auth, so keys only/.test(row(keysOnly.out, "public origin")), `an origin without the profile: keys only, named as the origin it reads as (${row(keysOnly.out, "public origin")})`);
+  const keysOnlySecret = await run({ ...base, COMPOSE_PROFILES: undefined, OB1_PUBLIC_ORIGIN: "https://user:hunter2@brain.example.com" });
+  assert(/!\s+public origin\s+OB1_PUBLIC_ORIGIN holds an @.* — unused while COMPOSE_PROFILES does not name auth/.test(row(keysOnlySecret.out, "public origin")) && !/hunter2/.test(keysOnlySecret.out),
+         `an unsound origin without the profile is a warning, not an ok row carrying the problem, and its credentials are not echoed (${row(keysOnlySecret.out, "public origin")})`);
+  const port = await run({ ...base, COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "https://brain.example.com:443" });
+  assert(/the origin is https:\/\/brain\.example\.com\)/.test(row(port.out, "public origin")), `an origin spelling its default port names the origin it means, as the authorization server does (${row(port.out, "public origin")})`);
+  // A pasted connector URL, its key in the query (review pass 3): never echoed, configured or not.
+  for (const profiles of ["auth", undefined]) {
+    const pasted = await run({ ...base, COMPOSE_PROFILES: profiles, OB1_PUBLIC_ORIGIN: "https://brain.example.com/mcp?key=hunter2" });
+    assert(/!\s+public origin\s.*the rest not shown/.test(row(pasted.out, "public origin")) && !/hunter2/.test(pasted.out),
+           `a connector URL pasted as the origin is a warning, its key not echoed (COMPOSE_PROFILES=${profiles ?? "unset"}: ${row(pasted.out, "public origin")})`);
+  }
+  const neither = await run({ ...base, COMPOSE_PROFILES: undefined, OB1_PUBLIC_ORIGIN: undefined });
+  assert(row(neither.out, "public origin") === "", "neither set: no row");
+}
+
 console.log("\n[3] Credentials are not echoed");
 {
   const r = await run({ ...NO_DB, OB1_STORE: "sql", MCP_ACCESS_KEY: "s3cr3t-key-value-abcdefghijklmnop",

@@ -18,7 +18,7 @@
 // everything, for the REST core (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
-import { cleanForDisplay } from "./consolidate.ts";
+import { cutByCodePoint, LINE_BREAK, oneLine, REASON_MAX, UNSHOWN } from "./consolidate.ts";
 import type { AuditChange, DryRunClaimResult, LoggedSearchPage, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
@@ -157,21 +157,6 @@ const safeChanges: Safe<ChangesResult> = (v) => ({
 });
 
 /**
- * Every break a reader may take as a new line: CRLF, CR, LF, VT, FF, the three
- * information separators Python's splitlines() breaks on (FS, GS, RS), NEL,
- * and Unicode's line and paragraph separators (review pass 1).
- */
-const LINE_BREAK = /\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/;
-/**
- * What a line of fenced text may not keep: the C0 and C1 controls but the tab
- * (an ESC sequence or a backspace moves a terminal's cursor back over the
- * fence), DEL, and the bidirectional controls, which lay a line out
- * right-to-left with its fence at the far end (review pass 1).
- */
-// eslint-disable-next-line no-control-regex
-const UNSHOWN = /[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-
-/**
  * Untrusted text — a thought's, a citation's, a judge's reason — on one line
  * of a reply: the same cleaner the CLI renders through
  * (server-portable/consolidate.ts), whitespace collapsed, cut with an ellipsis
@@ -181,28 +166,19 @@ const UNSHOWN = /[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f\u061c\u200e\u200f\u202a-\
  * dropped (SMD-2510).
  */
 export function snipText(text: string, max: number): string {
-  const t = cleanForDisplay(text.split(LINE_BREAK).join(" ")).replace(UNSHOWN, "").replace(/\s+/g, " ").trim();
-  // Cut by code point, so an emoji or other astral character at the bound is
-  // kept or dropped whole, never left as half a surrogate pair. No more UTF-16
-  // units than the bound is no more code points; past it, the walk stops at
-  // the bound, not at the end of a whole thought's text.
-  if (t.length <= max) return t;
-  let cut = "";
-  let n = 0;
-  for (const c of t) {
-    if (n === max) return cut + "…";
-    cut += c;
-    n++;
-  }
-  return t;
+  // oneLine and cutByCodePoint live beside cleanForDisplay, where
+  // parseJudgement cleans the reason it stores by the same rule (SMD-2536).
+  const t = oneLine(text);
+  const cut = cutByCodePoint(t, max);
+  return cut === t ? t : cut + "…";
 }
 
 /** Where a metadata value is cut (SMD-2510): a type is a word, a topic or a person a name, an action item a sentence. */
 const TYPE_MAX = 40;
 const TAG_MAX = 80;
 const ACTION_MAX = 200;
-/** Where a proposal's judge reason and review note are cut (SMD-2533): 400, where parseJudgement cuts a reason. consolidate.ts --list cuts at it too. */
-export const PROPOSAL_TEXT_MAX = 400;
+/** Where a proposal's judge reason and review note are cut (SMD-2533): parseJudgement's REASON_MAX, 400. consolidate.ts --list cuts at it too. */
+export const PROPOSAL_TEXT_MAX = REASON_MAX;
 
 /**
  * A thought's metadata value — its type, a topic, a person, an action item —

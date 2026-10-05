@@ -77,11 +77,31 @@ const provider = Bun.serve({
 process.env.OB1_LLM_BASE_URL = `http://127.0.0.1:${provider.port}/v1`;
 process.env.OB1_LLM_LOCAL = "1";
 
+// Configured for OAuth at a public origin no request below dials (SMD-2382):
+// every section but [11b] runs on loopback, where the answers are the ones a
+// stack with no auth profile gives — which is the point, and [11b] counts it.
+const PUBLIC_ORIGIN = "https://brain.example.test";
+/** A bearer of a JWT's shape, as the authorization server issues (oauth-edge.ts JWT_SHAPE). */
+const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
+process.env.COMPOSE_PROFILES = "local-models, auth";
+process.env.OB1_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
+
 // The import under test.
 const worker = (await import("./index.ts")).default as {
   fetch: (req: Request) => Response | Promise<Response>;
   port?: number;
 };
+
+// The authorization server's health check, stubbed before any request: up or
+// down as [11b] says, every probe counted, and nothing cached (a TTL of 0), so
+// each answer reads the switch. The real probe's own rules are [11a]'s.
+const edgeModule = await import("./oauth-edge.ts");
+let authUp = true;
+let authProbes = 0;
+edgeModule.useAuthReachability(new edgeModule.AuthReachability("http://auth.stub.test/healthz", 0, 1000, (async () => {
+  authProbes++;
+  return new Response(authUp ? "ok" : "down", { status: authUp ? 200 : 503 });
+}) as unknown as typeof fetch));
 
 // Served with every field the export declares, so what the export says about
 // the runtime — and what it leaves at the default — is what [17] measures.
@@ -434,6 +454,237 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
   ];
   for (const [label, path, init, expect] of rows) expectRefusal(label, await probe(path, init), expect);
   // The MCP endpoint at / is untouched — [4] through [10] above.
+}
+
+console.log("\n[11a] The public origin's rules (oauth-edge.ts, SMD-2382)");
+{
+  const E = edgeModule;
+  assert(E.configuredIn("auth") && E.configuredIn("local-models, auth") && E.configuredIn(" auth ,x"), "COMPOSE_PROFILES naming auth, alone or in a list, is configured");
+  assert(!E.configuredIn(undefined) && !E.configuredIn("") && !E.configuredIn("authx,local-models") && !E.configuredIn("Auth"), "unset, empty, a longer name or another case is not");
+
+  // The same rules as the authorization server's own (deploy/auth/layout.ts),
+  // which refuses to start on any of them: one origin, read the same way twice.
+  const { originFromEnv } = await import("../deploy/auth/layout.ts");
+  const origins = ["https://brain.example.com", "https://brain.example.com/", "https://brain.example.com:8443", "http://127.0.0.1:8000", "http://localhost", "http://[::1]:8000",
+    "http://brain.example.com", "https://brain.example.com/mcp", "https://brain.example.com?x=1", "https://brain.example.com#f", "https://u:p@brain.example.com", "brain.example.com",
+    "ftp://brain.example.com", "https://brain.example.com:443", " https://brain.example.com ", "", "not a url"];
+  const disagree = origins.filter((o) => {
+    let auth: string | null = null;
+    try { originFromEnv({ OB1_PUBLIC_ORIGIN: o }); } catch (e) { auth = (e as Error).message; }
+    return (auth === null) !== (E.originProblem(o) === null);
+  });
+  assert(disagree.length === 0, `originProblem refuses exactly what the authorization server refuses, over ${origins.length} values (disagree: ${JSON.stringify(disagree)})`);
+  assert(!(E.originProblem("https://u:secret@brain.example.com") ?? "").includes("secret"), "a value holding an @ is not echoed");
+  // A pasted connector URL carries the key as ?key= (review pass 3): nothing from ? or # on is echoed.
+  const pasted = ["https://brain.example.com/mcp?key=s3cr3t", "brain.example.com/mcp?key=s3cr3t", "http://brain.example.com/#s3cr3t", "ftp://brain.example.com/?key=s3cr3t"]
+    .map((v) => E.originProblem(v) ?? "");
+  assert(pasted.every((m) => m !== "" && !m.includes("s3cr3t") && m.includes("the rest not shown")), `a query or fragment is never echoed, in any of the four messages (${JSON.stringify(pasted)})`);
+  const whole = E.originProblem("ftp://brain.example.com/path") ?? "";
+  assert(whole.includes(`("ftp://brain.example.com/path")`) && !whole.includes("not shown"), `a value with nothing to cut is quoted whole (${whole})`);
+
+  const s = (profiles: string | undefined, origin: string | undefined) => E.edgeSettings({ COMPOSE_PROFILES: profiles, OB1_PUBLIC_ORIGIN: origin });
+  assert(s("auth", "https://brain.example.com/").origin === "https://brain.example.com", "configured with a sound origin: the origin, without its trailing slash");
+  assert(s(undefined, "https://brain.example.com").origin === null && s("", "https://brain.example.com").configured === false, "an origin without the profile is not configured: no origin to advertise");
+  assert(s("auth", "http://brain.example.com").origin === null && s("auth", "http://brain.example.com").configured, "configured with an unsound origin: configured, nothing to advertise");
+
+  const req = (url: string, headers: Record<string, string> = {}) => new Request(url, { method: "POST", headers });
+  const HEX = "a".repeat(64);
+  const kinds: [string, Request, string][] = [
+    ["nothing", req(`${PUBLIC_ORIGIN}/mcp`), "none"],
+    ["x-brain-key", req(`${PUBLIC_ORIGIN}/mcp`, { "x-brain-key": "k" }), "key"],
+    ["x-access-key", req(`${PUBLIC_ORIGIN}/mcp`, { "x-access-key": "k" }), "key"],
+    ["?key=", req(`${PUBLIC_ORIGIN}/mcp?key=k`), "key"],
+    ["a hex key as a bearer", req(`${PUBLIC_ORIGIN}/mcp`, { authorization: `Bearer ${HEX}` }), "key"],
+    ["a JWT as a bearer", req(`${PUBLIC_ORIGIN}/mcp`, { authorization: `bearer ${JWT}` }), "token"],
+    ["a JWT beside ?key= (a gateway's token)", req(`${PUBLIC_ORIGIN}/mcp?key=k`, { authorization: `Bearer ${JWT}` }), "key"],
+    ["Basic credentials", req(`${PUBLIC_ORIGIN}/mcp`, { authorization: "Basic dTpw" }), "none"],
+    ["an empty ?key= (a connector pasted without its key)", req(`${PUBLIC_ORIGIN}/mcp?key=`), "key"],
+    ["an empty x-brain-key", req(`${PUBLIC_ORIGIN}/mcp`, { "x-brain-key": "" }), "key"],
+    // A client whose key variable is unset sends `Bearer ` (review pass 3).
+    ["an empty bearer", req(`${PUBLIC_ORIGIN}/mcp`, { authorization: "Bearer " }), "key"],
+    ["the bare word Bearer", req(`${PUBLIC_ORIGIN}/mcp`, { authorization: "Bearer" }), "key"],
+    ["a bearer of two words", req(`${PUBLIC_ORIGIN}/mcp`, { authorization: "Bearer a b" }), "key"],
+    // auth.ts reads a key after a tab as after a space (review pass 4).
+    ["a key after a tab", req(`${PUBLIC_ORIGIN}/mcp`, { authorization: `Bearer\t${HEX}` }), "key"],
+    ["a JWT and a second word", req(`${PUBLIC_ORIGIN}/mcp`, { authorization: `Bearer ${JWT} extra` }), "key"],
+  ];
+  // The Host as the runtime builds the URL behind the proxy: `http://<Host>`.
+  const hosts: [string, string, boolean][] = [
+    ["the origin's host, as Bun builds it over plain HTTP", "http://brain.example.test/mcp", true],
+    ["the host with the https default port a TLS front may send", "http://brain.example.test:443/mcp", true],
+    ["upper case", "http://BRAIN.example.test/mcp", true],
+    ["another port", "http://brain.example.test:8443/mcp", false],
+    ["a trailing dot", "http://brain.example.test./mcp", false],
+    ["/mcp/, which is not the resource the document names", "http://brain.example.test/mcp/", false],
+  ];
+  for (const [label, url, want] of hosts) assert(E.forPublicResource(req(url), PUBLIC_ORIGIN) === want, `the public resource: ${label} → ${want}`);
+  // The Host header as Bun receives it, which the runtime's http:// URL has already normalised (`:80` dropped).
+  const viaHeader = (host: string, origin: string) => E.forPublicResource(req("http://placeholder.test/mcp", { host }), origin);
+  const headerRows: [string, string, string, boolean][] = [
+    ["an https origin and Host :443", "brain.example.test:443", PUBLIC_ORIGIN, true],
+    ["an https origin and Host :80, which is not its default", "brain.example.test:80", PUBLIC_ORIGIN, false],
+    ["an http loopback origin and Host :80", "localhost:80", "http://localhost", true],
+    ["an http loopback origin and Host :443", "localhost:443", "http://localhost", false],
+    ["userinfo in the Host", "evil@brain.example.test", PUBLIC_ORIGIN, false],
+    ["a path in the Host", "brain.example.test/x", PUBLIC_ORIGIN, false],
+    ["a query in the Host", "brain.example.test?x", PUBLIC_ORIGIN, false],
+    ["a fragment in the Host", "brain.example.test#x", PUBLIC_ORIGIN, false],
+    ["a password with no user name in the Host", ":pw@brain.example.test", PUBLIC_ORIGIN, false],
+  ];
+  for (const [label, host, origin, want] of headerRows) assert(viaHeader(host, origin) === want, `the public resource by its Host header: ${label} → ${want}`);
+  assert(E.forPublicResource(req("http://brain.example.test:8443/mcp"), "https://brain.example.test:8443") && !E.forPublicResource(req("http://brain.example.test/mcp"), "https://brain.example.test:8443"),
+         "an origin with its own port matches that port alone");
+  const malformed = { url: "http://x:99999/.well-known/oauth-protected-resource/mcp", headers: new Headers() } as unknown as Request;
+  let malformedRead: string;
+  try {
+    malformedRead = `${E.forPublicDocument(malformed, PUBLIC_ORIGIN)}/${E.forPublicResource(malformed, PUBLIC_ORIGIN)}`;
+  } catch (e) {
+    malformedRead = `threw ${(e as Error).name}`;
+  }
+  assert(malformedRead === "false/false", `a Host the URL cannot parse is not the origin's, and does not throw (${malformedRead})`);
+  for (const [label, r, want] of kinds) assert(E.presentedKind(r) === want, `presented: ${label} → ${want} (${E.presentedKind(r)})`);
+
+  assert(E.challengeHeader(PUBLIC_ORIGIN, false) === `Bearer resource_metadata="${PUBLIC_ORIGIN}/.well-known/oauth-protected-resource/mcp"`, "the challenge for no credential names the document and no error");
+  assert(/^Bearer resource_metadata="[^"]+", error="invalid_token", error_description="[^"]+"$/.test(E.challengeHeader(PUBLIC_ORIGIN, true)), "the challenge for a refused token adds invalid_token");
+  const doc = E.protectedResourceDocument(PUBLIC_ORIGIN);
+  assert(doc.resource === `${PUBLIC_ORIGIN}/mcp` && doc.authorization_servers.length === 1 && doc.authorization_servers[0] === `${PUBLIC_ORIGIN}/auth`, "the document names <origin>/mcp and the issuer <origin>/auth");
+  const { SCOPES: AS_SCOPES } = await import("../deploy/auth/layout.ts");
+  assert(JSON.stringify(doc.scopes_supported) === JSON.stringify(AS_SCOPES), "its scopes are the authorization server's");
+
+  // Every state the refusal can meet, and whether it waited on the probe.
+  const ON = { configured: true, origin: PUBLIC_ORIGIN };
+  const matrix: [string, Parameters<typeof E.refusalAt>[0], Request, boolean, string, boolean][] = [
+    // [label, settings, request, reachable, answer, probed]
+    ["not configured, keyless at the public /mcp", { configured: false, origin: null }, req(`${PUBLIC_ORIGIN}/mcp`), true, "today", false],
+    ["configured, unsound origin", { configured: true, origin: null }, req(`${PUBLIC_ORIGIN}/mcp`), true, "today", false],
+    ["keyless on loopback", ON, req("http://127.0.0.1:8000/mcp"), true, "today", false],
+    ["keyless at the public root (SMD-2306's window)", ON, req(`${PUBLIC_ORIGIN}/`), true, "today", false],
+    ["keyless at another public path", ON, req(`${PUBLIC_ORIGIN}/mcp/x`), true, "today", false],
+    ["a wrong key at the public /mcp", ON, req(`${PUBLIC_ORIGIN}/mcp?key=wrong`), true, "today", false],
+    ["keyless at the public /mcp, reachable", ON, req(`${PUBLIC_ORIGIN}/mcp`), true, "challenge", true],
+    ["keyless at the public /mcp/, reachable", ON, req(`${PUBLIC_ORIGIN}/mcp/`), true, "today", false],
+    ["a token at the public /mcp, reachable", ON, req(`${PUBLIC_ORIGIN}/mcp`, { authorization: `Bearer ${JWT}` }), true, "challenge+token", true],
+    ["keyless at the public /mcp, unreachable", ON, req(`${PUBLIC_ORIGIN}/mcp`), false, "today", true],
+    ["a token at the public /mcp, unreachable", ON, req(`${PUBLIC_ORIGIN}/mcp`, { authorization: `Bearer ${JWT}` }), false, "unavailable", true],
+    ["a token on loopback, unreachable", ON, req("http://127.0.0.1:8000/mcp", { authorization: `Bearer ${JWT}` }), false, "today", false],
+  ];
+  for (const [label, settings, r, up, want, wantProbe] of matrix) {
+    let probed = false;
+    const a = await E.refusalAt(settings, r, async () => { probed = true; return up; });
+    const got = a.kind === "challenge" ? (a.refusedToken ? "challenge+token" : "challenge") : a.kind;
+    assert(got === want && probed === wantProbe, `${label} → ${want}${wantProbe ? "" : ", no probe"} (${got}${probed ? ", probed" : ""})`);
+  }
+
+  // The probe: a 200 in time is up; anything else is down; the answer is kept
+  // for the TTL; one check is in flight at a time.
+  let clock = 0;
+  let calls = 0;
+  let answer: () => Promise<Response> = async () => new Response("ok");
+  const fakeFetch = (async (_u: string, init?: RequestInit) => {
+    calls++;
+    const r = answer();
+    return init?.signal ? Promise.race([r, new Promise<Response>((_, rej) => init.signal!.addEventListener("abort", () => rej(new Error("aborted"))))]) : r;
+  }) as unknown as typeof fetch;
+  const p = new E.AuthReachability("http://auth.test/healthz", 30_000, 50, fakeFetch, () => clock);
+  const burst = await Promise.all([p.reachable(), p.reachable(), p.reachable()]);
+  assert(burst.every((b) => b) && calls === 1, `a burst of three checks makes one probe, and reads up (${calls} probes)`);
+  answer = async () => new Response("down", { status: 503 });
+  clock = 29_999;
+  assert(await p.reachable() && calls === 1, "within the TTL the kept answer stands, with no probe");
+  clock = 30_000;
+  assert(!(await p.reachable()) && calls === 2, "at the TTL it probes again: a 503 is down");
+  answer = async () => { throw new Error("ECONNREFUSED"); };
+  clock = 60_000;
+  assert(!(await p.reachable()), "a refused connection is down");
+  // A fetch that follows redirects lands on the target's 200; the probe must ask it not to.
+  let redirectMode: RequestRedirect | undefined;
+  const redirecting = new E.AuthReachability("http://auth.test/healthz", 30_000, 50, (async (_u: string, init?: RequestInit) => {
+    redirectMode = init?.redirect;
+    return init?.redirect === "manual" ? new Response(null, { status: 302, headers: { location: "http://elsewhere" } }) : new Response("ok");
+  }) as unknown as typeof fetch);
+  assert(!(await redirecting.reachable()) && redirectMode === "manual", `a redirect is down, not followed (redirect: ${redirectMode})`);
+  answer = () => new Promise<Response>(() => {});
+  clock = 120_000;
+  const t0 = performance.now();
+  assert(!(await p.reachable()) && performance.now() - t0 < 1000, "a probe that never answers is down at its timeout");
+  // A fetch that throws before it returns a promise (Workers' "Illegal invocation") is down, not a rejection.
+  const throwing = new E.AuthReachability("http://auth.test/healthz", 30_000, 50, (() => { throw new TypeError("Illegal invocation"); }) as unknown as typeof fetch);
+  let thrownRead: string;
+  try {
+    thrownRead = await throwing.reachable().then((up) => `resolved ${up}`, (e) => `rejected ${(e as Error).message}`);
+  } catch (e) {
+    thrownRead = `threw ${(e as Error).message}`;
+  }
+  assert(thrownRead === "resolved false", `a fetch that throws at once reads as down, and neither throws nor rejects (${thrownRead})`);
+}
+
+console.log("\n[11b] At the public origin, configured (SMD-2382): the document and the challenge while the authorization server answers");
+{
+  // [1]–[11] ran on loopback with the stack configured: none of them probed.
+  assert(authProbes === 0, `no loopback request above asked whether the authorization server answers (${authProbes} probes)`);
+  const at = (path: string, init: RequestInit = {}) => worker.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, init));
+  const prm = "/.well-known/oauth-protected-resource/mcp";
+  const NOTE = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  authUp = true;
+  const doc = await at(prm);
+  const body = await doc.json().catch(() => null) as { resource?: string; authorization_servers?: string[] } | null;
+  assert(doc.status === 200 && body?.resource === `${PUBLIC_ORIGIN}/mcp` && body?.authorization_servers?.[0] === `${PUBLIC_ORIGIN}/auth`, `the document is served at the public origin while the authorization server answers (${doc.status})`);
+  assert(doc.headers.get("cache-control") === "no-store" && corsOk(doc), "…uncached, since it goes when the authorization server does, and with CORS");
+  expectRefusal("the document on loopback, configured and reachable", await probe(prm), 404);
+  const other = await worker.fetch(new Request(`https://other.example.test${prm}`));
+  assert(other.status === 404, `the document at another host is the 404 (${other.status})`);
+  const bare = await at("/.well-known/oauth-protected-resource");
+  assert(bare.status === 404, `the root form stays the 404: only the path-inserted one names /mcp (${bare.status})`);
+
+  const keyless = await at("/mcp", { method: "POST", headers: H, body: INIT });
+  const kb = await keyless.json().catch(() => null) as { error?: { code?: number }; id?: unknown } | null;
+  assert(keyless.status === 401 && keyless.headers.get("www-authenticate") === `Bearer resource_metadata="${PUBLIC_ORIGIN}${prm}"`, `a keyless request at the public /mcp gets 401 and the challenge (${keyless.status}, ${keyless.headers.get("www-authenticate")})`);
+  assert(kb?.error?.code === -32001 && kb?.id === 1 && corsOk(keyless) && /WWW-Authenticate/.test(keyless.headers.get("access-control-expose-headers") ?? ""), "…with the -32001 envelope for its id, CORS, and the header exposed to a browser");
+  const note = await at("/mcp", { method: "POST", headers: H, body: NOTE });
+  assert(note.status === 401 && note.headers.get("www-authenticate") !== null && (await note.text()) === "", `a keyless notification gets the bodyless 401 with the challenge (${note.status})`);
+  const token = await at("/mcp", { method: "POST", headers: { ...H, authorization: `Bearer ${JWT}` }, body: INIT });
+  assert(token.status === 401 && /error="invalid_token"/.test(token.headers.get("www-authenticate") ?? ""), `a token is refused invalid_token until SMD-2286 accepts one (${token.status})`);
+  const wrongKey = await at("/mcp?key=wrong", { method: "POST", headers: H, body: INIT });
+  assert(wrongKey.status === 200 && wrongKey.headers.get("www-authenticate") === null && (await wrongKey.json())?.error?.code === -32001, `a wrong ?key= is a key client's: today's 200 and -32001, never sent to sign in (${wrongKey.status})`);
+  // Through the real listener, as the proxy delivers it: the runtime builds
+  // the URL from the Host, over plain HTTP.
+  const viaHost = await fetch(`${BASE}/mcp`, { method: "POST", headers: { ...H, host: "brain.example.test" }, body: INIT });
+  assert(viaHost.status === 401 && viaHost.headers.get("www-authenticate") !== null, `over HTTP with the origin's Host, a keyless /mcp gets the challenge (${viaHost.status})`);
+  const viaTls = await fetch(`${BASE}/mcp`, { method: "POST", headers: { ...H, host: "brain.example.test:443" }, body: INIT });
+  assert(viaTls.status === 401, `…and with the :443 a TLS front may forward (${viaTls.status})`);
+  const docViaHost = await fetch(`${BASE}${prm}`, { headers: { host: "brain.example.test" } });
+  assert(docViaHost.status === 200 && ((await docViaHost.json()) as { resource?: string }).resource === `${PUBLIC_ORIGIN}/mcp`, `over HTTP with the origin's Host, the document is served (${docViaHost.status})`);
+  const slash = await at("/mcp/", { method: "POST", headers: H, body: INIT });
+  assert(slash.status === 200 && slash.headers.get("www-authenticate") === null, `keyless at /mcp/ is today's refusal: the document names /mcp, which a client must match exactly (${slash.status})`);
+  const emptyBearer = await at("/mcp", { method: "POST", headers: { ...H, authorization: "Bearer " }, body: INIT });
+  assert(emptyBearer.status === 200 && emptyBearer.headers.get("www-authenticate") === null, `an empty bearer is a key client's: today's refusal, not the challenge (${emptyBearer.status})`);
+  const emptyKey = await at("/mcp?key=", { method: "POST", headers: H, body: INIT });
+  assert(emptyKey.status === 200 && emptyKey.headers.get("www-authenticate") === null, `an empty ?key= is a key client's: today's refusal (${emptyKey.status})`);
+  const exposed = (await fetch(BASE, { method: "POST", headers: H, body: INIT })).headers.get("access-control-expose-headers");
+  assert(exposed === "Retry-After, Deprecation, Link, WWW-Authenticate", `every response exposes the challenge header beside Retry-After, Deprecation and Link, loopback's included (${exposed})`);
+  const before = authProbes;
+  const loopback = await fetch(`${BASE}/mcp`, { method: "POST", headers: H, body: INIT });
+  assert(loopback.status === 200 && loopback.headers.get("www-authenticate") === null && (await loopback.json())?.error?.code === -32001 && authProbes === before,
+         `keyless at loopback's /mcp, configured and reachable: today's refusal, and no probe — the Host is not the origin's (${loopback.status})`);
+  const root = await at("/", { method: "POST", headers: H, body: INIT });
+  assert(root.status === 200 && root.headers.get("www-authenticate") === null, `keyless at the public root is today's refusal: the root is not the resource (${root.status})`);
+  const keyed = await at("/mcp", { method: "POST", headers: AUTH, body: INIT });
+  assert(keyed.status === 200 && (await mcpBody(keyed))?.result !== undefined, `a right key at the public /mcp is served as ever (${keyed.status})`);
+
+  authUp = false;
+  const downDoc = await at(prm);
+  assert(downDoc.status === 404 && corsOk(downDoc), `the document while the authorization server is down is the 404, with CORS (${downDoc.status})`);
+  const downKeyless = await at("/mcp", { method: "POST", headers: H, body: INIT });
+  assert(downKeyless.status === 200 && downKeyless.headers.get("www-authenticate") === null && (await downKeyless.json())?.error?.code === -32001, `down: a keyless request gets today's refusal, no challenge (${downKeyless.status})`);
+  const downToken = await at("/mcp", { method: "POST", headers: { ...H, authorization: `Bearer ${JWT}` }, body: INIT });
+  const dtb = await downToken.json().catch(() => null) as { error?: { code?: number }; id?: unknown } | null;
+  assert(downToken.status === 503 && downToken.headers.get("retry-after") === "30" && dtb?.error?.code === -32003 && dtb?.id === 1 && downToken.headers.get("www-authenticate") === null, `down: a token gets 503, Retry-After and -32003, not a 401 that restarts its sign-in (${downToken.status})`);
+  const downNote = await at("/mcp", { method: "POST", headers: { ...H, authorization: `Bearer ${JWT}` }, body: NOTE });
+  assert(downNote.status === 503 && (await downNote.text()) === "", `down: a token's notification gets the bodyless 503 (${downNote.status})`);
+  const downKeyed = await at("/mcp", { method: "POST", headers: AUTH, body: INIT });
+  assert(downKeyed.status === 200 && (await mcpBody(downKeyed))?.result !== undefined, "down: a right key works, as in every state");
+  authUp = true;
 }
 
 console.log("\n[12] Query log flag — off by default, so the guard writes nothing (SMD-1295)");
@@ -918,8 +1169,11 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     idle.proc.kill("SIGTERM");
     const idleCode = await exited(idle.proc, 3_000);
     const idleLog = await idle.out;
-    assert(idleCode === 0 && performance.now() - t1 < 1_000 && /0 requests in flight/.test(idleLog) && /no database pool was opened; exit 0/.test(idleLog),
-      `an idle server stops at once, exit 0, and says it opened no pool (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
+    // Since SMD-2284 PR 3 the entry builds its store at start (root.ts's
+    // serveHere, so the job reconcile runs then): the idle server holds a pool
+    // on this silent database, and its stop closes it within the close bound.
+    assert(idleCode === 0 && performance.now() - t1 < 2_500 && /0 requests in flight/.test(idleLog) && /database pool (?:closed|not closed within 1000 ms); exit 0/.test(idleLog),
+      `an idle server stops at once — no request to drain, its pool within the close bound — exit 0 (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
     assert(/OB1_STOP_GRACE="soon" is not a whole number of seconds from 1 to 3600, with no unit .*; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
       "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
 
@@ -1054,13 +1308,15 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const { DEFAULT_STOP_GRACE_S } = await import("./shutdown.ts");
   const graceFallbacks: string[] = [];
   for (const file of ["compose.yaml", "compose.tiers.yaml"]) {
-    const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; stop_grace_period?: string }> };
+    const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; stop_grace_period?: string }> };
     for (const [name, svc] of Object.entries(doc.services)) {
-      if (svc.build?.dockerfile !== "server-portable/Dockerfile") continue;
+      // The server's image, built or (the REST core) run by the server's name.
+      if (svc.build?.dockerfile !== "server-portable/Dockerfile" && svc.image !== "${COMPOSE_PROJECT_NAME:-open-brain}-server") continue;
       graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
     }
   }
-  assert(graceFallbacks.length === 4 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+  // Five: the server and the REST core (SMD-2284) in compose.yaml, three tier servers.
+  assert(graceFallbacks.length === 5 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
     `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
 
   // Preflight refuses a value compose would render wrong, and reports one it reads.

@@ -180,6 +180,21 @@ export type Env = {
    * resolves on every request. See agents.ts.
    */
   OB1_AGENT_CACHE_TTL_MS?: string;
+  /**
+   * The stack's one public origin (SMD-2382): scheme, host and port, no path —
+   * `https://`, or `http://` on loopback. The authorization server's issuer is
+   * `<origin>/auth`, and this server's public resource `<origin>/mcp`. The
+   * server reads it only while COMPOSE_PROFILES names auth (oauth-edge.ts);
+   * preflight warns whenever it is set and is not a sound origin.
+   */
+  OB1_PUBLIC_ORIGIN?: string;
+  /**
+   * deploy/.env's compose profiles, forwarded so this server knows whether the
+   * stack is configured for OAuth — `auth` among them (ADR decision 16). A
+   * profile cannot set another service's environment, so compose passes the
+   * list itself, as it does to the authorization server.
+   */
+  COMPOSE_PROFILES?: string;
 };
 
 let ENV: Env | null = null;
@@ -213,13 +228,24 @@ export function env(): Env {
 }
 
 /**
- * Whether this process serves requests: set by the entry module Bun runs,
+ * The server this process serves as, by its door (`open-brain`, the MCP
+ * server; `open-brain-api`, the REST core): set by the entry module Bun runs,
  * before any request, and never by a suite that imports one. The store's
- * first build reads it to wire the durable job store (below).
+ * first build reads it to wire the durable job store (below) for that server
+ * alone — its jobs carry the name, and its reconcile touches only those
+ * (migration 078, SMD-2284).
  */
-let serving = false;
-export function serveHere(): void {
-  serving = true;
+let serving: string | null = null;
+export function serveHere(door: string): void {
+  serving = door;
+  // The store built now, not at the first keyed request, so the reconcile of
+  // this server's jobs a prior run left live happens at start-up: an internal
+  // REST core may wait long for its first caller, and meanwhile the other
+  // server's polls would read those dead jobs as running (SMD-2284 PR 3
+  // review pass 1). A store that fails to build here fails again, and says
+  // so, at the first request.
+  initEnv();
+  void db().catch(() => {});
 }
 
 // Built once, on first use. createStore() dynamically imports whichever backend
@@ -242,10 +268,11 @@ export function db(): Promise<ThoughtStore> {
     // gate on it, the SQL store returns a sink, the PostgREST store returns null
     // (the registry stays in-memory), and a store that fails to build leaves it
     // in-memory too. A suite drives the sink itself (it holds the store).
-    if (serving && !jobStoreWired) {
+    const door = serving;
+    if (door !== null && !jobStoreWired) {
       jobStoreWired = true;
       void _store.then(async (store) => {
-        const s = store.jobSink();
+        const s = store.jobSink(door);
         if (!s) return;
         // Reconcile BEFORE wiring the sink: only after setJobSink does a job of
         // this process get persisted as running, so running the reconcile first
@@ -262,10 +289,11 @@ export function db(): Promise<ThoughtStore> {
 }
 
 /**
- * The stop's close: the pool only if a request opened one — a store that
- * failed to build has none, and the PostgREST store holds no pooled connection
- * to close. True when a SQL pool was closed. Beside db(), so the store's wiring
- * is these two bodies (check 25).
+ * The stop's close: the pool the store opened — at a serving entry's start
+ * (serveHere), or at the first request where nothing called that — while a
+ * store that failed to build has none, and the PostgREST store holds no pooled
+ * connection to close. True when a SQL pool was closed. Beside db(), so the
+ * store is named in these two bodies alone (check 25).
  */
 export function closeStore(): Promise<boolean> {
   return _store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : Promise.resolve(false);

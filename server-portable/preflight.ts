@@ -33,6 +33,7 @@ import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
+import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -701,6 +702,37 @@ if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
   add("access key strength", "fail",
       `${env.MCP_ACCESS_KEY.length} chars — this key alone opens the endpoint with write scope, and nothing limits guessing it`,
       "Generate 32 bytes: openssl rand -hex 32 (or move to MCP_ACCESS_KEYS with bun keygen.ts --name laptop --scope write, and unset MCP_ACCESS_KEY)");
+}
+
+// ── Public origin ────────────────────────────────────────────────────────────
+
+// Configured (COMPOSE_PROFILES names auth) is ADR decision 16's switch; the
+// origin is what the server advertises OAuth at (oauth-edge.ts, SMD-2382). A
+// warning, not a failure: keys work in every state, and refusing to start
+// would take them down with OAuth. The authorization server refuses an unsound
+// origin itself (deploy/auth/config.ts). Silent on a stack with neither.
+if (configuredIn(env.COMPOSE_PROFILES)) {
+  const problem = originProblem(env.OB1_PUBLIC_ORIGIN);
+  if (problem) {
+    add("public origin", "warn",
+        `${problem}, and COMPOSE_PROFILES names auth — this server advertises no OAuth, and the authorization server will not start`,
+        "Set OB1_PUBLIC_ORIGIN in deploy/.env to the origin clients reach the stack at, e.g. https://brain.example.com");
+  } else {
+    // "Reaches", not "answers": until the server joins the mesh (SMD-2382's
+    // next cut) it reaches no authorization server, and advertises nothing.
+    const { origin } = edgeSettings(env);
+    add("public origin", "ok",
+        `${origin} — configured for OAuth: ${origin}/mcp is advertised while this server reaches the authorization server`);
+  }
+} else if (env.OB1_PUBLIC_ORIGIN) {
+  // Named through originProblem, which never echoes a value holding an `@`.
+  const problem = originProblem(env.OB1_PUBLIC_ORIGIN);
+  if (problem) {
+    add("public origin", "warn", `${problem} — unused while COMPOSE_PROFILES does not name auth (keys only), and refused when it does`,
+        "Set OB1_PUBLIC_ORIGIN to the origin alone, e.g. https://brain.example.com, or unset it");
+  } else {
+    add("public origin", "ok", `${new URL(env.OB1_PUBLIC_ORIGIN).origin} — COMPOSE_PROFILES does not name auth, so keys only (no OAuth)`);
+  }
 }
 
 // The connection string comes from DATABASE_URL, or from SUPABASE_URL when it
@@ -3051,7 +3083,7 @@ if (configFailed) {
             SELECT name, source FROM pg_settings WHERE name = ANY(${sql.array(HNSW_BOUNDS, "TEXT")})`;
           const boundsUnset = srcRows.length < HNSW_BOUNDS.length || srcRows.some((r: { source: string }) => r.source === "default");
           const seedBounds =
-            `Run as the database owner, in one session: SELECT '[1]'::vector; ${Object.entries(HNSW_SEEDS).map(([n, v]) => `ALTER DATABASE <db> SET ${n} = ${v};`).join(" ")}  then restart the server so its pool reconnects.`;
+            `Run as the database owner, in one session: SELECT '[1]'::vector; ${Object.entries(HNSW_SEEDS).map(([n, v]) => `ALTER DATABASE <db> SET ${n} = ${v};`).join(" ")}  then restart the servers (the MCP server and the REST core) so their pools reconnect.`;
           const putBack =
             `Put it back: SELECT '[1]'::vector; ALTER FUNCTION ${mt[0]?.sig ?? "match_thoughts"} SET hnsw.iterative_scan = relaxed_order;  — a redefinition that dropped this clause dropped 019's, 040's and 041's too (the candidate scan check below says) — and carry them into the migration that redefined it.`;
           const staleRecord = installedOld && libraryNew;

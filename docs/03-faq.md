@@ -9,10 +9,10 @@ This is the single most common issue. The tell is right in the pattern: Claude C
 The fix: use the MCP Connection URL with the key embedded as a query parameter (`?key=your-access-key`), not as a custom header. Your URL should look like:
 
 ```text
-https://your-host/?key=your-access-key
+https://your-host/mcp?key=your-access-key
 ```
 
-— the HTTPS proxy or tunnel in front of your server ([setup guide](01-getting-started.md), Step 6); a client on the same machine takes `http://127.0.0.1:8000/?key=your-access-key`.
+— the HTTPS proxy or tunnel in front of your server ([setup guide](01-getting-started.md), Step 6); a client on the same machine takes `http://127.0.0.1:8000/mcp?key=your-access-key`.
 
 When adding the connector in Claude Desktop (Settings → Connectors) or ChatGPT (Settings → Apps & Connectors), paste that full URL. Set authentication to "none" — the key is already in the URL.
 
@@ -223,7 +223,7 @@ That said: check your usage tier in your provider's console, make sure your agen
 
 1. **Did you follow the guide step by step?** Most issues trace back to a skipped or modified step.
 2. **Check the server's log.** `podman compose -f deploy/compose.yaml logs server` — and `deploy/smoke.sh`, which probes every surface. This tells you what's actually breaking.
-3. **Is your URL format correct?** `http://127.0.0.1:8000/?key=your-key` from this machine, `https://your-host/?key=your-key` through the proxy — a hosted connector needs the second.
+3. **Is your URL format correct?** `http://127.0.0.1:8000/mcp?key=your-key` from this machine, `https://your-host/mcp?key=your-key` through your TLS proxy or tunnel — a hosted connector needs the second.
 4. **Read the preflight row.** A server that refuses to start names the setting and the fix.
 5. **Don't let AI rewrite your server code** unless you understand what it's changing. Configuration problems need configuration fixes.
 

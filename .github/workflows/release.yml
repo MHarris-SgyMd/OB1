@@ -277,9 +277,9 @@ jobs:
           # runs the release's image, Ollama's by digest, and the proxy keeps
           # compose.yaml's digest (the overlay does not name it).
           docker compose -f compose.yaml -f compose.release.yaml --profile local-models config --format json \
-            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
+            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and .services.server.pull_policy == "missing" and (.services.api.image == .services.server.image) and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
           pull=(postgres proxy)
-          if [ "$PUBLISH" = true ]; then pull+=(server migrate); fi
+          if [ "$PUBLISH" = true ]; then pull+=(server api migrate); fi
           docker compose -f compose.yaml -f compose.release.yaml pull "${pull[@]}"
           docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240
         env:
@@ -377,6 +377,14 @@ jobs:
           cd "$RUNNER_TEMP/ob1-release-files"
           docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240
           docker compose -f compose.yaml -f compose.release.yaml logs --no-color server | grep -F 'preflight OK'
+          # The REST core too, from the release's server image (SMD-2284): before
+          # the overlay pinned it, `up` here tried to build it from a context
+          # this directory does not have.
+          docker compose -f compose.yaml -f compose.release.yaml logs --no-color api | grep -F 'preflight OK'
+          # The /api overlay is a release file (review pass 2): it reads beside
+          # the other two and adds its route to the proxy.
+          docker compose -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml config --format json \
+            | jq -e '.services.proxy.labels | has("ob1.proxy-api-route")' >/dev/null
           docker compose -f compose.yaml -f compose.release.yaml down -v
 
       - name: Keep the rehearsal's overlay and notes

@@ -374,7 +374,7 @@ case "$stable_stamp" in
 esac
 stable_server="$(container_of "$STABLE" server)"
 if [ -n "$stable_server" ] && ! "$RUNTIME" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$stable_server" | grep -qx 'OB1_TIER=stable'; then
-  say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the server, so its query log says which tier answered"
+  say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the servers (up -d server api), so its query log says which tier answered"
 fi
 
 say "canary Postgres"
@@ -384,12 +384,20 @@ CANARY_PG="$(container_of "$CANARY" postgres)"
 # A standing canary's server would serve the copy mid-restore (through the
 # registered connector, stamped stable by the restore until the refresh
 # stamps it), and write rows the restore then collides with; it is recreated
-# below either way.
+# below either way. So would a REST core (SMD-2284), which this script does
+# not start — one someone started in the canary's project is stopped with it
+# and recreated on the new image below.
 STOPPED_SERVER=""
 if [ -n "$(container_of "$CANARY" server)" ]; then
   say "canary server stopped for the refresh"
   canary_compose stop server >/dev/null
   STOPPED_SERVER=1
+fi
+STOPPED_API=""
+if [ -n "$(container_of "$CANARY" api)" ]; then
+  say "canary REST core stopped for the refresh"
+  canary_compose stop api >/dev/null
+  STOPPED_API=1
 fi
 # Whether stable holds a thought the probe could use (a vector from the
 # brain's model), read before the refresh: a canary with none after it is a
@@ -404,12 +412,17 @@ if [ "$refresh_rc" != 0 ]; then
   # tier.sh's own usage errors exit 2, which from here would read as "refused
   # before anything changed" — stable may be stamped by now, a server stopped.
   [ -z "$STOPPED_SERVER" ] || echo "the canary's server is stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
+  # A re-run recreates what it finds running, so a REST core stopped here stays stopped.
+  [ -z "$STOPPED_API" ] || echo "the canary's REST core is stopped too, and a re-run leaves it so: after \`up\` succeeds, start it with compose -p $CANARY up -d --no-deps api (with this checkout's -f files)." >&2
   echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it." >&2
   exit 1
 fi
 
 say "canary server at 127.0.0.1:$PORT/mcp (commit $GIT_SHA)"
 canary_compose up -d --build --no-deps --force-recreate server
+# The REST core runs the server's image by name: recreated, it runs the build
+# just made, not the one it was stopped on.
+[ -z "$STOPPED_API" ] || canary_compose up -d --no-deps --force-recreate api
 # The proxy in front of it (SMD-1846), left running across a refresh: while
 # the server is stopped it answers 502, and the server's new container is the
 # same name on the network. Recreated only when its own configuration changed
@@ -426,8 +439,10 @@ if [ "$(curl -s --max-time 2 "$BASE/health" || true)" != ok ]; then
   canary_compose logs --no-color --tail 10 proxy >&2 || true
   # restart: unless-stopped would otherwise restart it without end (hundreds
   # of times a minute under podman), and a registered connector points at it.
+  # The REST core, recreated above on the same image and environment, would too.
   canary_compose stop server >/dev/null 2>&1 || true
-  echo "the canary server is stopped; fix the cause above and re-run up." >&2
+  [ -z "$STOPPED_API" ] || canary_compose stop api >/dev/null 2>&1 || true
+  echo "the canary server is stopped${STOPPED_API:+, and its REST core}; fix the cause above and re-run up." >&2
   exit 1
 fi
 

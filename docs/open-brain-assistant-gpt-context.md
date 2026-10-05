@@ -29,8 +29,8 @@ The core setup creates:
 - A `thoughts` table with text content, vector embeddings, metadata, fingerprints, and timestamps.
 - A `match_thoughts` RPC for semantic search.
 - An `upsert_thought` RPC for deduplicated capture.
-- The MCP server (`server-portable/`) as a container, the one port the stack publishes by default.
-- A remote MCP connection URL like `http://127.0.0.1:8000/?key=YOUR_MCP_ACCESS_KEY` on the machine, or `https://your-host/?key=…` through the TLS proxy in front of it.
+- The MCP server (`server-portable/`) as a container behind the stack's proxy, whose port is the one the stack publishes by default, with the server at `/mcp` on it.
+- A remote MCP connection URL like `http://127.0.0.1:8000/mcp?key=YOUR_MCP_ACCESS_KEY` on the machine, or `https://your-host/mcp?key=…` through the TLS proxy in front of it.
 
 The core user journey is:
 
@@ -132,7 +132,7 @@ Common issues:
 - Capture works but search does not: check the model endpoint, embedding generation, `match_thoughts`, and the server's log.
 - Metadata looks wrong: metadata extraction is best-effort; semantic search depends primarily on embeddings.
 - First request is slow: the local models load into memory on the first call after a start.
-- OpenRouter key rotation breaks capture/search: update the key in `deploy/.env` and any local `.env` files, then restart the server; rotating on OpenRouter alone does not update a running process.
+- OpenRouter key rotation breaks capture/search: update the key in `deploy/.env` and any local `.env` files, then recreate the servers (`compose up -d server api`; a restart keeps the old key); rotating on OpenRouter alone does not update a running process.
 
 ## Extensions
 
