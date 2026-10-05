@@ -466,6 +466,50 @@ console.log("\n[13] An unreachable registry degrades to no id, not to a refusal"
          `each resolver warned once for the key, naming it and the cause, and not again while the failure lasted (${warnings.length} warning(s))`);
 }
 
+console.log("\n[13b] A registry that cannot answer this server is misconfigured, not unreachable — a retry will not heal it (SMD-2473)");
+{
+  // capture_thought offers a capture key's `supersedes` a retry only while
+  // the registry may answer; a brain before 049, a search_path that misses
+  // resolve_agent or the registry, or a role without its grants never will until an
+  // operator acts, and its key's pointer must not wait on it. The warning
+  // names the act that fits.
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(" ")); };
+  try {
+    const failing = (errno: string) => fakeStore(async () => { throw Object.assign(new Error(`failed ${errno}`), { errno }); }, () => {});
+    const remedy: Record<string, RegExp> = { "42883": /search_path reaches resolve_agent.*bun migrate\.ts\)/, "42P01": /search_path reaches resolve_agent.*bun migrate\.ts\)/, "23514": /bun migrate\.ts\) so the registry takes this key's scope/, "42501": /migrate\.ts --grant <role>/ };
+    for (const errno of Object.keys(remedy)) {
+      warnings.length = 0;
+      const out = await new AgentResolver(0, () => 0).resolve(failing(errno), principal("laptop", H("a")));
+      assert(out.status === "ok" && out.agentId === undefined && out.unresolved === "misconfigured" && warnings.length === 1 && /cannot attribute key "laptop" as this server is set up/.test(warnings[0]) && /`supersedes` is dropped/.test(warnings[0]) && remedy[errno].test(warnings[0]),
+        `${errno} is misconfigured, served by name, its warning saying a capture key's supersedes is dropped and naming the remedy (${JSON.stringify(out)}; ${warnings[0]?.slice(0, 160)})`);
+    }
+    // One resolver meeting one misconfiguration after another says each, so the
+    // log names the remedy that fits NOW: a brain its owner migrated can meet
+    // the grant gap next. The same SQLSTATE again is not said twice (review pass 2).
+    warnings.length = 0;
+    const one = new AgentResolver(0, () => 0);
+    for (const errno of ["42883", "42501", "42501"]) await one.resolve(failing(errno), principal("laptop", H("a")));
+    assert(warnings.length === 2 && /search_path/.test(warnings[0]) && /--grant/.test(warnings[1]),
+      `a change of SQLSTATE is said with its own remedy, a repeat is not (${warnings.length} warning(s): ${warnings.map((w) => w.slice(60, 140)).join(" | ")})`);
+    // PostgREST says PGRST202 while its schema cache is stale after a migration,
+    // which heals on reload: a retry may answer (review pass 1).
+    for (const errno of ["08006", "PGRST202"]) {
+      warnings.length = 0;
+      const out = await new AgentResolver(0, () => 0).resolve(failing(errno), principal("laptop", H("a")));
+      assert(out.status === "ok" && out.unresolved === "unreachable" && /`supersedes` gets a retry/.test(warnings[0] ?? ""), `…while ${errno} stays unreachable, its warning saying a capture key's supersedes gets a retry (${JSON.stringify(out)}; ${warnings[0]?.slice(0, 120)})`);
+    }
+    // `refused`: the registry answered and refused the argument, so the pointer
+    // goes, and the line says so (review pass 4: no test held the wording).
+    warnings.length = 0;
+    const refusedOut = await new AgentResolver(0, () => 0).resolve(fakeStore(async () => ({ ok: false, error: "UNRESOLVED", detail: "BAD_LABEL" }) as AgentResolution, () => {}), principal("laptop", H("a")));
+    assert(refusedOut.status === "ok" && refusedOut.unresolved === "refused" && /`supersedes` is dropped/.test(warnings[0] ?? ""), `a refused key's warning says its supersedes is dropped (${warnings[0]?.slice(0, 160)})`);
+  } finally {
+    console.warn = realWarn;
+  }
+}
+
 console.log("\n[14] A definitive revocation IS enforced, cached or not");
 {
   const store = fakeStore(
@@ -676,6 +720,26 @@ console.log("\n[16] A lookup that times out on a lock, or fails to serialize, is
   await ttl.resolve(counted, cold);
   console.warn = realWarn;
   assert(within.status === "busy" && b3 === b2 && n === b3 + 1, `…and busy for a second: none inside it, one after (${b3 - b2}, ${n - b3})`);
+  // `misconfigured` and `unreachable` for the failure TTL, not the success
+  // one: an operator's --grant or migration is met within ten seconds, not a
+  // minute (SMD-2473 review pass 3: no test held either).
+  console.warn = () => {};
+  try {
+    for (const [errno, label] of [["42501", "misconfigured"], ["08006", "unreachable"]] as const) {
+      answer = async () => { throw Object.assign(new Error(`failed ${errno}`), { errno }); };
+      const k = principal(`ttl-${errno}`, H(errno === "42501" ? "8" : "9"));
+      const first = await ttl.resolve(counted, k);
+      const c1 = n;
+      now += 5000;
+      await ttl.resolve(counted, k);
+      const c2 = n;
+      now += 6000; // 11 s: past the failure TTL, well inside the 60 s success one
+      await ttl.resolve(counted, k);
+      assert(first.status === "ok" && first.unresolved === label && c2 === c1 && n === c2 + 1, `…and ${label} (${errno}) for the failure TTL: none at 5 s, one at 11 s (${c2 - c1}, ${n - c2})`);
+    }
+  } finally {
+    console.warn = realWarn;
+  }
 }
 
 await sql.close();

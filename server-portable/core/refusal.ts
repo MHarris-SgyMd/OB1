@@ -28,9 +28,8 @@ export type Refusal =
   | { code: "REFUSED_DERIVED_FROM_SHAPE"; retryable: false; value: string }               // a `derived_from` entry is not a thought id
   | { code: "REFUSED_METADATA_SHAPE"; retryable: false; problem: MetadataProblem; key?: string; count?: number; length?: number } // a caller `metadata` key or value the boundary refuses
   // capture_thought's pointers (SMD-1298, SMD-1978).
-  | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "check_failed"; detail: string; noPrivilege: boolean } // the target's capture record could not be read
-  | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "registry_away" }  // the row is attributed and this key's id is not to hand
-  | { code: "REFUSED_SUPERSEDES_OWNERSHIP"; retryable: false; registryRefused: boolean } // a capture key named a supersedes it cannot show it wrote — another key's thought, or none at all (what it may learn here is SMD-2473's)
+  | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "check_failed"; detail: string; noPrivilege: boolean } // the target's capture record, or whether it stands, could not be read
+  | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "registry_away" }  // a capture key's id is not to hand while the registry may answer — whatever the target (SMD-2473)
   | { code: "REFUSED_SUPERSEDES_UNKNOWN"; retryable: false }          // the supersedes names no thought
   | { code: "DERIVED_FROM_MISSING"; retryable: false; named: { position: number; id: string }[] } // derived_from entries that name no thought — empty for a key that cannot read (the existence-oracle rule)
   | { code: "EMBEDDING_NOT_ATTACHED"; retryable: true; id: string; detail: string } // saved, but its vector did not attach (the PostgREST two-step)
@@ -74,7 +73,6 @@ const FACTS: Facts = {
   REFUSED_DERIVED_FROM_SHAPE: none,
   REFUSED_METADATA_SHAPE: none,
   SUPERSEDES_UNJUDGED: none,
-  REFUSED_SUPERSEDES_OWNERSHIP: none,
   REFUSED_SUPERSEDES_UNKNOWN: none,
   // The derived_from indices to drop — present only for a caller allowed to
   // know they exist (SMD-1978); what the session hook mends by.
