@@ -360,8 +360,10 @@ leaves the proxy, and `/api`, as they were. With the file named and the REST
 core down or starting, `/api` answers the proxy's 502. The REST core takes its key
 from a header (`x-brain-key`, `x-access-key` or `Authorization: Bearer`), never
 from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
-on `/mcp`. The proxy deletes `x-brain-forwarder` on the way in: only the MCP
-server, on the mesh, names itself as a request's carrier (SMD-2284). Its writes record their door as `open-brain-api`
+on `/mcp`. The proxy deletes `x-brain-forwarder` on the way in: a request's
+carrier (SMD-2284) is named only from inside the stack, where the MCP server
+will name itself once it forwards (SMD-2286). Its writes record their door as
+`open-brain-api`
 (`thought_audit.origin`) beside the MCP server's `open-brain`, and the jobs it
 starts are its own (migration 078): either server's start marks only its own
 unfinished jobs lost. A job is read by the key that started it through either

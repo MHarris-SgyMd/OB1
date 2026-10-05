@@ -181,7 +181,9 @@ export function createRestApp(deps: RestDeps): Hono {
     // Present at all, even empty, the forwarder slot must hold a forwarder's
     // key: a slot the caller filled is never ignored (an empty one is no
     // carrier named). Its digest is checked before either key reaches the
-    // registry, so a request refused for its forwarder registers no one.
+    // registry, so a request refused for a forwarder that is no forward key
+    // registers no one; one refused as a revoked or busy forwarder has resolved
+    // the caller first (a valid key; it is granted nothing).
     const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);
     const carrier = forwarded === null ? null : authenticate(forwarded, keys, { admit: ["forward"] });
     if (forwarded !== null && !carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });

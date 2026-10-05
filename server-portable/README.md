@@ -623,7 +623,8 @@ stripped (`X-Forwarded-Prefix`).
   with `credential: "forwarder"`, checked before either key reaches the
   registry; a revoked one a 401 `REVOKED`, a busy registry a 503, each with the
   same — so a client holding two keys cannot stamp one as the other's carrier.
-  The public `/api` route deletes the header: forwarding is the mesh's. Mint a
+  The public `/api` route deletes the header, so it is read only inside the
+  stack (until SMD-2286 nothing sends it). Mint a
   forwarder under a name never used before — the registry reads a known name
   with a new digest as that agent's rotation.
 - **Answers.** A success is the operation's value, for a key that can read (a capture

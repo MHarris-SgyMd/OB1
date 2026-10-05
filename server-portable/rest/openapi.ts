@@ -37,7 +37,7 @@ const KEYED_ANSWERS = {
   "405": refusal("A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does."),
   "500": refusal("A fault (FAILED, with its message; no retryable until SMD-2461)."),
   "501": refusal(`A mode not built: ${codesAt(501)}.`),
-  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY), capture's store fault (STORE_UNAVAILABLE), or ${codesAt(503)}.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
+  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY; with \`credential: "forwarder"\` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or ${codesAt(503)}.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
 };
 /** A keyed operation's answers: every one of KEYED_ANSWERS but 501, which only an operation with a mode not built (run_worker's drain) gives. */
 const answersFor = (name: ToolName) => {
@@ -88,7 +88,7 @@ export function openApiDocument(): Json {
         accessKey: { type: "apiKey", in: "header", name: "x-access-key" },
         bearer: { type: "http", scheme: "bearer" },
         // Beside a caller's key, never alone: the MCP server's forward-scope key, recorded as the request's `act` (SMD-2284).
-        forwarder: { type: "apiKey", in: "header", name: "x-brain-forwarder", description: "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing." },
+        forwarder: { type: "apiKey", in: "header", name: "x-brain-forwarder", description: "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing. Read only inside the stack: the public /api route deletes it." },
       },
       schemas: {
         Refusal: { type: "object", required: ["code"], properties: { code: { type: "string" }, retryable: { type: "boolean" } }, additionalProperties: true },
