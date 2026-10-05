@@ -29,7 +29,6 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED_DERIVED_FROM_SHAPE: 400,
   REFUSED_METADATA_SHAPE: 400,
   SUPERSEDES_UNJUDGED: 503,
-  REFUSED_SUPERSEDES_OWNERSHIP: 403,
   REFUSED_SUPERSEDES_UNKNOWN: 422,
   DERIVED_FROM_MISSING: 422,
   // Never answered as a refusal: the row is saved, so it is a creation (below).

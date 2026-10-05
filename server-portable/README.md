@@ -559,8 +559,9 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `REFUSED_CURSOR`. Capture's: the pointer and metadata shapes
   (`REFUSED_SUPERSEDES_SHAPE`, `REFUSED_DERIVED_FROM_SHAPE`,
   `REFUSED_METADATA_SHAPE`), SMD-1978's pointer codes (`DERIVED_FROM_MISSING` with
-  a reader's `positions`, `REFUSED_SUPERSEDES_UNKNOWN`,
-  `REFUSED_SUPERSEDES_OWNERSHIP`, `SUPERSEDES_UNJUDGED`), and
+  a reader's `positions`, a reader's `REFUSED_SUPERSEDES_UNKNOWN`,
+  `SUPERSEDES_UNJUDGED`; a capture-only key's `supersedes` it cannot prove its
+  own is dropped, not refused, SMD-2473), and
   `EMBEDDING_NOT_ATTACHED` (saved without its vector; retryable, with the `id`). An
   edit's and a delete's: `NOT_FOUND`, `REFUSED_NOTHING_TO_UPDATE`,
   `REFUSED_SUPERSEDES_SHAPE`, `REFUSED_STALE_READ` (with the row's
@@ -650,10 +651,10 @@ those its own way.
 ```bash
 bun test-server.ts        # 527 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
 bun test-auth.ts          # 124 — scoped, hashed, named keys
-bun test-rest.ts          # 223 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-rest.ts          # 226 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
-bun run test:e2e          # 429 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 457 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 131 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```

@@ -863,12 +863,8 @@ function captureRefusal(r: Refusal): string {
     case "REFUSED_METADATA_SHAPE": return metadataShape(r);
     case "SUPERSEDES_UNJUDGED":
       return r.cause === "check_failed"
-        ? `Error: this key's \`supersedes\` could not be checked against the target's capture record (${r.detail})${r.noPrivilege ? " — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`
+        ? `Error: this key's \`supersedes\` could not be checked against the target's capture record (${r.detail})${r.noPrivilege ? " — the server role needs SELECT on thought_audit and thoughts: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`
         : "Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.";
-    case "REFUSED_SUPERSEDES_OWNERSHIP":
-      return r.registryRefused
-        ? "Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself, and this key's identity could not be resolved — the agent registry refused its name or digest; see the server log."
-        : "Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.";
     // 025's self-FK, said as update_thought says it, not as Postgres does (fourth review pass).
     case "REFUSED_SUPERSEDES_UNKNOWN": return "Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.";
     case "DERIVED_FROM_MISSING": {

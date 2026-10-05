@@ -276,6 +276,22 @@ console.log("\n[7c] A 503 says when to retry; capture's fault is the transient t
   assert(thrown.status === 500 && /application\/json/.test(thrown.headers.get("content-type") ?? "") && (await thrown.json() as { code: string }).code === "FAILED", `a throw outside an operation is a JSON FAILED (${thrown.status} ${thrown.headers.get("content-type")})`);
 }
 
+console.log("\n[7d] The door hands the core why a key has no agent id, which a capture key's supersedes reads (SMD-2473)");
+{
+  // capture() offers the retry only to `unreachable` and drops the pointer
+  // otherwise; a door that lost the reason would drop it while the registry
+  // may still answer (review pass 4: no test held the REST door's).
+  answer = async () => ok({});
+  for (const unresolved of ["unreachable", "misconfigured", "refused"] as const) {
+    identity = { status: "ok", unresolved };
+    calls.length = 0;
+    await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "z", supersedes: "00000000-0000-4000-8000-000000000001" }) });
+    const got = calls.at(-1)?.principal;
+    assert(got?.agentId === undefined && got?.agentUnresolved === unresolved, `a registry ${unresolved} reaches the core on the principal (${got?.agentUnresolved})`);
+  }
+  identity = { status: "ok", agentId: "agent-1" };
+}
+
 console.log("\n[8] One log line per request: method, route, status, time — no query, key, id or content");
 {
   lines.length = 0;

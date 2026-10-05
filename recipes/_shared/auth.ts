@@ -104,8 +104,8 @@ export type Principal = {
    * attribution then falls back to `name`, which is where it was before 010.
    */
   agentId?: string;
-  /** Why `agentId` is absent, when it is: the registry could not be reached (a retry may answer) or refused the argument (it will not). Set beside agentId by index.ts from agents.ts's outcome. */
-  agentUnresolved?: "unreachable" | "refused";
+  /** Why `agentId` is absent, when it is: the registry could not be reached (a retry may answer), cannot answer this server as it is set up (not migrated, a CHECK refusing the key's scope, a grant or search_path missing — not until an operator acts), or refused the argument (it will not). Set beside agentId by index.ts from agents.ts's outcome. */
+  agentUnresolved?: "unreachable" | "misconfigured" | "refused";
 };
 
 export type KeyRecord = { name: string; scope: Scope; sha256: string };

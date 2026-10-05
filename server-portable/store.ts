@@ -1367,8 +1367,10 @@ export interface ThoughtStore {
    * A failure throws with the SQLSTATE on the error's `errno` (Bun's SQL sets
    * it; the PostgREST store copies PostgREST's `code` there): agents.ts reads
    * 55P03, 57014, 40P01 and 40001 as a registry busy — a lock timeout or a
-   * serialization failure — retried and then refusing the key, and anything
-   * else as an outage, which serves it by name (SMD-2072, SMD-2090).
+   * serialization failure — retried and then refusing the key; 42883, 42P01,
+   * 23514 and 42501 as misconfigured, served by name with no retry offered to
+   * a capture key's `supersedes` (SMD-2473); and anything else as an outage,
+   * which serves it by name (SMD-2072, SMD-2090).
    */
   resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution>;
 

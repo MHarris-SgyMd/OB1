@@ -131,12 +131,18 @@ export type AgentOutcome =
   /**
    * Resolved, or resolvable later; `agentId` is undefined when the registry
    * could not answer — `unresolved` says why: `unreachable` (no connection,
-   * not migrated, a CHECK refusing the scope; a retry may answer) or `refused`
-   * (the registry answered and refused the argument — BAD_KEY_HASH, BAD_LABEL,
-   * a malformed reply; a retry will not). capture_thought reads the difference
-   * when a capture-only key's `supersedes` needs the id (SMD-1298).
+   * PostgREST's stale schema cache, or any failure not named below; a retry
+   * may answer), `misconfigured` (the registry cannot answer this server as it
+   * is set up — no resolve_agent or registry table on its search_path, a CHECK
+   * refusing the scope, the server role without the registry tables' grants —
+   * until an operator acts; SMD-2473)
+   * or `refused` (the registry answered and refused the argument —
+   * BAD_KEY_HASH, BAD_LABEL, a malformed reply; a retry will not).
+   * capture_thought reads the difference when a capture-only key's
+   * `supersedes` needs the id (SMD-1298, SMD-2473): only `unreachable` is
+   * worth the caller's retry.
    */
-  | { status: "ok"; agentId?: string; unresolved?: "unreachable" | "refused" }
+  | { status: "ok"; agentId?: string; unresolved?: "unreachable" | "misconfigured" | "refused" }
   /** The database refused this digest. The request must be rejected. */
   | { status: "revoked"; agentId: string; revokedAt: string; reason: string | null }
   /**
@@ -238,7 +244,7 @@ export class AgentResolver {
         // reaching here means the schema and the server disagree. Serve without
         // an agent id rather than locking everyone out over a shape mismatch —
         // and say so once per key: a retry will not change this answer, and
-        // the tool's `Refused:` sends the operator to this log (eighth review pass).
+        // this log is where the operator learns of it (eighth review pass).
         // Not an answer that the key is not revoked, so a revocation read
         // before stands.
         const detail = String((r as { detail?: unknown }).detail ?? r.error);
@@ -247,7 +253,7 @@ export class AgentResolver {
           this.warnOnce(key, "revoked", `agent registry: resolve_agent refused key "${principal.name}" (${detail}) — its revocation stands until the registry answers`);
           outcome = revoked;
         } else {
-          this.warnOnce(key, "refused", `agent registry: resolve_agent refused key "${principal.name}" (${detail}) — writes are attributed by name only; the label or digest the schema rejects will not pass on retry`);
+          this.warnOnce(key, "refused", `agent registry: resolve_agent refused key "${principal.name}" (${detail}) — writes are attributed by name only, and a capture-only key's \`supersedes\` is dropped meanwhile; the label or digest the schema rejects will not pass on retry`);
           outcome = { status: "ok", agentId: undefined, unresolved: "refused" };
         }
         ttl = failureTtl(this.ttlMs);
@@ -268,8 +274,14 @@ export class AgentResolver {
         this.warnOnce(key, "busy", `agent registry: resolve_agent timed out on a lock or failed to serialize for key "${principal.name}", tried up to ${this.busyRetry.attempts} times within ${this.busyRetry.budgetMs} ms — its requests are refused with a retry until the registry answers: ${cause}`);
         outcome = { status: "busy" };
         ttl = Math.min(this.ttlMs, BUSY_TTL_MS);
+      } else if (misconfigured(e) !== null) {
+        // Said once per SQLSTATE, not per kind: each names its own remedy, and
+        // a brain migrated by its owner can meet the grant gap next (review pass 2).
+        this.warnOnce(key, `misconfigured:${String((e as { errno?: unknown })?.errno ?? "")}`, `agent registry: resolve_agent cannot attribute key "${principal.name}" as this server is set up — writes are attributed by name only, and a capture-only key's \`supersedes\` is dropped, until ${misconfigured(e)}: ${cause}`);
+        outcome = { status: "ok", agentId: undefined, unresolved: "misconfigured" };
+        ttl = failureTtl(this.ttlMs);
       } else {
-        this.warnOnce(key, "unreachable", `agent registry: resolve_agent failed for key "${principal.name}" — writes are attributed by name only until it answers: ${cause}`);
+        this.warnOnce(key, "unreachable", `agent registry: resolve_agent failed for key "${principal.name}" — writes are attributed by name only, and a capture-only key's \`supersedes\` gets a retry, until it answers: ${cause}`);
         outcome = { status: "ok", agentId: undefined, unresolved: "unreachable" };
         ttl = failureTtl(this.ttlMs);
       }
@@ -344,6 +356,30 @@ export class AgentResolver {
 function retryable(e: unknown): boolean {
   const state = String((e as { errno?: unknown })?.errno ?? "");
   return state === "55P03" || state === "57014" || state === "40P01" || state === "40001";
+}
+
+/**
+ * What an operator must do, when a lookup failed in a way no retry heals, or
+ * null: 42883 or 42P01 (no resolve_agent, or a function it calls, or a registry
+ * table on the role's search_path — SMD-2242; this server needs migrations far
+ * past 010, so not a brain before it), 23514 (a CHECK refusing the key's scope
+ * — a brain before 049 meeting a capture key) or 42501 (the server role
+ * without the `server` grant group's privileges on ob1_agents or
+ * ob1_agent_keys — resolve_agent keeps PUBLIC's EXECUTE (010) and runs as the
+ * caller, so it is the tables that refuse; since 054 a known key's row is
+ * written only when its last use is five minutes old, so this can first show
+ * minutes after a clean start).
+ * Not PostgREST's PGRST202: it says the same while its schema cache is stale
+ * after a migration, which heals on reload, so it stays `unreachable` (review
+ * pass 1). capture_thought offers a capture key's `supersedes` a retry only
+ * when one can heal (SMD-2473).
+ */
+function misconfigured(e: unknown): string | null {
+  const state = String((e as { errno?: unknown })?.errno ?? "");
+  if (state === "42883" || state === "42P01") return "the server role's search_path reaches resolve_agent and the registry tables, and the brain is migrated (cd db && bun migrate.ts)";
+  if (state === "23514") return "the brain is migrated (cd db && bun migrate.ts) so the registry takes this key's scope";
+  if (state === "42501") return "the server role holds the registry tables' grants (cd db && bun migrate.ts --grant <role>)";
+  return null;
 }
 
 /** Parse OB1_AGENT_CACHE_TTL_MS, falling back rather than failing on nonsense. */

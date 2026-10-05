@@ -139,15 +139,34 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // first review pass): `supersedes` marks the target superseded in every
     // search result — an alteration of a thought the key did not write, the
     // one thing the scope promises it cannot do. Ownership is the target's
-    // capture audit row (008/010): the same agent id when both sides have
-    // one, else the same key name. One message whichever way it fails, so
-    // the refusal is not an existence oracle for a key that cannot read.
-    if (supersedes !== undefined && !reader) {
+    // capture audit row (008/010) carrying this key's agent id, and the
+    // thought still standing. A pointer that is not provably so is dropped
+    // before the write, and the reply says nothing of it, as derived_from's
+    // trim above (SMD-2473): any answer that differed by target told a key
+    // that cannot read something it may not know — whether an id exists,
+    // was deleted, or is another key's, and, through a re-capture's id,
+    // whether a text was already in the brain. The row's supersedes says
+    // what was recorded. No ownership by name: a row written without an id
+    // (the registry away at the write) could be claimed by a later key
+    // minted under the same name. (An attributed row follows the name the
+    // registry's way — 010 maps a known label with a new digest to the same
+    // agent, a rotation — which is that design's, not this check's.)
+    let pointer = supersedes;
+    if (supersedes !== undefined && !reader && principal.agentId === undefined) {
+      // This key's id is not to hand, so no pointer of its is provable. Asked
+      // before the target is read, so the answer is the same for every target:
+      // a retry while the registry may answer, else the pointer goes.
+      if (principal.agentUnresolved === "unreachable") return refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
+      pointer = undefined;
+    } else if (supersedes !== undefined && !reader) {
       let writer: { actorName: string | null; agentId: string | null } | null;
+      let present: boolean;
       try {
-        writer = await (await ctx.store()).captureActorOf(supersedes);
+        // Both reads for every target, so no cell is a query shorter.
+        const store = await ctx.store();
+        [writer, present] = await Promise.all([store.captureActorOf(supersedes), liveIn(store, [supersedes]).then((live) => live(supersedes))]);
       } catch (e) {
-        // The read needs SELECT on thought_audit — the `server` grant group,
+        // The reads need SELECT on thought_audit and thoughts — the `server` grant group,
         // soft like the rest of it (second review pass: the capture group
         // holds INSERT alone). Refuse THIS pointer, name the grant, and let
         // the capture proceed without it on the caller's retry.
@@ -156,34 +175,21 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
         // there (fifth review pass: "Refused:" made the hook drop it, and
         // the hook told the two apart by the sentence's wording).
         const why = String((e as Error).message ?? e).slice(0, 120);
-        // The grant remedy only for a privilege error (42501); a dropped
-        // connection, a timeout or a brain before 010 gets the store's own
-        // words, since `--grant` would change nothing there (sixth review pass).
-        const noPrivilege = (e as { code?: string }).code === "42501" || /permission denied/i.test(why);
+        // The grant remedy only for a privilege error (42501, on `errno` where
+        // Bun's SQL puts the SQLSTATE, as agents.ts reads it; `code` for a
+        // PostgREST error); a dropped connection or a timeout gets the store's
+        // own words, since `--grant` would change nothing there (sixth review pass).
+        const state = String((e as { errno?: unknown; code?: unknown }).errno ?? (e as { code?: unknown }).code ?? "");
+        const noPrivilege = state === "42501" || /permission denied/i.test(why);
         return refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "check_failed", detail: why, noPrivilege });
       }
-      // By agent id when both sides carry one; by name only when NEITHER
-      // does (the registry away now, as it was at the write). A row without
-      // an id met by a principal with one is not this key's to replace: a
-      // later key minted under the same name would otherwise own every
-      // thought captured while the registry was down (fourth review pass).
-      // The registry away NOW while the row is attributed: nothing can be
-      // said either way, and that is the server's condition, not the
-      // caller's — an error to retry, not a refusal (fifth review pass).
-      // Unless the registry ANSWERED and refused this key's argument (a
-      // label the SQL rejects): that will not heal on a retry, so it is a
-      // refusal, and the caller posts without the pointer (sixth review pass).
-      // (The answers here still tell a key that cannot read more than they
-      // should — SMD-2473 designs the check whole.)
-      if (writer !== null && writer.agentId !== null && principal.agentId === undefined) {
-        if (principal.agentUnresolved === "refused") return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: true });
-        return refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
-      }
-      const own = writer !== null && (
-        writer.agentId !== null && principal.agentId !== undefined ? writer.agentId === principal.agentId
-          : writer.agentId === null && principal.agentId === undefined ? writer.actorName === principal.name
-            : false);
-      if (!own) return refuse({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false, registryRefused: false });
+      // The audit row outlives a delete: a deleted thought of this key's
+      // passes on it, and `present` drops it like the rest (SMD-2473 case 2;
+      // it reached the self-FK and answered as no other target did).
+      // Spelled whole, not leaning on the branch above for principal.agentId:
+      // a row with no capture audit row, or one without an id, is never owned.
+      const own = present && writer !== null && writer.agentId !== null && writer.agentId === principal.agentId;
+      if (!own) pointer = undefined;
     }
     // What may leave the box (SMD-1903): asked once, for both calls, and
     // only the allowed ones are made — a refused capture costs no request
@@ -235,7 +241,10 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // once more and writing again, so the summary keeps its live sources;
     // the refusal that reaches such a key names no position, and the hook
     // could only drop the whole list (twelfth review pass). A reader is
-    // refused as before, with positions, and decides.
+    // refused as before, with positions, and decides. The same for the
+    // pointer: its own thought deleted between the check and the write meets
+    // the self-FK, and the write goes again without it, so the race answers
+    // as the check would have (SMD-2473).
     const store = await ctx.store();
     const captureArgs = {
       content,
@@ -262,22 +271,32 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // one the embedder used, not the one ob1_config records: they differ
       // exactly while a re-embed to another model is under way.
       embeddingModel: embedded?.model,
-      // 025: provenance, if the caller named any. upsert_thought validates
-      // derived_from and refuses a bad reference, so a malformed value
-      // fails the capture with a clear message rather than storing a lie.
-      supersedes,
+      // 025's provenance — derived_from and supersedes, if the caller named
+      // any — is added per attempt below. upsert_thought validates derived_from
+      // and refuses a bad reference, so a malformed value fails the capture
+      // with a clear message rather than storing a lie.
       // SMD-1724: the content's trust as this write declares it — the event's
       // (046), which 073 clamps to the key's kind: a lowering stands, a raise
       // is filed as a claim on the audit row. Absent: the key's trust.
       ...(trust !== undefined ? { event: { trust } } : {}),
     };
     let captured;
-    try {
-      captured = await store.captureThought({ ...captureArgs, derivedFrom });
-    } catch (e) {
-      if (reader || !derivedFrom?.length || !/derived_from references a thought that does not exist/.test(String((e as Error)?.message ?? e))) throw e;
-      derivedFrom = await liveSubset(store, derivedFrom);
-      captured = await store.captureThought({ ...captureArgs, derivedFrom });
+    // One mend per pointer kind: the pointer's ends itself (it is gone), and
+    // derived_from's is counted on its own — a shared cap spent on two source
+    // races let the third attempt meet the self-FK and answer UNKNOWN to a key
+    // that cannot read (review pass 1).
+    let derivedMended = false;
+    for (;;) {
+      try {
+        captured = await store.captureThought({ ...captureArgs, supersedes: pointer, derivedFrom });
+        break;
+      } catch (e) {
+        if (reader) throw e;
+        const msg = String((e as Error)?.message ?? e);
+        if (pointer !== undefined && /thoughts_supersedes_fkey/.test(msg)) pointer = undefined;
+        else if (!derivedMended && derivedFrom?.length && /derived_from references a thought that does not exist/.test(msg)) { derivedMended = true; derivedFrom = await liveSubset(store, derivedFrom); }
+        else throw e;
+      }
     }
 
     // Memory utilization (SMD-1719, over 034's log): a capture that names a
@@ -296,7 +315,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // "fresh" on the one schema where the pointer's fate is unknown). The
     // vector attaching or not does not change what was written.
     if (captured.existed === false) {
-      await ctx.logActions(principal, citeRows("capture_thought", { derived_from: derivedFrom, supersedes }));
+      await ctx.logActions(principal, citeRows("capture_thought", { derived_from: derivedFrom, supersedes: pointer }));
     }
 
     if (captured.embeddingFailed) return refuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: captured.id, detail: captured.embeddingFailed });
@@ -327,8 +346,9 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     });
   } catch (err: unknown) {
     const msg = (err as Error)?.message ?? "";
-    // 025's self-FK is what refuses a first capture's supersedes naming no
-    // thought (a re-capture writes no pointer, so it never fires there —
+    // 025's self-FK is what refuses a reader's first capture whose supersedes
+    // names no thought (a key that cannot read has the pointer mended above,
+    // and a re-capture writes no pointer, so it never fires there —
     // migration 035). Said as update_thought says it, not as Postgres does
     // (fourth review pass).
     if (/thoughts_supersedes_fkey/.test(msg)) return refuse({ code: "REFUSED_SUPERSEDES_UNKNOWN", retryable: false });
