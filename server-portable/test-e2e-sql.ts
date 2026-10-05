@@ -1477,19 +1477,14 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   assert(del.error !== undefined || del.result?.isError === true, "delete_thought is not either — the key cannot remove what it added");
 
   // supersedes through a capture key (first review pass): only what it wrote.
+  // A pointer it cannot prove its own is dropped, not refused, so the reply is
+  // no oracle (SMD-2473); [13b] holds every target and registry state alike.
   const steal = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — a later ending — claims to replace eta", source: "claude-code", supersedes: retrieved } });
-  assert(steal.result?.isError === true && /only a thought it captured itself/.test(textOf(steal)) && sc(steal)?.code === "REFUSED_SUPERSEDES_OWNERSHIP" && sc(steal)?.retryable === false, `a capture key may not supersede another key's thought — refused, code and all (${sc(steal)?.code})`);
-  // With its agent id to hand, a capture key's supersedes naming no thought
-  // reads exactly as one naming another key's thought: the same code and the
-  // same words, so the refusal says nothing of whether the target exists
-  // (SMD-1298; SMD-2283 PR 2 review pass 2 — no test held it). The cases with
-  // the registry away or refusing are SMD-2473's.
-  const ghostSteal = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — a later ending — claims to replace a thought that is not there", source: "claude-code", supersedes: "00000000-0000-4000-8000-0000000000bb" } });
-  assert(sc(ghostSteal)?.code === sc(steal)?.code && textOf(ghostSteal) === textOf(steal), `…and a supersedes naming no thought is refused word for word alike (${sc(ghostSteal)?.code})`);
-  // The words ride the value too: a client that shows the model structuredContent alone still reads which pointer to drop (SMD-2283 review pass 3).
-  assert(sc(steal)?.text === textOf(steal), "a coded capture refusal carries its words in the value");
-  const [[untouched]] = [await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE 'Session summary — a later ending%'`];
-  assert(untouched?.n === 0, "…and nothing was written");
+  const stealId = idIn(textOf(steal));
+  const [stolen] = stealId ? await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${stealId}::uuid` : [];
+  assert(steal.result?.isError !== true && stolen !== undefined && stolen.s === null, `a capture key's supersedes of another key's thought lands without the pointer (${textOf(steal).split("\n")[0].slice(0, 60)}; ${stolen?.s})`);
+  const [victim] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE supersedes = ${retrieved}::uuid`;
+  assert(victim?.n === 0, "…and nothing supersedes the other key's thought");
   // A reader/write key naming a ghost supersedes reaches the write (it skips the
   // ownership check), where the self-FK refuses it: REFUSED_SUPERSEDES_UNKNOWN,
   // final — the fifth code pinned against the real server (SMD-1978).
@@ -1500,30 +1495,38 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   assert(own.result?.isError !== true && ownId !== undefined, `…while superseding its own earlier summary is allowed (${textOf(own).split("\n")[0].slice(0, 70)})`);
   const [chain] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${ownId}::uuid`;
   assert(chain?.s === id, "…and the pointer is recorded");
-  // Ownership has two paths (second review pass: mutants keeping either alone
-  // passed). The AGENT path: the key is renamed — same digest, new label — so
-  // its earlier thought's audit row carries the old name and the same agent id;
-  // the NAME path: the registry is away, the principal has no agent id, and a
-  // thought this key captured meanwhile has NULL for one.
+  // SMD-1719's cite row is a pointer the database accepted: the written one
+  // logs one, the dropped one above none (SMD-2473).
+  const citesOf = async (target: string) => (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'action' AND tool = 'capture_thought/supersedes' AND target_id::text = ${target}`)[0]?.n;
+  assert(await citesOf(id!) === 1 && await citesOf(retrieved!) === 0, "…and logs its cite, while the dropped pointer logged none");
+  // Ownership is the agent id, never the name (SMD-2473 dropped the name path):
+  // the key is renamed — same digest, new label — so its earlier thought's
+  // audit row carries the old name and the same agent id, and the pointer
+  // must still be written.
   // The server seeds its env once per process (third review pass: a swap of
   // MCP_ACCESS_KEYS here reached nothing, and the case was vacuous), so the
   // rename is written into the RECORD: the earlier row says a name this key no
-  // longer presents, and only the agent path can allow the supersedes.
+  // longer presents, and only the agent id can allow the supersedes.
   await sql`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`; // 008's append-only guard would refuse the UPDATE, honestly
   await sql`UPDATE thought_audit SET actor_name = 'session-hook-before-rename' WHERE thought_id = ${ownId}::uuid AND action = 'capture'`;
   await sql`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`;
   const renamed = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — under the key's new name", source: "claude-code", supersedes: ownId } });
-  assert(renamed.result?.isError !== true && idIn(textOf(renamed)) !== undefined, `a renamed key supersedes its own thought — the audit row's name differs, the agent id is the same (${textOf(renamed).split("\n")[0].slice(0, 60)})`);
+  // The pointer read back, not the landing: a dropped pointer lands too (review pass 1).
+  const renamedId = idIn(textOf(renamed));
+  const [renamedRow] = renamedId ? await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${renamedId}::uuid` : [];
+  assert(renamed.result?.isError !== true && renamedRow?.s === ownId, `a renamed key supersedes its own thought — the audit row's name differs, the agent id is the same, and the pointer is written (${renamedRow?.s ?? textOf(renamed).split("\n")[0].slice(0, 60)})`);
   const [renamedAudit] = await sql`SELECT actor_name FROM thought_audit WHERE thought_id = ${ownId}::uuid AND action = 'capture'`;
-  assert(renamedAudit?.actor_name === "session-hook-before-rename", "…the earlier row says the old name, so only the agent path could have allowed it");
+  assert(renamedAudit?.actor_name === "session-hook-before-rename", "…the earlier row says the old name, so only the agent id could have allowed it");
   // The ownership read needs the audit table (SELECT on it, the `server` grant
-  // group): with the table out of reach the pointer is refused by name and the
-  // grant is named, before any model call (third review pass: no tooth held this).
+  // group): with the table out of reach the pointer is the server's error to
+  // retry, before any model call (third review pass: no tooth held this).
   await sql`ALTER TABLE thought_audit RENAME TO thought_audit_away`;
   try {
     const unreadable = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — with the audit table away", source: "claude-code", supersedes: ownId } });
     assert(unreadable.result?.isError === true && /^Error: /.test(textOf(unreadable)) && /could not be checked/.test(textOf(unreadable)) && /does not exist/.test(textOf(unreadable)) && !/--grant/.test(textOf(unreadable)) && sc(unreadable)?.code === "SUPERSEDES_UNJUDGED" && sc(unreadable)?.retryable === true,
       `a supersedes the server cannot check is the server's error — "Error:", not "Refused:" — carrying the store's words and the SUPERSEDES_UNJUDGED code, retryable, and no grant remedy for what is not a privilege error (${sc(unreadable)?.code})`);
+    // The words ride the value too: a client that shows the model structuredContent alone still reads them (SMD-2283 review pass 3).
+    assert(sc(unreadable)?.text === textOf(unreadable), "a coded capture refusal carries its words in the value");
   } finally {
     await sql`ALTER TABLE thought_audit_away RENAME TO thought_audit`;
   }
@@ -1549,6 +1552,22 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     assert(retried.result?.isError !== true && retriedId !== undefined && JSON.stringify(retriedRow?.derived_from).includes(retrieved!) && JSON.stringify(retriedRow?.derived_from).includes(id!),
       `a refusal in the write that clears on a second try lands with both live sources recorded (${textOf(retried).slice(0, 50)})`);
     assert(Number((await sql`SELECT last_value FROM race_seq`)[0].last_value) === 2, "…after exactly two validator calls: the refusal, then the retry");
+    // Two source races, with a self-FK waiting for a third attempt: each kind
+    // has its own mend, so the second source race is the persistent one and
+    // ends the call as below — never REFUSED_SUPERSEDES_UNKNOWN, which a shared
+    // cap of two let the third attempt reach (review pass 1).
+    await sql`UPDATE race_mode SET n = 2`;
+    await sql`ALTER SEQUENCE race_seq RESTART`;
+    await sql.unsafe(`CREATE FUNCTION fk_once() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.supersedes IS NOT NULL THEN RAISE EXCEPTION 'insert or update on table "thoughts" violates foreign key constraint "thoughts_supersedes_fkey"'; END IF; RETURN NEW; END $$`);
+    await sql`CREATE TRIGGER fk_once BEFORE INSERT ON thoughts FOR EACH ROW EXECUTE FUNCTION fk_once()`;
+    try {
+      const twice = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — two source races and its pointer's", source: "claude-code", derived_from: [id, retrieved], supersedes: id } });
+      assert(sc(twice)?.code === "DERIVED_FROM_MISSING" && sc(twice)?.positions === undefined, `two source races end in the persistent race's answer, not the pointer's UNKNOWN (${sc(twice)?.code})`);
+      assert(Number((await sql`SELECT last_value FROM race_seq`)[0].last_value) === 2, "…the second race ending it: two validator calls, no third attempt");
+    } finally {
+      await sql`DROP TRIGGER fk_once ON thoughts`;
+      await sql`DROP FUNCTION fk_once()`;
+    }
     await sql`UPDATE race_mode SET n = 99`;
     await sql`ALTER SEQUENCE race_seq RESTART`;
     const raced = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — a source deleted between the check and the write", source: "claude-code", derived_from: [id, retrieved] } });
@@ -1568,33 +1587,210 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     await sql`DROP TABLE race_mode`;
     await sql`DROP SEQUENCE race_seq`;
   }
-  await sql`ALTER FUNCTION resolve_agent(text, text, text) RENAME TO resolve_agent_away`;
-  let awayIdOuter: string | undefined;
-  try {
-    const rpc2 = captureAs(CAPTURE_KEY_2);
-    const away1 = await rpc2({ content: "Session summary — codex — captured while the registry was away", source: "codex" });
-    const awayId = idIn(textOf(away1));
-    awayIdOuter = awayId;
-    const [awayAudit] = await sql`SELECT actor_name, canonical_agent_id FROM thought_audit WHERE thought_id = ${awayId}::uuid AND action = 'capture'`;
-    assert(awayId !== undefined && awayAudit?.actor_name === "hook-two" && awayAudit?.canonical_agent_id === null, "with the registry away a capture lands under the key's name and no agent id");
-    const away2 = await rpc2({ content: "Session summary — codex — the same session, ended again, registry still away", source: "codex", supersedes: awayId });
-    assert(away2.result?.isError !== true && idIn(textOf(away2)) !== undefined, `…and the key supersedes it by NAME (${textOf(away2).split("\n")[0].slice(0, 60)})`);
-    const byOtherName = await captureAs(CAPTURE_KEY)({ content: "Session summary — claude-code — session-hook claims hook-two's outage-time thought", source: "claude-code", supersedes: awayId });
-    assert(byOtherName.result?.isError === true && /only a thought it captured itself/.test(textOf(byOtherName)),
-      "…and another key with no id either is refused BY NAME (fifth review pass: the name path had no negative case)");
-    const away3 = await rpc2({ content: "Session summary — codex — a claim on the other key's thought", source: "codex", supersedes: id });
-    assert(away3.result?.isError === true && /^Error: .*could not be attributed while the agent registry is unavailable/.test(textOf(away3)) && sc(away3)?.code === "SUPERSEDES_UNJUDGED" && sc(away3)?.retryable === true,
-      `…while an ATTRIBUTED row met by a key with no id is the server's error to retry, not a refusal — SUPERSEDES_UNJUDGED, retryable (${sc(away3)?.code})`);
-  } finally {
-    await sql`ALTER FUNCTION resolve_agent_away(text, text, text) RENAME TO resolve_agent`;
-  }
-  // With the registry back the key has an agent id and the row from the outage
-  // has none: not provably this key's, so refused — a later key minted under the
-  // same name would otherwise own every thought written while the registry was
-  // down (fourth review pass).
+  // [13b] What a capture key's `supersedes` tells it, cell by cell (SMD-2473):
+  // eight targets × four registry states. One cell writes the pointer — its
+  // own thought, still standing, with the registry answering — and every other
+  // cell lands without it, answering word for word as that one does (ids
+  // aside), save the registry away for now, where every target is the same
+  // retry. No cell tells a key that cannot read whether an id exists, was
+  // deleted or is another key's, nor — through the id a re-capture hands it —
+  // whether a text was already in the brain. The writing cell is not told
+  // apart either: the row's supersedes is the only record of what was kept.
   {
-    const b = await captureAs(CAPTURE_KEY_2)({ content: "Session summary — codex — claiming the outage-time thought after the registry returned", source: "codex", supersedes: awayIdOuter });
-    assert(b.result?.isError === true && /only a thought it captured itself/.test(textOf(b)), "a row without an agent id is refused to a key that now has one, even under the same name");
+    type Registry = "answering" | "away" | "refusing" | "unmigrated";
+    // The registry's four answers, as the server meets them: resolve_agent
+    // itself; one that raises (a failure a retry may heal — `unreachable`);
+    // one that answers BAD_LABEL (`refused`); and none at all — resolve_agent
+    // missing, 42883, as a search_path that misses it would leave it
+    // (`misconfigured`: the state is named for the brain, the outcome for
+    // what the server makes of it).
+    const withRegistry = async (state: Registry, body: () => Promise<void>) => {
+      if (state === "answering") return body();
+      await sql`ALTER FUNCTION resolve_agent(text, text, text) RENAME TO resolve_agent_real`;
+      try {
+        if (state === "away") await sql.unsafe("CREATE FUNCTION resolve_agent(p_key_hash text, p_label text, p_scope text) RETURNS jsonb LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the registry is away for [13b]'; END $$");
+        if (state === "refusing") await sql.unsafe(`CREATE FUNCTION resolve_agent(p_key_hash text, p_label text, p_scope text) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{"ok": false, "error": "BAD_LABEL"}'::jsonb $$`);
+        await body();
+      } finally {
+        await sql`DROP FUNCTION IF EXISTS resolve_agent(text, text, text)`;
+        await sql`ALTER FUNCTION resolve_agent_real(text, text, text) RENAME TO resolve_agent`;
+      }
+    };
+    const K = captureAs(CAPTURE_KEY_2);
+    const UUID_G = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+    // What the key sees, ids masked: the envelope's error, the words and the value.
+    const seen = (e: Envelope) => JSON.stringify({ error: e.error ?? null, isError: e.result?.isError === true, text: textOf(e), sc: sc(e) ?? null }).replace(UUID_G, "<id>");
+    const landedId = async (e: Envelope, what: string) => {
+      const got = idIn(textOf(e));
+      assert(e.result?.isError !== true && got !== undefined, `[13b] setup: ${what} lands (${textOf(e).split("\n")[0].slice(0, 60)})`);
+      return got ?? "00000000-0000-4000-8000-0000000000ff";
+    };
+    const t: Record<string, string> = { missing: "00000000-0000-4000-8000-0000000000cc" };
+    const ownFresh = await K({ content: "[13b] hook-two's summary, attributed", source: "codex" });
+    t.attributedOwn = await landedId(ownFresh, "hook-two's own thought");
+    t.attributedForeign = retrieved!;
+    t.deletedOwn = await landedId(await K({ content: "[13b] hook-two's summary an operator deletes", source: "codex" }), "hook-two's thought to delete");
+    t.deletedForeign = idIn(await call("capture_thought", { content: "[13b] the writer's thought it deletes" }))!;
+    for (const gone of [t.deletedOwn, t.deletedForeign]) await call("delete_thought", { id: gone });
+    // The re-captured foreign target: the writer's text sent again by the capture key, which is
+    // handed the existing row's id — and told nothing else (its reply is the
+    // fresh capture's above, ids aside).
+    const shared = "[13b] the writer's text a capture key sends again";
+    const sharedId = idIn(await call("capture_thought", { content: shared }));
+    const recaptured = await K({ content: shared, source: "codex" });
+    t.recapturedForeign = await landedId(recaptured, "the capture key's re-capture of the writer's text");
+    assert(t.recapturedForeign === sharedId, "…handing it the writer's row's id");
+    assert(seen(recaptured) === seen(ownFresh), `…in the words a fresh capture gets, ids aside (${seen(recaptured).slice(0, 120)} vs ${seen(ownFresh).slice(0, 120)})`);
+    await withRegistry("unmigrated", async () => {
+      t.unattributedOwn = await landedId(await K({ content: "[13b] hook-two's summary from an outage of the registry", source: "codex" }), "hook-two's outage-time thought");
+      t.unattributedForeign = await landedId(await captureAs(CAPTURE_KEY)({ content: "[13b] session-hook's summary from the same outage", source: "claude-code" }), "session-hook's outage-time thought");
+    });
+    const attribution = await sql`SELECT thought_id::text AS id, actor_name, canonical_agent_id IS NOT NULL AS attributed FROM thought_audit WHERE action = 'capture' AND thought_id = ANY(${sql.array([t.attributedOwn, t.attributedForeign, t.unattributedOwn, t.unattributedForeign, t.deletedOwn], "TEXT")}::uuid[])`;
+    type Attribution = { id: string; actor_name: string; attributed: boolean };
+    const by = new Map<string, Attribution>((attribution as Attribution[]).map((r) => [r.id, r]));
+    assert(by.get(t.attributedOwn)?.attributed === true && by.get(t.deletedOwn)?.attributed === true && by.get(t.deletedOwn)?.actor_name === "hook-two",
+      "[13b] setup: hook-two's own thoughts carry its agent id — the deleted one's audit row outlives it");
+    assert(by.get(t.attributedForeign)?.attributed === true && by.get(t.attributedForeign)?.actor_name !== "hook-two",
+      "[13b] setup: the attributed foreign target carries another key's agent id, so it is not the unattributed one twice");
+    assert(by.get(t.unattributedOwn)?.attributed === false && by.get(t.unattributedOwn)?.actor_name === "hook-two" && by.get(t.unattributedForeign)?.attributed === false,
+      "[13b] setup: the outage-time thoughts carry the key's name and no agent id");
+    const live = await sql`SELECT id::text AS id FROM thoughts WHERE id = ANY(${sql.array([t.deletedOwn, t.deletedForeign, t.missing], "TEXT")}::uuid[])`;
+    assert(live.length === 0, "[13b] setup: the deleted and the missing targets name no thought");
+    // A thought with no capture audit row at all — from before 008, or written
+    // with the audit trigger off — is no key's, so no capture key's pointer
+    // stands on it (review pass 4: every target had an audit row, and a check
+    // owning a writer-less row passed).
+    await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`;
+    let unaudited = "00000000-0000-4000-8000-0000000000ee";
+    try {
+      [{ id: unaudited }] = await sql`INSERT INTO thoughts (content, metadata) VALUES ('[13b] a thought from before the audit trail', '{}'::jsonb) RETURNING id::text AS id`;
+    } finally {
+      await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`;
+    }
+    const [unauditedRows] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = ${unaudited}::uuid`;
+    assert(unauditedRows?.n === 0, "[13b] setup: the unaudited thought has no audit row");
+
+    // Every insert that names the deleted own thought as its pointer is
+    // counted (a sequence survives the rollback the self-FK causes): the
+    // existence read drops it before the write, so none is tried — else the
+    // cell would cost a failed write the others do not, the one thing left
+    // to tell it apart (review pass 1: no test held the read).
+    await sql`CREATE SEQUENCE deleted_own_attempts`;
+    await sql.unsafe(`CREATE FUNCTION deleted_own_attempt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.supersedes = '${t.deletedOwn}'::uuid THEN PERFORM nextval('deleted_own_attempts'); END IF; RETURN NEW; END $$`);
+    await sql`CREATE TRIGGER deleted_own_attempt BEFORE INSERT ON thoughts FOR EACH ROW EXECUTE FUNCTION deleted_own_attempt()`;
+    type Cell = { seen: string; landed: boolean; wrote: string | null; code?: string; retryable?: boolean };
+    const cells: Record<string, Record<string, Cell>> = {};
+    const STATES: Registry[] = ["answering", "away", "refusing", "unmigrated"];
+    // One cell: the key names `target`, beside whatever else `extra` sends.
+    const cell = async (content: string, target: string, extra: Record<string, unknown> = {}): Promise<Cell> => {
+      const e = await K({ content, source: "codex", supersedes: target, ...extra });
+      const got = e.result?.isError === true ? undefined : idIn(textOf(e));
+      const [row] = got ? await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${got}::uuid` : [];
+      return { seen: seen(e), landed: row !== undefined, wrote: row?.s ?? null, code: sc(e)?.code, retryable: sc(e)?.retryable };
+    };
+    let deletedOwnTried: boolean;
+    const withSources: Record<string, Cell> = {};
+    const unsourced: Record<string, Cell> = {};
+    const unprovable: Record<string, Cell> = {};
+    let upper: Cell | undefined;
+    let bare: Cell | undefined;
+    try {
+      for (const state of STATES) {
+        cells[state] = {};
+        await withRegistry(state, async () => {
+          for (const [name, target] of Object.entries(t)) cells[state][name] = await cell(`[13b] hook-two names ${name} as supersedes, the registry ${state}`, target);
+        });
+      }
+      // Beside the table, inside the counter's window so a deleted own target
+      // here is held too (review passes 3 and 4): every target with a
+      // `derived_from` source riding along; its own id in upper case; no
+      // `source` at all, so a check gated on a caller's claim fails; a thought
+      // with no audit row; and the unprovable states with a source beside the
+      // pointer, which must still drop it, not retry for ever.
+      for (const [name, target] of Object.entries(t)) withSources[name] = await cell(`[13b] hook-two names ${name} as supersedes, with a source beside it`, target, { derived_from: [t.attributedOwn] });
+      upper = await cell("[13b] hook-two names its own thought as supersedes, in upper case", t.attributedOwn.toUpperCase());
+      for (const [name, target] of [["attributedOwn", t.attributedOwn], ["attributedForeign", t.attributedForeign]] as const) unsourced[name] = await cell(`[13b] hook-two names ${name} as supersedes, no source`, target, { source: undefined });
+      bare = await cell("[13b] hook-two names a thought with no audit row as supersedes", unaudited);
+      for (const state of ["refusing", "unmigrated"] as Registry[]) {
+        await withRegistry(state, async () => {
+          for (const [name, target] of [["attributedOwn", t.attributedOwn], ["attributedForeign", t.attributedForeign]] as const) unprovable[`${state}/${name}`] = await cell(`[13b] hook-two names ${name} with a source beside it, the registry ${state}`, target, { derived_from: [t.attributedOwn] });
+        });
+      }
+      [{ is_called: deletedOwnTried }] = await sql`SELECT is_called FROM deleted_own_attempts`;
+    } finally {
+      await sql`DROP TRIGGER deleted_own_attempt ON thoughts`;
+      await sql`DROP FUNCTION deleted_own_attempt()`;
+      await sql`DROP SEQUENCE deleted_own_attempts`;
+    }
+    assert(deletedOwnTried === false, "its own deleted thought is dropped before the write — no insert naming it is tried, in any registry state, a source beside it or not");
+    const table = () => STATES.map((s) => `${s}: ${Object.entries(cells[s]).map(([n, c]) => `${n}=${c.landed ? (c.wrote ? "wrote" : "dropped") : c.code ?? "?"}`).join(" ")}`).join(" | ");
+    const writing = cells.answering.attributedOwn;
+    assert(writing.landed && writing.wrote === t.attributedOwn, `its own standing thought, the registry answering: the pointer is written (${table()})`);
+    const quiet = STATES.filter((s) => s !== "away").flatMap((s) => Object.entries(cells[s]).filter(([n]) => !(s === "answering" && n === "attributedOwn")).map(([n, c]) => ({ at: `${s}/${n}`, c })));
+    assert(quiet.length === 23 && Object.keys(cells.away).length === 8, `the table is whole: 23 quiet cells and 8 away (${quiet.length}, ${Object.keys(cells.away).length})`);
+    const loud = quiet.filter(({ c }) => !c.landed || c.wrote !== null);
+    assert(loud.length === 0, `every other cell, the registry answering, refusing or unmigrated, lands without the pointer — ${quiet.length} cells (${loud.map((l) => l.at).join(", ") || "none off"}; ${table()})`);
+    const unlike = quiet.filter(({ c }) => c.seen !== writing.seen);
+    assert(unlike.length === 0, `…each answering word for word as the writing cell does, ids aside (${unlike.map((u) => u.at).join(", ") || "all alike"}: ${unlike[0]?.c.seen.slice(0, 160) ?? ""} vs ${writing.seen.slice(0, 160)})`);
+    const away = Object.entries(cells.away);
+    assert(away.every(([, c]) => !c.landed && c.code === "SUPERSEDES_UNJUDGED" && c.retryable === true) && new Set(away.map(([, c]) => c.seen)).size === 1,
+      `the registry away for now: every target is the same retry, SUPERSEDES_UNJUDGED, word for word (${table()})`);
+    const [awayRows] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE '[13b] hook-two names % the registry away'`;
+    assert(awayRows?.n === 0, "…and none of them wrote a thought");
+
+    // The same rule whatever rides with the pointer: `derived_from` beside it
+    // takes no target past the check (review pass 3: every cell above sent
+    // supersedes alone, and a check skipped when sources came along passed).
+    // Its own target, named in upper case, is still its own: ids are compared
+    // as Postgres hands them back, not as typed.
+    const sourced = Object.entries(withSources).map(([n, c]) => `${n}=${c.landed ? (c.wrote ? "wrote" : "dropped") : c.code ?? "?"}`).join(" ");
+    assert(withSources.attributedOwn?.wrote === t.attributedOwn && upper?.wrote === t.attributedOwn, `its own thought is written with a source beside it, and named in upper case (${sourced}; upper ${upper?.wrote})`);
+    const sourcedOthers = Object.entries(withSources).filter(([n]) => n !== "attributedOwn");
+    assert(sourcedOthers.length === 7 && sourcedOthers.every(([, c]) => c.landed && c.wrote === null) && sourcedOthers.every(([, c]) => c.seen === withSources.attributedOwn.seen) && upper?.seen === writing.seen,
+      `…and none of the other seven targets is, a source beside it or not, each answering as the writing cell (${sourced})`);
+    assert(unsourced.attributedOwn?.wrote === t.attributedOwn && unsourced.attributedForeign?.landed === true && unsourced.attributedForeign.wrote === null && unsourced.attributedForeign.seen === unsourced.attributedOwn.seen,
+      `with no \`source\` at all, its own thought is written and another key's is not, alike in words (${unsourced.attributedOwn?.wrote}, ${unsourced.attributedForeign?.wrote})`);
+    assert(bare?.landed === true && bare.wrote === null && bare.seen === writing.seen, `a thought with no capture audit row is no key's: dropped, answering as the writing cell (${bare?.wrote ?? bare?.code})`);
+    const stuck = Object.entries(unprovable).filter(([, c]) => !c.landed || c.wrote !== null);
+    assert(Object.keys(unprovable).length === 4 && stuck.length === 0, `refused or unattributable with a source beside it: every pointer dropped, none retried (${stuck.map(([n, c]) => `${n}=${c.code ?? c.wrote}`).join(", ") || "all dropped"})`);
+
+    // A reader's pointer is not this check's: with its own agent id away or
+    // unattributable, a write key's supersedes is written as before, its own
+    // target or another key's, and a ghost is still UNKNOWN (review pass 3:
+    // no test ran a reader under the registry states).
+    for (const state of ["away", "unmigrated"] as Registry[]) {
+      await withRegistry(state, async () => {
+        for (const [name, target] of [["its own", sharedId!], ["another key's", t.attributedOwn]] as const) {
+          // The envelope, not call(): a refusal here is the finding, said as one, not a throw that ends the suite.
+          const e = await rpcAs("e2e-key")("tools/call", { name: "capture_thought", arguments: { content: `[13b] the writer names ${name} thought as supersedes, the registry ${state}`, supersedes: target } });
+          const text = textOf(e);
+          const got = e.result?.isError === true ? undefined : idIn(text);
+          const [row] = got ? await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${got}::uuid` : [];
+          assert(row?.s === target, `a reader's supersedes of ${name} thought is written with the registry ${state} (${row?.s ?? text.slice(0, 60)})`);
+        }
+        const ghost = await rpcAs("e2e-key")("tools/call", { name: "capture_thought", arguments: { content: `[13b] the writer names a ghost, the registry ${state}`, supersedes: "00000000-0000-4000-8000-0000000000dd" } });
+        assert(sc(ghost)?.code === "REFUSED_SUPERSEDES_UNKNOWN", `…and a ghost is REFUSED_SUPERSEDES_UNKNOWN with the registry ${state} (${sc(ghost)?.code})`);
+      });
+    }
+  }
+  // The check-then-write race on the pointer: its own thought deleted after
+  // the check, so the write meets the self-FK — made here by a trigger that
+  // refuses the first insert naming a supersedes with the constraint's words.
+  // The write goes again without the pointer and lands, as the check would
+  // have answered (SMD-2473); unmended it is the one cell that said UNKNOWN.
+  await sql`CREATE SEQUENCE fk_race_seq`;
+  await sql.unsafe(`CREATE FUNCTION fk_race() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.supersedes IS NOT NULL AND nextval('fk_race_seq') = 1 THEN RAISE EXCEPTION 'insert or update on table "thoughts" violates foreign key constraint "thoughts_supersedes_fkey"'; END IF; RETURN NEW; END $$`);
+  await sql`CREATE TRIGGER fk_race BEFORE INSERT ON thoughts FOR EACH ROW EXECUTE FUNCTION fk_race()`;
+  try {
+    const raced = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — its own thought deleted between the check and the write", source: "claude-code", supersedes: id } });
+    const racedId = idIn(textOf(raced));
+    const [racedRow] = racedId ? await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${racedId}::uuid` : [];
+    const [{ is_called: fkFired }] = await sql`SELECT is_called FROM fk_race_seq`;
+    assert(fkFired === true && raced.result?.isError !== true && racedRow !== undefined && racedRow.s === null, `a pointer refused by the self-FK in the write lands the capture without it — the refusal fired (${fkFired}; ${sc(raced)?.code ?? textOf(raced).split("\n")[0].slice(0, 60)})`);
+  } finally {
+    await sql`DROP TRIGGER fk_race ON thoughts`;
+    await sql`DROP FUNCTION fk_race()`;
+    await sql`DROP SEQUENCE fk_race_seq`;
   }
   // No existence oracle on a key that cannot read: re-sending the writer's
   // text says nothing of "already captured" to the capture key, and does to the writer.
@@ -1631,8 +1827,12 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   const [p] = await sql`SELECT metadata->>'source' AS origin FROM thoughts WHERE id = ${plain}::uuid`;
   assert(p?.origin === "mcp", `a capture naming no source still records mcp (${p?.origin})`);
 
-  // The writer sees the hook's summary where a session would look for it.
-  const found = await call("search_thoughts", { query: "eta", limit: 10, threshold: 0.1 });
+  // The writer sees the hook's summary where a session would look for it — by
+  // a quoted span of its own words, which ranks it with the strongest hits.
+  // The stub gives every text without alpha/beta/gamma one vector, so a bare
+  // "eta" left it to an arbitrary place among [13b]'s forty-odd ties (it fell
+  // out of the top 10 on some runs).
+  const found = await call("search_thoughts", { query: "\"the hook's first capture of a session that read eta\"", limit: 10, threshold: 0.1 });
   assert(found.includes(id!), "the summary the hook captured is retrievable by the writer key");
   await sql.close();
 }
