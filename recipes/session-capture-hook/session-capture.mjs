@@ -2150,11 +2150,8 @@ export async function postPending(cfg, own) {
         const summaryAt = Number.isNaN(pastMs(payload.prepared_at)) ? new Date().toISOString() : payload.prepared_at;
         if (!stateIsNewerNow) writeState(chain, { chain_id: chain, thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
         unlinkSync(here);
-        // `supersedes_sent`, not `supersedes`: the pointer the landed post named
-        // (none when the hook's mend or last resort dropped it), which a
-        // capture-only key's server keeps only for the key's own standing thought
-        // and otherwise drops without a word (SMD-2473) — the row's supersedes is
-        // what was written.
+        // `supersedes_sent`: postCapture's `sent`, what the post asked — a
+        // capture-only key's server may drop it without a word (SMD-2473).
         log(`captured ${who} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${posted.sent ? ` supersedes_sent=${posted.sent}` : ""}${payload.redactions?.length ? ` redactions=${payload.redactions.length}` : ""}${note ? ` note="${note}"` : ""}`);
         outcomes.push({ file, ok: true, id, note });
       } catch (e) {

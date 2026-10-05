@@ -994,6 +994,8 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
 // ── [6] Posting ──────────────────────────────────────────────────────────────
 console.log("\n[6] The background half posts over MCP, records the id, retries a provenance refusal without it, and keeps a failed payload");
 {
+  // The newest `captured` line a session's posts wrote (its "bookkeeping failed" lines aside).
+  const capturedLine = (session) => (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "").split("\n").filter((l) => l.includes(` captured session=${session} `) && !/bookkeeping failed/.test(l)).at(-1) ?? "";
   rmSync(STATE, { recursive: true, force: true });
   const cfg = { url: URL_, key: "cap-key" };
   assert(parseRpcBody('{"jsonrpc":"2.0","id":1,"result":{}}').result !== undefined && parseRpcBody('event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"a":1}}\n\n').result.a === 1, "both answer shapes parse");
@@ -1158,7 +1160,7 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
     `on the fifth attempt the pointer is dropped and the summary lands (${(so2.note ?? so2.error ?? "").slice(0, 60)})`);
   {
     // …and its captured line says so, naming no pointer it did not send (SMD-2473 PR 2 review pass 2).
-    const stuckLine = readFileSync(join(STATE, "log"), "utf8").split("\n").filter((l) => / captured session=s-stuck-ptr /.test(l)).at(-1) ?? "";
+    const stuckLine = capturedLine("s-stuck-ptr");
     assert(/note="supersedes dropped: 3 of 4/.test(stuckLine) && !/supersedes_sent=/.test(stuckLine), `the last resort's captured line carries the note and no supersedes_sent= (${stuckLine.slice(25, 140)})`);
   }
   // SMD-2473: the hook's verdict on a capture-only key's supersedes, cell by
@@ -1215,7 +1217,7 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
     // The log names the pointer sent, not one kept: the server drops a capture key's unprovable pointer without a word.
     const logged = readFileSync(join(STATE, "log"), "utf8");
     assert(logged.includes(`supersedes_sent=${landed[0].prior}`) && !/ supersedes=[0-9a-f]{8}-/.test(logged), "the captured line says supersedes_sent=, the pointer the post named");
-    const oldLine = logged.split("\n").find((l) => / captured session=s-cell-33 /.test(l)) ?? "";
+    const oldLine = capturedLine("s-cell-33");
     assert(/ captured session=s-cell-33 /.test(oldLine) && !/supersedes_sent=/.test(oldLine) && /supersedes dropped/.test(oldLine), `…and none when the mend dropped the pointer before the post that landed (review pass 1: it named the dropped one) (${oldLine.slice(25, 140)})`);
   }
   // …and not one attempt sooner: a payload whose pointer failed three of three
@@ -1253,7 +1255,7 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
     rmSync(join(STATE, "s-mend-bk.json"), { recursive: true, force: true });
     const beforeOwed = received.length;
     const [m2] = existsSync(owedPath) ? await postPending(cfg, owedPath) : [{}];
-    const mendLine = readFileSync(join(STATE, "log"), "utf8").split("\n").filter((l) => / captured session=s-mend-bk /.test(l) && !/bookkeeping failed/.test(l)).at(-1) ?? "";
+    const mendLine = capturedLine("s-mend-bk");
     assert(/bookkeeping deferred/.test(m1.note ?? "") && owed?.captured_id && owed.captured_sent === undefined && m2.ok && received.length === beforeOwed && /supersedes dropped/.test(mendLine) && !/supersedes_sent=/.test(mendLine),
       `a mend then a deferred bookkeeping: the next run posts nothing, and its line names no pointer (${mendLine.slice(25, 140)})`);
   }
@@ -1268,7 +1270,7 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
     writeFileSync(aged.payloadPath, JSON.stringify({ ...aged.payload, supersedes: uuid(93), captured_sent: uuid(93), captured_id: uuid(90), captured_note: "", attempts: 1, supersedes_failures: 1, prepared_at: new Date(Date.now() - 8 * 86_400_000).toISOString(), last_error: "capture failed: Error: this key's `supersedes` could not be checked against the target's capture record (permission denied)" }));
     const beforeAged = received.length;
     const [ag] = await postPending(cfg, aged.payloadPath);
-    const agedLine = readFileSync(join(STATE, "log"), "utf8").split("\n").filter((l) => / captured session=s-landed-aged /.test(l)).at(-1) ?? "";
+    const agedLine = capturedLine("s-landed-aged");
     assert(ag.ok && !/supersedes dropped/.test(ag.note ?? "") && received.length === beforeAged && readState("s-landed-aged")?.thought_id === uuid(90) && agedLine.includes(`supersedes_sent=${uuid(93)}`) && !/ note=/.test(agedLine),
       `a landed payload owed past a week is finished without a last-resort note or a post (${agedLine.slice(25, 160)})`);
   }
