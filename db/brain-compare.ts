@@ -293,7 +293,8 @@ export function boardSyncOf(info: BrainInfo): Pick<BrainReading, "boardSync" | "
   const db = dbOf(info);
   if (!db) return { boardSync: null, boardSyncUnread: NO_DATABASE };
   if (!("boardSync" in db)) return { boardSync: null, boardSyncUnread: OLDER_SERVER };
-  if (db.unread?.boardSync) return { boardSync: null, boardSyncUnread: "the brain did not read it" };
+  // The record's reason is one token (timeout, refused, deadline, …); its message, the database's words, stays out of the line.
+  if (db.unread?.boardSync) return { boardSync: null, boardSyncUnread: `the brain did not read it: ${UNREAD_REASONS.has(db.unread.boardSync.reason) ? db.unread.boardSync.reason : "error"}` };
   const w: unknown = db.boardSync;
   if (w === null) return { boardSync: null, boardSyncUnread: null };
   if (typeof w !== "string" || !ISO_INSTANT.test(w) || Number.isNaN(Date.parse(w))) return { boardSync: null, boardSyncUnread: "the record's value is not an ISO instant" };
@@ -303,11 +304,14 @@ export function boardSyncOf(info: BrainInfo): Pick<BrainReading, "boardSync" | "
 /** Why an older server's watermark is unread — every v1.5.0 peer, so the verdict stays quiet about it. */
 export const OLDER_SERVER = "the server is older than SMD-2261";
 
+/** brain-info.ts's UnreadReason, as the record may spell it. */
+const UNREAD_REASONS = new Set<string>(["refused", "timeout", "deadline", "invisible", "error"]);
+
 /** Why a watermark is unread when the whole database did not answer — the ledger and the count are unread too, and say so. */
 const NO_DATABASE = "the database did not answer";
 
 /** A watermark a server that has the field did not give: a read past the /health deadline, refused, or malformed. */
-export const boardSyncMissed = (r: BrainReading) => r.boardSyncUnread !== null && r.boardSyncUnread !== OLDER_SERVER && r.boardSyncUnread !== NO_DATABASE;
+const boardSyncMissed = (r: BrainReading) => r.boardSyncUnread !== null && r.boardSyncUnread !== OLDER_SERVER && r.boardSyncUnread !== NO_DATABASE;
 
 /** The watermark's one shape, as brain-info.ts's boardSyncValue sends it. */
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -335,7 +339,7 @@ export function boardSyncDelta(a: BrainReading, b: BrainReading): BoardSyncDelta
 }
 
 /** Whether a board-sync standing is a delta the report and the exit code count. */
-export const isBoardSyncDelta = (d: BoardSyncDelta | null): boolean => d !== null && ("none" in d || d.days !== 0);
+const isBoardSyncDelta = (d: BoardSyncDelta | null): boolean => d !== null && ("none" in d || d.days !== 0);
 
 /**
  * Newest capture, read from thought_stats — the one machine-unfriendly read here.
@@ -706,8 +710,9 @@ export function diffRow(query: string, arm: ReplayArm, a: string[], b: string[])
 
 /**
  * The one-line verdict: current when the two are in lockstep on migration and
- * count, else how far b trails or leads a — the "trust or distrust this tier's
- * answer at a glance" line a grooming session reads.
+ * count, and on the board-sync watermark where both servers have it, else how
+ * far b trails or leads a — the "trust or distrust this tier's answer at a
+ * glance" line a grooming session reads.
  */
 export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelta: number | null): string {
   const parts: string[] = [];

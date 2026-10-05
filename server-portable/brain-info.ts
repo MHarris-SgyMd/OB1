@@ -171,13 +171,15 @@ const COUNT_SQL: Record<CountedTable, (sql: SqlTag) => Promise<{ n: number }[]>>
  * counts, and only one Postgres reads as a timestamp: a malformed value, a bare
  * date or a word timestamptz accepts ('infinity', 'now') is passed over rather
  * than failing the read or winning the max — the value is a thought's
- * metadata, and the record carries it unguarded (render.ts's AS_RECORD). So is
- * an instant past an hour from now by the database's clock — Linear's updatedAt
- * is never in the future, so a host clock more than an hour slow passes a fresh
- * move over until it catches up —
- * and a capture key's far-future value (any write key can set the key) would
- * otherwise win the max for good — or, past 9999 in UTC, render a shape
- * boardSyncValue refuses and leave the field unread for good (review pass 1).
+ * metadata, and the record carries it unguarded (render.ts's AS_RECORD).
+ *
+ * So is an instant more than an hour past the database's clock. Linear's
+ * updatedAt is never in the future, and any write key can set the key: a
+ * far-future value would otherwise win the max for good, and one past 9999 in
+ * UTC would render a shape boardSyncValue refuses, leaving the field unread
+ * for good (review pass 1). The cost is a host clock more than an hour slow,
+ * whose watermark lags a fresh move until the clock catches up.
+ *
  * The cast sits in an inner CASE, after the validity test, because AND does
  * not order its operands. The pattern is spelled with [0-9], not \d: a Bun
  * template drops the backslash. `metadata ? key` is the GIN index 001 builds.

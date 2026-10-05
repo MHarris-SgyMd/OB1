@@ -296,7 +296,7 @@ function frame(msg: unknown, sse?: boolean): Response {
   // Either side: a's none named as a's, a's unread no delta (review pass 1: only b's side was driven).
   const aNone = freshnessVerdict(mk({ label: "bare", boardSync: null }), mk({ label: "peer" }), 0);
   ok(/bare holds no usable board-sync watermark/.test(aNone), `a's missing watermark is named as a's (${aNone})`);
-  const aUnread = freshnessVerdict(mk({ boardSync: null, boardSyncUnread: "the server is older than SMD-2261" }), mk({ label: "peer", boardSync: "2026-09-20T12:00:00.000Z" }), 0);
+  const aUnread = freshnessVerdict(mk({ boardSync: null, boardSyncUnread: OLDER_SERVER }), mk({ label: "peer", boardSync: "2026-09-20T12:00:00.000Z" }), 0);
   ok(aUnread === "current with each other — same migration and thought count.", `a's unread watermark is no delta and no claim (${aUnread})`);
   // An unread side is not a delta, and "current" does not claim the watermark.
   // A new server that did not read it (the /health deadline) is not "current" — on
@@ -313,7 +313,7 @@ function frame(msg: unknown, sse?: boolean): Response {
   ok(down === "no delta on what could be read; migration ledger and thought count unread, so freshness is not certain.", `a database that did not answer names the ledger and count only (${down})`);
   const three = freshnessVerdict(a, mk({ label: "x", thoughts: null, boardSync: null, boardSyncUnread: "the brain did not read it" }), null);
   ok(three === "no delta on what could be read; migration ledger, thought count and board-sync watermark unread, so freshness is not certain.", `three unread axes read as one list (${three})`);
-  const older = freshnessVerdict(a, mk({ label: "old", boardSync: null, boardSyncUnread: "the server is older than SMD-2261" }), 0);
+  const older = freshnessVerdict(a, mk({ label: "old", boardSync: null, boardSyncUnread: OLDER_SERVER }), 0);
   ok(older === "current with each other — same migration and thought count.", `an unread watermark is no delta and no claim (${older})`);
   ok(boardSyncDelta(a, mk({ boardSync: null, boardSyncUnread: "x" })) === null && boardSyncDelta(mk({ boardSync: null }), mk({ boardSync: null })) === null, "boardSyncDelta: unread or none on both sides is no delta");
 }
@@ -655,7 +655,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   const f = startFake({ info: baseInfo({ boardSync: "unread" }), newest: "9/24/2026", hits: {} });
   try {
     const out = renderComparison(await compareBrains(e.ep, f.ep, {}));
-    ok(out.includes(`  board sync: a=${SYNCED}  b=unread (the brain did not read it)`), `a watermark a new server did not read says why (${out.split("\n").find((l) => l.includes("board sync"))})`);
+    ok(out.includes(`  board sync: a=${SYNCED}  b=unread (the brain did not read it: deadline)`), `a watermark a new server did not read says why (${out.split("\n").find((l) => l.includes("board sync"))})`);
   } finally { e.server.stop(true); f.server.stop(true); }
 }
 

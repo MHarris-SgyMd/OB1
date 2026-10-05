@@ -357,13 +357,13 @@ An agent or an operator can ask a running brain what it is (SMD-2041). The
 key does not) answers a short table:
 
 ```
-Version:         1.1.0+upstream.9543c29 (release range 049–051; this tree adds 052, unreleased)
+Version:         1.5.0 (release range 073–076; this tree adds 077–079, unreleased)
 Commit:          8ba58db5…
 Store:           sql · tier stable
 Embedding:       qwen3-embedding:4b @ 1024
 Postgres:        16.15 (Debian 16.15-1.pgdg12+2) · pgvector 0.8.6 (schema public)
-Schema version:  1.1.0+upstream.9543c29
-Migrations:      052 applied — this server's tree ends at 052 (current: the ledger's highest is the tree's last)
+Schema version:  1.5.0
+Migrations:      079 applied — this server's tree ends at 079 (current: the ledger's highest is the tree's last)
 Brain embedding: qwen3-embedding:4b @ 1024
 Rows:            373 thoughts · 1,204 audit events · 90 chunks · 512 entities
 Database size:   45.2 MB
@@ -383,8 +383,10 @@ the whole database's. The server's embedding and the brain's are printed side by
 side without a verdict (preflight's embedding rows judge them; SMD-2071).
 `Board sync` is the board-sync watermark (SMD-2261): the newest Linear
 `updatedAt` any thought carries in `metadata.linear_updated_at`, which
-`db/sync-linear.ts` writes, in UTC; `none` when no thought carries a usable one
-(a malformed value, or one past an hour from now, is passed over). It is a
+`db/sync-linear.ts` writes, in UTC. It reads `none — no thought carries a usable
+Linear watermark` when none counts (a malformed value, or one more than an hour
+past the database's clock, is passed over), and `?` when the read did not answer
+(named in `Not read`). It is a
 high-water mark — the newest board move the brain reflects, not proof it reflects
 every one before it — and a quiet board leaves it old on a current brain.
 `tier.ts --compare` diffs it between two brains.

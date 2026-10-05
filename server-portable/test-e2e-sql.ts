@@ -1714,8 +1714,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(ids.length === marks.length, `enough thoughts to plant ${marks.length} watermarks (${ids.length})`);
   for (const [i, id] of ids.entries()) await sql`UPDATE thoughts SET metadata = metadata || ${{ linear_updated_at: marks[i] }}::jsonb WHERE id = ${id}::uuid`;
   const synced = (await health("e2e-key") as Record<string, any>).database ?? {};
-  const [want] = await sql`SELECT to_char(max(v::timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS w FROM unnest(${sql.array(["2026-09-23T08:00:00.000Z", "2026-09-24T09:30+02:00"], "TEXT")}::text[]) v`;
-  assert(synced.boardSync === "2026-09-24T07:30:00.000Z" && synced.boardSync === want.w && !("boardSync" in (synced.unread ?? {})),
+  assert(synced.boardSync === "2026-09-24T07:30:00.000Z" && !("boardSync" in (synced.unread ?? {})),
     `the watermark is the newest full instant, in UTC, the malformed ones passed over (${synced.boardSync}, ${JSON.stringify(synced.unread)})`);
   const boardRow = (await call("brain_info")).split("\n").find((l) => l.startsWith("Board sync"));
   assert(/^Board sync: +2026-09-24T07:30:00\.000Z$/.test(boardRow ?? ""), `the tool's table carries the same watermark (${boardRow})`);
@@ -1723,8 +1722,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // read is driven on a connection set elsewhere — review pass 1).
   const readFacts = (await import("./brain-info.ts")).readDatabaseFacts;
   await sql`SET TIME ZONE 'America/New_York'`;
-  const ny = await readFacts(sql as never);
-  await sql`RESET TIME ZONE`;
+  const ny = await readFacts(sql as never).finally(() => sql`RESET TIME ZONE`);
   assert(ny.boardSync === "2026-09-24T07:30:00.000Z", `the watermark is the same instant in UTC under a New York session (${ny.boardSync})`);
   // Each shape that must be read, alone on one thought so it must win: Linear's
   // own (ingest-linear.ts writes issue.updatedAt, …SS.mmmZ) in the afternoon, a
