@@ -1778,18 +1778,26 @@ retry rule, so 32 of 32 is derived, not re-measured whole) — and a call
 aborted so is retried as a cut one is, the retry read whole, since a penalised
 answer was measured to repeat an item three times and recover; an
 answer that enumerates distinct ids is not a loop by that rule and runs to the
-budget, which stays the bound. A loop inside a string is caught too: an entity
-named `Linear Linear Linear …`, each item one copy longer than the last, so no
-item repeats. Once the answer ends in 24 copies of one short unit holding a
-letter or a digit, whitespace aside (`repeatedTail`, `TOKEN_REPEATS`;
-SMD-2449), the call is aborted and
-retried the same way. Ollama's own repeat limit (more than 30 identical tokens)
-would otherwise end the stream with no finish_reason, a cut that read as a
-socket closed mid-answer: a provider failure the worker paused on, retried
-identically and could stop for. A cut answer whose tail repeats any unit 24
-times (punctuation and emoji too, which Ollama's limit also cuts) or ends in 24 or
-more whitespace characters is that runaway too, streamed or read whole (a whole answer
-Ollama cuts comes back with `finish_reason: null`). A call whose retry also runs away is a
+budget, which stays the bound. A loop inside a string is caught too: entity
+after entity named `Linear Linear …`, each name one copy longer than the last,
+so no item repeats. Once the answer ends in 24 copies of one short unit holding
+a letter or a digit, whitespace aside (`repeatedTail`, `TOKEN_REPEATS`;
+SMD-2449), the call is aborted and retried the same way. Ollama's own repeat
+limit (more than 30 identical tokens) would otherwise end the stream with no
+finish_reason, a cut that read as a socket closed mid-answer: a provider
+failure the worker paused on, retried identically and could stop for. A cut
+answer whose tail repeats any unit 24 times (punctuation and emoji too, which
+Ollama's limit also cuts) or ends in 24 or more whitespace characters is that
+runaway too, streamed or read whole (a whole answer Ollama cuts comes back
+with `finish_reason: null`). A row failed before this change with `provider
+error after 3 retries: … closed mid-answer …` comes back with
+`--retry-failed`, and the thoughts a stopped worker left pending are taken by
+the next run. There is no setting for the 24, by design: a name that copies a
+longer run from its text (a null SHA's zeros) costs one extra call, and the
+retry's answer stands. A gateway between the worker and Ollama that batches
+its tokens into larger frames can delay the abort, and one that adds `[DONE]`
+or a `finish_reason` to the cut stream turns a loop of punctuation back into
+an unretried malformed answer. A call whose retry also runs away is a
 malformed answer: a window's is left out of a thought at least one of whose
 other windows parsed (SMD-2260, below), and a thought none of whose windows
 parsed is recorded failed, retryable.
@@ -1802,8 +1810,10 @@ preflight's `extraction window` row print the same sentence. The prompt version
 is 2 — a pass under it re-extracts a brain whose thoughts were cut at 8,000
 characters under p1 — so the first run after upgrading needs `--switch-key`.
 `--dump`'s line carries `windows`, `retried` (or `escalated: <model>` when the
-runaway went to the larger model, SMD-2000) and `abortedMs` — how far into
-the call a runaway was aborted on the stream — and, for a windowed thought,
+runaway went to the larger model, SMD-2000), `abortedMs` — how far into
+the call a runaway was aborted on the stream, or cut there by the provider's
+repeat limit — and `abortedBy` (`item`, a third copy of one item; `token`,
+one unit repeated, SMD-2449), and, for a windowed thought,
 each window's own answer in `parts` beside the merged one. Why, measured:
 `evals/README.md`, "Entity extraction in windows".
 
