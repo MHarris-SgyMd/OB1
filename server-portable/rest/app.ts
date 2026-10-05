@@ -8,7 +8,7 @@
 
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { authenticate, canRead, SCOPES, type AuthConfig, type Principal } from "../auth.ts";
+import { authenticate, canRead, CLIENT_SCOPES, type AuthConfig, type Principal } from "../auth.ts";
 import type { AgentOutcome } from "../agents.ts";
 import { SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
@@ -116,19 +116,27 @@ export function createRestApp(deps: RestDeps): Hono {
 
   // One line per request: the method, the route's template — never the path
   // it was given (an id), the query string, a key or a body — the status and
-  // the time. Registered first, so every answer below is counted.
+  // the time. Registered first, so every answer below is counted — but the
+  // liveness probe's: the container's healthcheck asks every 30 s, and half
+  // the log was its 200 (SMD-2284 PR 3 review pass 1). A /health that is not
+  // a 200 is still logged.
   app.use("*", async (c, next) => {
     deps.init();
     const started = performance.now();
     await next();
     const template = c.req.routePath === "*" || c.req.routePath === "/*" ? "-" : c.req.routePath;
+    if (template === "/health" && c.res.status === 200) return;
     log(`api ${c.req.method} ${template} ${c.res.status} ${Math.round(performance.now() - started)}ms`);
   });
 
   // Liveness, for the container's healthcheck: no key, no store, no answer
   // about the brain. Internal only — the public /health is the MCP server's.
   app.get("/health", (c) => c.json({ status: "ok" }));
-  app.get("/openapi.json", (c) => c.json(doc));
+  // The document names where its paths are, as the caller reached it: `/api`
+  // through the proxy's opt-in route, the root on the mesh — so a client
+  // generated from it calls this server, not the origin's root, which is the
+  // MCP server's (review pass 1).
+  app.get("/openapi.json", (c) => c.json({ ...doc, servers: [{ url: linkBase(c) || "/" }] }));
 
   const refuse = (c: Context, status: 400 | 401 | 403 | 404 | 405 | 503, body: { code: TransportCode } & Record<string, unknown>, headers: Record<string, string> = {}) =>
     c.json(body, status, headers);
@@ -144,15 +152,15 @@ export function createRestApp(deps: RestDeps): Hono {
   const headOnly = (c: Context, type = "application/json") => c.req.method === "HEAD" ? c.body(null, 200, { "content-type": type }) : null;
 
   /**
-   * The caller, or the answer that refuses it: a key that authenticates (any
-   * scope), then the registry's word on it — revoked is refused for good, busy
+   * The caller, or the answer that refuses it: a key that authenticates (a
+   * caller's scope — a forwarder key alone is unknown here), then the registry's word on it — revoked is refused for good, busy
    * for now — with its stable agent id set for the audit row.
    */
   async function caller(c: Context): Promise<Principal | Response> {
     const keys = deps.keys();
     let principal: Principal | null = null;
     for (const key of headerKeys(c.req.raw)) {
-      principal = authenticate(key, keys, { admit: SCOPES });
+      principal = authenticate(key, keys, { admit: CLIENT_SCOPES });
       if (principal) break;
     }
     if (!principal) return refuse(c, 401, { code: "UNAUTHORIZED" }, { "WWW-Authenticate": "Bearer" });
@@ -251,7 +259,7 @@ export function createRestApp(deps: RestDeps): Hono {
       // Saved, but its vector did not attach (the PostgREST two-step): the row
       // is there, so the answer is the creation, flagged — a client that read a
       // refusal as "not written" would capture again.
-      if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false }, 201, { Location: `/v1/thoughts/${r.id}` });
+      if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false }, 201, { Location: `${linkBase(c)}/v1/thoughts/${r.id}` });
       const status = REFUSAL_STATUS[r.code];
       return c.json(refusalValue(r), status, status === 503 ? RETRY_AFTER : {});
     });
@@ -282,6 +290,20 @@ type Captured = Extract<Awaited<ReturnType<Core["capture"]>>, { ok: true }>["val
 const capturedFor = (p: Principal, v: Captured): object =>
   canRead(p) ? v : { id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }), embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures };
 
+/**
+ * Where this server's routes sit in the URL its caller used: "" on the mesh,
+ * `/api` through the proxy's opt-in route, whose stripPrefix adds it as
+ * `X-Forwarded-Prefix` — after the entrypoint has dropped any the client sent,
+ * an untrusted forwarded header (Traefik's default; measured through the
+ * stack). A caller on the mesh may send its own; it shapes only that caller's
+ * links. A value that is not a plain path of one to four segments is ignored,
+ * so a link stays on this origin.
+ */
+export function linkBase(c: Context): string {
+  const prefix = c.req.header("x-forwarded-prefix")?.trim() ?? "";
+  return /^(?:\/[A-Za-z0-9_-]+){1,4}$/.test(prefix) ? prefix : "";
+}
+
 /** A success as JSON: the operation's value, with a creation's Location, and a job's links on this server's own routes. */
 function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: object, p: Principal): Response {
   if (name === "capture_thought") {
@@ -293,11 +315,12 @@ function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: ob
     // row keeps the one it had (073's upsert) — so false says what this
     // capture did, not what the row holds, which a key that cannot read may
     // not learn (whether the text was already a thought).
-    return c.json({ ...capturedFor(p, v), embeddingAttached: v.embeddings.allowed }, 201, { Location: `/v1/thoughts/${v.id}` });
+    return c.json({ ...capturedFor(p, v), embeddingAttached: v.embeddings.allowed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
   }
   if (name === "scan_thoughts") {
     const { jobId } = value as { jobId: string };
-    return c.json({ ...value, poll: `/v1/jobs/${jobId}`, stream: `/v1/jobs/${jobId}/stream` }, 202, { Location: `/v1/jobs/${jobId}` });
+    const base = linkBase(c);
+    return c.json({ ...value, poll: `${base}/v1/jobs/${jobId}`, stream: `${base}/v1/jobs/${jobId}/stream` }, 202, { Location: `${base}/v1/jobs/${jobId}` });
   }
   return c.json(value, status);
 }

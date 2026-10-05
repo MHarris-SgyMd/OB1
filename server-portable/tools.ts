@@ -63,6 +63,8 @@ export const UNLOCKS: Readonly<Record<Scope, readonly ToolScope[]>> = {
   read: ["read"],
   capture: ["capture"],
   write: ["read", "capture", "write"],
+  // A forwarder's key grants nothing (SMD-2284); no server admits it as a caller.
+  forward: [],
 };
 
 /** Every tool name a write-scoped key sees, sorted — derived from UNLOCKS, not restated (eleventh review pass: it was every manifest entry, a second statement of the hierarchy). */

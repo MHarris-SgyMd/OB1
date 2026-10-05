@@ -837,12 +837,12 @@ export class SqlStore implements ThoughtStore {
    * any out-of-order arrival the per-record chain did not already serialize)
    * cannot move a finished job back to a live state.
    */
-  jobSink(): JobSink {
+  jobSink(door: string): JobSink {
     const sql = this.sql;
     return {
       async write(row: JobRow): Promise<void> {
         await sql`
-          INSERT INTO jobs (id, kind, owner_key_hash, actor, status, progress, result, error, created_at, started_at, ended_at, updated_at)
+          INSERT INTO jobs (id, kind, owner_key_hash, actor, status, progress, result, error, created_at, started_at, ended_at, updated_at, door)
           VALUES (
             ${row.id}::uuid, ${row.kind}, ${row.ownerKeyHash}, ${row.actor}, ${row.status},
             ${row.progress ?? null}::jsonb,
@@ -851,7 +851,8 @@ export class SqlStore implements ThoughtStore {
             to_timestamp(${row.createdAt}::double precision / 1000.0),
             to_timestamp(${row.startedAt ?? null}::double precision / 1000.0),
             to_timestamp(${row.endedAt ?? null}::double precision / 1000.0),
-            now()
+            now(),
+            ${door}
           )
           ON CONFLICT (id) DO UPDATE SET
             status     = EXCLUDED.status,
@@ -897,6 +898,7 @@ export class SqlStore implements ThoughtStore {
                  updated_at = now(),
                  error      = ${{ message: "the server restarted before the job finished; re-run it (a detached run does not survive a restart)", code: "SERVER_RESTARTED" }}::jsonb
            WHERE status IN ('pending', 'running')
+             AND door = ${door}
           RETURNING id`;
         return rows.length;
       },

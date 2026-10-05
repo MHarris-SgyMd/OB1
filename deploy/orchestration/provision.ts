@@ -371,9 +371,14 @@ export function checkBrainKey(credential: any, env: Record<string, string>): voi
   const records: { name: string; scope: Scope; sha256: string }[] = [...parseKeyRecords(env.MCP_ACCESS_KEYS ?? "").keys];
   if (env.MCP_ACCESS_KEY) records.push({ name: "MCP_ACCESS_KEY (legacy)", scope: "write", sha256: hashKey(env.MCP_ACCESS_KEY) });
   const declared: string | undefined = credential.brainScope;
+  if (declared !== undefined && declared !== "capture" && declared !== "read") throw new Error(`credential "${credential.name}" declares brainScope ${declared} — a workflow's brain credential is capture or read`);
   const hits = candidates(credential.data).map(hashKey).flatMap((h) => records.filter((r) => r.sha256 === h));
   for (const r of hits) {
     if (r.scope === "write") throw new Error(`credential "${credential.name}": it holds ${r.name}, a WRITE-scope brain key — a workflow holds a capture key (or, for an eval's read tool, a read key), never a write key`);
+    // A forwarder grants nothing, but in the REST core's forwarder slot it will
+    // name the actor of another key's request (SMD-2284): the MCP server's alone.
+    // Said by name, whatever brainScope the template declares.
+    if (r.scope === "forward") throw new Error(`credential "${credential.name}": it holds ${r.name}, a FORWARD-scope brain key — the MCP server's own, which names who carried another key's request; a workflow holds a capture key (or, for an eval's read tool, a read key)`);
     if (!declared) throw new Error(`credential "${credential.name}": it holds the brain key ${r.name} (${r.scope}) but declares no brainScope — if it is meant to carry a brain key, add "brainScope": "${r.scope}" to its template; if it is an inbound key or a vendor's, it must not reuse a brain key's value`);
     if (r.scope !== declared) throw new Error(`credential "${credential.name}" declares brainScope ${declared} and holds ${r.name}, a ${r.scope}-scope key — mint a ${declared} key (server-portable/keygen.ts --scope ${declared})`);
   }
@@ -804,6 +809,15 @@ async function selfCheck(): Promise<number> {
   expect("a key as `Bearer <key>` is seen", throws(() => checkBrainKey({ name: "a", type: "httpHeaderAuth", data: { name: "Authorization", value: `Bearer ${wr}` } }, env), /WRITE-scope/));
   expect("a key in a URL's ?key= is seen", throws(() => checkBrainKey({ name: "u", type: "httpQueryAuth", data: { url: `http://server:8000/mcp?key=${wr}&x=1` } }, env), /WRITE-scope/));
   expect("a key nested under another field is seen", throws(() => checkBrainKey({ name: "n", type: "custom", data: { outer: { inner: [cap] } } }, env), /declares no brainScope/));
+  // A forwarder (SMD-2284): refused whatever the template declares — the only guard when it declares forward itself.
+  const fwd = "f".repeat(64);
+  const fwdEnv = { ...env, MCP_ACCESS_KEYS: `${env.MCP_ACCESS_KEYS},mcp-forwarder:forward:${hashKey(fwd)}` };
+  for (const declared of [undefined, "capture", "read"]) {
+    expect(`a forwarder key is refused by name (brainScope ${declared ?? "none"})`, throws(() => checkBrainKey(brain(fwd, declared), fwdEnv), /FORWARD-scope/));
+  }
+  for (const declared of ["forward", "write"]) {
+    expect(`a credential declaring brainScope ${declared} is refused up front`, throws(() => checkBrainKey(brain(cap, declared), fwdEnv), new RegExp(`declares brainScope ${declared} — a workflow's brain credential is capture or read`)));
+  }
 
   const tricky = 'a"b\\c\nd';
   expect("render escapes a value into JSON", JSON.parse(render('{"v":"${K}"}', { K: tricky }, "t")).v === tricky);
@@ -1112,7 +1126,7 @@ if (import.meta.main) {
     const written = await initSecrets(envFile);
     console.log(written.length ? `wrote ${written.join(", ")} to ${envFile}` : `${envFile} already holds the profile's secrets`);
     const env = parseEnv(readFileSync(envFile, "utf8"));
-    if (!env.N8N_BRAIN_CAPTURE_KEY) console.log("optional: N8N_BRAIN_CAPTURE_KEY, for a template that captures into the brain (none ships yet) — cd server-portable && bun keygen.ts --name n8n --scope capture; the key into N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS, then recreate the server (compose up -d server; a restart keeps the old keys)");
+    if (!env.N8N_BRAIN_CAPTURE_KEY) console.log("optional: N8N_BRAIN_CAPTURE_KEY, for a template that captures into the brain (none ships yet) — cd server-portable && bun keygen.ts --name n8n --scope capture; the key into N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS, then recreate the servers (compose up -d server api; a restart keeps the old keys)");
     console.log("back up N8N_ENCRYPTION_KEY and N8N_OWNER_PASSWORD with POSTGRES_PASSWORD; if n8n was running, recreate it (compose --profile orchestration up -d n8n; not `compose restart`, which keeps the old values)");
     process.exit(0);
   }

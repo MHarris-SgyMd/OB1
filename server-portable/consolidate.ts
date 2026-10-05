@@ -21,8 +21,9 @@
  *
  * Deciding which pairs to ask about is NOT here; it is
  * `consolidation_candidates()` in migration 029 (redefined by 063, which lets
- * a stale pair through again, and by 066, which never pairs a thought with a
- * member of its derived_from), so the worker and the eval share one
+ * a stale pair through again, by 066, which never pairs a thought with a
+ * member of its derived_from, and by 079, which never pairs two tickets
+ * Linear links), so the worker and the eval share one
  * definition of the candidate set.
  */
 
@@ -205,6 +206,57 @@ export function cleanForDisplay(v: unknown): string {
   return typeof v === "string" ? v.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") : "";
 }
 
+/**
+ * Every break a reader may take as a new line: CRLF, CR, LF, VT, FF, the three
+ * information separators Python's splitlines() breaks on (FS, GS, RS), NEL,
+ * and Unicode's line and paragraph separators (SMD-2483, review pass 1).
+ * render.ts fences a text's lines on it, and oneLine makes each a space. It
+ * lives here, beside cleanForDisplay, so parseJudgement can use it without
+ * importing render.ts, which imports this file (SMD-2536).
+ */
+export const LINE_BREAK = /\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/;
+/**
+ * What a line of fenced text may not keep: the C0 and C1 controls but the tab
+ * (an ESC sequence or a backspace moves a terminal's cursor back over the
+ * fence), DEL, and the bidirectional controls, which lay a line out
+ * right-to-left with its fence at the far end (SMD-2483, review pass 1).
+ * Global, for `.replace`: a `.test` or `.exec` on it would carry `lastIndex`
+ * from one call to the next.
+ */
+// eslint-disable-next-line no-control-regex
+export const UNSHOWN = /[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * Untrusted text on one line: every LINE_BREAK a space, cleanForDisplay's
+ * controls and UNSHOWN's dropped, whitespace collapsed (SMD-2510's rule; `\s`
+ * matches none of NEL, FS, GS and RS). render.ts's snipText cuts it for a
+ * reply, and parseJudgement for the row it stores (SMD-2536).
+ */
+export function oneLine(text: string): string {
+  return cleanForDisplay(text.split(LINE_BREAK).join(" ")).replace(UNSHOWN, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The first `max` code points of `t`, so an emoji or other astral character
+ * at the bound is kept or dropped whole, never left as half a surrogate pair.
+ * No more UTF-16 units than the bound is no more code points; past it, the
+ * walk stops at the bound, not at the end of a whole thought's text.
+ */
+export function cutByCodePoint(t: string, max: number): string {
+  if (t.length <= max) return t;
+  let cut = "";
+  let n = 0;
+  for (const c of t) {
+    if (n === max) return cut;
+    cut += c;
+    n++;
+  }
+  return t;
+}
+
+/** Where parseJudgement cuts the judge's reason, in code points. */
+export const REASON_MAX = 400;
+
 function clampConfidence(v: unknown): number {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
   if (!Number.isFinite(n)) return 0.5;
@@ -216,7 +268,11 @@ function clampConfidence(v: unknown): number {
  * the vocabulary: a verdict outside the three is malformed, not coerced. A
  * direction is read only from a conflict — an "A" on an agree verdict is
  * dropped — and "A" means the older thought, "B" the newer, as the prompt
- * labels them. The reason is clipped; a reviewer reads it, a database stores it.
+ * labels them. The reason is one line, clipped: a reviewer reads it, a
+ * database stores it, and --dump writes it to a JSON line — every break a
+ * space and the controls a line may not keep dropped, by oneLine's rule, cut
+ * by code point (SMD-2536; `\s` alone left a NEL standing, and VT, FF, FS,
+ * GS and RS were deleted, gluing the words either side).
  */
 export function parseJudgement(raw: string): Judgement {
   const bad: Judgement = { verdict: "unrelated", supersedes: "unknown", confidence: 0, reason: "", malformed: true };
@@ -237,7 +293,7 @@ export function parseJudgement(raw: string): Judgement {
     if (s === "A" || s === "OLDER") supersedes = "older";
     else if (s === "B" || s === "NEWER") supersedes = "newer";
   }
-  const reason = typeof parsed.reason === "string" ? cleanForDisplay(parsed.reason).replace(/\s+/g, " ").trim().slice(0, 400) : "";
+  const reason = typeof parsed.reason === "string" ? cutByCodePoint(oneLine(parsed.reason), REASON_MAX) : "";
   return { verdict: verdict as Verdict, supersedes, confidence: clampConfidence(parsed.confidence), reason, malformed: false };
 }
 

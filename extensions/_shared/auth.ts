@@ -28,9 +28,19 @@
  *   names, and a caller that names none admits read and write: to a vendored
  *   server a capture key is no principal at all (unauthorized inside the
  *   envelope), whatever MCP_ACCESS_KEYS it was pasted into. The core server
- *   passes `{ admit: SCOPES }` (first review pass: a docblock sentence asking
+ *   passes `{ admit: CLIENT_SCOPES }` (first review pass: a docblock sentence asking
  *   operators to keep the key out of the extensions' env was the only guard).
  *   Migration 049 lets the agent registry record the scope.
+ *
+ *   A fourth, `forward` (SMD-2284), grants nothing by itself. It is the MCP
+ *   server's own key when it forwards a client's key to the REST core: the
+ *   client's key decides what the request may do, and the forwarder's names
+ *   who carried it. No server admits it as a caller — the core servers admit
+ *   CLIENT_SCOPES, and the vendored copies DEFAULT_ADMIT — so alone it is
+ *   refused like an unknown key everywhere; the REST core's forwarder slot,
+ *   the one place it will be read, is SMD-2284's PR 4b, and until then nothing
+ *   reads it. The registry records it with no scope (agents.ts, recordedScope):
+ *   049's CHECK does not hold `forward`, and no migration widens it.
  *
  *   Named keys, revocable independently. One per client, so retiring the key you
  *   pasted into a laptop does not break the rest.
@@ -71,13 +81,19 @@
 import { Buffer } from "node:buffer";
 import { createHash, timingSafeEqual } from "node:crypto";
 
-export type Scope = "read" | "write" | "capture";
+export type Scope = "read" | "write" | "capture" | "forward";
 /** Every scope keygen.ts mints and parseKeyRecords accepts, in the order the docs list them. */
-export const SCOPES: readonly Scope[] = Object.freeze(["read", "write", "capture"]);
+export const SCOPES: readonly Scope[] = Object.freeze(["read", "write", "capture", "forward"]);
+/**
+ * The scopes a caller may hold: every one but `forward`, which grants nothing
+ * and is for the REST core's forwarder slot alone (SMD-2284's PR 4b). What the
+ * core servers admit.
+ */
+export const CLIENT_SCOPES: readonly Scope[] = Object.freeze(["read", "write", "capture"]);
 /**
  * The scopes a consumer admits when it does not say: the two every consumer
  * knew before SMD-1298. A server that registers a tool group for a capture key
- * — the core server — names SCOPES; one that never asked (the vendored copies
+ * — the core servers — names CLIENT_SCOPES; one that never asked (the vendored copies
  * of this file) refuses such a key as it refuses an unknown one.
  */
 export const DEFAULT_ADMIT: readonly Scope[] = Object.freeze(["read", "write"]);
@@ -138,7 +154,7 @@ export function parseKeyRecords(spec: string): { keys: KeyRecord[]; problems: st
     }
     const [name, scope, sha] = parts.map((p) => p.trim());
     if (!name) problems.push(`an entry has no name`);
-    if (!isScope(scope)) problems.push(`key "${name}" has scope "${scope}" — expected read, write or capture`);
+    if (!isScope(scope)) problems.push(`key "${name}" has scope "${scope}" — expected read, write, capture or forward`);
     if (!SHA256_HEX.test(sha)) {
       problems.push(
         `key "${name}" does not carry a SHA-256 hex digest. Store the HASH, not the key — mint one with: bun keygen.ts --name ${name || "client"} --scope ${scope || "read"}`

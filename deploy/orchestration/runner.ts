@@ -751,7 +751,7 @@ async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promi
     return {
       ...base, ok: false, stage: "reembed", exit: 2, reembed,
       why: configuration
-        ? `the rows are written, and reembed refused to run: ${sentence(reason)} So ${rowsLack(unembedded, p.system)} no vector, and no run embeds ${unembedded === 1 ? "it" : "them"} until that is fixed. The runner takes the server's model and egress settings when it is created: after changing them, recreate both (compose --profile orchestration up -d --force-recreate server orchestration-runner)`
+        ? `the rows are written, and reembed refused to run: ${sentence(reason)} So ${rowsLack(unembedded, p.system)} no vector, and no run embeds ${unembedded === 1 ? "it" : "them"} until that is fixed. The runner takes the server's model and egress settings when it is created: after changing them, recreate all three (compose --profile orchestration up -d --force-recreate server api orchestration-runner)`
         : `the rows are written, and reembed could not run this time: ${sentence(reason)} ${rowsLack(unembedded, p.system)} no vector yet; the next run tries again`,
     };
   }

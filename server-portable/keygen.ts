@@ -9,6 +9,7 @@
  *   bun keygen.ts --name laptop  --scope write
  *   bun keygen.ts --name chatgpt --scope read
  *   bun keygen.ts --name session-hook --scope capture   # may add a thought, nothing else (SMD-1298)
+ *   bun keygen.ts --name mcp-forwarder --scope forward  # grants nothing; names who forwarded a client's key (SMD-2284)
  */
 
 import { randomBytes } from "node:crypto";
@@ -21,7 +22,7 @@ const name = flag("name");
 const scope = flag("scope") ?? "read";
 
 if (!name || !/^[A-Za-z0-9_-]+$/.test(name)) {
-  console.error("usage: bun keygen.ts --name <client> [--scope read|write|capture]");
+  console.error("usage: bun keygen.ts --name <client> [--scope read|write|capture|forward]");
   console.error("  name must be [A-Za-z0-9_-]+ (it becomes part of the config line)");
   process.exit(2);
 }
@@ -45,6 +46,11 @@ if (minted === "read") {
   console.log(`  Capture-only: capture_thought is the one tool registered for this key — no`);
   console.log(`  search, no update, no delete. For a hook or a pipeline that adds thoughts`);
   console.log(`  from a machine you do not sit at: a leak of this key can add, not read.\n`);
+} else if (minted === "forward") {
+  console.log(`  Forward: this key grants nothing by itself — every server refuses it as a`);
+  console.log(`  caller. It is for the MCP server's own use when it forwards a client's key to`);
+  console.log(`  the REST core (SMD-2284's PR 4b; until then nothing reads it): the client's key`);
+  console.log(`  decides what the request may do, this one names who carried it. Never a client's.\n`);
 } else {
   console.log(`  Write scope: this key can capture and modify thoughts. Prefer --scope read`);
   console.log(`  for anything that only needs to search, --scope capture for a hook that`);

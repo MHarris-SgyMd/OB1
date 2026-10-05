@@ -656,7 +656,7 @@ export class PostgrestStore implements ThoughtStore {
    * registry stays pure in-memory. index.ts sets no sink, and the async-job
    * routes still answer — they just never hold a running job (SMD-2273).
    */
-  jobSink(): null {
+  jobSink(_door: string): null {
     return null;
   }
 

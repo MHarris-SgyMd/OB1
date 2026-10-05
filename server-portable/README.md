@@ -291,7 +291,7 @@ both in the same commit.**
 Required in every environment:
 
 ```
-MCP_ACCESS_KEYS              name:scope:sha256 entries, scope read | write | capture — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
+MCP_ACCESS_KEYS              name:scope:sha256 entries, scope read | write | capture | forward (grants nothing; SMD-2284) — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
 DATABASE_URL                 the brain's postgres:// connection string — the SQL store, the default
 OPENROUTER_API_KEY           embeddings, and metadata extraction unless OB1_CHAT_BASE_URL gives chat its own endpoint — then OB1_CHAT_API_KEY (neither needed for a local endpoint)
 ```
@@ -581,9 +581,12 @@ The core's values are whole, for the REST core.
 ## The REST core (SMD-2284)
 
 `bun api.ts` serves every operation the tools expose as JSON, over the same core and
-the same process root (`root.ts`) as the MCP server. Its compose service, reached as
-`api.ob1.internal` and public at `/api` only where the operator turns that on, is
-SMD-2284's next step; today it runs where you start it.
+the same process root (`root.ts`) as the MCP server. In the stack it is the `api`
+service — the server's image with `command: ["api.ts"]` — reached as
+`api.ob1.internal` on the mesh, and at `/api` through the proxy only where the
+operator names `deploy/compose.api-public.yaml` (`deploy/README.md`, "The REST core
+and its opt-in `/api`"); there the links it answers carry the `/api` the proxy
+stripped (`X-Forwarded-Prefix`).
 
 - **Routes** come from `rest/routes.ts`, one per tool in the manifest (a tool
   without one does not compile): `GET /v1/thoughts`, `GET`/`PATCH`/`DELETE
@@ -633,10 +636,10 @@ SMD-2284's next step; today it runs where you start it.
 - **`GET /health`** is liveness with no key, for the container's healthcheck; the
   keyed BrainInfo is `GET /v1/brain`. A write through the REST core records its door
   as `open-brain-api` (thought_audit.origin).
-- **Jobs** stay in this process's memory until SMD-2284's PR 3: the durable job store's
-  start-up reconcile marks every live job in the table lost, the MCP server's too, so
-  it is wired here only once that reconcile is scoped to the server that started each
-  job.
+- **Jobs** are durable as the MCP server's are (069's `jobs`), and its own: each server
+  writes its door on the jobs it starts (`jobs.door`, migration 078) and its start-up
+  reconcile marks only those lost, so the REST core and the MCP server on one database
+  leave each other's live jobs alone.
 
 `test-rest-sql.ts` runs every operation through both servers on one database, over
 data each has something to say about, and holds that the MCP reply to a success is what
@@ -649,13 +652,13 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 527 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
-bun test-auth.ts          # 124 — scoped, hashed, named keys
-bun test-rest.ts          # 226 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-server.ts        # 619 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
+bun test-auth.ts          # 139 — scoped, hashed, named keys
+bun test-rest.ts          # 238 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
-bun run test:e2e          # 457 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 131 — the REST core beside the MCP server on one database: every operation through both
+bun run test:e2e          # 458 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+../db/with-postgres.sh bun test-rest-sql.ts  # 135 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 
