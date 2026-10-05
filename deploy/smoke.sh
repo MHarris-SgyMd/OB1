@@ -119,8 +119,9 @@ r=$(refusal -H 'x-brain-key: ob1-smoke-not-a-configured-key')
 #    since it is what a connector reads: this server answers it only with a 404
 #    or naming <origin>/mcp, its own resource. For a URL at <origin>/mcp or at
 #    the origin root (the legacy window's), a document naming exactly
-#    <origin>/mcp must come with the challenge on a keyless request there and a
-#    404 at the root form. The server's keyed /health is read for one verdict
+#    <origin>/mcp must come with the challenge on a keyless request there, a
+#    404 at the root form, and the authorization server's metadata naming the
+#    issuer <origin>/auth. The server's keyed /health is read for one verdict
 #    only: when it says it advertises at exactly this origin and a 404 reached
 #    smoke instead, the tunnel or proxy in front does not keep the origin's
 #    Host, or does not route the document. A URL under another path is asked at
@@ -134,10 +135,12 @@ hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health")
 # The run's first keyed request: a registry not yet warm can miss the body's
 # deadline and answer `ok`. One keyed call warms it, then read again (review
 # pass 6 of cut 2); a key it does not show the record to stays `ok`.
+viewless=""
 case "$hj" in
   "{"*) ;;
   *) rpc '{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{}}' > /dev/null
-     hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health") ;;
+     hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health")
+     case "$hj" in "{"*) ;; *) viewless=1 ;; esac ;;
 esac
 # The server's view, when the body is its record: advertised, at which origin,
 # configured. Anything else (`ok` for a key it does not show the record to, a
@@ -156,8 +159,6 @@ mine=""
 spelled() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's#^(https://[^/]+):443$#\1#; s#^(http://[^/]+):80$#\1#'; }
 respell=""
 [ "${advertised:-no}" = yes ] && [ -z "$mine" ] && [ "$(spelled "$adv_origin")" = "$(spelled "$origin")" ] && respell=1
-viewless=""
-case "$hj" in "{"*) ;; *) viewless=1 ;; esac
 note=""
 if [ "${advertised:-no}" = yes ] && [ -z "$mine" ]; then note="; the server advertises OAuth at ${adv_origin}/mcp, not at this origin"
 elif [ "${configured:-no}" = yes ] && [ "${advertised:-no}" != yes ]; then note="; the stack is configured, but its authorization server did not answer the server's probe, so nothing is advertised"; fi
@@ -304,9 +305,9 @@ esac
 #     checkout. No -L: curl forwards a custom header to whatever host a
 #     redirect names, and this one carries the key.
 #     A Supabase Edge Function fails here too: upstream has no such body.
-#     Read at check 2, which reads the edge's view from it (SMD-2382); again
-#     here when that first read gave no record — then it was the run's first
-#     keyed request, before checks 5–9 warmed the agent registry.
+#     Read at check 2, which reads the edge's view from it and reads it again
+#     after one warming call when the first read gave no record (SMD-2382);
+#     once more here if it still gave none, now that checks 5–9 have run.
 case "$hj" in "{"*) ;; *) hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health") ;; esac
 facts=$(printf '%s' "$hj" | python3 -c '
 import sys, json
