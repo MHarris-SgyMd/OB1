@@ -657,8 +657,10 @@ watermarks half a day or more apart, or one brain holding no usable one, are a d
 verdict names ("open-brain-canary's board-sync watermark is 1 day older") and the
 exit code counts. A brain older than SMD-2261 reads `unread` there and is not
 called older; a brain that has the field but did not read it (its read is the
-last the keyed `/health` deadline reaches) makes the verdict "not certain"
-rather than "current". The gap is between the newest board move each brain reflects, not
+last the keyed `/health` deadline reaches), or sent a malformed value, makes a
+verdict with no other delta "not certain" rather than "current", exit 0 as for
+any unread axis, and the line says why. A value more than an hour ahead of the
+brain's database clock is passed over, so a host clock that slow lags. The gap is between the newest board move each brain reflects, not
 how long one has been stale: a canary refreshed after a quiet week reads a week
 older the hour the board next moves, and a pass that synced one stale ticket of
 fifty moves the watermark as far as all fifty would. It moves when the board

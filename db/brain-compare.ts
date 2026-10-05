@@ -254,7 +254,7 @@ export interface BrainReading {
   newestCapture: string | null;
   /**
    * The board-sync watermark (SMD-2261): the newest Linear updatedAt the brain
-   * reflects, an ISO instant; null when no thought carries one — or when it was
+   * reflects, an ISO instant; null when no thought carries a usable one — or when it was
    * not read, and then `boardSyncUnread` says why. A high-water mark: it says
    * the newest board move the brain reflects, not that it reflects every move
    * before it.
@@ -291,7 +291,7 @@ export async function readBrain(ep: BrainEndpoint): Promise<BrainReading> {
  */
 export function boardSyncOf(info: BrainInfo): Pick<BrainReading, "boardSync" | "boardSyncUnread"> {
   const db = dbOf(info);
-  if (!db) return { boardSync: null, boardSyncUnread: "the database did not answer" };
+  if (!db) return { boardSync: null, boardSyncUnread: NO_DATABASE };
   if (!("boardSync" in db)) return { boardSync: null, boardSyncUnread: OLDER_SERVER };
   if (db.unread?.boardSync) return { boardSync: null, boardSyncUnread: "the brain did not read it" };
   const w: unknown = db.boardSync;
@@ -303,8 +303,11 @@ export function boardSyncOf(info: BrainInfo): Pick<BrainReading, "boardSync" | "
 /** Why an older server's watermark is unread — every v1.5.0 peer, so the verdict stays quiet about it. */
 export const OLDER_SERVER = "the server is older than SMD-2261";
 
+/** Why a watermark is unread when the whole database did not answer — the ledger and the count are unread too, and say so. */
+const NO_DATABASE = "the database did not answer";
+
 /** A watermark a server that has the field did not give: a read past the /health deadline, refused, or malformed. */
-const boardSyncMissed = (r: BrainReading) => r.boardSyncUnread !== null && r.boardSyncUnread !== OLDER_SERVER;
+export const boardSyncMissed = (r: BrainReading) => r.boardSyncUnread !== null && r.boardSyncUnread !== OLDER_SERVER && r.boardSyncUnread !== NO_DATABASE;
 
 /** The watermark's one shape, as brain-info.ts's boardSyncValue sends it. */
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -744,8 +747,9 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
     // unread: not "current" (review pass 2). An older server's absence stays quiet.
     const boardMissed = boardSyncMissed(a) || boardSyncMissed(b);
     if (migKnown && countsKnown && !boardMissed) return `current with each other — same migration and thought count${boardKnown ? ", board-sync watermarks under half a day apart" : ""}.`;
-    const unread = [migKnown ? null : "migration ledger", countsKnown ? null : "thought count", boardMissed ? "board-sync watermark" : null].filter(Boolean).join(" and ");
-    return `no delta on what could be read; ${unread} unread on one side, so freshness is not certain.`;
+    const unread = [migKnown ? null : "migration ledger", countsKnown ? null : "thought count", boardMissed ? "board-sync watermark" : null].filter((x): x is string => x !== null);
+    const named = unread.length > 1 ? `${unread.slice(0, -1).join(", ")} and ${unread.at(-1)}` : unread[0];
+    return `no delta on what could be read; ${named} unread, so freshness is not certain.`;
   }
   return parts.join("; ") + ".";
 }
@@ -802,7 +806,8 @@ export function renderComparison(c: Comparison): string {
     const ex = (ids: string[]) => (ids.length ? ` (e.g. ${ids.slice(0, 3).map(shortId).join(", ")}${ids.length > 3 ? ", …" : ""})` : "");
     lines.push(`  id-set: ${d.onlyA.length.toLocaleString("en-US")} only in a${ex(d.onlyA)}; ${d.onlyB.length.toLocaleString("en-US")} only in b${ex(d.onlyB)}.`);
   }
-  const board = (r: BrainReading) => (r.boardSyncUnread !== null ? "unread" : r.boardSync ?? "none");
+  // Why, when a server that has the field did not give it — the verdict's "not certain" (review pass 3).
+  const board = (r: BrainReading) => (r.boardSyncUnread === null ? r.boardSync ?? "none" : boardSyncMissed(r) ? `unread (${r.boardSyncUnread})` : "unread");
   lines.push(`  board sync: a=${board(c.a)}  b=${board(c.b)}`);
 
   lines.push("");

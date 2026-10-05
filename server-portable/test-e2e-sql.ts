@@ -1697,7 +1697,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(new RegExp(`^Rows: +${truth.thoughts} thoughts · ${truth.audit} audit`, "m").test(text) && /^Postgres: +\S.* · pgvector \d/m.test(text), "…and its Rows and Postgres rows carry the same counts and versions");
   // The board-sync watermark (SMD-2261): none while no thought carries one; then
   // the newest full ISO instant, normalised to UTC — a later bare date, a word
-  // timestamptz accepts ('infinity') and an impossible month passed over, not
+  // timestamptz accepts, and an impossible month passed over, not
   // winning the max or failing the read…
   assert("boardSync" in db && db.boardSync === null, `no Linear-sourced row: the watermark is null, and the field is there (${JSON.stringify(db.boardSync)})`);
   // …and an instant past an hour from now: a capture key's far-future value
@@ -1728,21 +1728,25 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(ny.boardSync === "2026-09-24T07:30:00.000Z", `the watermark is the same instant in UTC under a New York session (${ny.boardSync})`);
   // Each shape that must be read, alone on one thought so it must win: Linear's
   // own (ingest-linear.ts writes issue.updatedAt, …SS.mmmZ) in the afternoon, a
-  // negative offset, a compact one, and an instant half an hour ahead by the
-  // database's clock, inside the clamp's hour (review pass 2: only losers
+  // negative offset, a compact one, and an instant fifty-five minutes ahead by
+  // the database's clock, inside the clamp's hour (review pass 2: only losers
   // carried the first three, and nothing sat inside the hour).
   await sql`UPDATE thoughts SET metadata = metadata - 'linear_updated_at' WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
   const alone = async (value: string) => {
     await sql`UPDATE thoughts SET metadata = metadata || ${{ linear_updated_at: value }}::jsonb WHERE id = ${ids[0]}::uuid`;
     return (await readFacts(sql as never)).boardSync;
   };
-  const shapes = [["2026-09-24T15:04:05.678Z", "2026-09-24T15:04:05.678Z"], ["2026-09-24T09:30-05:00", "2026-09-24T14:30:00.000Z"], ["2026-09-24T09:30:00+0200", "2026-09-24T07:30:00.000Z"]];
+  const shapes = [["2026-09-24T15:04:05.678Z", "2026-09-24T15:04:05.678Z"], ["2026-09-24T09:30-05:00", "2026-09-24T14:30:00.000Z"], ["2026-09-24T09:30:00+0300", "2026-09-24T06:30:00.000Z"]];
   const read = [];
   for (const [value] of shapes) read.push(await alone(value));
   assert(read.join("|") === shapes.map(([, want]) => want).join("|"), `Linear's shape, a negative and a compact offset are each read, in UTC (${read.join(" | ")})`);
-  const [soon] = await sql`SELECT to_char((now() + interval '30 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS w`;
+  const [soon] = await sql`SELECT to_char((now() + interval '55 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS w`;
   const ahead = await alone(soon.w);
-  assert(ahead === soon.w, `an instant half an hour ahead by the database's clock is read, inside the clamp's hour (${ahead}, ${soon.w})`);
+  assert(ahead === soon.w, `an instant fifty-five minutes ahead by the database's clock is read, inside the clamp's hour (${ahead}, ${soon.w})`);
+  // …and one an hour and a quarter ahead is passed over: the slack is an hour, not two (review pass 3).
+  const [later] = await sql`SELECT to_char((now() + interval '75 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS w`;
+  const past = await alone(later.w);
+  assert(past === null, `an instant an hour and a quarter ahead by the database's clock is passed over (${past})`);
   await sql`UPDATE thoughts SET metadata = metadata - 'linear_updated_at' WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
 
   // A ledger short of the tree's last file is behind it, by name.
