@@ -87,7 +87,7 @@ Every MCP client handles remote servers slightly differently. Your extension acc
 
 **Option A: URL with key (easiest).** If your client has a field for a remote MCP server URL, paste the full MCP Connection URL including `?key=your-access-key`. This works for any client that supports remote MCP without requiring headers.
 
-**Option B: mcp-remote bridge (if your client only supports stdio).** Use `mcp-remote` to bridge to the remote server. This requires Node.js installed. Pass the access key via the URL query parameter (not a header) to avoid OAuth discovery issues with newer versions of `mcp-remote`:
+**Option B: mcp-remote bridge (if your client only supports stdio).** Use `mcp-remote` to bridge to the remote server. This requires Node.js installed. Pass the access key via the URL query parameter (not a header): it rides every request on every version of `mcp-remote` (the note below says why):
 
 ```json
 {
