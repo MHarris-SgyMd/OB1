@@ -40,7 +40,7 @@ import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { workerIdentity } from "./worker-bootstrap.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
-import { run as runExtract, type ExtractOptions } from "./extract-entities.ts";
+import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import type { PassStop } from "./lease.ts";
@@ -4215,6 +4215,82 @@ console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger m
   try { unlinkSync(dumpCtl); } catch { /* already gone */ }
 
   escModel.stop(true);
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql`DELETE FROM thoughts`;
+}
+
+console.log("\n[10f] db/extract-entities.ts: Ollama's repeat limit is a runaway, sent to the retry — never a provider pause, never a stop (SMD-2449)");
+{
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const good = { entities: [{ name: "Linear", type: "tool", confidence: 0.9 }], relationships: [] };
+  const head = '{"entities": [{"name": "Linear';
+  // The first call streams the 7B's loop as Ollama does — one token a frame,
+  // the name growing " Linear" each, then the stream ends with no finish_reason
+  // and no [DONE] after 31 copies. The penalised retry is read whole: for the
+  // "always" thought Ollama cuts that too (finish_reason null, measured).
+  const loopModel = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { stream?: boolean; frequency_penalty?: number; messages?: { role: string; content: string }[] };
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      if (!/repeat-limit/.test(prompt)) return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [], relationships: [] }) }, finish_reason: "stop" }] });
+      if (body.stream && body.frequency_penalty === undefined) {
+        const enc = new TextEncoder();
+        const frames = [head, ...Array.from({ length: 30 }, () => " Linear")].map((p) => `data: ${JSON.stringify({ choices: [{ delta: { content: p }, finish_reason: null }] })}\n\n`);
+        return new Response(new ReadableStream<Uint8Array>({
+          async start(c) { try { for (const f of frames) { c.enqueue(enc.encode(f)); await Bun.sleep(2); } c.close(); } catch { /* the client hung up */ } },
+        }), { headers: { "content-type": "text/event-stream" } });
+      }
+      if (/always/.test(prompt)) return Response.json({ choices: [{ message: { content: head + " Linear".repeat(31) }, finish_reason: null }] });
+      return Response.json({ choices: [{ message: { content: JSON.stringify(good) }, finish_reason: "stop" }] });
+    },
+  });
+  const rawKey = "c".repeat(64);
+  const seedOne = async (content: string) => ((await sql`SELECT upsert_thought(${content}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const tRescued = await seedOne("The repeat-limit ticket row, rescued by the retry.");
+  const tAlways = await seedOne("The repeat-limit ticket row, always looping.");
+  const dump = join(tmpdir(), `ob1-test-live-repeat-${process.pid}.jsonl`);
+  const loopRun = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--dump", dump], {
+    env: { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${loopModel.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: "stub-meta", OB1_WORKER_KEY: rawKey, MCP_ACCESS_KEYS: `loop-worker:write:${hashKey(rawKey)}` } as Record<string, string>,
+    cwd: HERE,
+  });
+  // The run's own summary, not the banner's "300 s per model call", and the
+  // count after the run, not the one before it.
+  const summary = loopRun.out.split("\n").find((l) => /model call\(s\) across/.test(l))?.trim() ?? "";
+  const counted = loopRun.out.split("\n").filter((l) => /extracted,/.test(l)).pop()?.trim() ?? "";
+  assert(!/provider unavailable|provider still failing|closed mid-answer/.test(loopRun.out),
+         `neither thought paused the worker as a provider outage, or stopped it — the stream's cut is a runaway, not a closed socket (${loopRun.out.split("\n").find((l) => /provider|closed mid-answer/.test(l))?.trim() ?? "no such line"})`);
+  assert(loopRun.code === 1 && /1 extracted, 1 failed/.test(counted) && /2 retried after a runaway/.test(summary) && /\(2 aborted on the stream before the budget\)/.test(summary),
+         `one run took both: the rescued thought extracted, the looping one failed, each retried once and each first call aborted on the stream (exit ${loopRun.code}: ${counted}; ${summary})`);
+  // No dump at all when nothing extracted — main's reading of the cut.
+  const dumped = existsSync(dump) ? (await Bun.file(dump).text()).trim() : "";
+  const rescuedLine = dumped.split("\n").filter(Boolean).map((l) => JSON.parse(l) as { id: string; retried?: boolean; abortedMs?: number; abortedBy?: string }).find((l) => l.id === tRescued);
+  assert(rescuedLine?.retried === true && rescuedLine.abortedMs !== undefined && rescuedLine.abortedBy === "token",
+         `the rescued thought's dump line records the retry and the abort, and why — one word repeated (${JSON.stringify(rescuedLine)})`);
+  const [failedRow] = (await sql`SELECT last_error FROM thought_work_claims WHERE thought_id = ${tAlways}::uuid AND status = 'failed'`) as { last_error: string }[];
+  assert(/the first call was aborted, or cut by the provider's repeat limit, on the stream [\d.]+ s in — the answer repeated one short unit \(a word, a number, punctuation, an emoji or whitespace\) over and over — and the penalised retry, read whole, did not converge either/.test(failedRow?.last_error ?? "") && !/third copy/.test(failedRow?.last_error ?? ""),
+         `the looping thought's failed row names the runaway it was, not a third copy of an item (${failedRow?.last_error})`);
+  try { unlinkSync(dump); } catch { /* already gone */ }
+
+  // The note itself, by the windows' reasons: an item runaway's words are
+  // main's, a token runaway's say a provider may have cut it, and mixed
+  // windows name each reason once.
+  const win = (index: number, malformed: boolean, abortedMs?: number, abortedBy?: "item" | "token", more: { retried?: true; escalated?: string } = {}) =>
+    ({ index, tokens: 100, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed, ...(abortedMs !== undefined ? { abortedMs, abortedBy } : {}), ...more });
+  const thought = (parts: ReturnType<typeof win>[]) => ({ entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: parts.every((p) => p.malformed), windows: parts.length, parts });
+  const UNIT = "the answer repeated one short unit (a word, a number, punctuation, an emoji or whitespace) over and over";
+  const ITEM = "the answer went on past a third copy of one item";
+  assert(abortedNote(thought([win(0, true), win(1, false, 900, "token", { retried: true })])) === "",
+    "abortedNote: nothing when no MALFORMED window was aborted — a rescued window's abort is not the failure's");
+  assert(abortedNote({ ...thought([]), parts: undefined, windows: 1, malformed: true, abortedMs: 1500, abortedBy: "item", retried: true }) === `; the first call was aborted on the stream 1.5 s in — ${ITEM} — and the penalised retry, read whole, did not converge either`,
+    "…an item runaway reads as it did before this ticket, word for word");
+  assert(abortedNote({ ...thought([]), parts: undefined, windows: 1, malformed: true, abortedMs: 200, abortedBy: "token" }) === `; the first call was aborted, or cut by the provider's repeat limit, on the stream 0.2 s in — ${UNIT} — and no retry was made`,
+    "…a token runaway says the provider may have cut it, and what repeated");
+  const mixed = abortedNote(thought([win(0, true, 3000, "item", { retried: true }), win(1, true, 1000, "token", { retried: true, escalated: "big-stub" }), win(2, true, 800, "token", { retried: true })]));
+  assert(mixed === `; the first call was aborted, or cut by the provider's repeat limit, on the stream 3.0 s in — ${ITEM}, or ${UNIT} — and the escalation to big-stub, read whole, did not converge either`,
+    `…mixed windows name each reason once, the longest abort's time, and the escalation (${mixed})`);
+  loopModel.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;
 }

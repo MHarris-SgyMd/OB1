@@ -1730,7 +1730,18 @@ retry rule, so 32 of 32 is derived, not re-measured whole) — and a call
 aborted so is retried as a cut one is, the retry read whole, since a penalised
 answer was measured to repeat an item three times and recover; an
 answer that enumerates distinct ids is not a loop by that rule and runs to the
-budget, which stays the bound. A call whose retry also runs away is a
+budget, which stays the bound. A loop inside a string is caught too: an entity
+named `Linear Linear Linear …`, each item one copy longer than the last, so no
+item repeats. Once the answer ends in 24 copies of one short unit holding a
+letter or a digit, whitespace aside (`repeatedTail`, `TOKEN_REPEATS`;
+SMD-2449), the call is aborted and
+retried the same way. Ollama's own repeat limit (more than 30 identical tokens)
+would otherwise end the stream with no finish_reason, a cut that read as a
+socket closed mid-answer: a provider failure the worker paused on, retried
+identically and could stop for. A cut answer whose tail repeats any unit 24
+times (punctuation and emoji too, which Ollama's limit also cuts) or ends in 24 or
+more whitespace characters is that runaway too, streamed or read whole (a whole answer
+Ollama cuts comes back with `finish_reason: null`). A call whose retry also runs away is a
 malformed answer: a window's is left out of a thought at least one of whose
 other windows parsed (SMD-2260, below), and a thought none of whose windows
 parsed is recorded failed, retryable.
@@ -3248,7 +3259,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2411 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1057 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1065 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

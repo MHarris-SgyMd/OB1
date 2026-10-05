@@ -1627,6 +1627,66 @@ does not change what a retry answers: the loop is the model's, the stream
 makes it cheap. `providerCall`'s chat path and `judgePair` are unchanged;
 neither was measured to run away.
 
+### One word repeated inside a string: Ollama's repeat limit, 2026-10-05 (SMD-2449)
+
+The item rule cannot see a loop whose items all differ. On 2026-10-01 the
+stable brain's SMD-2286 row (`c7506226`) failed all three attempts with
+"closed mid-answer: the socket closed after 7232 characters". Replayed
+through the worker's own `extractEntities` against the same Ollama, window 2
+streams 1,816 tokens, one a frame. `qwen2.5:7b` names entity after entity
+`Linear Linear …`, each one copy longer than the last (5 copies, 6, … 31),
+and after 31 identical tokens Ollama's HTTP layer ends the response: no
+`finish_reason`, no `[DONE]`, the same 7,232 characters every time at
+temperature 0. Read whole, the same call comes back as a 200 with
+`finish_reason: null` and the cut text. The worker read the first as a
+socket fault and paused on it; the second as a malformed answer, never
+retried.
+
+`repeatedTail` (`TOKEN_REPEATS` = 24, `REPEAT_UNIT_MAX` = 32) reads the end of
+the answer with its whitespace dropped, as Ollama trims the tokens it
+compares. The stream guard aborts the call once the answer ends in 24 copies
+of one unit holding a letter or digit. A cut answer (a stream with no end
+sign, or a whole one with no finish) is the same runaway when its tail repeats
+any unit 24 times, punctuation and emoji included, or ends in 24 whitespace
+characters: Ollama's limit cuts any token, and a cut answer has no budget left
+to reach. Each goes to the penalised retry, or the escalation model.
+
+**Why 24: the text.** A name is copied from the text, so the bound is the
+longest such run any thought holds. Across the stable brain's 1,493 thoughts,
+read by the same rule anywhere in the text:
+
+| most copies of one unit in a row | thoughts |
+| ---: | ---: |
+| 1–3 | 1,427 |
+| 4–7 | 60 |
+| 8–15 | 5 |
+| 16 or more | 1 (20: `limit=99999999999999999999`, SMD-2534's row) |
+
+The 8–15 band is a paper's table column (`Factual` ×12) and runs of zeros (a
+nil UUID's last group, ×12).
+
+**Why 24: the answers.** `qwen2.5:7b`, streamed, the shipped windowing, with
+every frame recorded: the 3 planted documents, 48 thoughts drawn at random from
+stable (`setseed(0.2449)`), and the first 14,000 characters of its 4 longest
+papers. That is 55 documents and 98 windows. The 92 answers that parsed hold
+97,812 tokens, and the longest run of one token, trimmed, is 1 in 51 answers,
+2 in 38 and 3 in 3 — counted by token, as Ollama counts, not by
+`repeatedTail`'s rule. No whitespace token comes twice in a row. The 6 answers
+that ran to the budget hold no run over three either: they are SMD-1960's
+enumerations, not this loop.
+
+So 24 clears this brain's 20 by four, and fires before Ollama's 31. Another
+brain can hold more, such as a null SHA's forty zeros or an `sk-xxxx…`
+placeholder; a name copying one costs an aborted call and a penalised retry. On
+`c7506226` it fires at token 1,389 of the 1,816 Ollama cut at (5,107 of 7,232
+characters). With the change the thought extracts: window 2 is aborted, the
+penalised retry parses, and the thought lands 27 entities.
+
+**What this does not do.** The guard lets a loop of punctuation, emoji or
+whitespace run while a budget is left; only a cut is read for those. The
+judge and capture-time metadata read whole and were not measured to loop this
+way; a cut whole answer there is still a malformed one.
+
 ### Reference-list windows: a budget-and-runaway problem, not a JSON one (SMD-2269)
 
 `eval-reference-windows.ts` (SMD-2269). SMD-2260 keeps a windowed thought's parsed

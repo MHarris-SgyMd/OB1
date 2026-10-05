@@ -106,7 +106,7 @@ export const MAX_NAME_CHARS = 200;
 export type ExtractedEntity = { name: string; type: EntityType; confidence: number; aliases: string[] };
 export type ExtractedRelation = { from: string; to: string; relation: Relation; confidence: number };
 /** One window's own answer, kept beside the merged result: the derivation record (SMD-1731) the worker dumps. */
-export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "rejected" | "malformed" | "retried" | "escalated" | "abortedMs"> & {
+export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "rejected" | "malformed" | "retried" | "escalated" | "abortedMs" | "abortedBy"> & {
   index: number;
   /** chunk.ts's estimate of the text sent. */
   tokens: number;
@@ -154,6 +154,14 @@ export type Extraction = {
    * was aborted. Only a first call is ever aborted: the retry is read whole.
    */
   abortedMs?: number;
+  /**
+   * Beside `abortedMs`: why that call was a runaway — `item`, a third copy of
+   * one item (RunawayDetector), or `token`, one unit repeated inside the
+   * answer (repeatedTail, SMD-2449). A stream the provider's own repeat limit
+   * ended, its tail so repeated, is recorded the same way: the cut was the
+   * abort, made at the other end.
+   */
+  abortedBy?: AbortedBy;
   /**
    * Set when the answer covers less than the whole thought. Either the thought
    * was over the per-thought bound and only its prefix was extracted
@@ -268,7 +276,9 @@ export type ExtractWindowing = {
    * Request the answer as a stream and abort the call the moment it holds
    * RUNAWAY_REPEATS copies of one item (RunawayDetector) — the runaways
    * measured for SMD-1879 are one entity or relation repeated to the budget,
-   * visible on the stream long before it (SMD-1960). A call aborted so is a
+   * visible on the stream long before it (SMD-1960) — or the moment it ends
+   * in TOKEN_REPEATS copies of one short unit holding a letter or a digit (repeatedTail,
+   * SMD-2449). A call aborted so is a
    * runaway: retried under the penalty when retryRunaway says so, else the
    * call's malformed answer. The budget stays the bound. Off, the answer is
    * read whole, as before. Presumes outputBudget: windowingFor turns the two
@@ -325,7 +335,7 @@ export type ExtractWindowObservation = {
   budget?: number;
   /** The call's `finish_reason` (`length` names a cut answer), or undefined when it streamed to an abort or carried none. */
   finishReason?: string;
-  /** The stream-abort detector fired — a repeated-item runaway, not a clean cut. */
+  /** The stream was a runaway before its budget — a repeated item, or one unit repeated inside the answer (SMD-2449) — not a clean cut. */
   aborted: boolean;
   /** The answer did not parse as JSON of the expected shape. */
   malformed: boolean;
@@ -358,6 +368,68 @@ export const OBSERVE_SAMPLE = 400;
  * three and recover (one of 20 measured), so the retry is not read by this.
  */
 export const RUNAWAY_REPEATS = 3;
+
+/**
+ * How many copies of one short unit at the end of an answer make it a runaway
+ * (SMD-2449): the loop the 7B makes inside a string, naming an entity `"Linear Linear Linear …"`,
+ * each item one copy longer than the last, so no item repeats and
+ * RunawayDetector never fires. Ollama ends such a stream itself once one
+ * token, trimmed, repeats more than 30 times in a row, with no finish_reason
+ * and no `[DONE]` (a whole answer comes back with `finish_reason: null`), and
+ * that cut used to read as a socket closed mid-answer: a provider failure,
+ * paused on and retried identically. Measured on the stable brain
+ * (2026-10-05): across its 1,493 thoughts, the most copies of one unit in a
+ * row, read by this rule, is 20 — `limit=99999999999999999999` in a ticket —
+ * then 12 (a paper's table column, a nil UUID's zeros), and a name is copied
+ * from the text; in qwen2.5:7b's 92 parsed answers over a 55-document sample
+ * (97,812 tokens, evals/README.md), no token came more than three times in a
+ * row (counted as Ollama counts, by token, not by this rule). 24 clears this
+ * brain's 20 and still fires before Ollama's 31, so the call is aborted
+ * rather than cut. Another brain can hold a longer run — a null SHA's forty
+ * zeros, an `sk-xxxx…` placeholder — and a name copying one costs that call:
+ * aborted, and the penalised retry, read whole, is the answer. The thought that
+ * found it (SMD-2286's row, `c7506226`) grows a name one `Linear` per item, 5
+ * to 31; at 24 the abort lands at token 1,389 of the 1,816 Ollama cut at.
+ */
+export const TOKEN_REPEATS = 24;
+
+/** The longest unit repeatedTail looks for, in characters other than whitespace: a few tokens. */
+export const REPEAT_UNIT_MAX = 32;
+
+/**
+ * The unit the text ends in TOKEN_REPEATS or more copies of, or null (SMD-2449).
+ * The text's whitespace is dropped first, as Ollama trims the tokens it
+ * compares, so `" Linear"` after `"Linear"` is a copy; the unit is the
+ * shortest of up to REPEAT_UNIT_MAX characters that repeats. Read on an answer
+ * still coming (the stream guard), the unit must hold a letter or a digit:
+ * a rule of dashes in a document is copied as text, and the budget still
+ * bounds the call. Read with `cut` — the provider has already ended the
+ * answer, so no budget is left to reach — any unit is one, punctuation and
+ * emoji included, since Ollama's repeat limit cuts any token; and so is a run
+ * of TOKEN_REPEATS or more whitespace characters (returned as `"whitespace"`),
+ * Ollama comparing a whitespace token as empty. The guard never aborts on
+ * whitespace, which an answer in progress can be indented with.
+ */
+export function repeatedTail(text: string, opts: { cut?: boolean } = {}): string | null {
+  if (opts.cut) {
+    const ws = /\s+$/.exec(text.slice(-4 * TOKEN_REPEATS));
+    if (ws !== null && ws[0].length >= TOKEN_REPEATS) return "whitespace";
+  }
+  const need = TOKEN_REPEATS * REPEAT_UNIT_MAX;
+  // Four times what the longest unit needs, before the whitespace goes: an
+  // answer that is mostly whitespace yields fewer characters, and only the
+  // longest units go unseen.
+  const s = text.slice(-4 * need).replace(/\s+/g, "").slice(-need);
+  for (let p = 1; p <= REPEAT_UNIT_MAX && p * TOKEN_REPEATS <= s.length; p++) {
+    let i = s.length - 1;
+    const stop = s.length - p * (TOKEN_REPEATS - 1);
+    while (i >= stop && s[i] === s[i - p]) i--;
+    if (i >= stop) continue;
+    const unit = s.slice(-p);
+    if (opts.cut || /[\p{L}\p{N}]/u.test(unit)) return unit;
+  }
+  return null;
+}
 
 /**
  * Reads a streamed extraction answer as it arrives and says when it has become
@@ -552,7 +624,7 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
     ? `${cfg.metadataModel}'s ${cfg.extractModelWindow}-token served context${cfg.extractChunkTokensUnfit ? ", which holds no window beside the rules and an answer" : ""}`
     : `${cfg.metadataModel}'s served context, which db/config.mjs's KNOWN_CHAT_MODEL_WINDOW does not list`;
   const w = windowingFor(cfg);
-  const abort = w.streamAbort ? `; the answer is streamed and a call is aborted once it holds ${RUNAWAY_REPEATS} copies of one item` : "";
+  const abort = w.streamAbort ? `; the answer is streamed and a call is aborted once it holds ${RUNAWAY_REPEATS} copies of one item or ends in ${TOKEN_REPEATS} copies of one short word, number or phrase` : "";
   const retry = !w.outputBudget
     ? "; no answer budget and no runaway retry — reasoning is on (OB1_METADATA_REASONING), and a budget would cap the thinking, so a call that does not converge ends at the context or the caller's deadline"
     : w.retryRunaway
@@ -748,9 +820,11 @@ export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
   const rejected = { entities: 0, relations: 0 };
   // No parts is no answer, as no window parsing is.
   const malformed = parts.every((p) => p.malformed);
+  // The longest abort, with its reason: the two travel together.
   let abortedMs: number | undefined;
+  let abortedBy: AbortedBy | undefined;
   for (const p of parts) {
-    if (p.abortedMs !== undefined) abortedMs = Math.max(abortedMs ?? 0, p.abortedMs);
+    if (p.abortedMs !== undefined && p.abortedMs >= (abortedMs ?? 0)) { abortedMs = p.abortedMs; abortedBy = p.abortedBy; }
     rejected.entities += p.rejected.entities;
     rejected.relations += p.rejected.relations;
     for (const e of p.entities) {
@@ -765,7 +839,7 @@ export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
       if (!have || r.confidence > have.confidence) relations.set(k, { ...r });
     }
   }
-  return { entities: [...entities.values()], relations: [...relations.values()], rejected, malformed, windows: parts.length, parts, ...(abortedMs !== undefined ? { abortedMs } : {}) };
+  return { entities: [...entities.values()], relations: [...relations.values()], rejected, malformed, windows: parts.length, parts, ...(abortedMs !== undefined ? { abortedMs, ...(abortedBy ? { abortedBy } : {}) } : {}) };
 }
 
 /** The pass's key: the model and the prompt version, so a change to either is a new pass. */
@@ -842,7 +916,7 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
       // Aborted: a runaway by the detector's rule, whatever the budget — the
       // partial answer is not read (it could not parse), and the caller's
       // deadline, on the fetch's signal, bounds the read as it does the whole.
-      if (got.repeated !== null) { report(got.finish, true, true, undefined); return { ...MALFORMED(), runaway: true, abortedMs: Date.now() - t0 }; }
+      if (got.repeated !== null) { report(got.finish, true, true, undefined); return { ...MALFORMED(), runaway: true, abortedMs: Date.now() - t0, abortedBy: got.repeated }; }
       const ex = parseExtraction(got.content);
       report(got.finish, false, ex.malformed, got.content);
       return { ...ex, runaway: budget && got.finish === "length" };
@@ -859,11 +933,19 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
   if (typeof answer !== "string") { report(finish, false, true, undefined); return { ...MALFORMED(), runaway }; }
   const ex = parseExtraction(answer);
   report(finish, false, ex.malformed, answer);
+  // Ollama's repeat limit cuts a whole answer too, returning what it had with
+  // `finish_reason: null` (SMD-2449): a malformed answer with no finish whose
+  // tail is one unit repeated is that runaway, whatever the budget — as an
+  // abort on the stream is — where it read as the model's malformed answer.
+  // No finish is null, absent or "", as the stream reader reads it.
+  if (ex.malformed && !finish && repeatedTail(answer, { cut: true }) !== null) return { ...ex, runaway: true };
   return { ...ex, runaway };
 }
 
-type StreamVerdict = { kind: "end" } | { kind: "repeated"; key: string } | null;
-type StreamedBody = { kind: "sse"; content: string; finish: string | undefined; repeated: string | null } | { kind: "json"; text: string };
+/** Why a call was a runaway before its budget: a third copy of one item (RunawayDetector), or one unit repeated inside the answer (repeatedTail, SMD-2449). */
+export type AbortedBy = "item" | "token";
+type StreamVerdict = { kind: "end" } | { kind: "repeated"; by: AbortedBy } | null;
+type StreamedBody = { kind: "sse"; content: string; finish: string | undefined; repeated: AbortedBy | null } | { kind: "json"; text: string };
 /**
  * A chat completion's body, read as it arrives. Sniffed, not trusted to its
  * content-type (sixth review pass): a body opening with `{` is a whole JSON
@@ -884,12 +966,16 @@ type StreamedBody = { kind: "sse"; content: string; finish: string | undefined; 
  * last content event or comes alone (ninth pass). The detector's `runaway` —
  * an item after the third copy inside the same array, the loop going on — is
  * the abort: the reader is cancelled (the connection closes, Ollama stops
- * generating) and the repeated item's key returned. An answer that closes or finishes after its
+ * generating) and the runaway returned, by its rule. An answer that closes or finishes after its
  * third copy, or goes on in its other array, is complete: parseExtraction
- * folds the copies (fifth to eighth passes). A stream that ends with content
+ * folds the copies (fifth to eighth passes). So is the abort on one unit
+ * repeated inside the answer (repeatedTail, SMD-2449), read after the item
+ * rule and never once the answer has closed. A stream that ends with content
  * but no end sign is a socket that closed mid-answer — thrown, so the worker
  * classifies it (transient) — unless what arrived is whole JSON, which is the
- * answer; one that ends with no content but an end sign is the provider's
+ * answer, or ends in one unit repeated or a run of whitespace, which is
+ * Ollama's repeat limit ending a runaway (SMD-2449), returned as the abort
+ * is; one that ends with no content but an end sign is the provider's
  * empty answer, returned as the whole read returns it — malformed — and one
  * with neither content nor end sign is thrown as empty, the row's failure
  * and not the connection's, as the whole read's r.json() on an empty body
@@ -940,7 +1026,11 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, base: string
     const finished = typeof choice?.finish_reason === "string" && choice.finish_reason !== "";
     if (finished) finish = choice.finish_reason as string;
     if (piece) detector.feed(piece);
-    if (detector.runaway && detector.fired !== null) return { kind: "repeated", key: detector.fired.key };
+    if (detector.runaway && detector.fired !== null) return { kind: "repeated", by: "item" };
+    // One unit repeated inside the answer (SMD-2449), before Ollama's own
+    // repeat limit ends the stream with no end sign. Read after the item rule
+    // and before the close, so a converging answer is never cut by it.
+    if (piece && !detector.closed && repeatedTail(content) !== null) return { kind: "repeated", by: "token" };
     if (detector.closed) { content = content.slice(0, detector.closedAt); return { kind: "end" }; }
     return finished ? { kind: "end" } : null;
   };
@@ -1008,9 +1098,15 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, base: string
     if (buffer) line(buffer);
     verdict = line("");
   }
-  if (verdict?.kind === "repeated") return { kind: "sse", content, finish, repeated: verdict.key };
+  if (verdict?.kind === "repeated") return { kind: "sse", content, finish, repeated: verdict.by };
   if (!content && verdict === null) throw new Error(`Extraction stream from ${base} was empty: no answer in ${frames} frame(s)`);
   if (verdict === null && !isWholeJson(content)) {
+    // Ollama's repeat limit ends a stream this way too (SMD-2449). A cut whose
+    // tail is one unit repeated is that runaway, sent to the retry. The guard
+    // above caught a word or a number already; what reaches here is the
+    // punctuation, emoji or whitespace it lets run while a budget is left. Any
+    // other cut is a socket that closed mid-answer, the worker's to pause on.
+    if (repeatedTail(content, { cut: true }) !== null) return { kind: "sse", content, finish, repeated: "token" };
     throw new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`);
   }
   return { kind: "sse", content, finish, repeated: null };
@@ -1037,7 +1133,7 @@ async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, pa
     : await extractOnce(text, cfg, timeoutMs, part, retryW, { penalty: true });
   // The first call's abort rides on the thought's answer; the retry has none.
   // `escalated` names the model that answered when it was the larger one.
-  return { ...second, ...(first.abortedMs !== undefined ? { abortedMs: first.abortedMs } : {}), retried: true, ...(w.escalateModel ? { escalated: w.escalateModel } : {}) };
+  return { ...second, ...(first.abortedMs !== undefined ? { abortedMs: first.abortedMs, ...(first.abortedBy ? { abortedBy: first.abortedBy } : {}) } : {}), retried: true, ...(w.escalateModel ? { escalated: w.escalateModel } : {}) };
 }
 
 /**
@@ -1229,7 +1325,7 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
       const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of, header }, windowing, onCall);
       retriedAny ||= ex.retried;
       if (ex.escalated) escalatedModel = ex.escalated;
-      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.escalated ? { escalated: ex.escalated } : {}), ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {}), ms: Date.now() - t0 });
+      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.escalated ? { escalated: ex.escalated } : {}), ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs, ...(ex.abortedBy ? { abortedBy: ex.abortedBy } : {}) } : {}), ms: Date.now() - t0 });
     }
     const merged = mergeExtractions(parts);
     // The windows that parsed are the answer and the rest are named on it, as
