@@ -83,7 +83,7 @@ SESSION CAPTURE HOOK -- CREDENTIAL TRACKER
 --------------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Endpoint URL (the MCP endpoint, e.g. http://127.0.0.1:8010/):  ____________
+  Endpoint URL (the MCP endpoint, e.g. http://127.0.0.1:8010/mcp):  ____________
 
 GENERATED DURING SETUP
   Capture-scoped key (step 1; shown once by keygen):              ____________
@@ -118,7 +118,7 @@ SELECT set_agent_kind('session-hook', 'agent');
 ```bash
 mkdir -p ~/.config/open-brain
 cat > ~/.config/open-brain/session-capture.json <<'EOF'
-{ "url": "http://127.0.0.1:8010/", "key": "<the raw capture key>" }
+{ "url": "http://127.0.0.1:8010/mcp", "key": "<the raw capture key>" }
 EOF
 chmod 600 ~/.config/open-brain/session-capture.json
 ```
@@ -129,7 +129,7 @@ To have a local model write the summary instead of the derived one, add the mode
 
 ```json
 {
-  "url": "http://127.0.0.1:8010/", "key": "<the raw capture key>",
+  "url": "http://127.0.0.1:8010/mcp", "key": "<the raw capture key>",
   "summary": "model",
   "model_url": "http://127.0.0.1:11434/v1", "model": "llama3.1:8b",
   "model_local": true
@@ -142,7 +142,7 @@ To have a local model write the summary instead of the derived one, add the mode
 bun recipes/session-capture-hook/session-capture.mjs --check
 ```
 
-`ok: http://127.0.0.1:8010/ answers, and the key sees capture_thought alone (capture scope). State: ~/.local/state/open-brain/session-capture`. With a write key it warns — the hook would work, and a leak would read your brain. With a read key it exits 1: the key cannot capture.
+`ok: http://127.0.0.1:8010/mcp/ answers, and the key sees capture_thought alone (capture scope). On a secret: redact. State: ~/.local/state/open-brain/session-capture`. With a write key it warns — the hook would work, and a leak would read your brain. With a read key it exits 1: the key cannot capture.
 
 Then see what a session of yours would send, without sending it:
 

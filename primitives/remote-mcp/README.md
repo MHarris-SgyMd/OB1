@@ -7,7 +7,7 @@ A guide to connecting your Open Brain extensions to any AI client. Run the serve
 
 ## Prerequisites
 
-- Your **MCP Connection URL** — the server's URL with the access key on it. Behind the TLS proxy it looks like `https://your-host/mcp?key=your-access-key`; for a client on the same machine as the server, `http://127.0.0.1:8787/mcp?key=your-access-key` (the port is the one the server's `PORT` names; the core server's is `http://127.0.0.1:8000/?key=…`)
+- Your **MCP Connection URL** — the server's URL with the access key on it. Behind the TLS proxy it looks like `https://your-host/mcp?key=your-access-key`; for a client on the same machine as the server, `http://127.0.0.1:8787/mcp?key=your-access-key` (the port is the one the server's `PORT` names; the core server's is `http://127.0.0.1:8000/mcp?key=…`)
 - The AI client you want to connect
 
 > A hosted client — Claude Desktop's connector, claude.ai, ChatGPT — dials your server from the vendor's side, so it needs the HTTPS form. Claude Code, Cursor and the other clients that run on your machine take the `127.0.0.1` form directly.

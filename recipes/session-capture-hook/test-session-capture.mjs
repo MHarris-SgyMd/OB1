@@ -634,6 +634,7 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     ["url with a password", "postgres://user:p@ss@host:5432/db"],
     ["slack webhook url", "https://hooks.slack.com/services/" + "T0123456789/B0123456789/" + "abcdefghijklmnopqrstuvwx"], // split so GitHub's push protection does not read the probe as a live webhook
     ["access key in a URL", "see http://127.0.0.1:8010/?key=" + "3f9a".repeat(16)],
+    ["access key in a URL", "see http://127.0.0.1:8010/mcp?key=" + "3f9a".repeat(16)], // the form SETUP.md documents since SMD-2306
     ["access key in a URL", "https://brain.example.com/mcp?x=1&access_token=" + "Ab9".repeat(12)],
     ["access key in a URL", "http://h/?key=" + "k".repeat(20)],
     ["access key in a URL", "https://acct.blob.core.windows.net/c/f.txt?sv=2022&sig=" + "Ab9%2F".repeat(8)],

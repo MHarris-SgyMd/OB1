@@ -455,8 +455,8 @@ podman compose -f deploy/compose.yaml up --build     # with a provider named in 
 podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-Three services in order (five with `local-models`): Postgres with pgvector, a migration job that applies the
-schema and exits, then the MCP server. The server runs `preflight.ts` before it
+Four services in order (six with `local-models`): Postgres with pgvector, a migration job that applies the
+schema and exits, then the MCP server and the proxy in front of it. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
 first capture. To run a *release* rather than a checkout build — the published
 `ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
@@ -471,29 +471,32 @@ OB1_SMOKE_KEY=<your-raw-key> ./deploy/smoke.sh
 ### 4. Connect a client
 
 ```
-http://127.0.0.1:8000/?key=<your-raw-key>
+http://127.0.0.1:8000/mcp?key=<your-raw-key>
 ```
 
 From a client on this machine — Claude Code, at user scope so every project
 sees it:
 
 ```bash
-claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/ --header "x-brain-key: <your-raw-key>"
+claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/mcp --header "x-brain-key: <your-raw-key>"
 ```
 
+`/mcp` is the server's path on the stack's proxy. The bare root still answers
+until v2.0.0, with a `Deprecation` header, for clients configured before the
+proxy; move those with `deploy/README.md`, "Moving a client to /mcp".
 `127.0.0.1` rather than `localhost`, since the port binds the IPv4 loopback
-only. By default nothing outside your machine can reach it: the server is the
-one port the stack publishes without its opt-in profiles (n8n's profile adds
+only. By default nothing outside your machine can reach it: the proxy's port is
+the one the stack publishes without its opt-in profiles (n8n's profile adds
 one, also on loopback), and it binds `127.0.0.1`; the database and Ollama are not published at all (`deploy/README.md`, "What is reachable from where").
 A claude.ai or Claude Desktop custom connector (Settings → Connectors → Add
 custom connector) connects from Anthropic's side, not from your machine, so it
 needs a TLS proxy or a tunnel in front. One on this host (caddy, cloudflared,
 `tailscale funnel` — `tailscale serve` reaches your tailnet alone) dials
 `127.0.0.1:8000` itself, and the loopback default serves it. Only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in
-`deploy/.env` — it opens the server, and only the server, to the network, with
-the key in clear on every request until the proxy.
+`deploy/.env` — it opens the stack's one published port, the proxy's, to the
+network, with the key in clear on every request until the proxy.
 
-A write key sees twelve tools; a read key sees nine. `capture_thought`,
+A write key sees every tool; a read key sees all but the ones that write. `capture_thought`,
 `update_thought` and `delete_thought` are never registered for a read key, so
 they do not appear in `tools/list` at all rather than failing when called.
 Opening the connector URL in a browser shows `Method Not Allowed`: the endpoint
