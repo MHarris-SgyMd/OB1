@@ -166,8 +166,9 @@ function cacheKey(keyHash: string, label: string): string {
  * forwarder's (SMD-2284), which is sent as none and recorded NULL. 049's CHECK
  * names read, write and capture, and a migration widening it cannot help:
  * `migrate.ts --reapply` runs 049 again, whose ADD CONSTRAINT would then fail
- * on a `forward` row. NULL passes the CHECK, so a forwarder still gets its
- * stable agent id and a revocation in the registry still reaches it. A NULL is
+ * on a `forward` row. NULL passes the CHECK, so a forwarder — once PR 4b's
+ * forwarder slot resolves one; no server resolves it before — gets its stable
+ * agent id, and a revocation in the registry reaches it. A NULL is
  * recorded on the key's first sight: resolve_agent keeps a recorded scope when
  * sent none (054's COALESCE), so a digest re-listed as a forwarder keeps the
  * scope it last had — mint a forwarder fresh, as keygen.ts does.

@@ -665,24 +665,25 @@ if (!env.MCP_ACCESS_KEYS && !env.MCP_ACCESS_KEY) {
     // since either kind of leak can put a thought into the brain. A forwarder
     // (SMD-2284) grants nothing and is no server's caller: it is neither, and
     // a list of forwarders alone is a server no client can reach. The legacy
-    // single key, set beside the list, is a write client that captures.
+    // single key, set beside the list, is one more client, with write scope.
     const clients = keys.filter((k) => k.scope !== "forward");
-    const capturers = clients.filter((k) => k.scope !== "read").length;
+    const legacyClient = env.MCP_ACCESS_KEY ? 1 : 0;
+    const capturers = clients.filter((k) => k.scope !== "read").length + legacyClient;
     add("access keys", "ok",
         `${keys.length} key(s): ${keys.map((k) => `${k.name}(${k.scope})`).join(", ")}`);
-    if (clients.length === 0 && !env.MCP_ACCESS_KEY) {
+    if (clients.length + legacyClient === 0) {
       add("access keys scope", "fail", "every key is a forwarder — forward scope grants nothing, so no client can authenticate",
           "Mint a client key: bun keygen.ts --name laptop --scope write");
-    } else if (capturers === 0 && !env.MCP_ACCESS_KEY) {
+    } else if (capturers === 0) {
       add("access keys scope", "warn", "every key is read-only — capture_thought will not be registered for anyone",
           "Mint a write key (or a capture key for a hook) if you intend to capture thoughts.");
     }
     // Write keys alone here: a capture key can add a thought and nothing else,
     // so a laptop's write key beside a hook's capture key is not "every key
     // can write" (second review pass).
-    const writers = clients.filter((k) => k.scope === "write").length;
-    if (writers === clients.length && clients.length > 1) {
-      add("access keys scope", "warn", "every key can write",
+    const writers = clients.filter((k) => k.scope === "write").length + legacyClient;
+    if (writers === clients.length + legacyClient && clients.length + legacyClient > 1) {
+      add("access keys scope", "warn", "every client key can write",
           "Prefer --scope read for clients that only search, especially URL-embedded connectors.");
     }
   }

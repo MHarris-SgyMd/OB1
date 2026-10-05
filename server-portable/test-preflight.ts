@@ -241,7 +241,11 @@ console.log("\n[2b] A forwarder key (SMD-2284) counts as no client: not a captur
   const reader = await run({ ...base, MCP_ACCESS_KEYS: [line("fwd", "forward"), line("chatgpt", "read")].join(",") });
   assert(scopeRows(reader.out).some((l) => /!/.test(l) && /every key is read-only/.test(l)), `a forwarder beside a read key: every CLIENT key is read-only, said (${scopeRows(reader.out).join(" | ")})`);
   const writers = await run({ ...base, MCP_ACCESS_KEYS: [line("fwd", "forward"), line("laptop", "write"), line("phone", "write")].join(",") });
-  assert(scopeRows(writers.out).some((l) => /every key can write/.test(l)), `a forwarder beside two write keys: every client key can write, said (${scopeRows(writers.out).join(" | ")})`);
+  assert(scopeRows(writers.out).some((l) => /every client key can write/.test(l)), `a forwarder beside two write keys: every client key can write, said so — not every key (${scopeRows(writers.out).join(" | ")})`);
+  const writeLegacy = await run({ ...base, MCP_ACCESS_KEYS: line("laptop", "write"), MCP_ACCESS_KEY: "z".repeat(40) });
+  assert(scopeRows(writeLegacy.out).some((l) => /every client key can write/.test(l)), `a write key beside the legacy single key, itself write scope: every client key can write (${scopeRows(writeLegacy.out).join(" | ")})`);
+  const readWriteLegacy = await run({ ...base, MCP_ACCESS_KEYS: [line("chatgpt", "read"), line("laptop", "write")].join(","), MCP_ACCESS_KEY: "z".repeat(40) });
+  assert(!scopeRows(readWriteLegacy.out).some((l) => /can write/.test(l)), `…but not beside a read key too (${scopeRows(readWriteLegacy.out).join(" | ")})`);
   const hook = await run({ ...base, MCP_ACCESS_KEYS: [line("fwd", "forward"), line("hook", "capture")].join(",") });
   assert(scopeRows(hook.out).length === 0, `a forwarder beside a capture key: no scope row (${scopeRows(hook.out).join(" | ")})`);
 }
