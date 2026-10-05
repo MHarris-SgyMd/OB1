@@ -982,6 +982,11 @@ jobs:
           CAPTURE_KEY=$(openssl rand -hex 32)
           CAPTURE_HASH=$(printf '%s' "$CAPTURE_KEY" | shasum -a 256 | cut -d' ' -f1)
           echo "OB1_SMOKE_CAPTURE_KEY=$CAPTURE_KEY" >> "$GITHUB_ENV"
+          # And a forwarder (SMD-2284): grants nothing; the REST core reads it
+          # beside a caller's key on the mesh, and /api deletes it.
+          FORWARD_KEY=$(openssl rand -hex 32)
+          FORWARD_HASH=$(printf '%s' "$FORWARD_KEY" | shasum -a 256 | cut -d' ' -f1)
+          echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
           # No OPENROUTER_API_KEY: the provider is a local endpoint, which
           # needs no credential (preflight decides). Preflight dials it
           # (GET /models, SMD-1875), and the canary step below embeds through
@@ -1051,7 +1056,7 @@ jobs:
           cat > .env <<EOF
           POSTGRES_PASSWORD="$(openssl rand -hex 24)"
           OB1_EMBEDDING_DIM=1024   # the stack's default, written out as an operator would
-          MCP_ACCESS_KEYS=ci:write:$HASH,ci-read:read:$READ_HASH,ci-capture:capture:$CAPTURE_HASH
+          MCP_ACCESS_KEYS=ci:write:$HASH,ci-read:read:$READ_HASH,ci-capture:capture:$CAPTURE_HASH,ci-forwarder:forward:$FORWARD_HASH
           OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1
           OB1_LLM_LOCAL=1
           OB1_QUERY_LOG=on
@@ -1129,7 +1134,7 @@ jobs:
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
           # its route file is its label, as the base one is.
           docker compose -f compose.yaml -f compose.api-public.yaml --profile local-models config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-api-route"] == .configs["proxy-api-route"].content)'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-api-route"] == .configs["proxy-api-route"].content) and (.configs["proxy-api-route"].content | test("middlewares: \\[api-no-forwarder, api-strip\\]") and test("X-Brain-Forwarder: \"\""))'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
@@ -1713,9 +1718,15 @@ jobs:
           [ "$c" = 404 ] || { echo "a POST to /api with the route off answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
           inside=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" http://api.ob1.internal.:8000/v1/whoami)
           jq -e '.scope == "write" and (.operations | index("capture_thought"))' <<<"$inside" >/dev/null || { echo "api.ob1.internal on the mesh did not answer whoami: ${inside:0:200}" >&2; exit 1; }
+          # Forwarded on the mesh, as the MCP server will: the forwarder is the request's act (SMD-2284).
+          carried=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" --header "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" http://api.ob1.internal.:8000/v1/whoami)
+          jq -e '.name == "ci" and .act.name == "ci-forwarder"' <<<"$carried" >/dev/null || { echo "a forwarded whoami on the mesh named no act: ${carried:0:200}" >&2; exit 1; }
           docker compose -f compose.yaml -f compose.api-public.yaml up -d --wait --wait-timeout 120 proxy
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
           if ! { [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null; }; then echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; fi
+          # From outside, the proxy deletes the forwarder slot: no act, however sound the forwarder key.
+          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" -H "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" "$B/api/v1/whoami")
+          if ! { [ "$c" = 200 ] && jq -e 'has("act") | not' /tmp/api-body >/dev/null; }; then echo "a forwarder through /api reached the REST core ($c): $(head -c 160 /tmp/api-body)" >&2; exit 1; fi
           c=$(code "$B/api/v1/whoami?key=$OB1_SMOKE_KEY")
           [ "$c" = 401 ] || { echo "a key in /api's query string was taken ($c): the REST core reads header keys only" >&2; exit 1; }
           c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"limit":5}' "$B/api/v1/scans")
@@ -1726,7 +1737,7 @@ jobs:
           [ "$c" = 404 ] || { echo "/api still answered $c after the overlay was dropped: compose did not recreate the proxy" >&2; exit 1; }
           sleep 1
           LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
-          if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key" >&2; exit 1; fi
+          if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
           grep -qE '^.*api GET /v1/whoami 200 [0-9]+ms$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
 
       - name: Confirm no Supabase CLI anywhere in the stack

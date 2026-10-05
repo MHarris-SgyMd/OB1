@@ -53,6 +53,16 @@ export function headerKeys(req: Request): string[] {
   return [...new Set(forms.filter((k): k is string => Boolean(k)))];
 }
 
+/**
+ * The forwarder slot (SMD-2284, the ADR's decision 7): when the MCP server
+ * forwards a client's key, it sends its own key here, and the REST core records
+ * it as who carried the request (`act`). Only a forward-scope key is taken — a
+ * key that grants nothing (auth.ts) — so a client holding two keys cannot stamp
+ * one as the other's carrier. Its own header, apart from the caller's three, so
+ * a forwarder is never read as a caller and a caller's key never as a forwarder.
+ */
+export const FORWARDER_HEADER = "x-brain-forwarder";
+
 const scopeOf = (name: ToolName) => TOOLS.find((t) => t.name === name)!.scope;
 /** Whether a key's scope unlocks a tool's group (tools.ts's UNLOCKS, the one statement of the hierarchy). */
 export const mayCall = (principal: Principal, name: ToolName): boolean => UNLOCKS[principal.scope].includes(scopeOf(name));
@@ -154,7 +164,11 @@ export function createRestApp(deps: RestDeps): Hono {
   /**
    * The caller, or the answer that refuses it: a key that authenticates (a
    * caller's scope — a forwarder key alone is unknown here), then the registry's word on it — revoked is refused for good, busy
-   * for now — with its stable agent id set for the audit row.
+   * for now — with its stable agent id set for the audit row. A request that
+   * carries the forwarder slot is refused unless the slot holds a forward-scope
+   * key the registry stands by (the refusal says `credential: "forwarder"`), and
+   * otherwise names its carrier as `act`; the client's key still decides what
+   * the request may do.
    */
   async function caller(c: Context): Promise<Principal | Response> {
     const keys = deps.keys();
@@ -164,22 +178,37 @@ export function createRestApp(deps: RestDeps): Hono {
       if (principal) break;
     }
     if (!principal) return refuse(c, 401, { code: "UNAUTHORIZED" }, { "WWW-Authenticate": "Bearer" });
+    // Present at all, even empty, the forwarder slot must hold a forwarder's
+    // key: a slot the caller filled is never ignored (an empty one is no
+    // carrier named). Its digest is checked before either key reaches the
+    // registry, so a request refused for a forwarder that is no forward key
+    // registers no one; one refused as a revoked or busy forwarder has resolved
+    // the caller first (a valid key; it is granted nothing).
+    const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);
+    const carrier = forwarded === null ? null : authenticate(forwarded, keys, { admit: ["forward"] });
+    if (forwarded !== null && !carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
     const identity = await deps.resolve(principal);
     if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED" }, { "WWW-Authenticate": "Bearer" });
     if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true }, RETRY_AFTER);
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
+    if (carrier) {
+      const carried = await deps.resolve(carrier);
+      if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
+      if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder" }, RETRY_AFTER);
+      principal.act = { name: carrier.name, ...(carried.agentId ? { agentId: carried.agentId } : {}) };
+    }
     return principal;
   }
 
-  // Who is calling: the key's name, its scope, its stable agent id, and the
-  // operations it may call — what the MCP server's tools/list and the GUI's
-  // sign-in read once SMD-2287 and SMD-2280 are clients (no `act` until a
-  // forwarder, SMD-2284's PR 4).
+  // Who is calling: the key's name, its scope, its stable agent id, the
+  // operations it may call, and — forwarded — who carried it (`act`): what the
+  // MCP server's tools/list and the GUI's sign-in read once SMD-2287 and
+  // SMD-2280 are clients.
   app.get("/v1/whoami", async (c) => {
     const p = await caller(c);
     if (p instanceof Response) return p;
-    return c.json({ name: p.name, scope: p.scope, ...(p.agentId ? { agentId: p.agentId } : {}), operations: visibleToolNames(p) });
+    return c.json({ name: p.name, scope: p.scope, ...(p.agentId ? { agentId: p.agentId } : {}), operations: visibleToolNames(p), ...(p.act ? { act: p.act } : {}) });
   });
 
   // A job's event stream (SMD-2273): its progress and its end as SSE, kept
