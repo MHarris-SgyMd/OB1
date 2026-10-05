@@ -1131,6 +1131,12 @@ jobs:
         run: |
           docker compose -f compose.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.proxy.ports | length == 1) and (.services.server | has("ports") | not) and (.services.api | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and ([.services[] | select(.network_mode != null)] | length == 0)'
+          # SMD-2294: the proxy dials every backend by a rooted mesh name — the
+          # server, the canary's and working tier's servers and the
+          # authorization server — never a service name, which a tier of
+          # another project on the mesh answers to as well.
+          docker compose -f compose.yaml config --format json \
+            | jq -e '[.configs["proxy-routes"].content | scan("url: \"([^\"]*)\"")[]] | . == ["http://mcp.ob1.internal.:8000", "http://mcp.canary.ob1.internal.:8000", "http://mcp.working.ob1.internal.:8000", "http://auth.ob1.internal.:3000"]'
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
           # its route file is its label, as the base one is.
           docker compose -f compose.yaml -f compose.api-public.yaml --profile local-models config --format json \
@@ -1780,6 +1786,49 @@ jobs:
           LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
           if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
           grep -qE '^.*api GET /v1/whoami 200 [0-9]+ms$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+
+      # SMD-2294: a canary or working tier of its own compose project joins
+      # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
+      # /canary/mcp and /working/mcp there. With no tier both are the proxy's
+      # bodiless 404, and so is everything else under either prefix, which
+      # never falls to the legacy route. A stand-in per tier on the mesh, under
+      # its tier's name and under `server` as a tier's container is, answers
+      # its own route; stable's /mcp reaches neither; gone, each is a 404 again.
+      - name: The tier routes reach a tier on the mesh, and nothing else under its prefix
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -s -o /tmp/tier-body -w '%{http_code}' --max-time 15 "$@"; }
+          bare404() { c=$(code "${@:2}"); if ! { [ "$c" = 404 ] && [ ! -s /tmp/tier-body ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's bodiless 404" >&2; exit 1; fi; }
+          bare404 'GET /canary/mcp/health with no canary' "$B/canary/mcp/health"
+          bare404 'a keyed tools/list at /canary/mcp with no canary' -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
+          bare404 'GET /working/mcp/health with no working tier' "$B/working/mcp/health"
+          for p in /canary /canary/ /canary/health /working/x; do
+            bare404 "a keyed POST to $p" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
+          done
+          trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          for tier in canary working; do
+            docker run -d --name "ob1-ci-$tier-stand-in" --network open-brain_mesh --network-alias "mcp.$tier.ob1.internal" --network-alias server \
+              --entrypoint bun "$IMAGE" -e "Bun.serve({ port: 8000, fetch: (r) => new Response('$tier ' + new URL(r.url).pathname) })" > /dev/null
+          done
+          for tier in canary working; do
+            for _ in $(seq 1 40); do [ "$(curl -s --max-time 2 "$B/$tier/mcp/health")" = "$tier /$tier/mcp/health" ] && break; sleep 0.5; done
+            got=$(curl -s --max-time 5 "$B/$tier/mcp/health")
+            [ "$got" = "$tier /$tier/mcp/health" ] || { echo "/$tier/mcp/health did not reach the $tier stand-in on the mesh: '$got'" >&2; exit 1; }
+            got=$(curl -s --max-time 5 -X POST -d '{}' "$B/$tier/mcp")
+            [ "$got" = "$tier /$tier/mcp" ] || { echo "a POST to /$tier/mcp did not reach the $tier stand-in: '$got'" >&2; exit 1; }
+          done
+          for _ in $(seq 1 20); do
+            got=$(curl -s --max-time 5 -H 'connection: close' "$B/mcp/health")
+            [ "$got" = ok ] || { echo "stable's /mcp/health answered '$got': the proxy reached another tier's container" >&2; exit 1; }
+          done
+          docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
+          for tier in canary working; do
+            for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health")" = 404 ] && break; sleep 0.5; done
+            bare404 "GET /$tier/mcp/health once the tier left" "$B/$tier/mcp/health"
+          done
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
