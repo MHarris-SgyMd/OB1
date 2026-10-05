@@ -271,8 +271,10 @@ server's key when it forwards a client's to the REST core), is not added to the
 CHECK: `migrate.ts --reapply` runs 049 again, whose `ADD CONSTRAINT` would then
 fail on a `forward` row. `agents.ts` sends a forwarder's scope as none, so
 `resolve_agent()` records it NULL on first sight — which the CHECK admits — and
-the key gets its agent id and its revocation once PR 4b's forwarder slot
-resolves one (no server resolves a forwarder before it). Sent none, `resolve_agent()`
+the key gets its agent id and its revocation when the REST core's forwarder
+slot resolves it — the one place a forwarder is resolved. A forwarded write
+names it in `thought_audit.actor_context` as `act` (`{name, agent_id}`), the
+row's actor still the client's key. Sent none, `resolve_agent()`
 keeps a scope already recorded (054), so a digest re-listed as a forwarder keeps
 its old one; a forwarder is minted fresh.
 

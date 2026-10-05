@@ -364,6 +364,11 @@ console.log("\n[10] The audit actor is serialised in the shape the trigger reads
   const bare = actorPayload({ name: "laptop" });
   assert(!("agent_id" in (bare ?? {})), "no agent id means no agent_id key at all");
   assert(actorPayload(undefined) === null, "no actor at all serialises to null");
+  // A forwarded write's carrier (SMD-2284): `act`, its id spelt as the trigger reads ids.
+  const carried = actorPayload({ name: "hook", via: "open-brain-api", act: { name: "mcp-forwarder", agentId: "fwd-1" } });
+  assert(JSON.stringify(carried?.act) === JSON.stringify({ name: "mcp-forwarder", agent_id: "fwd-1" }) && carried?.name === "hook", `act passes through with agent_id, the actor still the client's key (${JSON.stringify(carried)})`);
+  const carriedBare = actorPayload({ name: "hook", act: { name: "mcp-forwarder" } });
+  assert(JSON.stringify(carriedBare?.act) === JSON.stringify({ name: "mcp-forwarder" }) && !("act" in (bare ?? {})), "…an act with no id carries no agent_id key, and no act means no act key");
 }
 
 console.log("\n[11] An unreachable agent registry does not deny service");
