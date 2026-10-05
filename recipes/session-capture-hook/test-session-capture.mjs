@@ -72,6 +72,8 @@ const runHook = (input, env = {}, args = [], raw = false) => spawnScript(args, {
 //   [[fn-missing]]       a store error phrased with "not found" — still not a refusal
 //   [[refuse-hard]]      a refusal the hook cannot mend: isError "Refused: …" naming no pointer → dead
 //   [[grant-missing]]    the server could not CHECK the supersedes (its role lacks SELECT on thought_audit): kept, the pointer not dropped
+//   [[registry-away]]    the server could not attribute the key while its registry is away: SUPERSEDES_UNJUDGED, kept
+//   [[ownership-old]]    a server from before SMD-2473 refusing a supersedes the key did not write: REFUSED_SUPERSEDES_OWNERSHIP, mended
 //   [[refuse-derived-at:N]]  the first attempt is refused naming position N of derived_from, as the server does
 //   [[slow]]             the answer takes 2.5 s — a synchronous post would bust the SessionEnd budget
 const received = [];
@@ -123,9 +125,10 @@ const fake = Bun.serve({
       if (/\[\[store-401\]\]/.test(content)) return err("Error: PostgREST answered 401 Unauthorized: JWT expired", { code: "STORE_UNAVAILABLE", retryable: true });
       if (/\[\[state-moves\]\]/.test(content)) writeFileSync(join(STATE, "s-raced.json"), JSON.stringify({ thought_id: uuid(82), fingerprint: "sib", captured_at: new Date().toISOString(), summary_at: new Date().toISOString() }));
       if (/\[\[grant-missing\]\]/.test(content) && args.supersedes) return err("Error: this key's `supersedes` could not be checked against the target's capture record (permission denied for table thought_audit) — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
+      if (/\[\[ownership-old\]\]/.test(content) && args.supersedes) return err("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.", { code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
       if (/\[\[registry-away\]\]/.test(content) && args.supersedes) return err("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
-      if (/\[\[refuse-metadata\]\]/.test(content) && args.metadata && !refusedOnce.has(content)) {
-        refusedOnce.add(content); // a reserved-key clash, or a brain from before the metadata argument: the first call with metadata is refused (prose only, no code, as the real server's is), the retry without it lands
+      if (/\[\[refuse-metadata\]\]/.test(content) && args.metadata && !refusedOnce.has(`metadata ${content}`)) {
+        refusedOnce.add(`metadata ${content}`); // keyed apart from [[refuse-derived]]'s, so one capture can be refused on both // a reserved-key clash, or a brain from before the metadata argument: the first call with metadata is refused (prose only, no code, as the real server's is), the retry without it lands
         return err("Refused: `metadata.redactions` is set by the server, not the caller — drop it.", null);
       }
       if (/\[\[refuse-hard\]\]/.test(content)) return err("Refused: the content is not a thought this brain will hold."); // a Refused the server did not code: the hook falls back to the prose rule
@@ -512,6 +515,12 @@ let episodesLines;
   const ungated = prepare({ session_id: E_SID, transcript_path: join(TMP, "episodes-five.jsonl"), hook_event_name: "Stop" });
   assert(/^skip: last capture 0 min ago, interval 20$/.test(gated.message) && ungated.payloadPaths.length === 2 && ungated.payload.episode === 5 && /Episode 4 of the session, begun after a compaction, ended when SMD-2014 was taken up\./.test(JSON.parse(readFileSync(ungated.payloadPaths[0], "utf8")).text),
     `a Stop inside the interval skips though a fifth episode has opened; without the interval it prepares the closed fourth and the new fifth (${gated.message} | ${ungated.message.slice(0, 60)})`);
+  {
+    // Each episode is prepared pointing at its own chain's thought: the closed
+    // fourth at the fourth's, the new fifth at none (SMD-2473 PR 2 review pass 5).
+    const [p4, p5] = ungated.payloadPaths.map((p) => JSON.parse(readFileSync(p, "utf8")));
+    assert(p4.chain_id === "s-ep#e4" && p4.supersedes === readState("s-ep#e4").thought_id && p5.chain_id === "s-ep#e5" && p5.supersedes === undefined, "each episode is prepared pointing at its own chain's thought");
+  }
   for (const p of ungated.payloadPaths) unlinkSync(p);
   // A checkpoint is the open episode's alone.
   const cpE = prepare({ session_id: "s-ep-cp", transcript_path: EPISODES_T, hook_event_name: "PreCompact", trigger: "auto" });
@@ -550,7 +559,7 @@ let episodesLines;
   received.length = 0;
   const he = await runHook({ session_id: "s-ep-hook", transcript_path: EPISODES_T, cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
   assert(he.code === 0 && (he.err.match(/session-capture: captured 0000/g) ?? []).length === 4 && received.length === 4, `as a hook, synchronous: four captures, four lines on stderr (exit ${he.code}: ${he.err.trim().split("\n").length} line(s))`);
-  const epLog = readFileSync(join(STATE, "log"), "utf8");
+  const epLog = existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : ""; // a missing log is a failure the assertion names, not a throw
   assert(/captured session=s-ep-hook harness=claude-code id=/.test(epLog) && /captured session=s-ep-hook episode=2 harness=claude-code id=/.test(epLog) && /captured session=s-ep-hook episode=4 harness=claude-code id=/.test(epLog), "the log names the episode after the first");
   const hs = await runHook({ session_id: "s-ep-hook-sec", transcript_path: join(TMP, "episodes-secret.jsonl"), cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1", OB1_CAPTURE_ON_SECRET: "refuse" });
   assert(hs.code === 1 && /refused — episode 2 of session s-ep-hook-sec/.test(hs.err) && (hs.err.match(/session-capture: captured 0000/g) ?? []).length === 3 && received.length === 7 && !readState("s-ep-hook-sec#e2") && readState("s-ep-hook-sec#e3")?.thought_id,
@@ -1020,6 +1029,8 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   assert(r1old.id && /provenance dropped/.test(r1old.note) && received.at(-1).args.derived_from === undefined, "a server that names no position (before this pass) gets the whole list dropped");
   const r2 = await postCapture(cfg, { text: "[[embedding-failed]] summary", harness: "codex", derived_from: [] });
   assert(r2.id === uuid(1000 + received.length) && /embedding failed/.test(r2.note), "a saved-but-vectorless answer is a capture with a note");
+  const r2s = await postCapture(cfg, { text: "[[embedding-failed]] a summary with a pointer", harness: "codex", derived_from: [], supersedes: uuid(49) });
+  assert(r2s.id && /embedding failed/.test(r2s.note) && r2s.sent === uuid(49), "…and still says the pointer it sent, which the row was written with (SMD-2473 PR 2 review pass 2)");
   // Unauthorized is dead at once; a closed port is kept for a later run and then delivered.
   const bad = prepare({ session_id: "s-bad", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
   const [b] = await postPending({ url: URL_, key: "wrong" }, bad.payloadPath);
@@ -1145,6 +1156,122 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   const [so2] = await postPending(cfg, stuck.payloadPath);
   assert(so2.ok && /supersedes dropped: 3 of 4 attempts failed on it/.test(so2.note) && received.length === beforeStuck + 1 && received.at(-1).args.supersedes === undefined,
     `on the fifth attempt the pointer is dropped and the summary lands (${(so2.note ?? so2.error ?? "").slice(0, 60)})`);
+  {
+    // …and its captured line says so, naming no pointer it did not send (SMD-2473 PR 2 review pass 2).
+    const stuckLine = readFileSync(join(STATE, "log"), "utf8").split("\n").filter((l) => / captured session=s-stuck-ptr /.test(l)).at(-1) ?? "";
+    assert(/note="supersedes dropped: 3 of 4/.test(stuckLine) && !/supersedes_sent=/.test(stuckLine), `the last resort's captured line carries the note and no supersedes_sent= (${stuckLine.slice(25, 140)})`);
+  }
+  // SMD-2473: the hook's verdict on a capture-only key's supersedes, cell by
+  // cell of the server's table (test-e2e-sql [13b]: eight targets × four
+  // registry states). Such a key meets three replies across this server and
+  // an older one, so the 33 flows are those three, each cell labelled as the
+  // server's table names it (this server's other retry, an unreadable capture
+  // record, is [[grant-missing]]'s above):
+  // - landed: the pointer written (its own standing thought, the registry
+  //   answering) or dropped (every other cell), in the same reply, which the
+  //   hook cannot and need not tell apart;
+  // - SUPERSEDES_UNJUDGED: the registry away for now, every target;
+  // - REFUSED_SUPERSEDES_OWNERSHIP: a server from before SMD-2473.
+  // The hook must neither lose a pointer it owns nor wait for ever: a landed
+  // cell lands in one call and the state takes the new id, so the next end
+  // supersedes that; an away cell keeps the payload with its pointer, counted,
+  // never dead (its last resort is held above); an old refusal is mended at once.
+  {
+    const TARGETS = ["missing", "deletedOwn", "deletedForeign", "attributedOwn", "attributedForeign", "unattributedOwn", "unattributedForeign", "recapturedForeign"];
+    const STATES = ["answering", "away", "refusing", "unmigrated"];
+    const cells = STATES.flatMap((state) => TARGETS.map((target) => ({ state, target, answer: state === "away" ? "away" : "landed" })));
+    cells.push({ state: "old server", target: "attributedForeign", answer: "ownership-old" });
+    const verdicts = [];
+    let k = 0;
+    for (const c of cells) {
+      k++;
+      const session = `s-cell-${k}`;
+      const prior = uuid(3000 + k);
+      writeFileSync(join(STATE, `${session}.json`), JSON.stringify({ thought_id: prior, fingerprint: "older", captured_at: new Date(Date.now() - 60_000).toISOString(), summary_at: new Date(Date.now() - 60_000).toISOString() }));
+      const marker = c.answer === "away" ? "[[registry-away]] " : c.answer === "ownership-old" ? "[[ownership-old]] " : "";
+      const t = join(TMP, `${session}.jsonl`);
+      writeFileSync(t, [user(`${marker}a prompt naming ${c.target}, the registry ${c.state}`, { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n"));
+      const p = prepare({ session_id: session, transcript_path: t, hook_event_name: "SessionEnd" });
+      const before = received.length;
+      const [o] = await postPending(cfg, p.payloadPath);
+      const calls = received.slice(before);
+      // Read, not assumed: a payload gone dead is a finding, said by the assertions below, not a throw.
+      const recorded = JSON.parse(readFileSync(join(STATE, `${session}.json`), "utf8"));
+      const pendingPath = o.file ? join(STATE, "pending", basename(o.file)) : "";
+      const pending = !o.ok && pendingPath && existsSync(pendingPath) ? JSON.parse(readFileSync(pendingPath, "utf8")) : null;
+      verdicts.push({ ...c, o, calls, recorded, pending, prior });
+      if (pending) unlinkSync(pendingPath);
+    }
+    const at = (v) => `${v.state}/${v.target}`;
+    const landed = verdicts.filter((v) => v.answer === "landed");
+    const offLanded = landed.filter((v) => !(v.o.ok && v.calls.length === 1 && v.calls[0].args.supersedes === v.prior && v.recorded.thought_id === v.o.id && !/supersedes dropped/.test(v.o.note ?? "")));
+    assert(landed.length === 24 && offLanded.length === 0, `every landed cell — written or dropped, the hook cannot tell — lands in one call naming the prior id, and the state takes the new one for the next end to supersede (${offLanded.map(at).join(", ") || "all 24"})`);
+    const away = verdicts.filter((v) => v.answer === "away");
+    const offAway = away.filter((v) => !(!v.o.ok && !v.o.dead && v.calls.length === 1 && v.calls[0].args.supersedes === v.prior && v.pending?.supersedes === v.prior && v.pending?.supersedes_failures === 1 && v.recorded.thought_id === v.prior));
+    assert(away.length === 8 && offAway.length === 0, `every away cell keeps its payload and its pointer, one failure counted, never dead, the state untouched (${offAway.map(at).join(", ") || "all 8"})`);
+    const old = verdicts.find((v) => v.answer === "ownership-old");
+    assert(old?.o.ok && old.calls.length === 2 && old.calls[0].args.supersedes === old.prior && old.calls[1].args.supersedes === undefined && /supersedes dropped/.test(old.o.note ?? ""),
+      `an older server's ownership refusal is still mended at once: the pointer dropped and the summary landed (${old?.o.note ?? old?.o.error}${old?.o.dead ? "; dead" : ""})`);
+    // The log names the pointer sent, not one kept: the server drops a capture key's unprovable pointer without a word.
+    const logged = readFileSync(join(STATE, "log"), "utf8");
+    assert(logged.includes(`supersedes_sent=${landed[0].prior}`) && !/ supersedes=[0-9a-f]{8}-/.test(logged), "the captured line says supersedes_sent=, the pointer the post named");
+    const oldLine = logged.split("\n").find((l) => / captured session=s-cell-33 /.test(l)) ?? "";
+    assert(/ captured session=s-cell-33 /.test(oldLine) && !/supersedes_sent=/.test(oldLine) && /supersedes dropped/.test(oldLine), `…and none when the mend dropped the pointer before the post that landed (review pass 1: it named the dropped one) (${oldLine.slice(25, 140)})`);
+  }
+  // …and not one attempt sooner: a payload whose pointer failed three of three
+  // tries still names it on the fourth, stays pending and counts the fourth
+  // failure (SMD-2473 PR 2 review pass 1: a last resort at the second attempt
+  // passed every test, and would turn a short outage's supersession into two
+  // summaries side by side).
+  {
+    writeFileSync(join(STATE, "s-early-ptr.json"), JSON.stringify({ thought_id: uuid(97), fingerprint: "older", captured_at: new Date(Date.now() - 60_000).toISOString(), summary_at: new Date(Date.now() - 60_000).toISOString() }));
+    const earlyT = join(TMP, "early.jsonl");
+    writeFileSync(earlyT, [user("[[registry-away]] a prompt while the registry is still down", { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n"));
+    const early = prepare({ session_id: "s-early-ptr", transcript_path: earlyT, hook_event_name: "SessionEnd" });
+    writeFileSync(early.payloadPath, JSON.stringify({ ...early.payload, attempts: 3, supersedes_failures: 3, last_error: "capture failed: Error: this key's `supersedes` could not be attributed while the agent registry is unavailable" }));
+    const beforeEarly = received.length;
+    const [eo4] = await postPending(cfg, early.payloadPath);
+    const keptPath = eo4.file ? join(STATE, "pending", basename(eo4.file)) : "";
+    const kept = keptPath && existsSync(keptPath) ? JSON.parse(readFileSync(keptPath, "utf8")) : null;
+    assert(!eo4.ok && !eo4.dead && received.length === beforeEarly + 1 && received.at(-1).args.supersedes === uuid(97) && kept?.supersedes === uuid(97) && kept?.supersedes_failures === 4 && kept?.attempts === 4,
+      `the fourth attempt still names the pointer, and the payload waits with four failures counted (${eo4.error?.slice(0, 50) ?? `ok ${eo4.id}`}; ${kept?.supersedes_failures})`);
+    if (kept) unlinkSync(keptPath);
+  }
+  // A mend, then bookkeeping that fails: the next run finishes it without
+  // posting, and its captured line names what the landed post sent — no
+  // pointer, the mend having dropped it (SMD-2473 PR 2 review pass 2).
+  {
+    writeFileSync(join(STATE, "s-mend-bk.json"), JSON.stringify({ thought_id: uuid(96), fingerprint: "older", captured_at: new Date(Date.now() - 60_000).toISOString(), summary_at: new Date(Date.now() - 60_000).toISOString() }));
+    const mendT = join(TMP, "mend-bk.jsonl");
+    writeFileSync(mendT, [user("[[ownership-old]] a prompt whose pointer an older server refuses", { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n"));
+    const mend = prepare({ session_id: "s-mend-bk", transcript_path: mendT, hook_event_name: "SessionEnd" });
+    rmSync(join(STATE, "s-mend-bk.json"), { force: true });
+    mkdirSync(join(STATE, "s-mend-bk.json"), { recursive: true }); // the state write fails: bookkeeping deferred
+    const [m1] = await postPending(cfg, mend.payloadPath);
+    const owedPath = join(STATE, "pending", basename(m1.file ?? mend.payloadPath));
+    const owed = existsSync(owedPath) ? JSON.parse(readFileSync(owedPath, "utf8")) : null;
+    rmSync(join(STATE, "s-mend-bk.json"), { recursive: true, force: true });
+    const beforeOwed = received.length;
+    const [m2] = existsSync(owedPath) ? await postPending(cfg, owedPath) : [{}];
+    const mendLine = readFileSync(join(STATE, "log"), "utf8").split("\n").filter((l) => / captured session=s-mend-bk /.test(l) && !/bookkeeping failed/.test(l)).at(-1) ?? "";
+    assert(/bookkeeping deferred/.test(m1.note ?? "") && owed?.captured_id && owed.captured_sent === undefined && m2.ok && received.length === beforeOwed && /supersedes dropped/.test(mendLine) && !/supersedes_sent=/.test(mendLine),
+      `a mend then a deferred bookkeeping: the next run posts nothing, and its line names no pointer (${mendLine.slice(25, 140)})`);
+  }
+  // A payload that landed, its bookkeeping owed past a week with a failure on
+  // the pointer recorded before it landed: the next run finishes it and drops
+  // nothing — the last resort is for a post still to make (review pass 4).
+  {
+    const agedT = join(TMP, "landed-aged.jsonl");
+    writeFileSync(agedT, [user("a prompt whose post landed a week ago", { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n"));
+    rmSync(join(STATE, "s-landed-aged.json"), { recursive: true, force: true });
+    const aged = prepare({ session_id: "s-landed-aged", transcript_path: agedT, hook_event_name: "SessionEnd" });
+    writeFileSync(aged.payloadPath, JSON.stringify({ ...aged.payload, supersedes: uuid(93), captured_sent: uuid(93), captured_id: uuid(90), captured_note: "", attempts: 1, supersedes_failures: 1, prepared_at: new Date(Date.now() - 8 * 86_400_000).toISOString(), last_error: "capture failed: Error: this key's `supersedes` could not be checked against the target's capture record (permission denied)" }));
+    const beforeAged = received.length;
+    const [ag] = await postPending(cfg, aged.payloadPath);
+    const agedLine = readFileSync(join(STATE, "log"), "utf8").split("\n").filter((l) => / captured session=s-landed-aged /.test(l)).at(-1) ?? "";
+    assert(ag.ok && !/supersedes dropped/.test(ag.note ?? "") && received.length === beforeAged && readState("s-landed-aged")?.thought_id === uuid(90) && agedLine.includes(`supersedes_sent=${uuid(93)}`) && !/ note=/.test(agedLine),
+      `a landed payload owed past a week is finished without a last-resort note or a post (${agedLine.slice(25, 160)})`);
+  }
   // A store's own "401 Unauthorized" quoted in an Error: is an outage, not the key refused: kept (twelfth review pass — the bare word dead-lettered it).
   {
     writeFileSync(join(TMP, "store401.jsonl"), [user("[[store-401]] a prompt while the store's key was rotating", { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n"));
@@ -1261,6 +1388,15 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   const r4 = await postCapture(cfg, { text: "[[refuse-derived]][[refuse-supersedes]] both", harness: "codex", derived_from: [uuid(61)], supersedes: uuid(62) });
   assert(r4.id && /source id\(s\) dropped/.test(r4.note) && /supersedes dropped/.test(r4.note) && received.at(-1).args.derived_from === undefined && received.at(-1).args.supersedes === undefined,
     "both pointers refused: both dropped, three calls, one capture");
+  // All three refused in turn: three mends, four calls, one capture — the
+  // loop's bound holds every kind of pointer once (SMD-2473 PR 2 review pass 4).
+  {
+    const beforeAll = received.length;
+    let r5; try { r5 = await postCapture(cfg, { text: "[[refuse-derived]][[refuse-supersedes]][[refuse-metadata]] all three", harness: "codex", derived_from: [uuid(63)], supersedes: uuid(64), redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] }); } catch (e) { r5 = { error: e.message }; }
+    const last = received.at(-1).args;
+    assert(r5.id && /source id\(s\) dropped/.test(r5.note) && /supersedes dropped/.test(r5.note) && /metadata dropped/.test(r5.note) && received.length === beforeAll + 4 && last.derived_from === undefined && last.supersedes === undefined && last.metadata === undefined && r5.sent === undefined,
+      `all three pointers refused in turn: three mends, four calls, one capture, no pointer sent (${r5.error ?? r5.note})`);
+  }
   // SMD-2168: a redacted summary's capture carries metadata.redactions — the COUNT, never the reasons or offsets the payload records.
   received.length = 0;
   const rr = await postCapture(cfg, { text: "a redacted summary", harness: "claude-code", derived_from: [], redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }, { reason: "password assignment", at: 20, in: "the outcome" }] });
@@ -1385,6 +1521,8 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   rmSync(join(STATE, "s-unbooked.json"), { recursive: true, force: true });
   const settled = await postPending(cfg);
   assert(settled.length === 2 && settled.every((x) => x.ok) && received.length === 2 && readState("s-unbooked")?.thought_id === uuid(1002) && readdirSync(join(STATE, "pending")).length === 0, "the next run finishes both bookkeepings without posting again; the state names the end");
+  const unbookedEnd = logText().split("\n").filter((l) => / captured session=s-unbooked /.test(l) && !/bookkeeping failed/.test(l) && !/event=PreCompact/.test(l)).at(-1) ?? "";
+  assert(unbookedEnd.includes(`supersedes_sent=${uuid(1001)}`), `…and the end's captured line, written by that next run, names the pointer its post sent (SMD-2473 PR 2 review pass 2) (${unbookedEnd.slice(25, 140)})`);
   assert(readdirSync(STATE).filter((f) => f.endsWith(".tmp")).length === 0, "the state writes that failed on the directory left no temp file behind (seventh review pass: one per run)");
   // A temp file a writer left under the state directory or pending/ is pruned once older than any run lasts; a fresh one may still be mid-write.
   const staleTmp = join(STATE, "s-old.json.4242.tmp"), freshTmp = join(STATE, "pending", `${Date.now()}-0-aaaa-s-fresh.json.4243.tmp`);
@@ -1675,6 +1813,29 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const idNext = await postPending(cfg);
   assert(idNext.find((x) => x.file === idO.payloadPath)?.obsolete && received.length === 3 && readdirSync(join(STATE, "pending")).length === 0, "…and the next run drops the id-less payload as obsolete beside the state, not posting it again");
   void idSlow;
+  // The same on an episode's chain (SMD-2473 PR 2 review pass 5): what the run
+  // landed is keyed by the chain, so the end of `s-idep#e2` followed up in the
+  // same run supersedes that landing, not the state's older thought.
+  {
+    rmSync(STATE, { recursive: true, force: true });
+    received.length = 0;
+    const epO = prepare({ session_id: "s-idep", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
+    prepare({ session_id: "s-idep-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
+    const epEnd = prepare({ session_id: "s-idep", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+    const toEp = (path) => { const to = path.replace(/-s-idep\.json$/, "-s-idep_e2.json"); writeFileSync(to, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), chain_id: "s-idep#e2", episode: 2 })); unlinkSync(path); return to; };
+    const epOPath = toEp(epO.payloadPath), epEndPath = toEp(epEnd.payloadPath);
+    const epEndAside = join(TMP, basename(epEndPath));
+    renameSync(epEndPath, epEndAside);
+    mkdirSync(join(STATE, "inflight", String(process.pid), `${basename(epOPath)}.${process.pid}.tmp`), { recursive: true }); // the temp path, taken: the landing's id write fails
+    writeFileSync(join(STATE, "s-idep_e2.json"), JSON.stringify({ chain_id: "s-idep#e2", thought_id: uuid(51), fingerprint: "old", captured_at: iso(Date.now() - 3_600_000), summary_at: iso(Date.now() - 3_600_000) }));
+    const epRunning = postPending(cfg);
+    await sleep(600);
+    renameSync(epEndAside, epEndPath);
+    await epRunning;
+    rmSync(join(STATE, "inflight", String(process.pid)), { recursive: true, force: true });
+    assert(received.length === 3 && received[0].args.supersedes === uuid(51) && received[2].args.supersedes === uuid(1001),
+      `on an episode's chain the end followed up in the same run supersedes what the run landed (${received.map((r) => r.args.supersedes ?? "-").join(", ")})`);
+  }
   // …and it is a last resort, not a trump: a sibling landing a newer summary
   // of the session meanwhile writes the state, and the state's thought — later
   // than what this run landed, earlier than the end — is the pointer.
@@ -1872,6 +2033,7 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
     // The prose fallback derives the same verdicts for a server from before the code.
     assert(vp("Refused: derived_from[1] (x) names no thought").mend === "derived" && vp("Refused: derived_from[1] names no thought").positions.join() === "1", "…and from prose alone, a Refused naming a derived_from position mends by dropping it");
     assert(vp("Error: this key's `supersedes` could not be checked against the target's capture record (x)").retryable === true && vp("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable").on === "supersedes", "…an Error the pointer could not be judged is a kept transient marking the pointer");
+    assert(vp("Error: this key's `supersedes` could not be checked against the target's capture record (x)").on === "supersedes", "…the could-not-be-checked wording marking the pointer as the could-not-be-attributed one does, so the last resort counts it (SMD-2473 PR 2 review pass 3)");
     assert(vp("Refused: the content is not a thought this brain will hold").retryable === false && vp("Error: Failed to connect").retryable === true, "…a Refused is final and an Error kept — the prose split the hook falls back to");
     assert(vp("Refused: `metadata.redactions` is set by the server, not the caller — drop it.").mend === "metadata" && vp("Refused: derived_from[0] names no thought").mend === "derived", "…and a Refused naming metadata mends by dropping it, while one naming a pointer still mends the pointer (SMD-2168)");
     // A non-conforming server's malformed structuredContent is handled safely —
@@ -2229,6 +2391,24 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   assert(modelCalls === beforeLanded && received.length === 0, "a payload that already landed does not call the model again — nothing is re-posted");
 
   modelSrv.stop(true);
+}
+
+console.log("\n[10] What a dropped provenance list leaves, and a payload from before prepared_at (SMD-2473 PR 2 review pass 3)");
+{
+  const cfg = { url: URL_, key: "cap-key" };
+  mkdirSync(join(STATE, "pending"), { recursive: true });
+  // An older server's provenance refusal to a capture key names no position (this server trims the list silently), so the hook drops
+  // the whole derived_from list — and the supersedes pointer stays on the
+  // post that lands.
+  const rsup = await postCapture(cfg, { text: "[[refuse-derived-old]] a summary with a pointer", harness: "codex", derived_from: [uuid(53)], supersedes: uuid(54) });
+  assert(rsup.id && /provenance dropped/.test(rsup.note) && received.at(-1).args.derived_from === undefined && received.at(-1).args.supersedes === uuid(54) && rsup.sent === uuid(54),
+    "a whole-list provenance drop leaves supersedes on the post that lands, and sent names it");
+  // A payload with no prepared_at (an older or hand-edited file) ages by the
+  // millisecond in its name, and is given up after a week like any other.
+  const npPath = join(STATE, "pending", `${Date.now() - 8 * 86_400_000}-9997-noprep-s-noprep.json`);
+  writeFileSync(npPath, JSON.stringify({ session_id: "s-noprep", chain_id: "s-noprep", episode: 1, harness: "claude-code", event: "SessionEnd", text: "[[store-down]] a payload from before prepared_at", fingerprint: "fp-noprep", derived_from: [], prompts: 1, attempts: 0 }));
+  const np = (await postPending(cfg, npPath)).find((o) => basename(o.file ?? "") === basename(npPath));
+  assert(np && !np.ok && np.dead && existsSync(join(STATE, "dead", basename(npPath))), `a payload with no prepared_at, eight days old by its name, is given up (${np?.error ?? "no outcome"})`);
 }
 
 fake.stop(true);

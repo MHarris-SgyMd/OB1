@@ -290,7 +290,7 @@ export const SPECS = {
       derived_from: z.array(z.string()).optional()
         .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result). Recorded when the thought is new; if this text was already captured, the existing thought's provenance is left as it is."),
       supersedes: z.string().optional()
-        .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead."),
+        .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead (a key that can write). A capture-only key may replace only a thought it captured itself, attributed to its agent id, that still exists; any other id is left out without a word and the capture lands without it (while the server cannot check — its agent registry unreachable, or the target's capture record unreadable — it asks for a retry instead)."),
       // SMD-1298. Where the capture comes from, for metadata.source — "mcp"
       // when absent, as every capture before it. A session-end hook says
       // `claude-code` or `codex`; a per-source weight (SMD-1297) and the
