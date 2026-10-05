@@ -1125,7 +1125,11 @@ jobs:
         working-directory: deploy
         run: |
           docker compose -f compose.yaml --profile local-models config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.proxy.ports | length == 1) and (.services.server | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and ([.services[] | select(.network_mode != null)] | length == 0)'
+            | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.proxy.ports | length == 1) and (.services.server | has("ports") | not) and (.services.api | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and ([.services[] | select(.network_mode != null)] | length == 0)'
+          # The REST core's public overlay (SMD-2284) publishes nothing either, and
+          # its route file is its label, as the base one is.
+          docker compose -f compose.yaml -f compose.api-public.yaml --profile local-models config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-api-route"] == .configs["proxy-api-route"].content)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
@@ -1133,7 +1137,8 @@ jobs:
           # SMD-2210: the orchestration profile adds n8n's one port, also on
           # loopback, with its image pinned by digest. Its import runner
           # (SMD-2212) publishes none. Without a profile a plain config
-          # names exactly the four services it should: SMD-1846 added the proxy.
+          # names exactly the five services it should: SMD-1846 added the proxy,
+          # SMD-2284 the REST core (`api`, the server's image by name).
           docker compose -f compose.yaml --profile orchestration config --format json \
             | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
           # SMD-2285: the authorization server publishes nothing, joins only
@@ -1141,7 +1146,9 @@ jobs:
           # Postgres credential, no plain password and not the POC's switch.
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
-          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "migrate postgres proxy server " ]
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
+          docker compose -f compose.yaml config --format json \
+            | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a
@@ -1690,6 +1697,38 @@ jobs:
           if result - keepalive < 0.5: sys.exit("the keepalive frame arrived with the result: the proxy buffered the stream")
           PY
 
+      # SMD-2284: the REST core is internal by default — it answers on the mesh
+      # as api.ob1.internal, and the proxy's /api is a 404 — until the operator
+      # names compose.api-public.yaml, when /api reaches it with the prefix
+      # stripped and its links carrying it; dropping the file closes it again.
+      # Its log carries no key, query or content, and the proxy's no key.
+      - name: The REST core answers on the mesh, and at /api only by the overlay
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -s -o /tmp/api-body -w '%{http_code}' --max-time 15 "$@"; }
+          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
+          [ "$c" = 404 ] || { echo "/api with the public route off answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; }
+          c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"content":"ci: never captured"}' "$B/api/v1/thoughts")
+          [ "$c" = 404 ] || { echo "a POST to /api with the route off answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
+          inside=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" http://api.ob1.internal.:8000/v1/whoami)
+          jq -e '.scope == "write" and (.operations | index("capture_thought"))' <<<"$inside" >/dev/null || { echo "api.ob1.internal on the mesh did not answer whoami: ${inside:0:200}" >&2; exit 1; }
+          docker compose -f compose.yaml -f compose.api-public.yaml up -d --wait --wait-timeout 120 proxy
+          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
+          if ! { [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null; }; then echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; fi
+          c=$(code "$B/api/v1/whoami?key=$OB1_SMOKE_KEY")
+          [ "$c" = 401 ] || { echo "a key in /api's query string was taken ($c): the REST core reads header keys only" >&2; exit 1; }
+          c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"limit":5}' "$B/api/v1/scans")
+          if ! { [ "$c" = 202 ] && jq -e '.poll | startswith("/api/v1/jobs/")' /tmp/api-body >/dev/null; }; then echo "a scan through /api answered $c or a link without the prefix: $(head -c 200 /tmp/api-body)" >&2; exit 1; fi
+          [ "$(code "$B/api/openapi.json")" = 200 ] || { echo "/api/openapi.json is not served through the overlay" >&2; exit 1; }
+          docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy
+          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
+          [ "$c" = 404 ] || { echo "/api still answered $c after the overlay was dropped: compose did not recreate the proxy" >&2; exit 1; }
+          sleep 1
+          LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
+          if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key" >&2; exit 1; fi
+          grep -qE '^.*api GET /v1/whoami 200 [0-9]+ms$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
         run: |
@@ -1803,8 +1842,9 @@ jobs:
             echo "$1: docker compose stop returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code"
             if [ "$code" != "$2" ]; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 (137 is the kill at the end of the grace period: ${3:-10} s)" >&2; exit 1; fi
           }
-          # A keyed call first, so the pool this stop closes is this step's to
-          # open, whatever ran before it (review pass 2).
+          # A keyed call first, so the pool this stop closes — open since the
+          # server's start (SMD-2284) — has served this step, whatever ran
+          # before it (review pass 2).
           curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp
           stop serving 0

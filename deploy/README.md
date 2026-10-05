@@ -104,7 +104,7 @@ publishes the two images to GHCR, `ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z>` and
 `ghcr.io/mharris-sgymd/ob1-migrate:<X.Y.Z>` for linux/amd64 and linux/arm64, and
 creates the GitHub release with a compose overlay that names the two by tag and
 digest and `ollama` by the digest its tag resolved to when the job ran, beside
-`compose.yaml` and `.env.example` from the same tag, the change files the release
+`compose.yaml`, `.env.example` and `compose.api-public.yaml` from the same tag, the change files the release
 numbered and `scripts/mechanism-yield.ts`'s table. Before the release existed, the
 job brought a stack up from the *pulled* images and held it to this file's checks
 (the `Full stack, no Supabase` lines, `smoke.sh`, no Supabase binary) and to
@@ -117,6 +117,7 @@ mkdir ob1 && cd ob1
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.yaml
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.release.yaml
 curl -fsSL -o .env https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/env.example
+curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.api-public.yaml   # optional: /api on the proxy, a third -f ("The REST core" below)
 # fill in .env as step 1 says, then:
 docker compose -f compose.yaml -f compose.release.yaml pull
 docker compose -f compose.yaml -f compose.release.yaml up -d --wait   # --profile local-models on both for the stack's own Ollama
@@ -152,15 +153,16 @@ the repo root, with whatever `-f` files the stack was started with:
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` and, on the `mesh` network, `auth.ob1.internal:3000` (resolved with no search domains) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` and, on the `mesh` network, `auth.ob1.internal:3000` and — with `compose.api-public.yaml` named — `api.ob1.internal:8000` (resolved with no search domains) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `server` | `server:8000` — the proxy, and n8n | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
-| `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
+| `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on the default one, which every container there can reach until the network move (SMD-2294) — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
+| `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` and `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the REST core (SMD-2284), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
+| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2294), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -221,6 +223,7 @@ paths today:
 | Path | Answered by |
 | --- | --- |
 | `/auth` and everything under it, `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, the bare `/.well-known/oauth-authorization-server` | `auth` (`--profile auth`), as `auth.ob1.internal` on the `mesh` network — the issuer, sign-in, registration and the three discovery documents outside the issuer's path (the bare one is the only one Claude Code reads). Only while it answers: with the profile off, the server stopped or still starting, the proxy's own bodiless 404, so an origin without it says "no OAuth here" as before. Its own answers pass through untouched, the registration cap's 503 and `Retry-After` included |
+| `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
 | `/.well-known` and everything else under it | the proxy: a 404, `/.well-known/oauth-protected-resource/mcp` included until the server serves it (SMD-2382). A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246). The 404 carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
@@ -229,8 +232,10 @@ paths today:
 The path reaches the server as it came, prefix and all: the server answers POST
 at every path and `/health` under any prefix, so `/mcp` needs no setting there.
 The routes are `x-proxy-routes` at the top of `compose.yaml`, which compose
-hands the proxy as an inline config, so a release's `compose.yaml` carries them
-and there is no second file to fetch. The same text is a label on the proxy, so
+hands the proxy as an inline config (`routes.yaml` in the directory Traefik's
+file provider reads), so a release's `compose.yaml` carries them and there is no
+second file to fetch; an overlay may add a file beside it, as
+`compose.api-public.yaml` does. The same text is a label on the proxy, so
 an `up` after a route changed recreates it: compose does not recreate a
 container for a changed inline config alone (docker/compose#11900, measured on
 5.5).
@@ -244,7 +249,10 @@ loading; an SDK client connected across it saw one 404 and went on (measured).
 On that first `up` name the proxy wherever you name the server (`up -d --build
 server proxy`): `up server` alone recreates the server without its port and
 never creates the proxy. Once the proxy runs, recreating the server alone is
-fine — the proxy keeps the port and finds the new container by name. **Rolling back** to
+fine for the proxy — it keeps the port and finds the new container by name —
+but a rebuild names the REST core too, or the proxy, which depends on it ("The
+REST core", below): `api` runs the server's image, and a container keeps the
+image it started on. **Rolling back** to
 a `compose.yaml` from before it needs `up -d --remove-orphans`: without it the
 proxy, now an orphan, keeps the port and the old server cannot bind it
 (measured: "address already in use", the stack down).
@@ -255,8 +263,8 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 through the container engine's socket, which is root on the host, and the
 proxy is the one process a client on the network reaches —
 `docs/orchestration-tool.md` declined the same socket for n8n. The
-authorization server came this way (the `auth` router); the dashboard and the
-REST core's opt-in `/api` arrive the same way with their own tickets
+authorization server came this way (the `auth` router) and the REST core's
+`api-off`; the dashboard arrives the same way with its own ticket
 (`docs/operator-surface-tiers.md`). A service under a profile gets the `auth`
 router's shape: an `errors` middleware that turns Traefik's 502 for a name
 that does not resolve into a 404, so its paths answer only while it runs, and
@@ -316,6 +324,55 @@ http://127.0.0.1:<port>/health` answered, the Mac's `curl` got nothing), and so
 was any container's port on that compose network; recreating the network
 (`compose down` then `up`) restored it where restarting or recreating the proxy
 did not. The eval kit's auth stack meets a similar race (`evals/eval-auth.ts`).
+
+## The REST core and its opt-in `/api`
+
+The `api` service is the REST core (SMD-2284): every operation the MCP tools
+expose, as JSON, over the same core — the server's image run as `bun api.ts`,
+with the server's environment and its preflight
+(`server-portable/README.md`, "The REST core"). It publishes no port. On the
+`mesh` network it is `api.ob1.internal:8000`, for a client in the stack (the
+operator GUI, n8n, a worker); it is on the default network too, where Postgres
+and the model providers are, until the stack's network move (SMD-2294).
+It has no build of its own: an `up` that names it without `server` on a stack
+that never built the server's image stops at "no such image" — name `server`
+too, or build it first.
+
+```bash
+# from a container on the mesh — the proxy is one:
+docker compose -f compose.yaml exec proxy wget -qO- --header "x-brain-key: $KEY" http://api.ob1.internal.:8000/v1/whoami
+```
+
+**Public only where you turn it on.** Without the overlay the proxy answers
+`/api` with its bodiless 404. Naming it routes `/api` to the REST core:
+
+```bash
+docker compose -f compose.yaml -f compose.api-public.yaml up -d
+curl -H "x-brain-key: $KEY" http://127.0.0.1:${SERVER_PORT:-8000}/api/v1/whoami
+curl http://127.0.0.1:${SERVER_PORT:-8000}/api/openapi.json        # the contract, no key
+```
+
+Keep naming the file on every later `up` that names the proxy, or names no
+service (with the other `-f` files and profiles), the rebuild below included:
+such an `up` without it recreates the proxy without the route, and `/api` is the
+404 again — which is also how to turn it off; an `up` of other services alone
+leaves the proxy, and `/api`, as they were. With the file named and the REST
+core down or starting, `/api` answers the proxy's 502. The REST core takes its key
+from a header (`x-brain-key`, `x-access-key` or `Authorization: Bearer`), never
+from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
+on `/mcp`. Its writes record their door as `open-brain-api`
+(`thought_audit.origin`) beside the MCP server's `open-brain`, and the jobs it
+starts are its own (migration 078): either server's start marks only its own
+unfinished jobs lost. A job is read by the key that started it through either
+server; its stream, from the server that did not run it, is the job's state
+as recorded, then ends.
+
+Measured on this stack (CI's "Full stack, no Supabase" job holds each): off,
+`/api` is a 404 and a POST there never reaches the MCP server; on the mesh
+`api.ob1.internal` answers; on, `/api/v1/whoami` answers, a key in `?key=` alone
+is a 401, a scan's poll link reads `/api/v1/jobs/…`; dropped again, a 404. The
+REST core's log is one line per request — method, route template, status, time —
+and neither its log nor the proxy's holds a key.
 
 ## Moving a client to /mcp
 
@@ -434,6 +491,10 @@ always does (wrangler has no build arg). Rebuild with it:
 OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy
 ```
 
+The REST core runs the server's image by name, and the proxy depends on it,
+so this rebuilds and recreates it too; add `-f compose.api-public.yaml` where
+`/api` is on.
+
 `proxy` named beside `server`: the proxy waits on the server, nothing waits on
 the proxy, so `up server` alone on a stack from before SMD-1846 recreates the
 server without its port and never creates the proxy that takes it over.
@@ -452,7 +513,7 @@ their first thought, with the real error buried inside a tool response.
 On Supabase this mattered less: the platform injected the database credentials, so
 they could not be wrong. Off Supabase every one is hand-written.
 
-So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun index.ts`. A
+So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun index.ts` (the REST core's service runs `api.ts` instead). A
 misconfigured deployment crashloops, which is visible, instead of looking healthy,
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
 OpenRouter and checks the embedding width still matches the schema.
@@ -753,7 +814,7 @@ stable is redeployed:
 
    Stable with no tier stamp is stamped `tier=stable`. When stable's server
    runs without `OB1_TIER=stable` it says so; set that in the env file and
-   recreate the server.
+   recreate the servers (`up -d server api`).
 2. It starts the canary's Postgres, and refreshes it from stable through
    `tier.sh` on both networks: the dump, the settings, a migration with this
    checkout, the stamp and the mark ("Refreshing a tier", above).
@@ -896,7 +957,7 @@ bun deploy/orchestration/provision.ts        # --env-file for another file; --ro
 # Optional, for a template that captures into the brain (none ships yet): a CAPTURE key
 cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
 #   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS,
-#   then recreate the server (compose up -d server; a restart keeps the old keys) and provision again
+#   then recreate the servers (compose up -d server api; a restart keeps the old keys) and provision again
 ```
 
 `--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
@@ -1115,8 +1176,8 @@ lines naming the same one are refused.
     - a provider that did not answer, or a start that met another claimer:
       the next run tries again.
   - The runner takes the server's model and egress settings when it is
-    created. After changing them, recreate it with the server: `compose up
-    -d --force-recreate server orchestration-runner`.
+    created. After changing them, recreate it with the servers: `compose up
+    -d --force-recreate server api orchestration-runner`.
 - **The deadline.** One run, emitter to reembed, is bounded by
   `OB1_RUNNER_TIMEOUT_S` (3600), the wait for another pipeline's reembed
   included. n8n waits that long and a minute more. The runner reads the
@@ -1343,8 +1404,8 @@ pass a variable it does not name: `provision.ts` says which line.
 **Its state** — sessions, grants, refresh tokens and dynamically registered
 clients — is one SQLite file in the `auth-data` volume, so a restart keeps
 it, and so does an upgrade, which rebuilds and recreates the container. The server holds
-no Postgres credential, and until the REST core moves the stack onto the mesh
-(SMD-2284) it shares no network with Postgres either. On a stop it finishes
+no Postgres credential, and until the network move puts the stack on the mesh
+(SMD-2294) it shares no network with Postgres either. On a stop it finishes
 what is in flight, closes the store and exits. The library's in-memory store,
 which the proof of concept first ran on, forgot all of it at every restart.
 

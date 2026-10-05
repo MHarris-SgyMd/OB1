@@ -257,11 +257,12 @@
  *      blanked, no `sql` template, `new SQL`, `.unsafe(` or `fetch(`, bare or
  *      on globalThis; the store's builder `db` named only in the root's
  *      import, at root.ts's declaration, as createCore's `store:`, in
- *      `agents().resolve(db(), …)` and as an object key; and the store itself
- *      (`_store`, `createStore`) named only in root.ts's STORE_WIRING bodies,
+ *      `agents().resolve(db(), …)`, as an object key and, in root.ts,
+ *      serveHere()'s one start-up build (`void db().catch(() => {});`); and
+ *      the store itself (`_store`, `createStore`) named only in root.ts's
  *      db() and closeStore() (the factory in db() alone), and the store
- *      module's import — a second db() or closeStore(), in root.ts or
- *      index.ts, is a hit. A value passed on (the agent
+ *      module's import — a second db(), closeStore() or serveHere(), in
+ *      root.ts or a transport file, is a hit. A value passed on (the agent
  *      registry's lookups) and a global's alias are not followed;
  *      transportLeaksIn is a pure function its probes run on in-memory text;
  *      no exceptions
@@ -5151,13 +5152,15 @@ checkPostgrestClients();
 //     `fetch(` bare or on globalThis (a provider call is the core's);
 //   - the store's builder `db` named only in the root's import, where root.ts
 //     declares it, handed to the core (`createCore({ …, store: db })`), called
-//     for the agent registry (`agents().resolve(db(), …)`), or as an object
-//     key — an alias, `(db)()`, another caller or another `store:` is a hit;
+//     for the agent registry (`agents().resolve(db(), …)`), as an object key,
+//     or in root.ts by serveHere() as `void db().catch(() => {});` alone, its
+//     start-up build (SMD-2284) — an alias, `(db)()`, another caller (the
+//     root's other wiring too) or another `store:` is a hit;
 //   - the store itself (`_store`, `createStore`, called or not) named only in
-//     root.ts, inside STORE_WIRING's bodies — db() builds it and wires the job
+//     root.ts, inside db() and closeStore() — db() builds it and wires the job
 //     sink to it, closeStore() closes it at a stop; the factory in db() alone —
-//     at its declaration and in the store module's import. A second db() or
-//     closeStore(), in either of TRANSPORT_FILES, is a hit.
+//     at its declaration and in the store module's import. A second db(),
+//     closeStore() or serveHere(), in any of TRANSPORT_FILES, is a hit.
 // What it does not see: a store method reached through a value it cannot name
 // (a parameter, the agent registry's own lookups, a context the core hands
 // back), an alias of a global (`Bun.sql`), and a module the allowlist admits
@@ -5219,8 +5222,8 @@ const TRANSPORT_FILES = new Map<string, TransportRole>([
   ["server-portable/rest/routes.ts", REST_ROLE],
   ["server-portable/rest/openapi.ts", REST_ROLE],
 ]);
-/** The functions whose bodies are the store's wiring: build it once (and wire the job sink), close it at a stop. */
-const STORE_WIRING = ["db", "closeStore"];
+/** The functions whose bodies are the store's wiring: build it once (and wire the job sink), close it at a stop, and build it at a serving entry's start (SMD-2284). */
+const STORE_WIRING = ["db", "closeStore", "serveHere"];
 /** [start, end) of each STORE_WIRING function's body in `bare` (strings and comments blanked); a name not found is absent. */
 function wiringSpans(bare: string): Map<string, [number, number]> {
   const spans = new Map<string, [number, number]>();
@@ -5281,29 +5284,29 @@ function transportLeaksIn(text: string, role: TransportRole = INDEX_ROLE): { lin
   for (const m of bare.matchAll(/\bsql\s*`|\bnew\s+(?:Bun\s*\.\s*)?SQL\b|\.unsafe\s*\(/g)) hits.push({ line: lineAt(m.index), what: "a SQL call" });
   for (const m of bare.matchAll(/(?<![.\w$])fetch\s*\(|\bglobalThis\s*\.\s*fetch\b/g)) hits.push({ line: lineAt(m.index), what: "a fetch (a provider call is the core's)" });
   const wiring = role.wiring ? wiringSpans(bare) : new Map<string, [number, number]>();
-  const spans = [...wiring.values()];
+  const inBody = (name: string, i: number) => { const span = wiring.get(name); return span !== undefined && i >= span[0] && i < span[1]; };
   // In a transport file every declaration of db() or closeStore() is a second
   // one; in the root, every one after the first (review pass 2).
   for (const name of STORE_WIRING) {
     const declared = [...bare.matchAll(new RegExp(`\\bfunction\\s+${name}\\b`, "g"))];
-    for (const m of declared.slice(role.wiring ? 1 : 0)) hits.push({ line: lineAt(m.index), what: `a second ${name}() — the store's wiring is root.ts's db() and closeStore()` });
+    for (const m of declared.slice(role.wiring ? 1 : 0)) hits.push({ line: lineAt(m.index), what: `a second ${name}() — the store's wiring is root.ts's ${STORE_WIRING.map((n) => `${n}()`).join(", ")}` });
   }
   for (const m of bare.matchAll(/(?<![.\w$])db\b/g)) {
     const before = bare.slice(0, m.index), after = bare.slice(m.index + 2);
     if (inImportOf("./root.ts", m.index)) continue; // named in the root's import — the list above holds which
+    // serveHere's start-up build, the one form: its rejection is the first request's to report (review pass 2: any call in any wiring body passed).
+    if (inBody("serveHere", m.index) && /\bvoid\s+$/.test(before) && /^\(\)\.catch\(\(\)\s*=>\s*\{\s*\}\);/.test(after)) continue;
     if (/\bcreateCore\(\s*\{[^{}]*\bstore\s*:\s*$/.test(before) && /^\s*[,}]/.test(after)) continue; // handed to the core, uncalled
     if (/\bagents\(\)\s*\.\s*resolve\(\s*$/.test(before) && /^\s*\(\s*\)/.test(after)) continue; // the agent registry's lookup
     if (/[{,]\s*$/.test(before) && /^\s*:/.test(after)) continue; // an object key, not the builder
     if (/\bfunction\s+$/.test(before)) continue; // a second db(): said once, above
     hits.push({ line: lineAt(m.index), what: "the store's builder db named past the core" });
   }
-  const inWiring = (i: number) => spans.some(([s, e]) => i >= s && i < e);
-  // The factory builds the store in db() alone; closeStore() closes what db() built.
-  const inDb = (i: number) => { const span = wiring.get("db"); return span !== undefined && i >= span[0] && i < span[1]; };
+  // The factory builds the store in db() alone; closeStore() closes what db() built; serveHere() only calls db().
   for (const m of bare.matchAll(/(?<![.\w$])(?:_store|createStore)\b/g)) {
-    const allowed = m[0] === "createStore" ? inDb(m.index) : inWiring(m.index);
-    if (inImportOf("./store.ts", m.index) || allowed || (role.wiring && /\blet\s+$/.test(bare.slice(0, m.index)))) continue;
-    hits.push({ line: lineAt(m.index), what: role.wiring ? `the store (${m[0]}) named outside ${STORE_WIRING.map((n) => `${n}()`).join(" and ")}` : `the store (${m[0]}) named outside root.ts` });
+    const where = m[0] === "createStore" ? ["db"] : ["db", "closeStore"];
+    if (inImportOf("./store.ts", m.index) || where.some((n) => inBody(n, m.index)) || (role.wiring && /\blet\s+$/.test(bare.slice(0, m.index)))) continue;
+    hits.push({ line: lineAt(m.index), what: role.wiring ? `the store (${m[0]}) named outside ${where.map((n) => `${n}()`).join(" and ")}` : `the store (${m[0]}) named outside root.ts` });
   }
   return hits;
 }
@@ -5372,6 +5375,14 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ['import { db } from "./root.ts";\nconst s = await db();\n', true, API_ROLE],
   ['import { failure, refusalValue, type Refusal, type RefusalCode } from "../core/refusal.ts";\n', false, REST_ROLE],
   ['import { refuse } from "../core/refusal.ts";\n', true, REST_ROLE],
+  // SMD-2284 PR 3: the root's serveHere builds the store at a serving entry's start — the wiring calling itself.
+  ["export function serveHere(door: string): void {\n  serving = door;\n  initEnv();\n  void db().catch(() => {});\n}\n", false, ROOT_ROLE],
+  ["export function startUp(): void {\n  void db().catch(() => {});\n}\n", true, ROOT_ROLE],
+  // Review pass 2: only that form, only there — a store call in serveHere, db() in closeStore(), the store in serveHere.
+  ["export function serveHere(door: string): void {\n  serving = door;\n  void db().then((s) => s.retryFailed(\"x\"));\n}\n", true, ROOT_ROLE],
+  ["export function serveHere(door: string): void {\n  void db().catch(() => {}).then((s) => s?.retryFailed(\"x\"));\n}\n", true, ROOT_ROLE],
+  ["export function closeStore(): Promise<boolean> {\n  return db().then(async (s) => { await s.close(); return true; });\n}\n", true, ROOT_ROLE],
+  ["export function serveHere(door: string): void {\n  serving = door;\n  _store = null;\n}\n", true, ROOT_ROLE],
   // Review pass 1's root probe: a store call past the wiring, in the root itself.
   ["const r = await (await db()).retryFailed(workType);\n", true, ROOT_ROLE],
   ['import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";\n', false],
@@ -5382,7 +5393,7 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ['import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
   ['// import { decideCalls } from "./egress.ts";\n', false],
   ["const msg = \"copied from './egress.ts' once\";\nconst t = `moved from \"./x.ts\"`;\n", false],
-  ["let _store: Promise<ThoughtStore> | null = null;\nexport function db(): Promise<ThoughtStore> {\n  if (!_store) _store = createStore(env());\n  void _store.then((s) => s.jobSink());\n  return _store;\n}\n", false, ROOT_ROLE],
+  ["let _store: Promise<ThoughtStore> | null = null;\nexport function db(): Promise<ThoughtStore> {\n  if (!_store) _store = createStore(env());\n  void _store.then((s) => s.jobSink(serving));\n  return _store;\n}\n", false, ROOT_ROLE],
   ["export function closeStore(): Promise<boolean> {\n  return _store ? _store.then(async (s) => { await s.close(); return true; }) : Promise.resolve(false);\n}\n", false, ROOT_ROLE],
   ["const identity = await agents().resolve(db(), principal);\n", false],
   ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],

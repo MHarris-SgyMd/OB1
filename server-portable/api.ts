@@ -2,11 +2,11 @@
 // every operation the MCP tools expose, over the same core and the same
 // process root as the MCP server (root.ts). Its routes, its authorization and
 // its OpenAPI document are rest/'s; this file builds the core under its own
-// door and serves it. Run as `bun api.ts`; reached as api.ob1.internal on the
-// stack's mesh once SMD-2284's PR 3 adds the service, public only where the
-// operator turns /api on.
+// door and serves it. Run as `bun api.ts` — the stack's `api` service,
+// reached as api.ob1.internal on the mesh, and at /api only where the operator
+// names deploy/compose.api-public.yaml.
 
-import { agents, closeStore, db, env, initEnv } from "./root.ts";
+import { agents, closeStore, db, env, initEnv, serveHere } from "./root.ts";
 import { createCore } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
@@ -37,12 +37,11 @@ export const app = createRestApp({
 // imports it.
 const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
 let bunServer: Stoppable | undefined;
-// Not serveHere() yet: the store's first build would wire the durable job
-// store and reconcile every live job in it to lost — the MCP server's too,
-// on the same database (store-sql.ts's reconcileRunningLost). Until SMD-2284's
-// PR 3 scopes that reconcile to the server that started a job, this server's
-// jobs live in its memory alone (jobs.ts, as on Workers).
 if (SERVES_ON_BUN) {
+  // The store's first build wires the durable job store for this server: its
+  // jobs carry its door and its start-up reconcile touches only those, so the
+  // MCP server's live jobs on the same database are left alone (migration 078).
+  serveHere(API_DOOR);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
   drainOnSignal({

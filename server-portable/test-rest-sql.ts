@@ -385,6 +385,54 @@ console.log("\n[8] The log: one line per request, with no query, key, id or cont
   for (const s of ["private words", ids[2], "trace=1", "someone-named", "must not be logged", KEYS.writer]) assert(!all.includes(s), `no ${s.slice(0, 20)} in the log`);
 }
 
+console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the REST core: its own job left running is reconciled to lost, the MCP server's is left alone, and a job it starts is recorded as its own (migration 078, SMD-2284)");
+{
+  const mine = crypto.randomUUID(), theirs = crypto.randomUUID();
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${mine}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain-api')`;
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${theirs}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain')`;
+  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const port = free.port;
+  free.stop(true);
+  const child = Bun.spawn([process.execPath, "api.ts"], {
+    cwd: import.meta.dir,
+    env: { ...process.env, PORT: String(port) },
+    stdout: "ignore", stderr: "pipe",
+  });
+  const status = async (id: string) => String((await sql`SELECT status FROM jobs WHERE id = ${id}::uuid`)[0]?.status);
+  let mineStatus = "running";
+  try {
+    const deadline = Date.now() + 15_000;
+    let answered = false;
+    while (!answered && Date.now() < deadline) {
+      // Keyless liveness reads no store: the reconcile is the start-up's (review pass 1).
+      answered = await realFetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false);
+      if (!answered) await Bun.sleep(100);
+    }
+    assert(answered, "the REST core answers its keyless /health as Bun's entry, which builds no store");
+    while (mineStatus === "running" && Date.now() < deadline) {
+      mineStatus = await status(mine);
+      if (mineStatus === "running") await Bun.sleep(100);
+    }
+    assert(mineStatus === "lost", `the REST core's own job left running is reconciled to lost at start-up, before any keyed request (${mineStatus})`);
+    assert((await status(theirs)) === "running", "…and the MCP server's live job on the same database is not");
+    const scan = await realFetch(`http://127.0.0.1:${port}/v1/scans`, { method: "POST", headers: { "x-brain-key": KEYS.reader, "content-type": "application/json" }, body: JSON.stringify({ limit: 5 }) });
+    const { jobId } = await scan.json() as { jobId: string };
+    let door: string | undefined;
+    for (let i = 0; i < 50 && door === undefined; i++) {
+      door = (await sql`SELECT door FROM jobs WHERE id = ${jobId}::uuid`)[0]?.door;
+      if (door === undefined) await Bun.sleep(100);
+    }
+    assert(scan.status === 202 && door === "open-brain-api", `a scan the REST core starts is recorded as its own (${scan.status}, door ${door})`);
+  } finally {
+    child.kill();
+    const hung = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    await child.exited;
+    clearTimeout(hung);
+    if (mineStatus !== "lost") console.log((await new Response(child.stderr).text()).split("\n").slice(-10).map((l) => `      ${l}`).join("\n"));
+    await sql`DELETE FROM jobs WHERE id IN (${mine}::uuid, ${theirs}::uuid)`;
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

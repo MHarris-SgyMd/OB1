@@ -198,7 +198,7 @@ podman compose -f deploy/compose.yaml --profile local-models up --build
 
 (Docker: `docker compose …`. The profile adds the two model containers; with hosted models, leave `--profile local-models` off. `--build` builds the server image from your checkout, so a later `git pull` takes effect on the next start with it.)
 
-Six containers start in order (four with hosted models — no Ollama and no pull): Postgres with pgvector, a one-shot job that applies the schema and exits, the models' runtime and a one-shot job that pulls the two models, then the MCP server and the proxy in front of it. The first run downloads the images and about 7 GB of models (SETUP.md has the sizes), so give it a while; every later start is seconds.
+Seven containers start in order (five with hosted models — no Ollama and no pull): Postgres with pgvector, a one-shot job that applies the schema and exits, the models' runtime and a one-shot job that pulls the two models, then the MCP server, the REST core (internal unless you turn it on: `deploy/README.md`, "The REST core") and the proxy in front of them. The first run downloads the images and about 7 GB of models (SETUP.md has the sizes), so give it a while; every later start is seconds.
 
 The server checks its own configuration before it serves anything. Watch for two lines from `server`:
 
@@ -268,7 +268,7 @@ cloudflared tunnel --url http://127.0.0.1:8000
 It prints a `https://….trycloudflare.com` URL. That plus `/mcp?key=your-access-key` is your **Public HTTPS URL** — save it. The quick tunnel changes its name each time it starts, so for something permanent use a named Cloudflare tunnel, [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) (`tailscale funnel 8000`), or a reverse proxy such as caddy on a machine you own; all of them dial `127.0.0.1:8000` themselves, and the proxy keeps listening on the loopback ([`deploy/README.md`](../deploy/README.md), "What is reachable from where").
 
 > [!WARNING]
-> Anyone with that URL and your key can read and write your brain. Give the URL a `read`-scoped key where you can (Step 3.3), keep the tunnel running only while you use it, and rotate the key by replacing its line in `deploy/.env` and restarting the server.
+> Anyone with that URL and your key can read and write your brain. Give the URL a `read`-scoped key where you can (Step 3.3), keep the tunnel running only while you use it, and rotate the key by replacing its line in `deploy/.env` and running Step 4's command again with `-d`: that recreates the server and the REST core, which both read the keys (a `restart` keeps the old ones).
 
 </details>
 
@@ -470,7 +470,7 @@ A retry after a half-finished attempt: `podman compose -f deploy/compose.yaml do
 
 **❌ Port 8000 is already in use**
 
-Something on your machine holds it. Set `SERVER_PORT=8001` (any free port) in `deploy/.env`, restart, and use that port in every URL — `smoke.sh` follows it.
+Something on your machine holds it. Set `SERVER_PORT=8001` (any free port) in `deploy/.env`, run Step 4's command again (with `-d`; a `restart` keeps the old port), and use that port in every URL — `smoke.sh` follows it.
 
 **❌ Claude Desktop or ChatGPT tools don't appear**
 
@@ -486,11 +486,11 @@ Check the server's log. If no request appears when ChatGPT fails, your server is
 
 **❌ Getting 401 errors**
 
-The key in your URL or header is not one whose hash is in `MCP_ACCESS_KEYS`. The URL carries the **key**; `deploy/.env` holds the **line** with its hash — check you didn't paste the line into the URL. If you're using the header approach (Claude Code), the header is `x-brain-key` (lowercase, with the dash). A changed `deploy/.env` needs a restart.
+The key in your URL or header is not one whose hash is in `MCP_ACCESS_KEYS`. The URL carries the **key**; `deploy/.env` holds the **line** with its hash — check you didn't paste the line into the URL. If you're using the header approach (Claude Code), the header is `x-brain-key` (lowercase, with the dash). A changed `deploy/.env` takes effect when Step 4's command runs again (with `-d`), which recreates the containers that read it; a `restart` keeps the old values.
 
 **❌ The capture landed but says it has no vector**
 
-`OB1_LLM_LOCAL=1` is missing from `deploy/.env` (Step 3.4) — or, with the OpenRouter lines, `OB1_EGRESS_POLICY=allow` is: the server refused to send the text to a model endpoint it wasn't told is local or allowed. Add the line, restart, and capture the thought again — a re-capture of the same text replaces its vector. (A whole brain of such rows is `db/reembed.ts`'s job, which needs the database published to the host: `db/README.md`, "Re-embedding", and `deploy/README.md`, "What is reachable from where".)
+`OB1_LLM_LOCAL=1` is missing from `deploy/.env` (Step 3.4) — or, with the OpenRouter lines, `OB1_EGRESS_POLICY=allow` is: the server refused to send the text to a model endpoint it wasn't told is local or allowed. Add the line, run Step 4's command again (with `-d`; a `restart` keeps the old values), and capture the thought again — a re-capture of the same text replaces its vector. (A whole brain of such rows is `db/reembed.ts`'s job, which needs the database published to the host: `db/README.md`, "Re-embedding", and `deploy/README.md`, "What is reachable from where".)
 
 **❌ Search returns no results**
 

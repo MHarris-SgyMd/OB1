@@ -72,14 +72,21 @@ USER bun
 # started, and the stop waited out the grace period and was killed (10.1 s,
 # exit 137, measured). A trap runs only once the foreground command returns,
 # hence preflight in the background and `wait`, which a trapped signal
-# interrupts. From the `exec` on, index.ts's own handlers answer (shutdown.ts),
+# interrupts. From the `exec` on, the entry's own handlers answer (shutdown.ts),
 # once its imports have loaded: a stop in that fraction of a second is still
 # the grace period's kill.
-ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun index.ts"]
+#
+# The entry is the command: index.ts, the MCP server, unless a service names
+# another — the REST core's `command: ["api.ts"]` in deploy/compose.yaml
+# (SMD-2284). One image, one preflight, two servers.
+ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun \"$@\"", "entry"]
+CMD ["index.ts"]
 
-# Liveness only. The MCP endpoint requires auth, so a probe cannot exercise a real
-# tool; an unauthenticated POST returns HTTP 200 with a JSON-RPC -32001 envelope,
-# which proves the process is serving and leaks nothing. Readiness — is the
+# Liveness only — the MCP server's. The MCP endpoint requires auth, so a probe
+# cannot exercise a real tool; an unauthenticated POST returns HTTP 200 with a
+# JSON-RPC -32001 envelope, which proves the process is serving and leaks
+# nothing. The REST core answers that POST 405; its service names its own
+# check, a GET of its /health (deploy/compose.yaml). Readiness — is the
 # database actually reachable — is the entrypoint's job, above.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD wget -qO- --post-data='{}' --header='Content-Type: application/json' \
