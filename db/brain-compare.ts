@@ -46,11 +46,13 @@
  *     the arm that ran it, `current` as search_thoughts with prefer_current (059,
  *     SMD-2255).
  *
- * Both of SMD-2109's once-deferred limits are now closed over the read surface: the
- * EXACT id-set difference rides list_thought_ids (SMD-2244), and a replay sourced
- * from a brain's own query_log rides list_logged_searches (SMD-2245). One signal is
- * still deferred — the board-sync watermark (max metadata.linear_updated_at), which
- * no read tool exposes; the compare names it rather than guessing (SMD-2109 notes).
+ * All three of SMD-2109's once-deferred limits are now closed over the read surface:
+ * the EXACT id-set difference rides list_thought_ids (SMD-2244), a replay sourced
+ * from a brain's own query_log rides list_logged_searches (SMD-2245), and the
+ * board-sync watermark (max metadata.linear_updated_at) rides the keyed /health
+ * record the identity is read from (SMD-2261) — the one signal that catches a brain
+ * that missed the board's status moves, which change no count, no newest capture
+ * and no migration.
  *
  * Until SMD-2037 lands, a refreshed brain runs at pgvector's default HNSW scan
  * settings, so a hybrid-arm difference here can be GUC-induced rather than a real
@@ -251,6 +253,16 @@ export interface BrainReading {
   latestMigration: number;
   /** Newest capture, best-effort from thought_stats' date range; null when unavailable. */
   newestCapture: string | null;
+  /**
+   * The board-sync watermark (SMD-2261): the newest Linear updatedAt the brain
+   * reflects, an ISO instant; null when no thought carries a usable one — or
+   * when it was not read, and then `boardSyncUnread` says why. A high-water
+   * mark: the newest board move the brain reflects, not proof it reflects every
+   * move before it.
+   */
+  boardSync: string | null;
+  /** Why the watermark was not read (an older server, a read that did not answer); null when it was. */
+  boardSyncUnread: string | null;
 }
 
 /** The database summary shape brain_info carries when the database answered. */
@@ -268,8 +280,67 @@ export async function readBrain(ep: BrainEndpoint): Promise<BrainReading> {
     highestMigration: db?.highestMigration ?? null,
     latestMigration: info.latestMigration,
     newestCapture: await newestCapture(ep),
+    ...boardSyncOf(info),
   };
 }
+
+/**
+ * The watermark the record carries, or why it does not: a server older than
+ * SMD-2261 has no field, a read that did not answer is named in `unread`, and a
+ * value that is not the server's ISO instant is not read here either. None of
+ * them is "no watermark" — that is a null the record states.
+ */
+export function boardSyncOf(info: BrainInfo): Pick<BrainReading, "boardSync" | "boardSyncUnread"> {
+  const db = dbOf(info);
+  if (!db) return { boardSync: null, boardSyncUnread: NO_DATABASE };
+  if (!("boardSync" in db)) return { boardSync: null, boardSyncUnread: OLDER_SERVER };
+  // The record's reason is one token (timeout, refused, deadline, …); its message, the database's words, stays out of the line.
+  if (db.unread?.boardSync) return { boardSync: null, boardSyncUnread: `the brain did not read it: ${UNREAD_REASONS.has(db.unread.boardSync.reason) ? db.unread.boardSync.reason : "error"}` };
+  const w: unknown = db.boardSync;
+  if (w === null) return { boardSync: null, boardSyncUnread: null };
+  if (typeof w !== "string" || !ISO_INSTANT.test(w) || Number.isNaN(Date.parse(w))) return { boardSync: null, boardSyncUnread: "the record's value is not an ISO instant" };
+  return { boardSync: w, boardSyncUnread: null };
+}
+
+/** Why an older server's watermark is unread — every v1.5.0 peer, so the verdict stays quiet about it. */
+export const OLDER_SERVER = "the server is older than SMD-2261";
+
+/** brain-info.ts's UnreadReason, as the record may spell it. */
+const UNREAD_REASONS = new Set<string>(["refused", "timeout", "deadline", "invisible", "error"]);
+
+/** Why a watermark is unread when the whole database did not answer — the ledger and the count are unread too, and say so. */
+const NO_DATABASE = "the database did not answer";
+
+/** A watermark a server that has the field did not give: a read past the /health deadline, refused, or malformed. */
+const boardSyncMissed = (r: BrainReading) => r.boardSyncUnread !== null && r.boardSyncUnread !== OLDER_SERVER && r.boardSyncUnread !== NO_DATABASE;
+
+/** The watermark's one shape, as brain-info.ts's boardSyncValue sends it. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/**
+ * How b's watermark stands against a's: whole days apart (b − a; negative when b
+ * is older), or one side holding none while the other does. Null when either side
+ * was not read or both hold none — an unread axis is not a delta. Rounded as
+ * captureDaysApart rounds, half a day or more reading as a day, by magnitude so
+ * the standing does not depend on which brain is a (Math.round(-0.5) is -0,
+ * Math.round(0.5) is 1). It is the gap between the two newest board moves each
+ * reflects, not how long a brain has been stale: a canary refreshed after a quiet
+ * week reads seven days older the hour the board next moves.
+ */
+export type BoardSyncDelta = { days: number } | { none: "a" | "b" };
+export function boardSyncDelta(a: BrainReading, b: BrainReading): BoardSyncDelta | null {
+  if (a.boardSyncUnread !== null || b.boardSyncUnread !== null) return null;
+  if (a.boardSync === null && b.boardSync === null) return null;
+  if (a.boardSync === null) return { none: "a" };
+  if (b.boardSync === null) return { none: "b" };
+  const ta = Date.parse(a.boardSync);
+  const tb = Date.parse(b.boardSync);
+  const d = (tb - ta) / 86_400_000;
+  return { days: Math.sign(d) * Math.round(Math.abs(d)) || 0 };
+}
+
+/** Whether a board-sync standing is a delta the report and the exit code count. */
+const isBoardSyncDelta = (d: BoardSyncDelta | null): boolean => d !== null && ("none" in d || d.days !== 0);
 
 /**
  * Newest capture, read from thought_stats — the one machine-unfriendly read here.
@@ -640,8 +711,9 @@ export function diffRow(query: string, arm: ReplayArm, a: string[], b: string[])
 
 /**
  * The one-line verdict: current when the two are in lockstep on migration and
- * count, else how far b trails or leads a — the "trust or distrust this tier's
- * answer at a glance" line a grooming session reads.
+ * count, and on the board-sync watermark where both servers have it, else how
+ * far b trails or leads a — the "trust or distrust this tier's answer at a
+ * glance" line a grooming session reads.
  */
 export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelta: number | null): string {
   const parts: string[] = [];
@@ -652,6 +724,16 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
   const days = captureDaysApart(a.newestCapture, b.newestCapture);
   if (days !== null && Math.abs(days) >= 1) {
     parts.push(`${b.label}'s newest capture is ${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"} ${days < 0 ? "older" : "newer"}`);
+  }
+  // The board's status moves change no count, capture or migration: a brain that
+  // missed a day of them is caught here alone (SMD-2261). Worded as the capture
+  // gap is — the watermarks' gap, not a staleness the brain has been in.
+  const board = boardSyncDelta(a, b);
+  if (board && "none" in board) {
+    parts.push(`${board.none === "a" ? a.label : b.label} holds no usable board-sync watermark`);
+  } else if (board && board.days !== 0) {
+    const n = Math.abs(board.days);
+    parts.push(`${b.label}'s board-sync watermark is ${n} day${n === 1 ? "" : "s"} ${board.days < 0 ? "older" : "newer"}`);
   }
   const ca = a.thoughts;
   const cb = b.thoughts;
@@ -664,9 +746,17 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
     // (review pass 1: it read "same migration and thought count" over two nulls).
     const migKnown = migrationDelta !== null;
     const countsKnown = a.thoughts !== null && b.thoughts !== null;
-    if (migKnown && countsKnown) return `current with each other — same migration and thought count.`;
-    const unread = [migKnown ? null : "migration ledger", countsKnown ? null : "thought count"].filter(Boolean).join(" and ");
-    return `no delta on what could be read; ${unread} unread on one side, so freshness is not certain.`;
+    // Claimed only over two watermarks compared: none on both sides is not "apart".
+    const boardKnown = board !== null && "days" in board;
+    // A server that has the field but did not give it (a read that timed out or
+    // failed — the last the /health deadline reaches) leaves the one signal this
+    // incident shows on unread: not "current" (review pass 2). An older server's
+    // absence stays quiet.
+    const boardMissed = boardSyncMissed(a) || boardSyncMissed(b);
+    if (migKnown && countsKnown && !boardMissed) return `current with each other — same migration and thought count${boardKnown ? ", board-sync watermarks under half a day apart" : ""}.`;
+    const unread = [migKnown ? null : "migration ledger", countsKnown ? null : "thought count", boardMissed ? "board-sync watermark" : null].filter((x): x is string => x !== null);
+    const named = unread.length > 1 ? `${unread.slice(0, -1).join(", ")} and ${unread.at(-1)}` : unread[0];
+    return `no delta on what could be read; ${named} unread, so freshness is not certain.`;
   }
   return parts.join("; ") + ".";
 }
@@ -723,7 +813,9 @@ export function renderComparison(c: Comparison): string {
     const ex = (ids: string[]) => (ids.length ? ` (e.g. ${ids.slice(0, 3).map(shortId).join(", ")}${ids.length > 3 ? ", …" : ""})` : "");
     lines.push(`  id-set: ${d.onlyA.length.toLocaleString("en-US")} only in a${ex(d.onlyA)}; ${d.onlyB.length.toLocaleString("en-US")} only in b${ex(d.onlyB)}.`);
   }
-  lines.push(`  (board-sync watermark is not on the read surface — a DB-backed compare adds it, SMD-2109.)`);
+  // Why, when a server that has the field did not give it — the verdict's "not certain" (review pass 3).
+  const boardSide = (r: BrainReading) => (r.boardSyncUnread === null ? r.boardSync ?? "none" : boardSyncMissed(r) ? `unread (${r.boardSyncUnread})` : "unread");
+  lines.push(`  board sync: a=${boardSide(c.a)}  b=${boardSide(c.b)}`);
 
   lines.push("");
   lines.push("Retrieval:");
@@ -831,7 +923,10 @@ export async function runCompare(args: CompareArgs): Promise<number> {
   // A read that could not be had — `unavailable` (older brain) or `failed` — is not a
   // delta: the count stand-in already spoke and we do not force the gate on an unread axis.
   const idSetDelta = !c.idDiff.unavailable && !c.idDiff.failed && !c.idDiff.equal;
-  const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0) || idSetDelta;
+  // Board-sync watermarks half a day or more apart once rounded (SMD-2261), or one
+  // side with no usable watermark; a side that did not give it is not a delta.
+  const boardDelta = isBoardSyncDelta(boardSyncDelta(c.a, c.b));
+  const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0) || idSetDelta || boardDelta;
   const anyDelta =
     c.identity.length > 0 ||
     (c.migrationDelta ?? 0) !== 0 ||

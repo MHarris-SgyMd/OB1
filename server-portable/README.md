@@ -357,16 +357,17 @@ An agent or an operator can ask a running brain what it is (SMD-2041). The
 key does not) answers a short table:
 
 ```
-Version:         1.1.0+upstream.9543c29 (release range 049–051; this tree adds 052, unreleased)
+Version:         1.5.0 (release range 073–076; this tree adds 077–079, unreleased)
 Commit:          8ba58db5…
 Store:           sql · tier stable
 Embedding:       qwen3-embedding:4b @ 1024
 Postgres:        16.15 (Debian 16.15-1.pgdg12+2) · pgvector 0.8.6 (schema public)
-Schema version:  1.1.0+upstream.9543c29
-Migrations:      052 applied — this server's tree ends at 052 (current: the ledger's highest is the tree's last)
+Schema version:  1.5.0
+Migrations:      079 applied — this server's tree ends at 079 (current: the ledger's highest is the tree's last)
 Brain embedding: qwen3-embedding:4b @ 1024
 Rows:            373 thoughts · 1,204 audit events · 90 chunks · 512 entities
 Database size:   45.2 MB
+Board sync:      2026-10-05T16:57:19.368Z
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
 ```
 
@@ -380,12 +381,22 @@ past its range. The audit count is the event log's size — every capture, edit 
 delete, deleted thoughts' included — not a count of thoughts. `Database size` is
 the whole database's. The server's embedding and the brain's are printed side by
 side without a verdict (preflight's embedding rows judge them; SMD-2071).
+`Board sync` is the board-sync watermark (SMD-2261): the newest Linear
+`updatedAt` any thought carries in `metadata.linear_updated_at`, which
+`db/sync-linear.ts` writes, in UTC. It reads `none — no thought carries a usable
+Linear watermark` when none counts (a malformed value, or one more than an hour
+past the database's clock, is passed over), and `?` when the read did not answer
+(named in `Not read`). It is a
+high-water mark — the newest board move the brain reflects, not proof it reflects
+every one before it — and a quiet board leaves it old on a current brain.
+`tier.ts --compare` diffs it between two brains.
 
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
 token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
 `unreleased`, `latestMigration`, `commit`, `store`, `tier`, `embedding`,
 `ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
-database's facts (the ledger as `{ present, readable }`, not its names) or
+database's facts (the ledger as `{ present, readable }`, not its names; the
+watermark as `boardSync`, an ISO instant or null) or
 `{ "error": … }` when it cannot answer. Beside the record, `oauth` is the
 server's own view of its public origin (SMD-2382): `{ configured, origin,
 advertised }`, which `deploy/smoke.sh` compares with what reaches it. It answers within 2.5 s
@@ -554,8 +565,11 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   promises — a time, a uuid, or one enum token — and nulls anything else, so a
   field typed as a time but filled from a thought's metadata (prefer_current's
   `window.syncedAt`) cannot carry a sentence.
-  `brain_info` answers its whole record beside the table: it holds only the
-  server's and the database's own facts.
+  `brain_info` answers its whole record beside the table: it holds the
+  server's and the database's own facts, and one value read from thoughts'
+  metadata — the board-sync watermark, which the read itself holds to one shape
+  (a UTC instant to the millisecond, never past an hour from now by the
+  database's clock) or leaves null.
 - A refusal answers `{ code, retryable, text }`. The reads': `NOT_FOUND`,
   `REFUSED_FILTER`, `REFUSED_EGRESS` (with its `rule`), `REFUSED_SINCE`,
   `REFUSED_CURSOR`. Capture's: the pointer and metadata shapes
@@ -670,12 +684,12 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 624 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
+bun test-server.ts        # 628 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, and the board-sync watermark's shape
 bun test-auth.ts          # 141 — scoped, hashed, named keys
 bun test-rest.ts          # 268 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
-bun run test:e2e          # 458 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 466 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 149 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
