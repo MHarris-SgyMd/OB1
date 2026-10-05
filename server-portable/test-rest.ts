@@ -216,6 +216,14 @@ console.log("\n[7] A refusal answers its code, its status and its declared facts
   answer = async () => ok({ jobId: "j1", status: "accepted", poll: "/jobs/j1", stream: "/jobs/j1/stream" });
   r = await json(await hit("/v1/scans", { key: "read-raw", method: "POST", body: "{}" }));
   assert(r.status === 202 && r.body.poll === "/v1/jobs/j1" && r.body.stream === "/v1/jobs/j1/stream", `a job's handle points at this server's routes (${JSON.stringify(r.body)})`);
+  // Through the proxy's opt-in /api, the prefix Traefik strips comes back on every link.
+  const viaApi = await app.fetch(new Request("http://api/v1/scans", { method: "POST", body: "{}", headers: { "x-brain-key": "read-raw", "content-type": "application/json", "x-forwarded-prefix": "/api" } }));
+  const vb = await viaApi.json() as Record<string, unknown>;
+  assert(vb.poll === "/api/v1/jobs/j1" && vb.stream === "/api/v1/jobs/j1/stream" && viaApi.headers.get("location") === "/api/v1/jobs/j1", `behind /api the handle and Location carry the prefix (${JSON.stringify(vb)})`);
+  for (const bad of ["https://evil.example", "//evil", "/api/../x", "/a b", "/" + "x".repeat(10) + "/1/2/3/4"]) {
+    const res = await app.fetch(new Request("http://api/v1/scans", { method: "POST", body: "{}", headers: { "x-brain-key": "read-raw", "content-type": "application/json", "x-forwarded-prefix": bad } }));
+    assert(((await res.json()) as Record<string, unknown>).poll === "/v1/jobs/j1", `a prefix that is not a plain path (${bad}) moves no link`);
+  }
   answer = async () => { throw new Error("connection refused"); };
   r = await json(await hit("/v1/stats", { key: "read-raw" }));
   assert(r.status === 500 && JSON.stringify(r.body) === JSON.stringify({ code: "FAILED", message: "connection refused" }), `a fault is FAILED 500 with no verdict (${JSON.stringify(r.body)})`);
@@ -276,6 +284,12 @@ console.log("\n[7c] A 503 says when to retry; capture's fault is the transient t
   assert(thrown.status === 500 && /application\/json/.test(thrown.headers.get("content-type") ?? "") && (await thrown.json() as { code: string }).code === "FAILED", `a throw outside an operation is a JSON FAILED (${thrown.status} ${thrown.headers.get("content-type")})`);
 }
 
+console.log("\n[7d] The served OpenAPI document names its base as the caller reached it");
+{
+  const served = async (prefix?: string) => (await (await app.fetch(new Request("http://api/openapi.json", { headers: prefix ? { "x-forwarded-prefix": prefix } : {} }))).json() as { servers?: { url: string }[] }).servers;
+  assert(same(await served(), [{ url: "/" }]) && same(await served("/api"), [{ url: "/api" }]), "the served document names its base: the root on the mesh, /api behind the proxy's route");
+}
+
 console.log("\n[8] One log line per request: method, route, status, time — no query, key, id or content");
 {
   lines.length = 0;
@@ -283,7 +297,8 @@ console.log("\n[8] One log line per request: method, route, status, time — no 
   await hit("/v1/changes?agent=someone-secret", { key: "read-raw" });
   await hit("/v1/search", { key: "write-raw", method: "POST", body: JSON.stringify({ query: "the private query" }) });
   await hit("/nope");
-  assert(lines.length === 4, `four requests, four lines (${lines.length})`);
+  await hit("/health");
+  assert(lines.length === 4, `four requests, four lines — the liveness probe's 200 is not one (${lines.length})`);
   assert(/^api GET \/v1\/thoughts\/:id \d{3} \d+ms$/.test(lines[0] ?? ""), `the route's template, not its id (${lines[0]})`);
   const all = lines.join("\n");
   for (const s of ["9f0c1e2a", "someone-secret", "private query", "read-raw", "write-raw", "x=1"]) assert(!all.includes(s), `no ${s} in the log`);

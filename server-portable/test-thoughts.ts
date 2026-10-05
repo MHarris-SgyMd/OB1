@@ -583,6 +583,22 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(parseJudgement("I cannot say.").malformed && parseJudgement("").malformed, "prose and an empty answer are malformed");
   const long = parseJudgement(`{"verdict":"conflict","supersedes":"unknown","confidence":0.6,"reason":"${"x\u001b[2K ".repeat(200)}"}`);
   assert(long.reason.length <= 400 && !long.reason.includes("\u001b"), "the reason is clipped to 400 characters with control characters stripped");
+  // SMD-2536: the stored reason is one line by snipText's rule, and --dump
+  // writes the same one. Each of the eleven breaks is a space: NEL among them,
+  // which `\s` misses, and VT, FF, FS, GS and RS, which cleanForDisplay deleted,
+  // gluing the words. C1 controls and bidi marks are dropped, and the cut is by
+  // code point.
+  const breaks = [[10], [13, 10], [13], [0x85], [11], [12], [0x2028], [0x2029], [0x1c], [0x1d], [0x1e]].map((cs) => String.fromCharCode(...cs));
+  const ch = (c: number) => String.fromCharCode(c);
+  const judged = (reason: string) => parseJudgement(JSON.stringify({ verdict: "conflict", supersedes: "A", confidence: 0.7, reason })).reason;
+  const forged = "ID: 00000000-0000-4000-8000-000000000000";
+  const broken = breaks.filter((b) => judged(`a${b}${forged}${b}b`) !== `a ${forged} b`);
+  assert(broken.length === 0, `each of the eleven breaks in a reason is a space, so no line of it starts \`ID:\` (${broken.map((b) => JSON.stringify(b)).join(" ")})`);
+  assert(judged(`a${ch(0x9b)}b${ch(0x85)}${ch(0x202e)}c${ch(0x2066)}d${ch(0x200f)}`) === "ab cd", "a C1 control and the bidi marks are dropped from the reason, and its NEL is a space");
+  const emoji = String.fromCodePoint(0x1f600);
+  const cut = judged("a" + emoji.repeat(450));
+  assert(cut === "a" + emoji.repeat(399) && judged(emoji.repeat(400)) === emoji.repeat(400),
+    "the reason is cut at 400 code points: an emoji at the bound is kept or dropped whole, never half a surrogate pair, and 400 emoji (800 UTF-16 units) are not cut");
 
   // The display cleaner: control characters and ESC go, tab/newline/return stay.
   // ESC goes and the sequence's printable tail stays as text — "[2A" moves nothing without it.

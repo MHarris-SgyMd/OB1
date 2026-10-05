@@ -1169,8 +1169,11 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     idle.proc.kill("SIGTERM");
     const idleCode = await exited(idle.proc, 3_000);
     const idleLog = await idle.out;
-    assert(idleCode === 0 && performance.now() - t1 < 1_000 && /0 requests in flight/.test(idleLog) && /no database pool was opened; exit 0/.test(idleLog),
-      `an idle server stops at once, exit 0, and says it opened no pool (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
+    // Since SMD-2284 PR 3 the entry builds its store at start (root.ts's
+    // serveHere, so the job reconcile runs then): the idle server holds a pool
+    // on this silent database, and its stop closes it within the close bound.
+    assert(idleCode === 0 && performance.now() - t1 < 2_500 && /0 requests in flight/.test(idleLog) && /database pool (?:closed|not closed within 1000 ms); exit 0/.test(idleLog),
+      `an idle server stops at once — no request to drain, its pool within the close bound — exit 0 (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
     assert(/OB1_STOP_GRACE="soon" is not a whole number of seconds from 1 to 3600, with no unit .*; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
       "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
 
@@ -1305,13 +1308,15 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const { DEFAULT_STOP_GRACE_S } = await import("./shutdown.ts");
   const graceFallbacks: string[] = [];
   for (const file of ["compose.yaml", "compose.tiers.yaml"]) {
-    const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; stop_grace_period?: string }> };
+    const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; stop_grace_period?: string }> };
     for (const [name, svc] of Object.entries(doc.services)) {
-      if (svc.build?.dockerfile !== "server-portable/Dockerfile") continue;
+      // The server's image, built or (the REST core) run by the server's name.
+      if (svc.build?.dockerfile !== "server-portable/Dockerfile" && svc.image !== "${COMPOSE_PROJECT_NAME:-open-brain}-server") continue;
       graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
     }
   }
-  assert(graceFallbacks.length === 4 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+  // Five: the server and the REST core (SMD-2284) in compose.yaml, three tier servers.
+  assert(graceFallbacks.length === 5 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
     `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
 
   // Preflight refuses a value compose would render wrong, and reports one it reads.
