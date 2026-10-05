@@ -258,9 +258,10 @@ services:
   migrate:
     # Named, so orchestration-runner-role finds it by one name under every
     # compose (the Python podman-compose and --compatibility name a build
-    # <project>_migrate); never pulled, so `pull` and `up --pull …` build it
+    # <project>_migrate); never pulled, so `pull` skips it and `up` builds it
     # rather than ask a registry for a name no registry holds (SMD-2289 review
-    # pass 8). The release overlay pulls its pinned migrator instead.
+    # pass 8) — `up --pull always` still asks, is denied, and builds (measured,
+    # SMD-2284). The release overlay pulls its pinned migrator instead.
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-migrate
     pull_policy: never
     build:
@@ -301,9 +302,9 @@ services:
     # behind after `up --build server`, as orchestration-runner-role's did).
     # Docker Compose v2 named the build this already; the Python podman-compose
     # and --compatibility named it <project>_server, so their next `up` builds
-    # it once under this name. Never pulled, as migrate: `pull` and a fresh
-    # `up` build it rather than ask a registry for a name no registry holds
-    # (review pass 2). The release overlay pulls its pinned server instead.
+    # it once under this name. Never pulled, as migrate: `pull` skips it and a
+    # fresh `up` builds it (review pass 2). The release overlay pulls its
+    # pinned server instead.
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
     pull_policy: never
     build:

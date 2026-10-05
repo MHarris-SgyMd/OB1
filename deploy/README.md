@@ -104,7 +104,7 @@ publishes the two images to GHCR, `ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z>` and
 `ghcr.io/mharris-sgymd/ob1-migrate:<X.Y.Z>` for linux/amd64 and linux/arm64, and
 creates the GitHub release with a compose overlay that names the two by tag and
 digest and `ollama` by the digest its tag resolved to when the job ran, beside
-`compose.yaml` and `.env.example` from the same tag, the change files the release
+`compose.yaml`, `.env.example` and `compose.api-public.yaml` from the same tag, the change files the release
 numbered and `scripts/mechanism-yield.ts`'s table. Before the release existed, the
 job brought a stack up from the *pulled* images and held it to this file's checks
 (the `Full stack, no Supabase` lines, `smoke.sh`, no Supabase binary) and to

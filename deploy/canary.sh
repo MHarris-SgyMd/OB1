@@ -374,7 +374,7 @@ case "$stable_stamp" in
 esac
 stable_server="$(container_of "$STABLE" server)"
 if [ -n "$stable_server" ] && ! "$RUNTIME" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$stable_server" | grep -qx 'OB1_TIER=stable'; then
-  say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the server, so its query log says which tier answered"
+  say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the servers (up -d server api), so its query log says which tier answered"
 fi
 
 say "canary Postgres"
@@ -412,6 +412,8 @@ if [ "$refresh_rc" != 0 ]; then
   # tier.sh's own usage errors exit 2, which from here would read as "refused
   # before anything changed" — stable may be stamped by now, a server stopped.
   [ -z "$STOPPED_SERVER" ] || echo "the canary's server is stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
+  # A re-run recreates what it finds running, so a REST core stopped here stays stopped.
+  [ -z "$STOPPED_API" ] || echo "the canary's REST core is stopped too, and a re-run leaves it so: after \`up\` succeeds, start it with compose -p $CANARY up -d --no-deps api (with this checkout's -f files)." >&2
   echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it." >&2
   exit 1
 fi
@@ -437,8 +439,10 @@ if [ "$(curl -s --max-time 2 "$BASE/health" || true)" != ok ]; then
   canary_compose logs --no-color --tail 10 proxy >&2 || true
   # restart: unless-stopped would otherwise restart it without end (hundreds
   # of times a minute under podman), and a registered connector points at it.
+  # The REST core, recreated above on the same image and environment, would too.
   canary_compose stop server >/dev/null 2>&1 || true
-  echo "the canary server is stopped; fix the cause above and re-run up." >&2
+  [ -z "$STOPPED_API" ] || canary_compose stop api >/dev/null 2>&1 || true
+  echo "the canary server is stopped${STOPPED_API:+, and its REST core}; fix the cause above and re-run up." >&2
   exit 1
 fi
 

@@ -455,8 +455,9 @@ podman compose -f deploy/compose.yaml up --build     # with a provider named in 
 podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-Four services in order (six with `local-models`): Postgres with pgvector, a migration job that applies the
-schema and exits, then the MCP server and the proxy in front of it. The server runs `preflight.ts` before it
+Five services in order (seven with `local-models`): Postgres with pgvector, a migration job that applies the
+schema and exits, then the MCP server, the REST core (internal unless `deploy/compose.api-public.yaml` is named)
+and the proxy in front of them. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
 first capture. To run a *release* rather than a checkout build — the published
 `ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
