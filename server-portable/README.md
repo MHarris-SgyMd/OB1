@@ -616,12 +616,16 @@ stripped (`X-Forwarded-Prefix`).
   `x-brain-forwarder` header carries the key of whoever forwarded it — the MCP
   server's, a `forward`-scope key that grants nothing (`keygen.ts --scope
   forward`). The caller's key still decides everything; the forwarder is
-  recorded as `act` (`{name, agentId}`) — on every write's audit row
-  (`thought_audit.actor_context.act`) and in `whoami`. Anything but a
-  forward-scope key in that header, an empty one included, is a 401
-  `UNAUTHORIZED` with `credential: "forwarder"`, a revoked one a 401 `REVOKED`
-  with the same, so a client holding two keys cannot stamp one as the other's
-  carrier.
+  recorded as `act` (`{name, agentId}`) — on every thought write's audit row
+  (`thought_audit.actor_context.act`) and in `whoami`; the action log, jobs and
+  the query log keep the caller's id alone. Anything but a forward-scope key in
+  that header, an empty one or two of them included, is a 401 `UNAUTHORIZED`
+  with `credential: "forwarder"`, checked before either key reaches the
+  registry; a revoked one a 401 `REVOKED`, a busy registry a 503, each with the
+  same — so a client holding two keys cannot stamp one as the other's carrier.
+  The public `/api` route deletes the header: forwarding is the mesh's. Mint a
+  forwarder under a name never used before — the registry reads a known name
+  with a new digest as that agent's rotation.
 - **Answers.** A success is the operation's value, for a key that can read (a capture
   is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
   vector with the row, false when the egress gate refused the embedding call (on a
@@ -664,11 +668,11 @@ those its own way.
 ```bash
 bun test-server.ts        # 619 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
 bun test-auth.ts          # 141 — scoped, hashed, named keys
-bun test-rest.ts          # 253 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-rest.ts          # 265 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
 bun run test:e2e          # 430 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 147 — the REST core beside the MCP server on one database: every operation through both
+../db/with-postgres.sh bun test-rest-sql.ts  # 149 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 

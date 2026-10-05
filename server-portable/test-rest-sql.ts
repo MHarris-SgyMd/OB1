@@ -71,12 +71,13 @@ process.env.MCP_ACCESS_KEY = "legacy-raw"; // the legacy single key: full write,
 delete process.env.OB1_QUERY_LOG; // off: a read through one door must leave nothing the other door's read would see
 process.env.DATABASE_URL = URL_;
 process.env.OB1_AGENT_CACHE_TTL_MS = "0"; // a revocation reaches the next request
-const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw", gone: "gone-raw", forwarder: "forwarder-raw", forwarderGone: "forwarder-gone-raw" } as const;
+const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw", gone: "gone-raw", forwarder: "forwarder-raw", forwarderGone: "forwarder-gone-raw", fresh: "fresh-raw" } as const;
 process.env.MCP_ACCESS_KEYS = [
   `writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`,
   `hook:capture:${hashKey(KEYS.hook)}`, `gone:write:${hashKey(KEYS.gone)}`,
   // Forwarders (SMD-2284): grant nothing; read in the REST core's forwarder slot alone.
   `mcp-forwarder:forward:${hashKey(KEYS.forwarder)}`, `old-forwarder:forward:${hashKey(KEYS.forwarderGone)}`,
+  `fresh:write:${hashKey(KEYS.fresh)}`, // never used but by [6b]'s refused forwarded request
 ].join(",");
 
 // Both doors in one process, over the one process root (root.ts): one store.
@@ -385,6 +386,9 @@ console.log("\n[6b] Forwarded through REST: the client's key is the subject, the
   const edit = await forwarded("PATCH", `/v1/thoughts/${cap.body.id}`, KEYS.writer, KEYS.forwarder, { content: "iota: a hook's thought, carried and then edited" });
   const editRow = await auditOf(String(cap.body.id), "update");
   assert(edit.status === 200 && editRow?.actor_name === "writer" && same(editRow?.act, { name: "mcp-forwarder", agent_id: fwdId }), `a forwarded edit records the forwarder as act too (${edit.status} ${JSON.stringify(editRow)})`);
+  const del = await forwarded("DELETE", `/v1/thoughts/${cap.body.id}`, KEYS.writer, KEYS.forwarder);
+  const delRow = await auditOf(String(cap.body.id), "delete");
+  assert(del.status === 200 && delRow?.actor_name === "writer" && same(delRow?.act, { name: "mcp-forwarder", agent_id: fwdId }), `a forwarded delete records the forwarder as act too (${del.status} ${JSON.stringify(delRow)})`);
   const direct = await rest("POST", "/v1/thoughts", { content: "kappa: a hook's thought, not forwarded" }, KEYS.hook);
   const directRow = await auditOf(String(direct.body.id), "capture");
   assert(direct.status === 201 && directRow?.act === null, `a write not forwarded records no act (${JSON.stringify(directRow)})`);
@@ -396,6 +400,9 @@ console.log("\n[6b] Forwarded through REST: the client's key is the subject, the
   const before = Number((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c);
   const wrong = await forwarded("POST", "/v1/thoughts", KEYS.hook, KEYS.reader, { content: "lambda: carried by a client's key" });
   assert(wrong.status === 401 && wrong.body.code === "UNAUTHORIZED" && wrong.body.credential === "forwarder", `a client's key in the forwarder slot → 401, credential forwarder (${JSON.stringify(wrong.body)})`);
+  const fresh = await forwarded("GET", "/v1/whoami", KEYS.fresh, "not-a-forwarder");
+  const [freshRow] = await sql`SELECT count(*)::int AS c FROM ob1_agent_keys WHERE key_hash = ${hashKey(KEYS.fresh)}`;
+  assert(fresh.status === 401 && fresh.body.credential === "forwarder" && Number(freshRow.c) === 0, `a never-seen caller refused for its forwarder is not registered: the forwarder is checked before either key reaches the registry (${fresh.status}, ${freshRow.c} row)`);
   assert((await forwarded("GET", "/v1/whoami", KEYS.reader, KEYS.forwarderGone)).status === 200, "the forwarder to be revoked carries first");
   await sql`SELECT revoke_agent_key(${hashKey(KEYS.forwarderGone)}, ${"rest suite"})`;
   const revoked = await forwarded("POST", "/v1/thoughts", KEYS.hook, KEYS.forwarderGone, { content: "mu: carried by a revoked forwarder" });

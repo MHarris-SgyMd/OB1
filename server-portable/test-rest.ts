@@ -112,13 +112,15 @@ const core = new Proxy({}, {
 let identity: AgentOutcome = { status: "ok", agentId: "agent-1" };
 /** The registry's word on a forwarder key (SMD-2284), apart from the caller's. */
 let carrierIdentity: AgentOutcome = { status: "ok", agentId: "agent-f" };
+/** Every key the registry was asked about, by name — a refused forwarder must reach it with neither key. */
+const resolvedNames: string[] = [];
 let resolveThrows = false;
 const lines: string[] = [];
 const app = createRestApp({
   core,
   init: () => {},
   keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},w:write:${hashKey("write-raw")},c:capture:${hashKey("cap-raw")},f:forward:${hashKey("fwd-raw")}` }),
-  resolve: async (p) => { if (resolveThrows) throw new Error("the registry threw"); return p.scope === "forward" ? carrierIdentity : identity; },
+  resolve: async (p) => { resolvedNames.push(p.name); if (resolveThrows) throw new Error("the registry threw"); return p.scope === "forward" ? carrierIdentity : identity; },
   track: (run) => run(),
   log: (l) => lines.push(l),
 });
@@ -207,15 +209,29 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   r = await json(await fwd("/v1/stats", "cap-raw", "fwd-raw"));
   assert(r.status === 403 && r.body.needs === "read", `…and still cannot read (${r.status})`);
 
-  // Anything else in the slot is refused, naming the slot; the operation never runs.
+  // Anything else in the slot is refused, naming the slot, whatever the
+  // caller's scope (review pass 1: a capture caller alone left a scope-keyed
+  // bypass alive); the operation never runs, and neither key reaches the registry.
   calls.length = 0;
-  for (const [label, carrier] of [["a read key", "read-raw"], ["a write key", "write-raw"], ["an unknown key", "nope"], ["an empty value", ""], ["the caller's own key", "cap-raw"]] as const) {
-    const x = await fwd("/v1/thoughts", "cap-raw", carrier, { method: "POST", body: JSON.stringify({ content: "x" }) });
-    const b = await json(x);
-    assert(b.status === 401 && b.body.code === "UNAUTHORIZED" && b.body.credential === "forwarder" && x.headers.get("www-authenticate") === "Bearer",
-      `${label} in the forwarder slot → 401 UNAUTHORIZED, credential forwarder (${b.status} ${JSON.stringify(b.body)})`);
+  resolvedNames.length = 0;
+  for (const [caller, path, init] of [["read-raw", "/v1/stats", {}], ["write-raw", "/v1/thoughts", { method: "POST", body: JSON.stringify({ content: "x" }) }], ["cap-raw", "/v1/thoughts", { method: "POST", body: JSON.stringify({ content: "x" }) }]] as const) {
+    for (const [label, carrier] of [["a read key", "read-raw"], ["a write key", "write-raw"], ["an unknown key", "nope"], ["an empty value", ""], ["the caller's own key", caller]] as const) {
+      const x = await fwd(path, caller, carrier, init);
+      const b = await json(x);
+      assert(b.status === 401 && b.body.code === "UNAUTHORIZED" && b.body.credential === "forwarder" && x.headers.get("www-authenticate") === "Bearer",
+        `${caller}: ${label} in the forwarder slot → 401 UNAUTHORIZED, credential forwarder (${b.status} ${JSON.stringify(b.body)})`);
+    }
   }
-  assert(calls.length === 0, `…and no operation ran (${calls.length})`);
+  assert(calls.length === 0 && resolvedNames.length === 0, `…and no operation ran, and no key reached the registry (${calls.length}, ${resolvedNames.join(",")})`);
+  // The swap: the forwarder in a caller's slot and a caller's key in the forwarder's.
+  r = await json(await fwd("/v1/whoami", "fwd-raw", "read-raw"));
+  assert(r.status === 401 && r.body.code === "UNAUTHORIZED" && !("credential" in r.body), `the forwarder as the caller and a client's key as the forwarder → the caller's 401 (${JSON.stringify(r.body)})`);
+  // Two forwarder headers: Headers.get joins them, and the joined value is no key.
+  const twice = new Headers({ "x-brain-key": "read-raw" });
+  twice.append("x-brain-forwarder", "fwd-raw");
+  twice.append("x-brain-forwarder", "fwd-raw");
+  r = await json(await app.fetch(new Request("http://api/v1/whoami", { headers: twice })));
+  assert(r.status === 401 && r.body.credential === "forwarder", `two forwarder headers, even the same sound key twice → 401, credential forwarder (${JSON.stringify(r.body)})`);
   r = await json(await fwd("/v1/whoami", null, "fwd-raw"));
   assert(r.status === 401 && r.body.code === "UNAUTHORIZED" && !("credential" in r.body), `the forwarder slot alone, no caller's key → the caller's 401 (${JSON.stringify(r.body)})`);
   identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-05T00:00:00Z", reason: null };
@@ -227,7 +243,8 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   assert(r.status === 401 && r.body.code === "REVOKED" && r.body.credential === "forwarder", `a revoked forwarder → 401 REVOKED, credential forwarder (${JSON.stringify(r.body)})`);
   carrierIdentity = { status: "busy" } as AgentOutcome;
   const busy = await fwd("/v1/whoami", "read-raw", "fwd-raw");
-  assert(busy.status === 503 && busy.headers.get("retry-after") === "2", `a busy registry on the forwarder → 503 with Retry-After (${busy.status})`);
+  const busyBody = await busy.clone().json() as Record<string, unknown>;
+  assert(busy.status === 503 && busy.headers.get("retry-after") === "2" && busyBody.credential === "forwarder", `a busy registry on the forwarder → 503 with Retry-After, naming the slot (${busy.status} ${JSON.stringify(busyBody)})`);
   carrierIdentity = { status: "ok", agentId: undefined, unresolved: "unreachable" };
   who = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
   assert(who.status === 200 && same(who.body.act, { name: "f" }), `an unreachable registry names the forwarder without an id (${JSON.stringify(who.body.act)})`);

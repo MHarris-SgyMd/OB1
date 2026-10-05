@@ -178,20 +178,22 @@ export function createRestApp(deps: RestDeps): Hono {
       if (principal) break;
     }
     if (!principal) return refuse(c, 401, { code: "UNAUTHORIZED" }, { "WWW-Authenticate": "Bearer" });
+    // Present at all, even empty, the forwarder slot must hold a forwarder's
+    // key: a slot the caller filled is never ignored (an empty one is no
+    // carrier named). Its digest is checked before either key reaches the
+    // registry, so a request refused for its forwarder registers no one.
+    const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);
+    const carrier = forwarded === null ? null : authenticate(forwarded, keys, { admit: ["forward"] });
+    if (forwarded !== null && !carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
     const identity = await deps.resolve(principal);
     if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED" }, { "WWW-Authenticate": "Bearer" });
     if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true }, RETRY_AFTER);
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
-    // Present at all, even empty, it must hold a forwarder's key: a slot the
-    // caller filled is never ignored (an empty one is no carrier named).
-    const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);
-    if (forwarded !== null) {
-      const carrier = authenticate(forwarded, keys, { admit: ["forward"] });
-      if (!carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
+    if (carrier) {
       const carried = await deps.resolve(carrier);
       if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
-      if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true }, RETRY_AFTER);
+      if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder" }, RETRY_AFTER);
       principal.act = { name: carrier.name, ...(carried.agentId ? { agentId: carried.agentId } : {}) };
     }
     return principal;
