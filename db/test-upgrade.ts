@@ -522,7 +522,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // (min_trust on match_thoughts and the keyword arm, SMD-1724), 075
   // (min_trust on the hybrid and the current read, SMD-1724), 077 (the
   // current read by the tickets a thought names, SMD-2271) and 078 (two
-  // different tickets never paired for judgement, SMD-2448) stay recorded
+  // tickets Linear links never paired for judgement, SMD-2448) stay recorded
   // and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -617,8 +617,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // adds ticket_references and ticket_references_settled and redefines 075's
   // 8-argument search_thoughts_current on its own body, refusing by name
   // without 068 or 075 ([20aa]); 078 redefines 066's consolidation_candidates
-  // on its own body and adds a count beside it, refusing by name without
-  // 025, 029 or 063 ([20ab]) — all recorded by the
+  // on its own body and adds a predicate and a count beside it, refusing by
+  // name without 025, 029, 053 or 063 ([20ab]) — all recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
@@ -3366,13 +3366,15 @@ console.log("\n[20aa] Migration 077: refused without 068 or 075, naming each; on
   await sql.close();
 }
 
-console.log("\n[20ab] Migration 078: refused by name without 025, 029 or 063; onto a populated brain at the file before it — the candidate filter redefined on 066's body plus the ticket rule and the count added, an operator's REVOKE kept, no audit row and no row moved, a proposal standing on two tickets left as it stands; a newer ticket row listed another ticket before the file and lists its own ticket's row and the note alone after it; a re-apply a no-op (SMD-2448)");
+console.log("\n[20ab] Migration 078: refused by name without 025, 029, 053 or 063; onto a populated brain at the file before it — the candidate filter redefined on 066's body plus the linked-tickets rule, the predicate and the count added, an operator's REVOKE kept, no audit row and no row moved, a proposal standing on two linked tickets left as it stands; a newer ticket row listed a ticket Linear relates to it before the file and lists its own ticket's row, an unlinked ticket and the note after it; a re-apply a no-op (SMD-2448)");
 {
-  const the078 = MIGRATIONS.find((f) => f.endsWith("_distinct_tickets_not_paired.sql"))!;  // by name: renumbered when main takes its number
+  const the078 = MIGRATIONS.find((f) => f.endsWith("_linked_tickets_not_paired.sql"))!;  // by name: renumbered when main takes its number
   // The guard, driven, one probe at a time: a schema at 024 lacks 025's
   // derived_from (which 066's terms read), one at 028 lacks 029's queue and
-  // filter, and one at 062 has 029's filter but not 063's stale status.
-  for (const [upTo, needs] of [["025", "migration 078 needs 025 (thoughts.derived_from); this schema lacks it"], ["029", "migration 078 needs 029 (supersession_proposals, consolidation_candidates); this schema lacks it"]] as const) {
+  // filter, one at 052 lacks 053's link rows and their index, and one at 062
+  // has all of those but not 063's stale status.
+  for (const [upTo, needs] of [["025", "migration 078 needs 025 (thoughts.derived_from); this schema lacks it"], ["029", "migration 078 needs 029 (supersession_proposals, consolidation_candidates); this schema lacks it"],
+                               ["053", "migration 078 needs 053 (link rows on thought_facets, thought_facets_link_target_idx); this schema lacks it"]] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < upTo });
     const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the078 }).then(() => "applied", (e: Error) => e.message);
@@ -3392,44 +3394,49 @@ console.log("\n[20ab] Migration 078: refused by name without 025, 029 or 063; on
   const SIG = "consolidation_candidates(uuid, int, float)";
   const put = async (content: string, metadata: Record<string, unknown>) =>
     ((await sql`SELECT upsert_thought(${content}, ${{ metadata, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string }).id;
-  // A corpus at 077, ten days old, each row mentioning billing: two
-  // tickets, a second ticket's row with a proposal planted on it before the
-  // file, and a note; then today's row of the first ticket.
+  // A corpus at 077, ten days old, each row mentioning billing: ticket
+  // SMD-7801's row; SMD-7802, which Linear relates to SMD-7801 (its row
+  // holds the link, as board-sync records it); SMD-7803, related too, with a
+  // proposal planted on it before the file; SMD-7804, related to nothing;
+  // and a note; then today's row of SMD-7801.
   const t1 = await put("upgrade 078: SMD-7801 bills monthly", { source: "linear", issue: "SMD-7801" });
   const t2 = await put("upgrade 078: SMD-7802 bills annually", { source: "linear", issue: "SMD-7802" });
   const t3 = await put("upgrade 078: SMD-7803, judged at 077", { source: "linear", issue: "SMD-7803" });
+  const t4 = await put("upgrade 078: SMD-7804, a ticket nothing relates", { source: "linear", issue: "SMD-7804" });
   const note = await put("upgrade 078: a note on billing", { source: "mcp" });
-  await sql`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id IN (${t1}::uuid, ${t2}::uuid, ${t3}::uuid, ${note}::uuid)`;
+  await sql`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id IN (${t1}::uuid, ${t2}::uuid, ${t3}::uuid, ${t4}::uuid, ${note}::uuid)`;
+  for (const holder of [t2, t3])
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${holder}::uuid, 'link', jsonb_build_object('system', 'linear', 'relation', 'relates_to', 'target', 'SMD-7801'))`;
   const newer = await put("upgrade 078: SMD-7801 moved to annual billing", { source: "linear", issue: "SMD-7801" });
-  for (const id of [t1, t2, t3, note, newer])
+  for (const id of [t1, t2, t3, t4, note, newer])
     await sql`SELECT record_thought_entities(${id}::uuid, 'extract:m@p2', '[{"name": "billing", "type": "topic", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL)`;
   const pid = (await sql`SELECT record_supersession_proposal(${t3}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.9, 'one ticket over another, judged at 077', 0.99, 'consolidate:judge@p3') AS id`)[0].id as string;
-  const cands = async (): Promise<string> => (await sql`SELECT older_id::text AS o FROM consolidation_candidates(${newer}::uuid, 5, 0) ORDER BY 1`).map((r: { o: string }) => r.o).join();
-  const name = (o: string) => new Map([[t1, "T1"], [t2, "T2"], [t3, "T3"], [note, "N"]]).get(o) ?? o;
-  assert(typeof pid === "string" && (await cands()) === [t1, t2, note].sort().join(),
-    `before 078 the newer SMD-7801 row's candidates include SMD-7802 — the pair SMD-2448 measured — beside its own ticket's row and the note, and not SMD-7803, whose pending proposal holds the pair (${(await cands()).split(",").map(name).join()})`);
+  const name = (o: string) => new Map([[t1, "T1"], [t2, "T2"], [t3, "T3"], [t4, "T4"], [note, "N"]]).get(o) ?? o;
+  const cands = async (): Promise<string> => (await sql`SELECT older_id::text AS o FROM consolidation_candidates(${newer}::uuid, 10, 0) ORDER BY 1`).map((r: { o: string }) => r.o).join();
+  assert(typeof pid === "string" && (await cands()) === [t1, t2, t4, note].sort().join(),
+    `before 078 the newer SMD-7801 row's candidates include SMD-7802, which Linear relates to it — the pair SMD-2448 measured — beside its own ticket's row, the unrelated SMD-7804 and the note, and not SMD-7803, whose pending proposal holds the pair (${(await cands()).split(",").map(name).join()})`);
   await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIG} FROM PUBLIC`);
   const stamps = async () => JSON.stringify(await sql`SELECT id, content, metadata, embedding::text AS e, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
   const proposals = async () => JSON.stringify(await sql`SELECT id, older_id, newer_id, status, verdict, judged_at::text AS j, reviewed_at::text AS r, review_note FROM supersession_proposals ORDER BY id`);
   const before = await stamps(), proposalsBefore = await proposals();
   const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the078 });
-  const [shape] = await sql`SELECT p.prosrc LIKE '%ob1:distinct-tickets-not-paired%' AS x, p.prosrc LIKE '%ob1:lineage-excludes-the-pair%' AS l, p.proacl::text AS acl,
+  const [shape] = await sql`SELECT p.prosrc LIKE '%ob1:linked-tickets-not-paired%' AS x, p.prosrc LIKE '%ob1:lineage-excludes-the-pair%' AS l, p.proacl::text AS acl,
                                    (SELECT count(*)::int FROM pg_proc WHERE proname = 'consolidation_candidates') AS n,
-                                   to_regprocedure('consolidation_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS counter
+                                   to_regprocedure('consolidation_ticket_pairs_left_out(uuid, float)') IS NOT NULL AND to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS counter
                               FROM pg_proc p WHERE p.oid = to_regprocedure(${SIG})`;
   assert(shape.x === true && shape.l === true && Number(shape.n) === 1 && shape.counter === true && shape.acl !== null && !/(^|[{,])=X/.test(shape.acl),
-    `one candidate filter carrying both rules, the count added, and an operator's REVOKE standing (${JSON.stringify(shape)})`);
+    `one candidate filter carrying both rules, the count and the predicate added, and an operator's REVOKE standing (${JSON.stringify(shape)})`);
   await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIG} TO PUBLIC`);
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert((await stamps()) === before && (await proposals()) === proposalsBefore && Number(auditAfter) === Number(auditBefore),
-    "…no row, no proposal and no audit row moved — the proposal on two tickets stands pending for its reviewer");
+    "…no row, no proposal and no audit row moved — the proposal on two linked tickets stands pending for its reviewer");
   const [{ n: left }] = await sql`SELECT consolidation_ticket_pairs_left_out(${newer}::uuid, 0) AS n`;
-  assert((await cands()) === [t1, note].sort().join() && Number(left) === 1,
-    `…and the newer SMD-7801 row is judged against its own ticket's row and the note alone, the one other ticket left out and counted (${(await cands()).split(",").map(name).join()}; left out ${left})`);
+  assert((await cands()) === [t1, t4, note].sort().join() && Number(left) === 1,
+    `…and the newer SMD-7801 row is judged against its own ticket's row, the unrelated SMD-7804 and the note, the one related ticket left out and counted (${(await cands()).split(",").map(name).join()}; left out ${left})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the078 });
-  const [{ n: again }] = await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname IN ('consolidation_candidates', 'consolidation_ticket_pairs_left_out')`;
-  assert(Number(again) === 2 && (await cands()) === [t1, note].sort().join(), "a re-apply of 078 is a no-op: one of each, the same answers");
+  const [{ n: again }] = await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname IN ('consolidation_candidates', 'consolidation_ticket_pairs_left_out', 'consolidation_tickets_linked')`;
+  assert(Number(again) === 3 && (await cands()) === [t1, t4, note].sort().join(), "a re-apply of 078 is a no-op: one of each, the same answers");
   await sql.close();
 }
 

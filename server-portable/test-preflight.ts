@@ -1831,7 +1831,7 @@ else {
   // sentinel but pairs two different tickets; the check reads 078's sentinel
   // and warns naming 078 — the next rung after 066's.
   const pre078 = await run(SQL_ENV);
-  assert(pre078.code === 0 && /!  lineage\s+every derived row has its lineage row, but consolidation_candidates is from before 078 \(migration 078 not yet applied, or 063 or 066 re-applied by hand over it\): the judge is asked whether one ticket supersedes another, a pair of two records each with its own lifecycle \(SMD-2448\)/.test(pre078.out) && /Apply db\/migrations\/078_distinct_tickets_not_paired\.sql\./.test(fix(pre078.out, "lineage")),
+  assert(pre078.code === 0 && /!  lineage\s+every derived row has its lineage row, but consolidation_candidates is from before 078 \(migration 078 not yet applied, or 063 or 066 re-applied by hand over it\): the judge is asked whether one ticket supersedes another that Linear already relates to it \(parent, child, blocker, related, duplicate\), two records each with its own lifecycle \(SMD-2448\)/.test(pre078.out) && /Apply db\/migrations\/078_linked_tickets_not_paired\.sql\./.test(fix(pre078.out, "lineage")),
          `066 re-applied over 078 is a warning on the candidate body, naming 078 as the remedy (${(pre078.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("078") });
   // 063 re-applied by hand over 067 (SMD-2297): 063's rebuild_derived keeps

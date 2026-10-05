@@ -171,7 +171,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2425 assertions: 2425 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2427 assertions: 2427 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports seventy-eight (78) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1026,31 +1026,38 @@ per search (paired median, +6.0 at p90) over 075's 4.5 ms, the hybrid alone
 --sql-check` held the SQL to the rule on all 1,464 thoughts and the ranking to
 its oracle on all 12 queries. test-schema [69], test-upgrade [20aa].
 
-Migration 078 never pairs two different tickets for judgement (SMD-2448):
-`consolidation_candidates` leaves out a pair whose two thoughts both carry a
-ticket identity and the identities differ — the ticket `node_state` reads a
-thought under, `coalesce(metadata->>'ticket', metadata->>'issue')` (a ticket's
-row by its issue, a dated section filed under it by its ticket), the text
-exactly. Two tickets are two records, each with its own status, which
-board-sync keeps current; one "superseding" the other archives a record that
-still holds. On the stable dogfood brain 109 of the 128 proposals ever recorded
-paired two different tickets, all rejected, and neither accepted one did; at
-the shipped defaults (k 3, cosine 0.6) a full pass makes 36.1% fewer judge
-calls (3,427 → 2,190 over 1,238 pooled thoughts). Two rows of one ticket stay
-candidates (two writers of one identity can be genuine duplicates); a thought
-with no identity is judged against a ticket row as before.
+Migration 078 never pairs two tickets Linear links for judgement (SMD-2448):
+`consolidation_candidates` leaves out a pair filed under two different tickets
+that an active Linear link relates in either direction — parent and child,
+blocks, relates, duplicate (053's link rows; a text reference does not count).
+A thought's ticket is the one `node_state` reads it under,
+`coalesce(metadata->>'ticket', metadata->>'issue')` (a ticket's row by its
+issue, a dated section filed under it by its ticket), the text exactly; the
+predicate is `consolidation_tickets_linked(a, b)`, one definition for the
+candidate body, the count and the worker's settle reason. Two linked tickets
+are two records whose relationship is already stated, each with its own status;
+one "superseding" the other archives a record that still holds. On the stable
+dogfood brain 107 of the 128 proposals ever recorded pair two tickets Linear
+relates, all rejected, and neither accepted one does. Unlinked tickets stay
+candidates: the eval's hand-graded set (`evals/consolidate-labels.json`) holds
+six real supersessions between two tickets, a later ticket replacing an
+earlier one's decision, which the broader "any two tickets" rule would lose.
+At the shipped defaults (k 3, cosine 0.6) a full pass makes 4.1% fewer judge
+calls (3,432 → 3,290 over 1,238 pooled thoughts); the judge's cost on unlinked
+ticket pairs is SMD-1873's. Two rows of one ticket stay candidates, and a
+thought with no identity is judged against a ticket row as before.
 `consolidation_ticket_pairs_left_out(thought, floor)` counts what the rule
 removes for one thought, every other term met; `db/consolidate.ts` turns it
 into judge calls fewer at `--k` (a lower bound: a stale pair past the cut is not
-counted) — in a run's summary, and in `--status`
-and `--dry-run` over the thoughts still to judge (one neighbour read each:
-3.3 s for the dogfood's pool) — and settles a stale proposal on two tickets
-naming the rule. The body carries `ob1:distinct-tickets-not-paired`, which the
-worker reads before it reports the rule and preflight's `lineage` check reads
-to warn naming 078 when 063 or 066 is re-applied by hand over it. Not taken:
-matching a ticket id in free text — on the 128 it would leave out 11 more
-pairs, one of them accepted. test-schema [70], test-live [16], test-upgrade
-[20ab].
+counted) — in a run's summary, and in `--status` and `--dry-run` over the
+thoughts still to judge (one neighbour read each: 3.1 s for the dogfood's pool)
+— and settles a stale proposal on two linked tickets naming the rule. Nothing
+is stored: a link written or closed moves the rule at the next pass. The body
+carries `ob1:linked-tickets-not-paired`, which the worker reads before it
+reports the rule and preflight's `lineage` check reads to warn naming 078 when
+063 or 066 is re-applied by hand over it. Not taken: matching a ticket id in
+free text — on the 128 it would leave out 11 more pairs, one of them accepted.
+test-schema [70], test-live [16], test-upgrade [20ab].
 
 ## What changed relative to the guide
 
@@ -2136,10 +2143,11 @@ side of which names the other in `derived_from` (a page and the evidence its
 sections were generated from, a digest and its sources) never judged: a
 derivation says what its input says by construction, and re-deriving is
 `rebuild_derived`'s door, not supersession's (SMD-2292; direct members only,
-the array is one level), and, since 078, a pair whose two thoughts carry two
-different ticket identities (`metadata->>'ticket'`, else `metadata->>'issue'`,
-as `node_state` reads them) never judged: two tickets are two records, each
-with its own lifecycle (SMD-2448). Older-only means a pair is reached from its newer
+the array is one level), and, since 078, a pair filed under two different
+tickets that an active Linear link relates (`consolidation_tickets_linked`)
+never judged: two records whose relationship is stated, each with its own
+lifecycle (SMD-2448; unlinked tickets are still judged — a later ticket can
+replace an earlier one's decision). Older-only means a pair is reached from its newer
 side once, with no memory needed; the day rule keeps an import's burst from
 being compared with itself (and means a same-day contradiction is not found,
 stated rather than hidden). The shared-entity restriction is the cheap signal
@@ -3266,7 +3274,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2425 assertions, PGlite, no container
+bun test-schema.ts                          # 2427 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1063 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

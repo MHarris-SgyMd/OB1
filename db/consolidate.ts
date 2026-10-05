@@ -799,7 +799,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * tickets past the k nearest).
    */
   const [{ has_078: HAS_078 }] = (await sql`
-    SELECT COALESCE((SELECT prosrc LIKE '%ob1:distinct-tickets-not-paired%' FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')), false)
+    SELECT COALESCE((SELECT prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')), false)
            AND to_regprocedure('consolidation_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_078`) as { has_078: boolean }[];
   /** The judge calls 078 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
   async function ticketCallsSaved(ids: string, param: string): Promise<{ n: number; t: number }> {
@@ -808,16 +808,21 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         FROM (${ids}) s CROSS JOIN LATERAL (SELECT count(*)::int AS n FROM consolidation_candidates(s.id, $2::int, $3::float)) k`, [param, K, MIN_SIM])) as { n: number; t: number }[];
     return { n: Number(r.n), t: Number(r.t) };
   }
+  /** 078's predicate on two thoughts by id — the reason a stale proposal no longer meets the candidate rule. */
+  async function linkedTickets(olderId: string, newerId: string): Promise<boolean> {
+    const [r] = (await sql`SELECT consolidation_tickets_linked(o.metadata, n.metadata) AS l FROM thoughts o, thoughts n WHERE o.id = ${olderId}::uuid AND n.id = ${newerId}::uuid`) as { l: boolean }[];
+    return r?.l === true;
+  }
   /** --status and --dry-run: over the thoughts the next run judges — pending, not yet pooled, re-pooled for a stale proposal, and failed under --retry-failed. */
   async function printTicketCalls(): Promise<void> {
     if (!HAS_078) {
-      out("  tickets: pairs of two different tickets are still judged — consolidation_candidates is from before migration 078 (not applied, or 063 or 066 re-applied by hand over it): cd db && bun migrate.ts --url <url>");
+      out("  tickets: pairs of two tickets Linear links are still judged — consolidation_candidates is from before migration 078: apply it (cd db && bun migrate.ts --url <url>), or, where the ledger already records 078 and 063 or 066 was re-applied by hand over it, re-apply (add --reapply)");
       return;
     }
     const { n, t } = await ticketCallsSaved(
       `SELECT thought_id AS id FROM thought_work_claims WHERE work_type = $1 AND status IN ('pending'${RETRY_FAILED ? ", 'failed'" : ""})
        UNION SELECT consolidation_pool($1) UNION SELECT id FROM (${STALE_REPOOL_SQL}) r`, JOB);
-    out(`  tickets: ${n} judge call(s) fewer over the ${t} thought(s) still to judge${DRY_RUN && LIMIT ? " (before --limit)" : ""} — pairs of two different tickets left out at --k ${K} (078)`);
+    out(`  tickets: ${n} judge call(s) fewer over the ${t} thought(s) still to judge${DRY_RUN && LIMIT ? " (before --limit)" : ""} — pairs of two tickets Linear links left out at --k ${K} (078)`);
   }
 
   if (STATUS_ONLY || DRY_RUN) {
@@ -916,7 +921,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     /** In hand at the hard stop: nothing more written, and no longer this worker's to release. */
     | { outcome: "abandoned" };
   /** 067: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
-  type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean; lineage_pair: boolean; distinct_tickets: boolean };
+  type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean; lineage_pair: boolean };
 
   /**
    * A Writer's throw from inside processRow, marked so the worker's catch
@@ -978,10 +983,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
              (o.supersedes = p.newer_id OR me.supersedes = p.older_id
               OR EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes IN (p.older_id, p.newer_id))) AS superseded,
              -- 066 (SMD-2292): a derivation and its input are never paired — the rule's own predicate, NULL-safe.
-             (COALESCE(me.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(me.id::text), false)) AS lineage_pair,
-             -- 078 (SMD-2448): two different tickets are never paired — the rule's own predicate, NULL-safe; named as the
-             -- reason only where 078 stands (on a brain without it the candidate body still admits such a pair).
-             COALESCE(coalesce(me.metadata->>'ticket', me.metadata->>'issue') <> coalesce(o.metadata->>'ticket', o.metadata->>'issue'), false) AS distinct_tickets
+             (COALESCE(me.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(me.id::text), false)) AS lineage_pair
         FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts me ON me.id = p.newer_id
        WHERE p.newer_id = ${row.id}::uuid AND p.status = 'stale'`) as StaleRow[];
     const staleByOlder = new Map(stale.map((s) => [s.older_id, s]));
@@ -1119,7 +1121,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // no write function makes are the remainder.
       const why = s.superseded ? "a side superseded"
         : s.lineage_pair ? "a lineage pair — one side derived from the other (066's rule)"
-        : HAS_078 && s.distinct_tickets ? "two different tickets — each its own record (078's rule)"
+        // 078 (SMD-2448): read through its own predicate, only where 078 stands — the function exists nowhere else.
+        : HAS_078 && await linkedTickets(s.older_id, row.id) ? "two tickets Linear links — each its own record (078's rule)"
         : s.shared === 0 ? "no shared entity"
         : s.similarity !== null && s.similarity < MIN_SIM ? `under the similarity floor ${MIN_SIM} (cosine ${s.similarity.toFixed(3)})`
         : "outside the candidate rule (the day rule, or a change no write function makes)";
@@ -1418,7 +1421,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   out(
     `  ${totals.pairs} pair(s) judged${judged ? ` — ${(totals.pairs / judged).toFixed(2)} per thought judged, ${Math.round((totals.pairs / judged) * 1000)} calls per thousand thoughts` : ""}; ` +
       `${totals.noCandidates} thought(s) had no candidate; verdicts: ${totals.agree} agree, ${totals.unrelated} unrelated, ${totals.conflict} conflict` +
-      (HAS_078 ? `; ${totals.ticketCalls} judge call(s) fewer — pairs of two different tickets left out at --k ${K} (078${totals.ticketCallsUnread ? `; ${totals.ticketCallsUnread} thought(s) not counted, the read failed` : ""})` : "")
+      (HAS_078 ? `; ${totals.ticketCalls} judge call(s) fewer — pairs of two tickets Linear links left out at --k ${K} (078${totals.ticketCallsUnread ? `; ${totals.ticketCallsUnread} thought(s) not counted, the read failed` : ""})` : "")
   );
   out(
     `  ${totals.proposed} proposal(s) recorded (${totals.undirected} without a direction)` +

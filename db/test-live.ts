@@ -5468,11 +5468,11 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     for (const id of ids) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
-  // 078 (SMD-2448): two different tickets are never judged against each
-  // other. A fresh corpus — an older row of each of two tickets, a dated
-  // section filed under the second (metadata.ticket, as board-sync writes
-  // one), a note, and a newer row of the first ticket, all on one axis
-  // mentioning billing. At --k 3 the newer row's list under 066 would be
+  // 078 (SMD-2448): two tickets Linear links are never judged against each
+  // other. A fresh corpus — an older row of each of two tickets Linear
+  // relates, a dated section filed under the second (metadata.ticket, as
+  // board-sync writes one), a note, and a newer row of the first ticket, all
+  // on one axis mentioning billing. At --k 3 the newer row's list under 066 would be
   // its own ticket's row, the note and one of the two SMD-9002 rows; under
   // 078 it is the first two, so one judge call is saved — what --status,
   // --dry-run and the run say. With 066 re-applied by hand over 078 (the
@@ -5487,20 +5487,22 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       return id;
     };
     await ticket("SMD-9001: tickets bill monthly", { source: "linear", issue: "SMD-9001" }, 10);
-    await ticket("SMD-9002: tickets bill on the first", { source: "linear", issue: "SMD-9002" }, 10);
+    const other = await ticket("SMD-9002: tickets bill on the first", { source: "linear", issue: "SMD-9002" }, 10);
+    // Linear relates SMD-9002 to SMD-9001: the link on SMD-9002's row, as board-sync records it (053).
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${other}::uuid, 'link', jsonb_build_object('system', 'linear', 'relation', 'relates_to', 'target', 'SMD-9001'))`;
     const section = await ticket("## Update: SMD-9002's billing moved", { source: "linear", ticket: "SMD-9002" }, 10);
     await ticket("a note: tickets and billing", { source: "test" }, 10);
     const newerT = await ticket("SMD-9001: tickets bill weekly now", { source: "linear", issue: "SMD-9001" }, 0);
     const line = (out: string, re: RegExp) => out.split("\n").find((l) => re.test(l))?.trim();
     const statusT = await consolidate("--status");
     const dryT = await consolidate("--dry-run");
-    const saved = /tickets: 1 judge call\(s\) fewer over the 5 thought\(s\) still to judge — pairs of two different tickets left out at --k 3 \(078\)/;
+    const saved = /tickets: 1 judge call\(s\) fewer over the 5 thought\(s\) still to judge — pairs of two tickets Linear links left out at --k 3 \(078\)/;
     assert(statusT.code === 0 && saved.test(statusT.out) && saved.test(dryT.out),
       `--status and --dry-run count the one judge call the k cut no longer spends on another ticket's rows (${line(statusT.out, /tickets:/)})`);
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("066_") });
     const undone = await consolidate("--status");
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("078_") });
-    assert(/tickets: pairs of two different tickets are still judged — consolidation_candidates is from before migration 078/.test(undone.out),
+    assert(/tickets: pairs of two tickets Linear links are still judged — consolidation_candidates is from before migration 078/.test(undone.out),
       `with 066 re-applied by hand over 078 the count still stands but the rule is gone, and --status says such pairs are still judged (${line(undone.out, /tickets:/)})`);
     // One thought claimed and judged: the other four are pending now, and the
     // count still covers them (the pending arm of the set — second review pass).
@@ -5513,7 +5515,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const judgedT = seen.slice(from);
     const oneSaved = Number(/; (\d) judge call\(s\) fewer/.exec(oneT.out)?.[1] ?? NaN), restSaved = Number(/; (\d) judge call\(s\) fewer/.exec(runT.out)?.[1] ?? NaN);
     assert(runT.code === 0 && judgedT.length === 2 && judgedT.every((p) => !/SMD-9002/.test(p.a + p.b)) && oneSaved + restSaved === 1
-        && /judge call\(s\) fewer — pairs of two different tickets left out at --k 3 \(078\)/.test(runT.out),
+        && /judge call\(s\) fewer — pairs of two tickets Linear links left out at --k 3 \(078\)/.test(runT.out),
       `the two runs judge the newer SMD-9001 row against its own ticket's row and the note, never SMD-9002's row or its section, and between them say one call was saved (${judgedT.length} judged; ${oneSaved} + ${restSaved})`);
     // A proposal from SMD-9002's dated section — a thought filed under the
     // ticket by metadata.ticket alone — gone stale (judged before 078, a text
@@ -5528,8 +5530,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       `--status counts over the one thought the pass re-pools for the stale proposal (${line(staleStatus.out, /tickets:/)})`);
     const settleRun = await consolidate("--workers", "1");
     const [settled] = await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${staleT}::uuid`;
-    assert(settleRun.code === 0 && settled.status === "rejected" && /no longer a candidate pair — two different tickets — each its own record \(078's rule\)/.test(String(settled.review_note)),
-      `a stale proposal on two tickets is settled by the pass, the note naming 078's rule (${settled.status}: ${settled.review_note})`);
+    assert(settleRun.code === 0 && settled.status === "rejected" && /no longer a candidate pair — two tickets Linear links — each its own record \(078's rule\)/.test(String(settled.review_note)),
+      `a stale proposal on two linked tickets is settled by the pass, the note naming 078's rule (${settled.status}: ${settled.review_note})`);
   }
 
   judge.stop(true);

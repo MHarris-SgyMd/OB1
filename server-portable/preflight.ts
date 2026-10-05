@@ -180,7 +180,7 @@ const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
 const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
 const APPLY_070 = "Apply db/migrations/070_listing_flags_lineage_pair.sql.";
 const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
-const APPLY_078 = "Apply db/migrations/078_distinct_tickets_not_paired.sql.";
+const APPLY_078 = "Apply db/migrations/078_linked_tickets_not_paired.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -2188,8 +2188,8 @@ if (configFailed) {
                      to_regprocedure('public.settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS has_067,
                      (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
-                     -- 078 (SMD-2448): the candidate body leaves out two different tickets (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
-                     (SELECT w.prosrc LIKE '%ob1:distinct-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
+                     -- 078 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
+                     (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
                      -- 070 (SMD-2313): the listing flags a lineage pair (its sentinel) and stands in one form — 029 re-applied by hand lands its
                      -- two-argument form BESIDE 070's, and a call passing fewer than three arguments is then ambiguous (42725, not unique) and fails.
                      (SELECT w.prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.list_supersession_proposals(text, int, boolean)')) AS lists_lineage,
@@ -2331,7 +2331,7 @@ if (configFailed) {
               // 078 (SMD-2448): 063's or 066's candidate body over 078's — the
               // pass asks the judge whether one ticket supersedes another.
               add("lineage", "warn",
-                  `every derived row has its lineage row, but consolidation_candidates is from before 078 (migration 078 not yet applied, or 063 or 066 re-applied by hand over it): the judge is asked whether one ticket supersedes another, a pair of two records each with its own lifecycle (SMD-2448). ${coverage}`,
+                  `every derived row has its lineage row, but consolidation_candidates is from before 078 (migration 078 not yet applied, or 063 or 066 re-applied by hand over it): the judge is asked whether one ticket supersedes another that Linear already relates to it (parent, child, blocker, related, duplicate), two records each with its own lifecycle (SMD-2448). ${coverage}`,
                   ledgerRemedy("078", APPLY_078));
             } else if (reopenOlder) {
               add("lineage", "warn",

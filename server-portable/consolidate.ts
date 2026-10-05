@@ -22,8 +22,8 @@
  * Deciding which pairs to ask about is NOT here; it is
  * `consolidation_candidates()` in migration 029 (redefined by 063, which lets
  * a stale pair through again, by 066, which never pairs a thought with a
- * member of its derived_from, and by 078, which never pairs two different
- * tickets), so the worker and the eval share one
+ * member of its derived_from, and by 078, which never pairs two tickets
+ * Linear links), so the worker and the eval share one
  * definition of the candidate set.
  */
 
