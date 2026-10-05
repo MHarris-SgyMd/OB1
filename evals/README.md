@@ -1646,7 +1646,7 @@ retried.
 the answer with its whitespace dropped, as Ollama trims the tokens it
 compares. The stream guard aborts the call once the answer ends in 24 copies
 of one unit holding a letter or digit. A cut answer (a stream with no end
-sign, or a whole one with no finish) is the same runaway when its tail repeats
+sign, or a malformed whole one with no finish) is the same runaway when its tail repeats
 any unit 24 times, punctuation and emoji included, or ends in 24 whitespace
 characters: Ollama's limit cuts any token, and a cut answer has no budget left
 to reach. Each goes to the penalised retry, or the escalation model.
@@ -1662,8 +1662,9 @@ read by the same rule anywhere in the text:
 | 8–15 | 5 |
 | 16 or more | 1 (20: `limit=99999999999999999999`, SMD-2534's row) |
 
-The 8–15 band is a paper's table column (`Factual` ×12) and runs of zeros (a
-nil UUID's last group, ×12).
+The 8–15 band is a paper's table column (`Factual` ×12) and runs of zeros:
+×12 twice (a nil UUID's last group, and a `000000000000` placeholder in a
+ticket), ×9 and ×8 in tickets' numbers.
 
 **Why 24: the answers.** `qwen2.5:7b`, streamed, the shipped windowing, with
 every frame recorded: the 3 planted documents, 48 thoughts drawn at random from

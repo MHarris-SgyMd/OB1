@@ -380,7 +380,7 @@ export const RUNAWAY_REPEATS = 3;
  * paused on and retried identically. Measured on the stable brain
  * (2026-10-05): across its 1,493 thoughts, the most copies of one unit in a
  * row, read by this rule, is 20 — `limit=99999999999999999999` in a ticket —
- * then 12 (a paper's table column, a nil UUID's zeros), and a name is copied
+ * then 12 (a paper's table column, two runs of zeros), and a name is copied
  * from the text; in qwen2.5:7b's 92 parsed answers over a 55-document sample
  * (97,812 tokens, evals/README.md), no token came more than three times in a
  * row (counted as Ollama counts, by token, not by this rule). 24 clears this
@@ -966,11 +966,13 @@ type StreamedBody = { kind: "sse"; content: string; finish: string | undefined; 
  * last content event or comes alone (ninth pass). The detector's `runaway` —
  * an item after the third copy inside the same array, the loop going on — is
  * the abort: the reader is cancelled (the connection closes, Ollama stops
- * generating) and the runaway returned, by its rule. An answer that closes or finishes after its
- * third copy, or goes on in its other array, is complete: parseExtraction
- * folds the copies (fifth to eighth passes). So is the abort on one unit
- * repeated inside the answer (repeatedTail, SMD-2449), read after the item
- * rule and never once the answer has closed. A stream that ends with content
+ * generating) and the runaway returned, by its rule. The same abort fires on
+ * one unit holding a letter or a digit repeated at the answer's end
+ * (repeatedTail, SMD-2449), read after the item rule, on the text as it
+ * stands when each piece arrives, and never once the answer has closed. An
+ * answer that closes or finishes after its third copy, or goes on in its
+ * other array, is complete: parseExtraction folds the copies (fifth to
+ * eighth passes). A stream that ends with content
  * but no end sign is a socket that closed mid-answer — thrown, so the worker
  * classifies it (transient) — unless what arrived is whole JSON, which is the
  * answer, or ends in one unit repeated or a run of whitespace, which is

@@ -4281,8 +4281,9 @@ console.log("\n[10f] db/extract-entities.ts: Ollama's repeat limit is a runaway,
   const thought = (parts: ReturnType<typeof win>[]) => ({ entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: parts.every((p) => p.malformed), windows: parts.length, parts });
   const UNIT = "the answer repeated one short unit (a word, a number, punctuation, an emoji or whitespace) over and over";
   const ITEM = "the answer went on past a third copy of one item";
-  assert(abortedNote(thought([win(0, true), win(1, false, 900, "token", { retried: true })])) === "",
-    "abortedNote: nothing when no MALFORMED window was aborted — a rescued window's abort is not the failure's");
+  assert(abortedNote(thought([win(0, true), win(1, false, 900, "token", { retried: true })])) === ""
+         && abortedNote({ ...thought([]), parts: undefined, windows: 1, malformed: false, abortedMs: 900, abortedBy: "token", retried: true }) === "",
+    "abortedNote: nothing when no MALFORMED window was aborted — a rescued window's abort, or a single call the retry rescued, is not the failure's");
   assert(abortedNote({ ...thought([]), parts: undefined, windows: 1, malformed: true, abortedMs: 1500, abortedBy: "item", retried: true }) === `; the first call was aborted on the stream 1.5 s in — ${ITEM} — and the penalised retry, read whole, did not converge either`,
     "…an item runaway reads as it did before this ticket, word for word");
   assert(abortedNote({ ...thought([]), parts: undefined, windows: 1, malformed: true, abortedMs: 200, abortedBy: "token" }) === `; the first call was aborted, or cut by the provider's repeat limit, on the stream 0.2 s in — ${UNIT} — and no retry was made`,

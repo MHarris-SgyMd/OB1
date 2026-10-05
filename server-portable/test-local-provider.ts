@@ -915,7 +915,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
         // Ollama's repeat-limit shape: the name grows one " Linear" a frame,
         // and after 31 copies the stream ends — no finish_reason, no [DONE].
         frames = [frame(LINEAR_HEAD), ...Array.from({ length: 30 }, () => frame(" Linear"))];
-        gapMs = 25;
+        gapMs = 60;
       } else if (gMode === "tokenshort") {
         // A converging answer whose name holds one copy fewer than the
         // limit, one token a frame: complete, so parsed — never an abort.
@@ -1140,7 +1140,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
     `a name repeating one word is a runaway — the penalised retry's answer is the thought's, where it threw "closed mid-answer" (${JSON.stringify(tokenRescued).slice(0, 120)})`);
   assert(tokenRescued.abortedMs !== undefined && tokenRescued.abortedBy === "token", `…the abort recorded, and why: one unit repeated, not a third copy of an item (${tokenRescued.abortedBy})`);
   assert(runs.length === 2 && runs[0].cancelled && runs[0].sent >= TOKEN_REPEATS && runs[0].sent < runs[0].total && runs[0].total === 31 && runs[1].body.frequency_penalty === RUNAWAY_PENALTY && runs[1].body.stream === undefined,
-    `…the client hung up at the ${TOKEN_REPEATS}th copy, before the 31 Ollama cuts at (${runs[0]?.sent} of ${runs[0]?.total} frames), and the retry carried the penalty, read whole`);
+    `…the client hung up once the ${TOKEN_REPEATS}th copy arrived, before the 31 Ollama cuts at (${runs[0]?.sent} of ${runs[0]?.total} frames), and the retry carried the penalty, read whole`);
   assert(tokenObs.length === 1 && tokenObs[0].aborted && tokenObs[0].malformed, "…and observe reports the first call aborted");
 
   // A converging answer one copy short of the limit is the answer.

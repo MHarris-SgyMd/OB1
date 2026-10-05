@@ -269,7 +269,7 @@ function numbers(opts: ExtractOptions): Numbers | string {
  * off and the stream abort on — a constant flipped — and stays for that truth.
  */
 export function abortedNote(extraction: Extraction): string {
-  const abortedParts: { abortedMs?: number; abortedBy?: AbortedBy; retried?: true; escalated?: string }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.abortedMs !== undefined ? [extraction] : [];
+  const abortedParts: { abortedMs?: number; abortedBy?: AbortedBy; retried?: true; escalated?: string }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.malformed && extraction.abortedMs !== undefined ? [extraction] : [];
   if (abortedParts.length === 0) return "";
   const abortedMs = Math.max(...abortedParts.map((p) => p.abortedMs as number));
   // What the runaway was, by each aborted window's own reason (SMD-2449): a
