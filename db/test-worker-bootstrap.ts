@@ -135,6 +135,12 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
 
   const notListed = await workerIdentity(UNUSED_URL, { OB1_WORKER_KEY: "raw", MCP_ACCESS_KEYS: `someone:write:${hashKey("a-different-key")}` }, { noKeyWarning: "unused" });
   ok(!notListed.ok && /OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS/.test(notListed.message), "a key absent from MCP_ACCESS_KEYS is refused — the server would refuse it too");
+  // A forwarder (SMD-2284) is refused before a store is opened: no identity, and no `forward` row for 049's CHECK.
+  const forwarder = await workerIdentity(UNUSED_URL, { OB1_WORKER_KEY: "raw", MCP_ACCESS_KEYS: `mcp-forwarder:forward:${hashKey("raw")}` }, { noKeyWarning: "unused" });
+  ok(!forwarder.ok && /"mcp-forwarder", a forward-scope key — it grants nothing and names no worker/.test(forwarder.message) && /bun keygen\.ts --name <worker> --scope capture/.test(forwarder.message), `a forwarder key is refused as the worker's identity, with a keygen line that runs (${forwarder.ok ? "accepted" : forwarder.message.trim().slice(0, 80)})`);
+  // One digest listed twice, a forwarder first (preflight fails the config): the worker takes the caller's record, as the server does — not refused.
+  const twice = await workerIdentity(UNUSED_URL, { OB1_WORKER_KEY: "raw", MCP_ACCESS_KEYS: `mcp-forwarder:forward:${hashKey("raw")},laptop:write:${hashKey("raw")}` }, { noKeyWarning: "unused", warn: () => {} });
+  ok(twice.ok, `a digest listed as a forwarder and as a write key is the write key here, as the server picks it (${twice.ok ? "accepted" : twice.message.trim().slice(0, 60)})`);
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);

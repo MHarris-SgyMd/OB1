@@ -9494,8 +9494,8 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     `029's two status CHECKs replaced by 063's named pair: four statuses, and unreviewed = pending or stale (${pcons.join(" | ")})`);
   for (const fn of ["derivation_descendants", "record_supersession_proposal"])
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
-  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("066"),
-    `one consolidation_candidates, 066 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) (${lastDefinerOf("consolidation_candidates")})`);
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079"),
+    `one consolidation_candidates, 079 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) and the ticket rule ([70]) (${lastDefinerOf("consolidation_candidates")})`);
   assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("064") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
     `one ob1_record_derivation, 064 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]) (${lastDefinerOf("ob1_record_derivation")})`);
   // rebuild_derived's last definer is 067 (SMD-2297: the proposal arm reopens a pass-settled row); [61] asserts it.
@@ -10145,10 +10145,10 @@ console.log("\n[60] Migration 066: a derivation and its inputs are never paired 
   await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
   await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
 
-  // The shape: one body, 066's, on 063's text.
+  // The shape: one body, 079's, carrying 066's rule on 063's text.
   const body = await src(SIG);
-  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("066") && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body),
-    `one consolidation_candidates, 066 its last definer, the sentinel and 063's stale clause in the body (${lastDefinerOf("consolidation_candidates")})`);
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079") && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body),
+    `one consolidation_candidates, 079 its last definer, 066's sentinel and 063's stale clause in the body (${lastDefinerOf("consolidation_candidates")})`);
   // The spelling, not only the behaviour: `'["a"]'::jsonb @> '"a"'` is TRUE
   // in Postgres (array-contains-scalar is membership), so to_jsonb(id::text)
   // would be the same rule and every behavioural assertion below would pass
@@ -12029,6 +12029,174 @@ console.log("\n[69] Migration 077: prefer_current also ranks below a thought who
     `one ticket's completion moves exactly the thoughts that name it on the next search — the summary recommending it, and the one its open veto no longer holds — and writes none of them: no audit row and no updated_at but the ticket's own (moved ${moved.length}, other audits ${otherAudits.length})`);
 
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[70] Migration 079: two tickets Linear links are never paired for judgement — consolidation_candidates leaves out a pair filed under two different tickets (metadata.ticket, else metadata.issue — node_state's key) that an active Linear link relates, either direction; unlinked tickets, two rows of one ticket and a thought with no identity are still paired; consolidation_linked_ticket_pairs_left_out counts what the rule removes, every other term met, and with the kept list partitions 066's (SMD-2448)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const SIG = "consolidation_candidates(uuid, int, float)";
+  const LEFT = "consolidation_linked_ticket_pairs_left_out(uuid, float)";
+  const LINKED = "consolidation_tickets_linked(jsonb, jsonb)";
+  const ACTOR = { name: "op-key", via: "test-door" };
+  const EXTRACT = "extract:stub@p1";
+  const cap = async (content: string, at: number, metadata: Record<string, unknown>) =>
+    (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify({ metadata, actor: ACTOR, embedding_model: EMBEDDING_MODEL }), unit(at)])).r.id;
+  const age = (id: string, days: number) => db.query(`UPDATE thoughts SET created_at = now() - make_interval(days => $2) WHERE id = $1::uuid`, [id, days]);
+  const mention = (id: string, names = ["billing"]) => db.query(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, '[]'::jsonb, NULL, NULL)`, [id, EXTRACT, JSON.stringify(names.map((n) => ({ name: n, type: "topic", confidence: 0.9 })))]);
+  /** A Linear link as board-sync records it (053): the holder's row, a relation, the other ticket's identifier. */
+  const link = (holder: string, relation: string, target: string) =>
+    db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'link', jsonb_build_object('system', 'linear', 'relation', $2::text, 'target', $3::text))`, [holder, relation, target]);
+  const cands = async (id: string) => (await q<{ o: string }>(`SELECT older_id::text AS o FROM consolidation_candidates($1::uuid, 1000, 0)`, [id])).map((r) => r.o).sort();
+  const leftOut = async (id: string, floor = 0) => Number((await one<{ n: number }>(`SELECT consolidation_linked_ticket_pairs_left_out($1::uuid, $2::float) AS n`, [id, floor])).n);
+  const linked = async (a: Record<string, unknown> | null, b: Record<string, unknown> | null) => (await one<{ l: boolean | null }>(`SELECT consolidation_tickets_linked($1::jsonb, $2::jsonb) AS l`, [a === null ? null : JSON.stringify(a), b === null ? null : JSON.stringify(b)])).l;
+
+  await restoreShipped("consolidation_candidates", "consolidation_linked_ticket_pairs_left_out", "consolidation_tickets_linked");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_entities`);
+  await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
+  await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
+
+  // The shape: one body, 079's — 066's rule and 063's stale clause kept, the
+  // predicate on both thoughts' metadata — the count beside it, read-only,
+  // and the predicate, one definition read by both.
+  const body = await src(SIG), counter = await src(LEFT), predicate = await src(LINKED);
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079") && /ob1:linked-tickets-not-paired/.test(body) && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body)
+      && /AND NOT consolidation_tickets_linked\(me\.metadata, o\.metadata\)/.test(body),
+    `one consolidation_candidates, 079 its last definer, both sentinels, the stale clause, and the pair rule through the predicate (${lastDefinerOf("consolidation_candidates")})`);
+  const vol = await q<{ f: string; v: string }>(`SELECT p.oid::regprocedure::text AS f, provolatile AS v FROM pg_proc p WHERE p.oid IN ($1::regprocedure, $2::regprocedure)`, [LEFT, LINKED]);
+  assert((await functionsNamed("consolidation_linked_ticket_pairs_left_out")) === 1 && (await functionsNamed("consolidation_tickets_linked")) === 1 && vol.every((r) => r.v === "s")
+      && /AND consolidation_tickets_linked\(me\.metadata, o\.metadata\)/.test(counter) && !/LIMIT/.test(counter)
+      && /coalesce\(p_a->>'ticket', p_a->>'issue'\)/.test(predicate) && /IN \('child_of', 'blocks', 'blocked_by', 'relates_to'\)/.test(predicate) && /f\.valid_until IS NULL/.test(predicate),
+    `the count holds the condition turned round with no k cut, and the predicate reads node_state's key, four structured relations (not duplicate_of), active links only — both STABLE (${vol.map((r) => `${r.f}:${r.v}`).join(", ")})`);
+  const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
+  assert(/066/.test(comment) && /079/.test(comment) && /Linear link/.test(comment), "the comment names 066, 079 and the linked-tickets rule");
+
+  // The corpus, ten days old, every row mentioning billing. Ticket SMD-1's
+  // own rows (its issue row, a second writer's, a dated section filed by
+  // metadata.ticket as board-sync writes one); SMD-2, which links to SMD-1
+  // from its own row (relates_to), and SMD-2's dated section; SMD-3 on a far
+  // axis (cosine 0), which the newer SMD-1 row links to (blocks) — the other
+  // direction; SMD-6, linked to nothing; SMD-7, only named by SMD-1's text
+  // (a references link); SMD-9, linked by SMD-1 once (child_of) but closed;
+  // a note with no identity and a row whose issue is JSON null.
+  const O1 = await cap("SMD-1: bill monthly", 0, { source: "linear", issue: "SMD-1" });
+  const W1 = await cap("SMD-1, a second writer's row", 0, { source: "records", issue: "SMD-1" });
+  const S1 = await cap("## Update: SMD-1's billing", 0, { source: "linear", ticket: "SMD-1" });
+  const O2 = await cap("SMD-2: bill annually", 0, { source: "linear", issue: "SMD-2" });
+  const S2 = await cap("## Update: SMD-2's billing", 0, { source: "linear", ticket: "SMD-2" });
+  const O3 = await cap("SMD-3: invoices on the first", 2, { source: "linear", issue: "SMD-3" });
+  const OU = await cap("SMD-6: billing, a ticket nothing relates", 0, { source: "linear", issue: "SMD-6" });
+  const OR = await cap("SMD-7: billing, named in SMD-1's text", 0, { source: "linear", issue: "SMD-7" });
+  const OX = await cap("SMD-9: billing, once SMD-1's parent", 0, { source: "linear", issue: "SMD-9" });
+  const ON = await cap("a note on monthly billing", 0, { source: "mcp" });
+  const OJ = await cap("a row whose issue is null", 0, { source: "mcp", issue: null });
+  for (const id of [O1, W1, S1, O2, S2, O3, OU, OR, OX, ON, OJ]) { await age(id, 10); await mention(id); }
+  await link(O2, "relates_to", "SMD-1");
+  await link(O1, "references", "SMD-7");
+  await link(O1, "child_of", "SMD-9");
+  await db.query(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND payload->>'target' = 'SMD-9'`, [O1]);
+  // Two link holders outside the lists (no entity): SMD-11, Linear's
+  // duplicate of SMD-1 (duplicate_of is left to the judge — review pass 4);
+  // SMD-12, related to SMD-1 in another system's links.
+  const D11 = await cap("SMD-11: a duplicate of SMD-1", 5, { source: "linear", issue: "SMD-11" });
+  const G12 = await cap("SMD-12: related elsewhere", 5, { source: "linear", issue: "SMD-12" });
+  await link(D11, "duplicate_of", "SMD-1");
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'link', jsonb_build_object('system', 'github', 'relation', 'relates_to', 'target', 'SMD-1'))`, [G12]);
+  // A row for each term the count must share with the candidate body
+  // (run-it, first review pass: seven of its nine other terms could be
+  // dropped with this section green): SMD-4 (linked) shares two entities
+  // with the newer SMD-1 row — one pair, not two; SMD-5 (linked) is
+  // superseded by a later thought; SMD-8, today's, linked, is itself
+  // superseded — no list, no count.
+  const X2 = await cap("SMD-4: billing and pricing", 0, { source: "linear", issue: "SMD-4" });
+  const XS = await cap("SMD-5: billing, since replaced", 0, { source: "linear", issue: "SMD-5" });
+  await age(X2, 10); await mention(X2, ["billing", "pricing"]);
+  await age(XS, 10); await mention(XS);
+  await link(O1, "relates_to", "SMD-4");
+  await link(O1, "child_of", "SMD-5");
+  const ZS = await cap("the thought that replaced SMD-5's", 3, { source: "mcp" });
+  await db.query(`UPDATE thoughts SET supersedes = $1::uuid WHERE id = $2::uuid`, [XS, ZS]);
+  // Today's: a newer row of ticket SMD-1 (blocking SMD-3), a plain note, and
+  // SMD-8's row, related to SMD-1 and superseded.
+  const N1 = await cap("SMD-1: billing moved to annual", 0, { source: "linear", issue: "SMD-1" });
+  const NN = await cap("a newer note on billing", 0, { source: "mcp" });
+  const NS = await cap("SMD-8: billing, superseded today", 0, { source: "linear", issue: "SMD-8" });
+  await mention(N1, ["billing", "pricing"]); await mention(NN); await mention(NS);
+  await link(N1, "blocks", "SMD-3");
+  await link(NS, "relates_to", "SMD-1");
+  const ZN = await cap("the thought that replaced SMD-8's", 3, { source: "mcp" });
+  await db.query(`UPDATE thoughts SET supersedes = $1::uuid WHERE id = $2::uuid`, [NS, ZN]);
+  const corpus = [O1, W1, S1, O2, S2, O3, OU, OR, OX, ON, OJ, X2, XS, N1, NN, NS];
+  const name = (o: string) => new Map([[O1, "O1"], [W1, "W1"], [S1, "S1"], [O2, "O2"], [S2, "S2"], [O3, "O3"], [OU, "OU"], [OR, "OR"], [OX, "OX"], [ON, "ON"], [OJ, "OJ"], [X2, "X2"], [XS, "XS"]]).get(o) ?? o;
+
+  // The predicate alone: either direction, a section by its ticket, never a
+  // pair of one ticket, a side with no identity, a reference or a closed link.
+  const m = (k: "issue" | "ticket", v: string) => ({ source: "linear", [k]: v });
+  const truth = [
+    await linked(m("issue", "SMD-1"), m("issue", "SMD-2")), await linked(m("issue", "SMD-2"), m("issue", "SMD-1")), await linked(m("ticket", "SMD-2"), m("issue", "SMD-1")),
+    await linked(m("issue", "SMD-1"), m("ticket", "SMD-1")), await linked(m("issue", "SMD-1"), { source: "mcp" }), await linked(m("issue", "SMD-1"), null),
+    await linked(m("issue", "SMD-1"), m("issue", "SMD-7")), await linked(m("issue", "SMD-1"), m("issue", "SMD-9")), await linked(m("issue", "SMD-1"), m("issue", "SMD-6")),
+    // Review pass 4: a third ticket's link to SMD-1 relates nothing else to it (the holder's identity is read in both directions); a duplicate and another system's link do not count.
+    await linked(m("issue", "SMD-6"), m("issue", "SMD-1")), await linked(m("issue", "SMD-1"), m("issue", "SMD-6")),
+    await linked(m("issue", "SMD-11"), m("issue", "SMD-1")), await linked(m("issue", "SMD-12"), m("issue", "SMD-1")),
+  ];
+  assert(truth.join() === "true,true,true,false,false,false,false,false,false,false,false,false,false",
+    `the predicate: SMD-1 and SMD-2 either way round and through SMD-2's section; never SMD-1 with itself, a note, NULL, a text reference, a closed link, an unrelated ticket either way round (though others link to SMD-1), Linear's duplicate, or another system's link — false, never NULL (${truth.join()})`);
+
+  // 066's list, the body this file replaces: every older row that nothing
+  // supersedes — and its size for every thought in the corpus.
+  await reapply("066");
+  const lists066 = new Map<string, number>();
+  for (const id of corpus) lists066.set(id, (await cands(id)).length);
+  const before = await cands(N1);
+  assert(before.join() === [O1, W1, S1, O2, S2, O3, OU, OR, OX, ON, OJ, X2].sort().join(), `under 066 the newer SMD-1 row is judged against every older row sharing the entity that nothing supersedes (${before.map(name).join()})`);
+  await restoreShipped("consolidation_candidates");
+
+  // THE ASSERTION THE FILE EXISTS FOR: the newer SMD-1 row is judged against
+  // its own ticket's rows, the unlinked ticket, the merely named one, the
+  // one whose link was closed, the note and the null-issue row — never
+  // against SMD-2's row or section, SMD-3 or SMD-4, which Linear relates;
+  // and the count names exactly those four — SMD-4 once for its two shared
+  // entities, superseded SMD-5 never.
+  const after = await cands(N1);
+  assert(after.join() === [O1, W1, S1, OU, OR, OX, ON, OJ].sort().join(), `under 079 it is judged against its own ticket's three rows, the unlinked, merely named and no-longer-linked tickets, the note and the null-issue row — never a ticket Linear relates, from either side, or that ticket's section (${after.map(name).join()})`);
+  assert((await leftOut(N1)) === 4 && after.length + (await leftOut(N1)) === before.length, `the count is the four left out, and with the kept list it partitions 066's (${await leftOut(N1)} + ${after.length} of ${before.length})`);
+  const parts: string[] = [];
+  for (const id of corpus) if ((await cands(id)).length + (await leftOut(id)) !== lists066.get(id)) parts.push(name(id));
+  assert(parts.length === 0 && (await leftOut(NS)) === 0, `for every thought in the corpus the kept list and the count partition 066's list, and a superseded thought has neither (off: ${parts.join() || "none"})`);
+  // A thought with no identity: the rule adds nothing.
+  assert((await cands(NN)).join() === before.join() && (await leftOut(NN)) === 0, "a note with no ticket identity is judged against every older row, tickets and sections included, and nothing is left out for it");
+  // Every other term met: the floor, a pair already proposed (a stale one
+  // still counts — 063's clause lets it through), a lineage pair, the day rule.
+  assert((await leftOut(N1, 0.5)) === 3, "at a floor of 0.5 the far ticket fails the floor, and SMD-2's row and section and SMD-4 count");
+  await db.query(`INSERT INTO supersession_proposals (older_id, newer_id, verdict, confidence, judge_key, status) VALUES ($1::uuid, $2::uuid, 'conflict_undirected', 0.8, 'consolidate:stub@p1', 'stale')`, [S2, N1]);
+  assert((await leftOut(N1)) === 4, "a pair whose proposal is stale still counts — the candidate rule would judge it again (063)");
+  await db.query(`DELETE FROM supersession_proposals WHERE older_id = $1::uuid AND newer_id = $2::uuid`, [S2, N1]);
+  await db.query(`UPDATE thoughts SET derived_from = jsonb_build_array($1::text) WHERE id = $2::uuid`, [S2, N1]);
+  assert((await leftOut(N1)) === 3, "a pair one side of which names the other in derived_from is not counted — 066 never judges it either");
+  await db.query(`UPDATE thoughts SET derived_from = NULL WHERE id = $1::uuid`, [N1]);
+  await age(S2, 0);
+  assert((await leftOut(N1)) === 3, "a ticket row captured the same day is not counted — the day rule never pairs it either");
+  await age(S2, 10);
+  await db.query(`INSERT INTO supersession_proposals (older_id, newer_id, verdict, confidence, judge_key) VALUES ($1::uuid, $2::uuid, 'conflict_undirected', 0.8, 'consolidate:stub@p1')`, [O2, N1]);
+  assert((await leftOut(N1)) === 3, "a pair already proposed is not counted — it would not be judged under any rule");
+  await db.query(`DELETE FROM supersession_proposals WHERE older_id = $1::uuid AND newer_id = $2::uuid`, [O2, N1]);
+  // Nothing is stored: closing SMD-2's link puts its row and section back
+  // in the list at the next read.
+  await db.query(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND kind = 'link'`, [O2]);
+  assert((await cands(N1)).join() === [...after, O2, S2].sort().join() && (await leftOut(N1)) === 2, "a link closed later moves the rule with it: SMD-2's row and section are candidates again, nothing stored");
+  await db.query(`UPDATE thought_facets SET valid_until = NULL WHERE thought_id = $1::uuid AND kind = 'link'`, [O2]);
+
+  // A re-apply is a no-op: one body, the rule standing.
+  await reapply("079");
+  assert((await functionsNamed("consolidation_candidates")) === 1 && (await functionsNamed("consolidation_linked_ticket_pairs_left_out")) === 1 && (await functionsNamed("consolidation_tickets_linked")) === 1 && (await cands(N1)).join() === after.join() && (await leftOut(N1)) === 4,
+    "a re-apply leaves one body carrying the rule, one count and one predicate");
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+  await db.exec(`DELETE FROM ob1_entities`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

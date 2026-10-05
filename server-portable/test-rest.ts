@@ -115,7 +115,7 @@ const lines: string[] = [];
 const app = createRestApp({
   core,
   init: () => {},
-  keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},w:write:${hashKey("write-raw")},c:capture:${hashKey("cap-raw")}` }),
+  keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},w:write:${hashKey("write-raw")},c:capture:${hashKey("cap-raw")},f:forward:${hashKey("fwd-raw")}` }),
   resolve: async () => { if (resolveThrows) throw new Error("the registry threw"); return identity; },
   track: (run) => run(),
   log: (l) => lines.push(l),
@@ -133,6 +133,17 @@ console.log("\n[5] The authorization ladder: a wrong key 401, a revoked one 401,
   assert(r.status === 401 && r.body.code === "UNAUTHORIZED", `a wrong key → 401 (${r.status})`);
   r = await json(await hit("/v1/stats?key=read-raw"));
   assert(r.status === 401, `a key in the query string is no key (${r.status})`);
+  // A forwarder key (SMD-2284) grants nothing: alone it is no caller, whatever
+  // it asks for, and the operation never runs.
+  calls.length = 0;
+  for (const [path, init] of [["/v1/stats", {}], ["/v1/whoami", {}], ["/v1/thoughts", { method: "POST", body: JSON.stringify({ content: "x" }) }]] as const) {
+    r = await json(await hit(path, { key: "fwd-raw", ...init }));
+    assert(r.status === 401 && r.body.code === "UNAUTHORIZED", `a forwarder key alone → 401 UNAUTHORIZED at ${"method" in init ? "POST " : "GET "}${path} (${r.status} ${r.body.code})`);
+  }
+  assert(calls.length === 0, `…and no operation ran (${calls.length})`);
+  // In a caller's slot beside a caller's key, it is passed over, not taken for the caller.
+  const beside = await json(await app.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "fwd-raw", authorization: "Bearer read-raw" } })));
+  assert(beside.status === 200 && beside.body.name === "r" && beside.body.scope === "read", `a forwarder key beside a read key: the read key is the caller (${beside.status} ${JSON.stringify(beside.body).slice(0, 60)})`);
   r = await json(await hit("/v1/stats", { key: "read-raw" }));
   assert(r.status === 200, `a read key reads (${r.status})`);
   r = await json(await hit("/v1/thoughts", { key: "read-raw", method: "POST", body: JSON.stringify({ content: "x" }) }));
@@ -288,6 +299,22 @@ console.log("\n[7d] The served OpenAPI document names its base as the caller rea
 {
   const served = async (prefix?: string) => (await (await app.fetch(new Request("http://api/openapi.json", { headers: prefix ? { "x-forwarded-prefix": prefix } : {} }))).json() as { servers?: { url: string }[] }).servers;
   assert(same(await served(), [{ url: "/" }]) && same(await served("/api"), [{ url: "/api" }]), "the served document names its base: the root on the mesh, /api behind the proxy's route");
+}
+
+console.log("\n[7e] The door hands the core why a key has no agent id, which a capture key's supersedes reads (SMD-2473)");
+{
+  // capture() offers the retry only to `unreachable` and drops the pointer
+  // otherwise; a door that lost the reason would drop it while the registry
+  // may still answer (review pass 4: no test held the REST door's).
+  answer = async () => ok({});
+  for (const unresolved of ["unreachable", "misconfigured", "refused"] as const) {
+    identity = { status: "ok", unresolved };
+    calls.length = 0;
+    await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "z", supersedes: "00000000-0000-4000-8000-000000000001" }) });
+    const got = calls.at(-1)?.principal;
+    assert(got?.agentId === undefined && got?.agentUnresolved === unresolved, `a registry ${unresolved} reaches the core on the principal (${got?.agentUnresolved})`);
+  }
+  identity = { status: "ok", agentId: "agent-1" };
 }
 
 console.log("\n[8] One log line per request: method, route, status, time — no query, key, id or content");

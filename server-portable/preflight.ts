@@ -181,6 +181,7 @@ const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
 const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
 const APPLY_070 = "Apply db/migrations/070_listing_flags_lineage_pair.sql.";
 const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
+const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -658,24 +659,32 @@ if (!env.MCP_ACCESS_KEYS && !env.MCP_ACCESS_KEY) {
 } else if (env.MCP_ACCESS_KEYS) {
   const { keys, problems } = accessKeys;
   if (problems.length) {
-    for (const p of problems) add("access keys", "fail", p, "bun keygen.ts --name <client> --scope read|write|capture");
+    for (const p of problems) add("access keys", "fail", p, "bun keygen.ts --name <client> --scope read|write|capture|forward");
   } else {
     // A capture-only key (SMD-1298) adds thoughts and reads nothing: it counts
     // as a capturer here and as a writer for the "every key can write" warning,
-    // since either kind of leak can put a thought into the brain.
-    const capturers = keys.filter((k) => k.scope !== "read").length;
+    // since either kind of leak can put a thought into the brain. A forwarder
+    // (SMD-2284) grants nothing and is no server's caller: it is neither, and
+    // a list of forwarders alone is a server no client can reach. The legacy
+    // single key, set beside the list, is one more client, with write scope.
+    const clients = keys.filter((k) => k.scope !== "forward");
+    const legacyClient = env.MCP_ACCESS_KEY ? 1 : 0;
+    const capturers = clients.filter((k) => k.scope !== "read").length + legacyClient;
     add("access keys", "ok",
         `${keys.length} key(s): ${keys.map((k) => `${k.name}(${k.scope})`).join(", ")}`);
-    if (capturers === 0) {
+    if (clients.length + legacyClient === 0) {
+      add("access keys scope", "fail", "every key is a forwarder — forward scope grants nothing, so no client can authenticate",
+          "Mint a client key: bun keygen.ts --name laptop --scope write");
+    } else if (capturers === 0) {
       add("access keys scope", "warn", "every key is read-only — capture_thought will not be registered for anyone",
           "Mint a write key (or a capture key for a hook) if you intend to capture thoughts.");
     }
     // Write keys alone here: a capture key can add a thought and nothing else,
     // so a laptop's write key beside a hook's capture key is not "every key
     // can write" (second review pass).
-    const writers = keys.filter((k) => k.scope === "write").length;
-    if (writers === keys.length && keys.length > 1) {
-      add("access keys scope", "warn", "every key can write",
+    const writers = clients.filter((k) => k.scope === "write").length + legacyClient;
+    if (writers === clients.length + legacyClient && clients.length + legacyClient > 1) {
+      add("access keys scope", "warn", "every client key can write",
           "Prefer --scope read for clients that only search, especially URL-embedded connectors.");
     }
   }
@@ -2219,6 +2228,8 @@ if (configFailed) {
                      to_regprocedure('public.settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS has_067,
                      (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
+                     -- 079 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
+                     (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
                      -- 070 (SMD-2313): the listing flags a lineage pair (its sentinel) and stands in one form — 029 re-applied by hand lands its
                      -- two-argument form BESIDE 070's, and a call passing fewer than three arguments is then ambiguous (42725, not unique) and fails.
                      (SELECT w.prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.list_supersession_proposals(text, int, boolean)')) AS lists_lineage,
@@ -2226,7 +2237,7 @@ if (configFailed) {
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; lists_lineage: boolean | null; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_lineage: boolean | null; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
@@ -2356,6 +2367,12 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but consolidation_candidates is from before 066 (migration 066 not yet applied, or 063 re-applied by hand over it): the judge is asked whether a page supersedes its own evidence, and a digest its sources (SMD-2292). ${coverage}`,
                   ledgerRemedy("066", APPLY_066));
+            } else if (bodies.has_063 && bodies.excludes_tickets !== true) {
+              // 079 (SMD-2448): 063's or 066's candidate body over 079's — the
+              // pass asks the judge whether one ticket supersedes another.
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but consolidation_candidates is from before 079 (migration 079 not yet applied, or 063 or 066 re-applied by hand over it): the judge is asked whether one ticket supersedes another that Linear already relates to it (parent, child, blocker, related), two records each with its own lifecycle (SMD-2448). ${coverage}`,
+                  ledgerRemedy("079", APPLY_079));
             } else if (reopenOlder) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but rebuild_derived is from before 067 (063 re-applied by hand over it): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again (SMD-2297). ${coverage}`,

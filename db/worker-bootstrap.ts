@@ -19,7 +19,7 @@
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
 import { refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
-import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
+import { CLIENT_SCOPES, hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 
 // ── Egress ───────────────────────────────────────────────────────────────────
@@ -85,9 +85,10 @@ export type WorkerIdentity = { agentId: string | null; keyName: string | undefin
 /**
  * The claim workers' identity bootstrap (SMD-2303), extract-entities.ts's and
  * consolidate.ts's ~45-line block in one place. The same decision the server
- * makes: OB1_WORKER_KEY must be a key MCP_ACCESS_KEYS holds — one the server
- * would refuse is no identity here either — and the record's own name and scope
- * are what get registered. Resolution goes through the store's capped path
+ * makes: OB1_WORKER_KEY must be a key MCP_ACCESS_KEYS holds, of a caller's
+ * scope — one the server would refuse, a forwarder's included (SMD-2284), is no
+ * identity here either — and the record's own name and scope are what get
+ * registered. Resolution goes through the store's capped path
  * (SqlStore.resolveAgent, which bounds lock_timeout so a lookup of a locked
  * registry holds its connection for the cap, not the lock — what the raw
  * `resolve_agent` the workers ran did not), on a one-connection store of its
@@ -124,7 +125,16 @@ export async function workerIdentity(
     return { ok: false, message: "\n  OB1_WORKER_KEY is set but MCP_ACCESS_KEYS is not, so the key cannot be checked or named. Set both, as the server has them." };
   }
   const hash = hashKey(rawKey);
-  const record = parseKeyRecords(env.MCP_ACCESS_KEYS).keys.find((k) => k.sha256 === hash);
+  // As the server picks (auth.ts authenticate): the first record of the digest
+  // whose scope it admits as a caller's. A forwarder grants nothing and names
+  // who carried another key's request (SMD-2284): every server refuses it as a
+  // caller, and its scope is one the registry's CHECK does not hold (agents.ts,
+  // recordedScope).
+  const matching = parseKeyRecords(env.MCP_ACCESS_KEYS).keys.filter((k) => k.sha256 === hash);
+  const record = matching.find((k) => CLIENT_SCOPES.includes(k.scope));
+  if (!record && matching.length) {
+    return { ok: false, message: `\n  OB1_WORKER_KEY is "${matching[0].name}", a ${matching[0].scope}-scope key — it grants nothing and names no worker; the server refuses it as a caller, and so does this. Give the worker a key of its own: cd server-portable && bun keygen.ts --name <worker> --scope capture (or write).` };
+  }
   if (!record) {
     return { ok: false, message: "\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this." };
   }
