@@ -735,7 +735,11 @@ services:
     # none, and the route's name written rooted (`auth.ob1.internal.`), the
     # one lookup is the stack's own name under the reserved .internal TLD.
     # An absent tier's name (mcp.canary.ob1.internal.) is written the same
-    # way, for the same reason.
+    # way, for the same reason. That one lookup still reaches the host's
+    # resolvers, since the default network forwards a name it does not hold:
+    # one that answers *.ob1.internal itself would get the route's requests,
+    # keys included, until the network move puts the proxy on internal
+    # networks alone (SMD-2583; deploy/README.md, "One origin").
     dns_search: ["."]
     healthcheck:
       test: ["CMD", "traefik", "healthcheck"]

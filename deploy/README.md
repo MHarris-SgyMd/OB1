@@ -233,6 +233,17 @@ paths today:
 | `/.well-known` and everything else under it | the proxy: a 404. It carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
 | anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>`. It keeps every client configured before SMD-1846 working until v2.0.0, and every answer says so: a `Deprecation` header and a `Link` to "Moving a client to /mcp" below, where the server's line naming each key still on it is too (SMD-2306). SMD-2532 removes it, and `/` becomes the proxy's 404 |
 
+Every backend is dialled by its name on the `mesh` network — the server as
+`mcp.ob1.internal`, never `server`, because compose gives every container its
+service name on each network it joins, and a tier's container on this mesh is
+a `server` too (SMD-2294). A name nothing on the networks holds — a tier that
+is not up, the authorization server with its profile off — is looked up once
+more by the host's resolvers, since the proxy is on the default network too:
+a resolver that answers `*.ob1.internal` itself (a split-horizon DNS serving
+`.internal`, a hostile network's) would be sent that route's requests, keys
+included. Putting the proxy on internal networks alone closes it; that is the
+network move's (SMD-2583).
+
 The path reaches the server as it came, prefix and all: the server answers POST
 at every path and `/health` under any prefix, so `/mcp` needs no setting there.
 The routes are `x-proxy-routes` at the top of `compose.yaml`, which compose
@@ -571,7 +582,8 @@ with a key it does not show that record to, the pass line says this could not
 be judged. A URL spelled otherwise than the server's origin (`:443`, upper
 case), or a document naming another origin (`http` in front of an `https`
 tunnel), fails with the URL to use instead. A URL under another
-path (a tier at `/canary/mcp`, SMD-2294's) is asked at its own path form and
+path (a tier at `/canary/mcp`, reached with keys until SMD-2286 gives tiers
+OAuth) is asked at its own path form and
 the root form only. A server whose authorization server flips between up and
 down inside one run (its probe's 30 s) can fail it once; run it again.
 
