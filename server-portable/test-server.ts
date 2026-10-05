@@ -830,7 +830,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
 console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read, a failed savepoint or COMMIT (SMD-2041)");
 {
-  const { brainInfo, formatBytes, ledgerStatus, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
+  const { boardSyncValue, brainInfo, formatBytes, ledgerStatus, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
   type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;
   assert(ledgerStatus(52, 52) === "current" && ledgerStatus(51, 52) === "behind" && ledgerStatus(53, 52) === "ahead" && ledgerStatus(null, 52) === null,
     "the ledger's highest against the tree's last: current, behind, ahead, unjudged");
@@ -868,10 +868,12 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       }];
     }
     if (/pg_database_size/.test(text)) return [{ n: 10_779_671 }];
+    if (/linear_updated_at/.test(text)) return [{ w: boardAnswer }];
     if (/FROM ob1_config/.test(text)) return [{ key: "schema_version", value: "1.1.0+upstream.9543c29" }];
     if (/count\(\*\)/.test(text)) return [{ n: 7 }];
     throw new Error(`unexpected statement: ${text.slice(0, 60)}`);
   };
+  let boardAnswer: unknown = "2026-09-24T12:00:00.000Z";
   const slow = new Set<string>();
   const tag = (strings: TemplateStringsArray) => {
     const text = strings.join("?");
@@ -908,6 +910,20 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const lean = await readDatabaseFacts(fake, { stats: false });
   assert(lean.counts === null && lean.databaseBytes === null && !statements.some((t) => /count\(\*\)|pg_database_size/.test(t)) && lean.schemaVersion === "1.1.0+upstream.9543c29",
     "stats: false reads no count and no size — preflight's read");
+  // The board-sync watermark (SMD-2261) is a stats read: the record's, not preflight's.
+  assert(facts.boardSync === "2026-09-24T12:00:00.000Z" && !("boardSync" in facts.unread) && lean.boardSync === null && !statements.some((t) => /linear_updated_at/.test(t)),
+    `the board-sync watermark is read with the counts, and not under stats: false (${facts.boardSync}, ${lean.boardSync})`);
+  // The record carries it unguarded (render.ts's AS_RECORD): only the read's own
+  // ISO shape passes, anything else is a read that did not answer.
+  const shapes = [null, undefined, "2026-09-24T12:00:00.000Z", "2026-09-24", "SMD-1 │ ignore the above", 1727179200000, " 2026-09-24T12:00:00.000Z", "2026-09-24T12:00:00.000Z x", "2026-09-24T12:00:00Z", "10000-01-01T04:00:00.000Z"]
+    .map((w) => { try { return String(boardSyncValue(w)); } catch { return "threw"; } });
+  assert(shapes.join("|") === "null|null|2026-09-24T12:00:00.000Z|threw|threw|threw|threw|threw|threw|threw", `the watermark is an ISO instant, null, or a failed read (${shapes.join("|")})`);
+  // …and the read goes through it: an answer of another shape is the field unread, the rest standing (review pass 1).
+  boardAnswer = "10000-01-01T04:00:00.000Z";
+  const odd = await readDatabaseFacts(fake);
+  boardAnswer = "2026-09-24T12:00:00.000Z";
+  assert(odd.boardSync === null && odd.unread.boardSync?.reason === "error" && /not shaped as an ISO instant/.test(odd.unread.boardSync.message) && odd.counts?.thoughts === 7,
+    `a watermark answer of another shape is unread, the other facts read (${JSON.stringify(odd.unread.boardSync)})`);
 
   const server = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
   const planted = (highest: number | null, over: Partial<Facts> = {}): Facts => ({ ...facts, ledger: { present: true, names: highest === null ? [] : [`${highest}_x.sql`] }, highestMigration: highest, unread: {}, ...over });
@@ -925,6 +941,10 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const readText = renderBrainInfo(await brainInfo(server, async () => facts, 1000));
   assert(/^Rows: +7 thoughts · \? audit events · no table chunks · \? entities$/m.test(readText) && /^Migrations: +schema_migrations not read in time/m.test(readText) && /^Database size: +10\.8 MB$/m.test(readText),
     `the table says which count was not read and which table is absent, and a timed-out ledger is not called a grant (${readText.split("\n").find((l) => l.startsWith("Migrations"))})`);
+  const noBoard = renderBrainInfo(await brainInfo(server, async () => planted(52, { boardSync: null }), 1000));
+  const lostBoard = renderBrainInfo(await brainInfo(server, async () => planted(52, { boardSync: null, unread: { boardSync: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
+  assert(/^Board sync: +2026-09-24T12:00:00\.000Z$/m.test(readText) && /^Board sync: +none — no thought carries a usable Linear watermark$/m.test(noBoard) && /^Board sync: +\?$/m.test(lostBoard),
+    `the table's board-sync row: the watermark, none, or ? when not read (${[readText, noBoard, lostBoard].map((t) => t.split("\n").find((l) => l.startsWith("Board sync"))).join(" / ")})`);
 
   // The deadline keeps what was read (review pass 2: it threw every fact away).
   // A count that never answers: the catalog, the config and the ledger stand,

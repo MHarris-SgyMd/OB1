@@ -99,6 +99,20 @@ export interface DatabaseFacts {
   counts: Record<CountedTable, number | null> | null;
   /** pg_database_size(current_database()), in bytes; null when not read. */
   databaseBytes: number | null;
+  /**
+   * The board-sync watermark (SMD-2261): the newest Linear `updatedAt` any
+   * thought reflects — max metadata.linear_updated_at, which sync-linear.ts
+   * writes — as an ISO instant in UTC. Null when no thought carries a usable one
+   * (malformed and future values are passed over, see BOARD_SYNC_SQL), when
+   * not read (`unread` names it) or not asked (`stats: false`). A high-water
+   * mark: the newest board move the brain reflects, not proof it reflects every
+   * move before it. It moves when the board does, so a quiet board leaves it old
+   * on a current brain, and it says nothing of whether the sync is alive. It is
+   * a thought's metadata — a write key can set it to any instant up to an hour
+   * past the database's clock, and a later one counts once the clock reaches
+   * it — not a fact the database keeps.
+   */
+  boardSync: string | null;
   /** Every HNSW index on a table on this connection's search_path. */
   hnsw: HnswIndex[];
   /** Field → why its read did not answer. Empty when every read answered. */
@@ -151,6 +165,38 @@ const COUNT_SQL: Record<CountedTable, (sql: SqlTag) => Promise<{ n: number }[]>>
   thought_chunks: (sql) => sql`SELECT count(*)::float8 AS n FROM thought_chunks`,
   ob1_entities: (sql) => sql`SELECT count(*)::float8 AS n FROM ob1_entities`,
 };
+
+/**
+ * The board-sync watermark's read. Only a full ISO instant with its offset
+ * counts, and only one Postgres reads as a timestamp: a malformed value, a bare
+ * date or a word timestamptz accepts ('infinity', 'now') is passed over rather
+ * than failing the read or winning the max — the value is a thought's
+ * metadata, and the record carries it unguarded (render.ts's AS_RECORD).
+ *
+ * So is an instant more than an hour past the database's clock. Linear's
+ * updatedAt is never in the future, and any write key can set the key: a
+ * far-future value would otherwise win the max for good, and one past 9999 in
+ * UTC would render a shape boardSyncValue refuses, leaving the field unread
+ * for good (review pass 1). The cost is a host clock more than an hour slow,
+ * whose watermark lags a fresh move until the clock catches up.
+ *
+ * The cast sits in an inner CASE, after the validity test, because AND does
+ * not order its operands. The pattern is spelled with [0-9], not \d: a Bun
+ * template drops the backslash. `metadata ? key` is the GIN index 001 builds.
+ */
+const BOARD_SYNC_SQL = (sql: SqlTag) => sql`
+  SELECT to_char(max(CASE WHEN v ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)$'
+                           AND pg_input_is_valid(v, 'timestamptz')
+                          THEN CASE WHEN v::timestamptz <= now() + interval '1 hour' THEN v::timestamptz END END) AT TIME ZONE 'UTC',
+                 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS w
+    FROM (SELECT metadata->>'linear_updated_at' AS v FROM thoughts WHERE metadata ? 'linear_updated_at') s`;
+
+/** The watermark as the record carries it: the read's instant, or null when no thought has a usable one. Anything else is a read that did not answer. */
+export function boardSyncValue(w: unknown): string | null {
+  if (w == null) return null;
+  if (typeof w !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(w)) throw new Error(`the board-sync watermark read answered ${typeof w === "string" ? "a value not shaped as an ISO instant" : typeof w}`);
+  return w;
+}
 
 /**
  * Read the database's facts over a direct connection — the SQL store's pool, or
@@ -227,6 +273,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       highestMigration: null,
       counts: stats ? Object.fromEntries(COUNTED_TABLES.map((t) => [t, null])) as Record<CountedTable, number | null> : null,
       databaseBytes: null,
+      boardSync: null,
       hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
       unread: {},
     };
@@ -266,6 +313,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         ? [
             ...COUNTED_TABLES.map((t): Guarded => ({ field: `counts.${t}`, table: t, read: async (sp) => { facts.counts![t] = Number((await COUNT_SQL[t](sp))[0].n); }, clear: () => { facts.counts![t] = null; } })),
             { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); }, clear: () => { facts.databaseBytes = null; } },
+            { field: "boardSync", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.boardSync = boardSyncValue((await BOARD_SYNC_SQL(sp))[0]?.w); }, clear: () => { facts.boardSync = null; } },
           ]
         : []),
     ];
@@ -505,6 +553,7 @@ export function renderBrainInfo(info: BrainInfo): string {
     lines.push(
       row("Rows", `${num("thoughts")} thoughts · ${num("thought_audit")} audit events · ${num("thought_chunks")} chunks · ${num("ob1_entities")} entities`),
       row("Database size", db.databaseBytes === null ? "?" : formatBytes(db.databaseBytes)),
+      row("Board sync", db.boardSync ?? ("boardSync" in db.unread ? "?" : "none — no thought carries a usable Linear watermark")),
     );
   }
   lines.push(row("HNSW", db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")));
