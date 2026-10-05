@@ -5176,6 +5176,8 @@ const INDEX_ROLE: TransportRole = {
     ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "serveHere", "Env"])],
     ["./auth.ts", "*"], ["./version.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./tools.ts", "*"], ["./sse.ts", "*"],
     ["./core/index.ts", "*"], ["./render.ts", "*"],
+    // The public origin's answers (SMD-2382): HTTP at the edge, no store, no provider.
+    ["./oauth-edge.ts", "*"],
     // The core's deadlines and filter parser — its operations are reached through createCore.
     ["./core/reads.ts", new Set(["HEALTH_DEADLINE_MS", "BRAIN_INFO_TOOL_DEADLINE_MS"])],
     ["./core/filter.ts", new Set(["parseFilter", "withActorFilter"])],

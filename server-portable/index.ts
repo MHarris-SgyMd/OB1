@@ -11,6 +11,7 @@ import type { ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
 import { labelPart, withSseKeepalive } from "./sse.ts";
+import { authReachability, challengeHeader, edgeSettings, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
 // core or the renderer it belongs to (SMD-2283).
@@ -265,12 +266,14 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
   // Retry-After is not a CORS-safelisted response header, so a browser-hosted
   // client (claude.ai, the Claude Desktop connector) cannot read it off a fetch
-  // without this. It is the one header the fork means such a client to read —
-  // the busy refusal's retry delay (SMD-2106) — so it is exposed; on a response
-  // that carries no Retry-After this says nothing. Deprecation and Link too:
-  // the proxy's legacy route adds them to the server's answer (SMD-2306), and
-  // its headers middleware leaves this one alone, so it must name them here.
-  "Access-Control-Expose-Headers": "Retry-After, Deprecation, Link",
+  // without this. The headers the fork means such a client to read are
+  // exposed: Retry-After, the busy refusal's retry delay (SMD-2106);
+  // Deprecation and Link, which the proxy's legacy route adds to the server's
+  // answer (SMD-2306) while its headers middleware leaves this one alone, so
+  // this must name them; and WWW-Authenticate, the challenge at the public
+  // origin that names the protected-resource document a client signs in from
+  // (SMD-2382). On a response that carries none of them this says nothing.
+  "Access-Control-Expose-Headers": "Retry-After, Deprecation, Link, WWW-Authenticate",
 };
 
 // The two 405 header sets, built once; the refusal path spreads nothing per request.
@@ -456,6 +459,48 @@ function notificationRefusedResponse(opts: { retryAfter?: number } = {}): Respon
   return new Response(null, { status: opts.retryAfter !== undefined ? 503 : 202, headers });
 }
 
+/**
+ * The public origin's settings (oauth-edge.ts), read once: the environment is
+ * frozen at the first request (root.ts initEnv), so these cannot change after.
+ */
+let edge: EdgeSettings | null = null;
+function edgeHere(): EdgeSettings {
+  return (edge ??= edgeSettings(env()));
+}
+
+/**
+ * The refusal at the public resource while the authorization server answers
+ * (SMD-2382): HTTP 401 with the challenge that names the protected-resource
+ * document, the status RFC 9728 and the MCP authorization spec start a
+ * sign-in from. A request keeps the JSON-RPC envelope in the body, so a client
+ * that reads only the body still sees -32001; a notification gets none, as
+ * notificationRefusedResponse says why.
+ */
+function challengeResponse(origin: string, refusedToken: boolean, target: RefusalTarget): Response {
+  return edgeRefusal(401, { "WWW-Authenticate": challengeHeader(origin, refusedToken) }, target, JSON_RPC_UNAUTHORIZED_CODE, UNAUTHORIZED_MESSAGE);
+}
+
+/**
+ * An OAuth token at the public resource of a stack configured with a sound
+ * origin, while the authorization server does not answer: 503 with
+ * Retry-After, never a 401, which would send the client back through a
+ * sign-in that cannot finish either.
+ */
+const UNREACHABLE_MESSAGE =
+  "Temporarily unavailable: this server cannot reach the authorization server, so no OAuth token can be checked. Retry later; an access key still works.";
+function unavailableResponse(target: RefusalTarget): Response {
+  return edgeRefusal(503, { "Retry-After": String(UNREACHABLE_RETRY_AFTER_SECONDS) }, target, JSON_RPC_BUSY_CODE, UNREACHABLE_MESSAGE);
+}
+
+/** The edge's two refusals: the status and headers given, the JSON-RPC envelope for a request, no body for a notification. */
+type RefusalTarget = { expectsReply: boolean; id: string | number | null };
+function edgeRefusal(status: number, extra: Record<string, string>, target: RefusalTarget, code: number, message: string): Response {
+  const headers: Record<string, string> = { ...corsHeaders, ...extra };
+  if (!target.expectsReply) return new Response(null, { status, headers });
+  headers["Content-Type"] = "application/json";
+  return new Response(JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: target.id }), { status, headers });
+}
+
 const app = new Hono<{ Bindings: Env }>();
 
 // Must run before anything reads env(). On Workers c.env carries the bindings;
@@ -482,6 +527,21 @@ app.options("*", (c) => {
 // server, not the caller, and a revoked key gets the same 404. Terminal for the
 // whole prefix: a future /.well-known/ route (real RFC 9728 metadata, say) must
 // be registered ABOVE this line or it never fires. FORK.md change 42.
+//
+// The one such route (SMD-2382): the public `/mcp`'s protected-resource
+// document, served only while the stack is configured (COMPOSE_PROFILES names
+// auth, OB1_PUBLIC_ORIGIN is sound), the request's Host is the origin's and the
+// authorization server answers (oauth-edge.ts). Anything else falls through to
+// the 404 — at any Host but the origin's, on a stack not configured or with an
+// unsound origin, and while the authorization server is down. Asked without a key, as claude.ai asks it, so
+// once the proxy routes it a `?key=` connector at /mcp signs in instead (the
+// auth profile is a preview until SMD-2286 accepts the token).
+// A `Host` the URL cannot parse falls through too (oauth-edge.ts atOrigin).
+app.get(PRM_PATH, async (c, next) => {
+  const { origin } = edgeHere();
+  if (!origin || !forPublicDocument(c.req.raw, origin) || !(await authReachability().reachable())) return next();
+  return c.json(protectedResourceDocument(origin), 200, { ...corsHeaders, "Cache-Control": "no-store" });
+});
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
 /**
@@ -830,9 +890,17 @@ app.on(MCP_METHODS, "*", async (c) => {
     // error rather than a transport fault and keep the connection alive.
     // Best-effort echo of the inbound request id keeps the response
     // correlated; malformed/missing bodies fall back to id: null.
+    // At the public resource of a configured stack, a keyless request or an
+    // OAuth token is answered for OAuth (SMD-2382, oauth-edge.ts): the
+    // challenge while the authorization server answers, a 503 for a token while
+    // it does not. Asked before the body is read, so the probe's wait (at most
+    // its timeout, once per window) comes before the read, not inside it.
+    const answer = await refusalAt(edgeHere(), c.req.raw, () => authReachability().reachable());
     const bodyText = await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT);
     const target = refusalTarget(bodyText);
     settled = true;
+    if (answer.kind === "challenge") return challengeResponse(answer.origin, answer.refusedToken, target);
+    if (answer.kind === "unavailable") return unavailableResponse(target);
     // A notification (no id) gets no JSON-RPC body: 202, since no key never
     // changes on a retry (SMD-2106). A request keeps the 200 envelope.
     return target.expectsReply ? unauthorizedResponse(target.id) : notificationRefusedResponse();
