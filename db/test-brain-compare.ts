@@ -95,6 +95,7 @@ function baseInfo(over: Partial<BrainInfo> & { thoughts?: number; highestMigrati
       counts: { thoughts, thought_audit: thoughts * 3, thought_chunks: thoughts, ob1_entities: 40 },
       databaseBytes: 45_200_000,
       boardSync: boardSync === "absent" || boardSync === "unread" ? null : boardSync,
+      workers: { heartbeats: [], ignored: 0 },
       hnsw: [],
       unread: {},
       ledger: { present: true, readable: true },

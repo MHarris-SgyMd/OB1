@@ -113,11 +113,106 @@ export interface DatabaseFacts {
    * it — not a fact the database keeps.
    */
   boardSync: string | null;
+  /**
+   * The long-running workers' heartbeats (SMD-2261, db/pass-stamp.ts): one per
+   * `heartbeat:` row of ob1_config, judged against the database's clock.
+   * `ignored` counts rows whose key or value is not a heartbeat's shape — named,
+   * not printed. Null when ob1_config was not read (`unread` names it) or is
+   * absent. A worker that never ran on this brain has no row.
+   */
+  workers: { heartbeats: WorkerHeartbeat[]; ignored: number } | null;
   /** Every HNSW index on a table on this connection's search_path. */
   hnsw: HnswIndex[];
   /** Field → why its read did not answer. Empty when every read answered. */
   unread: Record<string, Unread>;
 }
+
+/** One long-running worker's heartbeat as the record carries it (SMD-2261). */
+export interface WorkerHeartbeat {
+  worker: "board-sync" | "extract" | "consolidate";
+  /** The claim job it works (extract:qwen2.5:7b@p2); null for board-sync. */
+  job: string | null;
+  /** When it last stamped, a UTC instant, and how long ago by the database's clock. */
+  at: string;
+  ageS: number;
+  /** The longest the worker lets pass between two stamps. */
+  everyS: number;
+  /** Older than three of its own intervals: the worker has stopped, or cannot reach the database. */
+  stale: boolean;
+  /** A pass was under way at the last stamp. */
+  running: boolean;
+  /** How the last pass ended; null before the first ends. */
+  outcome: "ok" | "failed" | "stopped" | null;
+  /** Passes this worker's process has finished. */
+  passes: number;
+  /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm (extraction only). */
+  malformed: { answers: number; bad: number; alarm: boolean } | null;
+}
+
+/** A heartbeat older than this many of its own intervals is stale. */
+export const STALE_AFTER_INTERVALS = 3;
+
+const HEARTBEAT_KEY = /^heartbeat:(board-sync|extract|consolidate)(?::([A-Za-z0-9._:@/+-]{1,120}))?$/;
+const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const count = (n: unknown, max = Number.MAX_SAFE_INTEGER): n is number => Number.isSafeInteger(n) && (n as number) >= 0 && (n as number) <= max;
+
+/**
+ * The heartbeat rows as the record carries them. The record is rendered
+ * unguarded (render.ts's AS_RECORD), and any role with the worker group can
+ * write ob1_config, so a row counts only in full: a key naming a known worker
+ * (board-sync without a job, the claim workers with one, of a bounded token
+ * alphabet), a value of the version db/pass-stamp.ts writes, numbers that are
+ * counts, the enums as written, and the database's own instant. Anything else
+ * is counted in `ignored`, and its text goes nowhere.
+ */
+export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknown; age_s: unknown }[]): { heartbeats: WorkerHeartbeat[]; ignored: number } {
+  const heartbeats: WorkerHeartbeat[] = [];
+  let ignored = 0;
+  for (const r of rows) {
+    const k = typeof r.key === "string" ? HEARTBEAT_KEY.exec(r.key) : null;
+    const worker = k?.[1] as WorkerHeartbeat["worker"] | undefined;
+    const suffix = k?.[2];
+    let v: Record<string, unknown> | null = null;
+    try { v = typeof r.value === "string" ? JSON.parse(r.value) : null; } catch { v = null; }
+    const ageS = typeof r.age_s === "number" ? r.age_s : Number(r.age_s);
+    const m = v?.malformed as Record<string, unknown> | undefined;
+    const malformed = m === undefined ? null
+      : m !== null && typeof m === "object" && count(m.answers) && count(m.bad, m.answers as number) && typeof m.alarm === "boolean"
+        ? { answers: m.answers as number, bad: m.bad as number, alarm: m.alarm }
+        : undefined;
+    const ok = worker !== undefined && (worker === "board-sync") === (suffix === undefined)
+      && v !== null && typeof v === "object" && v.v === 1
+      && count(v.every_s, 2_147_483) && (v.every_s as number) >= 1
+      && typeof v.running === "boolean"
+      && (v.outcome === null || v.outcome === "ok" || v.outcome === "failed" || v.outcome === "stopped")
+      && count(v.passes) && malformed !== undefined
+      && typeof r.at === "string" && UTC_INSTANT.test(r.at) && Number.isFinite(ageS);
+    if (!ok) {
+      ignored++;
+      continue;
+    }
+    const everyS = v!.every_s as number;
+    heartbeats.push({
+      worker: worker!,
+      job: suffix === undefined ? null : `${worker}:${suffix}`,
+      at: r.at as string,
+      ageS: Math.max(0, Math.round(ageS)),
+      everyS,
+      stale: ageS > STALE_AFTER_INTERVALS * everyS,
+      running: v!.running as boolean,
+      outcome: v!.outcome as WorkerHeartbeat["outcome"],
+      passes: v!.passes as number,
+      malformed: malformed ?? null,
+    });
+  }
+  return { heartbeats, ignored };
+}
+
+/** The heartbeat rows, at most fifty — one per worker and job, so a brain holds a handful. */
+const HEARTBEAT_SQL = (sql: SqlTag) => sql`
+  SELECT key, value, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
+         extract(epoch FROM now() - updated_at)::float8 AS age_s
+    FROM ob1_config WHERE key LIKE 'heartbeat:%' ORDER BY key LIMIT 50`;
 
 export interface ReadOptions {
   /** Read the row counts and the database's size too — brain_info does; preflight, which uses neither, does not. Default true. */
@@ -274,6 +369,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       counts: stats ? Object.fromEntries(COUNTED_TABLES.map((t) => [t, null])) as Record<CountedTable, number | null> : null,
       databaseBytes: null,
       boardSync: null,
+      workers: null,
       hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
       unread: {},
     };
@@ -297,6 +393,13 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
           facts.embedding = { model: config.embedding_model ?? null, dim: dim === null || Number.isNaN(dim) ? null : dim };
         },
         clear: () => { facts.schemaVersion = null; facts.embedding = { model: null, dim: null }; },
+      },
+      // Not a stats read: preflight's workers row reads it (SMD-2261).
+      {
+        field: "workers",
+        table: "ob1_config",
+        read: async (sp) => { facts.workers = parseHeartbeats(await HEARTBEAT_SQL(sp)); },
+        clear: () => { facts.workers = null; },
       },
       {
         field: "ledger",
@@ -504,6 +607,28 @@ const unreadWords = (u: Unread): string =>
     : u.reason === "invisible" ? "not resolved for this role"
     : "not read";
 
+/** A duration as an operator reads it: seconds, minutes, hours, then days. */
+export function ago(s: number): string {
+  return s < 90 ? `${Math.round(s)} s` : s < 90 * 60 ? `${Math.round(s / 60)} min` : s < 48 * 3600 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
+}
+
+/** One heartbeat's state in a few words: what a reader acts on first. */
+export function heartbeatState(h: WorkerHeartbeat): string {
+  const when = `last stamped ${ago(h.ageS)} ago, every ${h.everyS} s`;
+  const alarm = h.malformed?.alarm ? `; ${h.malformed.bad} of its last ${h.malformed.answers} answers malformed` : "";
+  if (h.stale) return `stale — ${when}${h.outcome === "stopped" ? ", stopped" : h.outcome === "failed" ? ", its last pass failed" : ""}${alarm}`;
+  return `${h.running ? "running a pass" : h.outcome === "failed" ? "alive, its last pass failed" : "alive"} (${when})${alarm}`;
+}
+
+/** The Workers row: each heartbeat's state, none, or why it was not read. */
+function workersLine(db: DatabaseSummary): string {
+  if (db.workers === null) return "workers" in db.unread ? `? (ob1_config ${unreadWords(db.unread.workers)})` : "no ob1_config";
+  const { heartbeats, ignored } = db.workers;
+  const tail = ignored ? ` (${ignored} heartbeat row(s) not of the shape, ignored)` : "";
+  if (heartbeats.length === 0) return `none stamped — no long-running worker has run here${tail}`;
+  return heartbeats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + tail;
+}
+
 /** The record as the tool's short table: one fact per line, a label and a value. */
 export function renderBrainInfo(info: BrainInfo): string {
   const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
@@ -556,6 +681,7 @@ export function renderBrainInfo(info: BrainInfo): string {
       row("Board sync", db.boardSync ?? ("boardSync" in db.unread ? "?" : "none — no thought carries a usable Linear watermark")),
     );
   }
+  lines.push(row("Workers", workersLine(db)));
   lines.push(row("HNSW", db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")));
   const unread = Object.entries(db.unread);
   // A deadline's message is its words; every other reason adds the database's.

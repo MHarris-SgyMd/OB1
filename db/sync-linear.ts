@@ -118,6 +118,7 @@ import type { Derived } from "./ingest-contract.ts";
 import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
 import { commandLine, readNumber } from "./cli.ts";
 import { databaseUrl, openSql } from "./connect.ts";
+import { passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
 // the markup strip moved to db/ingest-linear.ts (SMD-1867) so the sync and
@@ -1729,22 +1730,52 @@ async function main(): Promise<void> {
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
+  // The loop's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
+  // pass, re-stamped while one runs, and "stopped" when the loop ends. A dry run
+  // or an audit writes nothing, its heartbeat included; a one-shot pass stamps
+  // nothing either, so no row is left to go stale.
+  const stamper = cli.has("loop") && !dryRun && !cli.has("audit")
+    ? passStamper({
+        sql, worker: "board-sync", intervalS: interval,
+        onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not written: ${e.message.split("\n")[0]} — the role needs INSERT and UPDATE on ob1_config (the worker grant group); the loop goes on`),
+      })
+    : null;
   let code = 0;
   try {
     if (!cli.has("loop")) { code = await once(); return; }
     console.log(`  ${SELF}: a pass every ${interval} s against ${initiative}${dryRun ? " (dry run)" : ""}; SIGTERM/SIGINT ends the loop after the issue in hand`);
-    while (!stopping) {
-      console.log(`▸ ${new Date().toISOString()}`);
-      // The last pass's result is the loop's exit code: a service whose every
-      // pass reported errors must not stop clean (eleventh review pass).
-      try { code = await once(); } catch (e) { code = 1; console.error(`  pass failed: ${(e as Error).message}`); }
-      for (let waited = 0; waited < interval && !stopping; waited++) await Bun.sleep(1000);
-    }
+    code = await loopPasses({ once, intervalS: interval, stopped: () => stopping, stamper });
   } finally {
     await store.close();
     await sql.close();
     process.exitCode = code;
   }
+}
+
+/**
+ * The --loop: a pass, then the interval, until a signal. The last pass's
+ * result is the loop's exit code — a service whose every pass reported errors
+ * must not stop clean (eleventh review pass). The heartbeat (SMD-2261) is
+ * stamped after every pass, re-stamped while one runs, and "stopped" when the
+ * loop ends. Its own function so the stamping is tested without Linear.
+ */
+export async function loopPasses(opts: {
+  once: () => Promise<number>;
+  intervalS: number;
+  stopped: () => boolean;
+  stamper: PassStamper | null;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<number> {
+  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms));
+  let code = 0;
+  while (!opts.stopped()) {
+    console.log(`▸ ${new Date().toISOString()}`);
+    try { code = await (opts.stamper ? opts.stamper.during(opts.once()) : opts.once()); } catch (e) { code = 1; console.error(`  pass failed: ${(e as Error).message}`); }
+    await opts.stamper?.stamp(code === 0 ? "ok" : "failed");
+    for (let waited = 0; waited < opts.intervalS && !opts.stopped(); waited++) await sleep(1000);
+  }
+  await opts.stamper?.stamp("stopped");
+  return code;
 }
 
 if (import.meta.main) await main();

@@ -130,6 +130,7 @@ import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { PROPOSAL_TEXT_MAX, snipText } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { passStamper, stampKey } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
@@ -1370,6 +1371,24 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
   opts.onPass?.(stop);
 
+  // A follower's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
+  // pass and re-stamped while one runs. A one-shot run stamps nothing.
+  const stamper = FOLLOW
+    ? passStamper({
+        sql, worker: "consolidate", job: JOB, intervalS: FOLLOW,
+        onError: (e) => err(`  heartbeat ${stampKey("consolidate", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
+      })
+    : null;
+  // A pass that throws ends the run; its heartbeat says so first.
+  const stampedPass = async () => {
+    try {
+      return await (stamper ? stamper.during(pass()) : pass());
+    } catch (e) {
+      await stamper?.stamp("failed");
+      throw e;
+    }
+  };
+
   let firstPass = true;
   async function pass(): Promise<Counts> {
     // The pool rule, every pass, from migration 029's consolidation_pool (one
@@ -1406,13 +1425,18 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   out(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
 
-  let after = await pass();
+  let after = await stampedPass();
   if (FOLLOW) {
+    await stamper?.stamp("ok");
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
-      after = await pass();
+      after = await stampedPass();
+      await stamper?.stamp("ok");
     }
+    // The follower ends — a signal, its --limit, or the provider refusing the
+    // request itself — and the row says so: its age then warns, as it should.
+    await stamper?.stamp(configError ? "failed" : "stopped");
   }
 
   const elapsed = (Date.now() - started) / 1000;

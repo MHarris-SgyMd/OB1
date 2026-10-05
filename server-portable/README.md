@@ -368,6 +368,7 @@ Brain embedding: qwen3-embedding:4b @ 1024
 Rows:            373 thoughts · 1,204 audit events · 90 chunks · 512 entities
 Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
+Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
 ```
 
@@ -396,7 +397,8 @@ token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
 `unreleased`, `latestMigration`, `commit`, `store`, `tier`, `embedding`,
 `ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
 database's facts (the ledger as `{ present, readable }`, not its names; the
-watermark as `boardSync`, an ISO instant or null) or
+watermark as `boardSync`, an ISO instant or null; the long-running workers'
+heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261) or
 `{ "error": … }` when it cannot answer. Beside the record, `oauth` is the
 server's own view of its public origin (SMD-2382): `{ configured, origin,
 advertised }`, which `deploy/smoke.sh` compares with what reaches it. It answers within 2.5 s
@@ -684,12 +686,12 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 628 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, and the board-sync watermark's shape
+bun test-server.ts        # 633 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape and the heartbeats' parsing
 bun test-auth.ts          # 141 — scoped, hashed, named keys
 bun test-rest.ts          # 268 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
-bun run test:e2e          # 466 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 469 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 149 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```

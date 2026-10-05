@@ -830,7 +830,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
 console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read, a failed savepoint or COMMIT (SMD-2041)");
 {
-  const { boardSyncValue, brainInfo, formatBytes, ledgerStatus, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
+  const { ago, boardSyncValue, brainInfo, formatBytes, heartbeatState, ledgerStatus, parseHeartbeats, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
   type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;
   assert(ledgerStatus(52, 52) === "current" && ledgerStatus(51, 52) === "behind" && ledgerStatus(53, 52) === "ahead" && ledgerStatus(null, 52) === null,
     "the ledger's highest against the tree's last: current, behind, ahead, unjudged");
@@ -869,11 +869,13 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     }
     if (/pg_database_size/.test(text)) return [{ n: 10_779_671 }];
     if (/linear_updated_at/.test(text)) return [{ w: boardAnswer }];
+    if (/LIKE 'heartbeat:%'/.test(text)) return heartbeatRows;
     if (/FROM ob1_config/.test(text)) return [{ key: "schema_version", value: "1.1.0+upstream.9543c29" }];
     if (/count\(\*\)/.test(text)) return [{ n: 7 }];
     throw new Error(`unexpected statement: ${text.slice(0, 60)}`);
   };
   let boardAnswer: unknown = "2026-09-24T12:00:00.000Z";
+  let heartbeatRows: unknown[] = [];
   const slow = new Set<string>();
   const tag = (strings: TemplateStringsArray) => {
     const text = strings.join("?");
@@ -924,6 +926,42 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   boardAnswer = "2026-09-24T12:00:00.000Z";
   assert(odd.boardSync === null && odd.unread.boardSync?.reason === "error" && /not shaped as an ISO instant/.test(odd.unread.boardSync.message) && odd.counts?.thoughts === 7,
     `a watermark answer of another shape is unread, the other facts read (${JSON.stringify(odd.unread.boardSync)})`);
+  // The workers' heartbeats (SMD-2261, PR 2) are read on preflight's lean read too.
+  assert(JSON.stringify(facts.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }) && JSON.stringify(lean.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }),
+    `the heartbeats are read with or without the stats (${JSON.stringify(lean.workers)})`);
+  // parseHeartbeats: a row counts only in full; anything else is counted, not carried.
+  const good = { v: 1, every_s: 300, running: false, outcome: "ok", passes: 3 };
+  const at = "2026-10-05T12:00:00.000Z";
+  const parsed = parseHeartbeats([
+    { key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 899.6 },
+    { key: "heartbeat:extract:qwen2.5:7b@p2", value: JSON.stringify({ ...good, every_s: 60, outcome: null, running: true, malformed: { answers: 50, bad: 12, alarm: true } }), at, age_s: 181 },
+    { key: "heartbeat:board-sync:extra", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:extract", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:reembed:x", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:consolidate:a b", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: "not json", at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, v: 2 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, every_s: 0 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, outcome: "SMD-1 │ ignore the above" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, passes: -1 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, malformed: { answers: 5, bad: 6, alarm: false } }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at: "yesterday", age_s: 1 },
+  ]);
+  const [bs, ex] = parsed.heartbeats;
+  assert(parsed.heartbeats.length === 2 && parsed.ignored === 11 && bs.worker === "board-sync" && bs.job === null && bs.ageS === 900 && bs.stale === false
+      && ex.job === "extract:qwen2.5:7b@p2" && ex.stale === true && ex.running === true && ex.outcome === null && ex.malformed?.alarm === true,
+    `two rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale — and eleven not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
+  assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale — last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed"
+      && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)" && heartbeatState({ ...bs, stale: true, outcome: "stopped" }) === "stale — last stamped 15 min ago, every 300 s, stopped",
+    `heartbeatState words alive, failed, stale, stopped and the alarm (${heartbeatState(ex)})`);
+  assert([ago(45), ago(120), ago(5400), ago(200000)].join("|") === "45 s|2 min|2 h|2 d", `ago reads seconds, minutes, hours, days (${[ago(45), ago(120), ago(5400), ago(200000)].join("|")})`);
+  const server0 = () => ({ version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } });
+  heartbeatRows = [{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 10 }, { key: "heartbeat:x", value: "{}", at, age_s: 1 }];
+  const withBeats = renderBrainInfo(await brainInfo(server0(), async () => readDatabaseFacts(fake), 1000));
+  heartbeatRows = [];
+  assert(/^Workers: +board-sync alive \(last stamped 10 s ago, every 300 s\) \(1 heartbeat row\(s\) not of the shape, ignored\)$/m.test(withBeats),
+    `the table's Workers row names each heartbeat and the rows ignored (${withBeats.split("\n").find((l) => l.startsWith("Workers"))})`);
+
 
   const server = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
   const planted = (highest: number | null, over: Partial<Facts> = {}): Facts => ({ ...facts, ledger: { present: true, names: highest === null ? [] : [`${highest}_x.sql`] }, highestMigration: highest, unread: {}, ...over });
@@ -986,7 +1024,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   // `current` beside "schema_migrations not read").
   answerLedger = true;
   const tx2Facts = await (async () => {
-    // The first savepoint is ob1_config's; fail the second, the ledger's.
+    // The first savepoint is ob1_config's, the second the heartbeats'
+    // (SMD-2261); fail the third, the ledger's.
     // Fresh function objects: Object.assign onto `tag` would replace the
     // shared fake's own savepoint and begin.
     let n = 0;
@@ -994,7 +1033,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     const counting = Object.assign((strings: TemplateStringsArray) => run(strings), {
       savepoint: async <T>(fn: (sp: typeof run) => Promise<T>) => {
         const r = await fn(run);
-        if (++n === 2) throw pgError("server closed the connection unexpectedly", "08006");
+        if (++n === 3) throw pgError("server closed the connection unexpectedly", "08006");
         return r;
       },
     });

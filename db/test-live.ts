@@ -51,7 +51,8 @@ import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.t
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
-import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
+import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
+import { passStamper, stampKey } from "./pass-stamp.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -3666,6 +3667,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(retried.code === 0 && /1 extracted, 0 failed/.test(retried.out), `--retry-failed with --limit 1 extracts the one failed row and exits 0 (exit ${retried.code})`);
   assert((await entityByName("Socrates")) !== undefined, "…and its entity is in the graph");
 
+  // The one-shot runs above stamped no heartbeat: only a follower does (SMD-2261).
+  const beatsOf = async (worker: string) => (await sql`SELECT key, value FROM ob1_config WHERE key LIKE ${`heartbeat:${worker}:%`}`) as { key: string; value: string }[];
+  assert((await beatsOf("extract")).length === 0, "no one-shot extraction run left a heartbeat row");
   // --follow: a capture made while the worker is polling is extracted without a
   // new run, and the first signal ends the process with exit 0.
   const follower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
@@ -3682,6 +3686,12 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(extracted, "a thought captured while --follow polls is extracted by the trigger and the poll, with no new run");
   assert(followCode === 0, `the follower exits 0 on SIGINT (exit ${followCode}; ${followOut.split("\n").filter(Boolean).slice(-2).join(" | ")})`);
   assert((await entityByName("Grafana")) !== undefined, "…and Grafana is in the graph");
+  // …and its heartbeat: one row under its job, stopped by the signal, the
+  // passes it finished counted, judged against a minute (a 1-second poll).
+  const extractBeats = await beatsOf("extract");
+  const eb = extractBeats.length === 1 ? JSON.parse(extractBeats[0].value) : null;
+  assert(eb !== null && /^heartbeat:extract:\S+@p\d+$/.test(extractBeats[0].key) && eb.v === 1 && eb.outcome === "stopped" && eb.running === false && eb.passes >= 1 && eb.every_s === 60,
+    `the follower stamped one heartbeat, stopped, with its passes (${extractBeats.map((b) => `${b.key} ${b.value}`).join("; ")})`);
 
   // Stopping a pass (SMD-2304). Four notes the stub answers with nothing, one
   // worker, slow answers: a stop lands while a thought is in hand.
@@ -4135,6 +4145,12 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(alarmFollowCode === 0 && alarmAt >= 0 && alarmAt < alarmFollowErr.indexOf("stopping after the current thought")
          && alarmFollowOut.split("The follower keeps polling; stopped by a signal, it exits 0.").length === 2 && !/Exiting \d/.test(alarmFollowOut),
          `a follower says the model is likely at fault while it polls, once, not at its stop, and exits 0 on SIGINT (exit ${alarmFollowCode}: ${alarmFollowOut.split("\n").find((l) => /answers were/.test(l))?.trim().slice(-120)})`);
+  // …and its heartbeat carries the block, so preflight's workers row warns on
+  // a follower nobody watches the stderr of (SMD-2261).
+  const alarmBeat = (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0];
+  const ab = alarmBeat ? JSON.parse(alarmBeat.value) : null;
+  assert(ab?.malformed?.alarm === true && ab.malformed.answers === 48 && ab.malformed.bad === 48 && ab.outcome === "stopped",
+    `the follower's heartbeat carries its tripped block (${alarmBeat?.value})`);
   // A retry chose its rows for failing: the 60 notes back, still in prose,
   // trip the alarm, which does not clear their documents (review pass 1).
   const retriedNotes = await extract("--retry-failed");
@@ -4146,11 +4162,15 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // A follower that ends at its --limit with the last block tripped: the
   // final judgement's line, saying the exit it takes, not "keeps polling …
   // exits 0" (review pass 2, caught by running it).
+  // Its row cleared of the earlier block first, so the block it carries after is this run's final judgement.
+  await sql`UPDATE ob1_config SET value = (value::jsonb - 'malformed')::text WHERE key = ${`heartbeat:${KEY}`}`;
   for (let i = 0; i < 48; i++) await seed(`A limited reference-list page, number ${i}.`);
   const limitedFollow = await extract("--follow", "1", "--limit", "48");
   assert(limitedFollow.code === 3 && limitedFollow.out.includes("  48 of the follower's last 48 answers were not JSON") && /\n    Check OB1_METADATA_MODEL \(stub-meta\)[^\n]*\. Exiting 3\./.test(limitedFollow.out)
          && !limitedFollow.out.includes("keeps polling"),
          `a follower that trips the alarm on the pass that reaches its --limit says it exits 3, and exits 3 (exit ${limitedFollow.code}: ${limitedFollow.out.split("\n").find((l) => /Exiting|keeps polling/.test(l))?.trim().slice(-120)})`);
+  const limitedBeat = (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0];
+  assert(JSON.parse(limitedBeat?.value ?? "{}").malformed?.alarm === true, `a follower stopped at its --limit carries the final judgement's block on its row (${limitedBeat?.value})`);
   proseKeys.delete("reference-list page");
 
   model.stop(true);
@@ -5147,6 +5167,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     // line says "1 settled" alone — anchored, so a "; 1 wait" suffix fails
     // (third review pass, mutant: bags for the sets survived every tooth).
     seen.length = 0;
+    const consolidateBeats = async () => (await sql`SELECT key, value FROM ob1_config WHERE key LIKE 'heartbeat:consolidate:%'`) as { key: string; value: string }[];
+    assert((await consolidateBeats()).length === 0, "no one-shot consolidation run left a heartbeat row (SMD-2261)");
     const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
     await Bun.sleep(2500);
     assert((await proposalRow(cedar.id)).status === "stale" && seen.length === 0, "the follower's first polls leave the row waiting and call no judge");
@@ -5163,6 +5185,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
            `the poll after the vector lands re-pools the thought and settles the row, one judge call in all (exit ${followCode}; ${followOut.split("\n").filter((l) => /pool:|stale proposals:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
     assert(/^\s*stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\) — distinct rows across the polls\s*$/m.test(followOut),
            `…and the summary counts the row once, settled, with no wait clause (${staleLine(followOut)})`);
+    const cb = await consolidateBeats();
+    const cv = cb.length === 1 ? JSON.parse(cb[0].value) : null;
+    assert(cv !== null && cb[0].key === `heartbeat:${KEY}` && cv.outcome === "stopped" && cv.passes >= 1 && cv.every_s === 60 && !("malformed" in cv),
+      `the consolidation follower stamped one heartbeat under its key, stopped, with no malformed block (${cb.map((b) => `${b.key} ${b.value}`).join("; ")})`);
     const olderBack = await consolidate("--status");
     assert(olderBack.code === 0 && !/stale/.test(olderBack.out.split("\n").find((l) => /queue:/.test(l)) ?? "x stale"), `no stale row is left (${olderBack.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 160)})`);
     assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "…still without an audit row");
@@ -9286,6 +9312,94 @@ console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress
   } finally {
     stub.stop(true);
     await wsql.close();
+  }
+}
+
+console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one ob1_config row per worker and job, stamped after each pass and re-stamped while one runs, a failed write said once, and board-sync's loop stamping ok, failed and stopped (SMD-2261)");
+{
+  const hsql = new SQL({ url: URL_!, max: 2 });
+  const row = async (key: string) => {
+    const [r] = await hsql`SELECT value, extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = ${key}`;
+    return r ? { ...JSON.parse(r.value), age: Number(r.age) } : null;
+  };
+  try {
+    // The key names its worker first, once.
+    assert(stampKey("board-sync") === "heartbeat:board-sync" && stampKey("extract", "extract:qwen2.5:7b@p2") === "heartbeat:extract:qwen2.5:7b@p2" && stampKey("extract", "my-job") === "heartbeat:extract:my-job",
+      "stampKey: board-sync alone, a job named for its worker kept, a custom job prefixed");
+
+    // A pass's stamp: outcome, passes, the malformed block, the interval's minute floor.
+    const st = passStamper({ sql: hsql as never, worker: "extract", job: "extract:test@p2", intervalS: 15 });
+    await st.stamp("ok", { answers: 50, bad: 12, alarm: true });
+    const one = await row(st.key);
+    assert(one?.v === 1 && one.outcome === "ok" && one.passes === 1 && one.running === false && one.every_s === 60 && one.malformed?.alarm === true && one.malformed.bad === 12 && one.age < 5,
+      `a stamp records the outcome, the pass, the block and a minute's floor (${JSON.stringify(one)})`);
+    await st.stamp("stopped");
+    const two = await row(st.key);
+    assert(two?.outcome === "stopped" && two.passes === 1 && two.malformed?.bad === 12, `a stop is no pass, and the last block stays (${JSON.stringify(two)})`);
+
+    // While a pass runs the row is re-stamped "running" on the timer; the
+    // pass's own stamp after it is the last word.
+    const fast = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:test@p3", intervalS: 1, minEveryS: 1 });
+    let mid: { running?: boolean } | null = null;
+    await fast.during((async () => { await Bun.sleep(2600); mid = await row(fast.key); })());
+    await fast.stamp("ok");
+    const after = await row(fast.key);
+    assert(mid !== null && (mid as { running: boolean }).running === true && after?.running === false && after.outcome === "ok",
+      `a pass longer than the interval is stamped running on the timer, and done after (${JSON.stringify(mid)} → ${JSON.stringify(after)})`);
+    await Bun.sleep(1500);
+    const quiet = await row(fast.key);
+    assert(quiet?.running === false && (quiet?.age ?? 0) >= 1, `the timer stops with the pass: nothing re-stamps after it (${JSON.stringify(quiet)})`);
+
+    // A role that cannot write: said once, the work goes on, said again only after a write succeeded.
+    let failNow = true;
+    const errors: string[] = [];
+    const flaky = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      if (failNow) return Promise.reject(new Error("permission denied for table ob1_config"));
+      return (hsql as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown>)(strings, ...values);
+    }) as never;
+    const denied = passStamper({ sql: flaky, worker: "board-sync", intervalS: 300, onError: (e) => errors.push(e.message) });
+    await denied.stamp("ok");
+    await denied.stamp("ok");
+    failNow = false;
+    await denied.stamp("ok");
+    failNow = true;
+    await denied.stamp("failed");
+    assert(errors.length === 2 && errors.every((m) => /permission denied/.test(m)), `a failed write is said once, and again only after one succeeded (${errors.length})`);
+
+    // board-sync's loop: a pass that reports errors, one that throws, one that
+    // finishes; then the signal. The loop's code is the last pass's.
+    await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    const codes = [1, "throw", 0] as const;
+    let i = 0;
+    const seenOutcomes: string[] = [];
+    const loopStamper = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 10 });
+    const origStamp = loopStamper.stamp.bind(loopStamper);
+    loopStamper.stamp = async (o, m) => { seenOutcomes.push(o); await origStamp(o, m); };
+    const log = console.log, error = console.error;
+    console.log = () => {};
+    console.error = () => {};
+    let loopCode: number;
+    try {
+      loopCode = await loopPasses({
+        once: async () => { const c = codes[i++]; if (c === "throw") throw new Error("Linear unreachable"); return c; },
+        intervalS: 10, stopped: () => i >= codes.length, stamper: loopStamper, sleep: async () => {},
+      });
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+    const board = await row("heartbeat:board-sync");
+    assert(seenOutcomes.join(",") === "failed,failed,ok,stopped" && loopCode! === 0 && board?.outcome === "stopped" && board.passes === 3 && board.every_s === 60,
+      `the loop stamps each pass's outcome (errors and a throw both failed), then stopped (${seenOutcomes.join(",")}; ${JSON.stringify(board)})`);
+    // A dry run or an audit passes no stamper: the loop writes no row.
+    await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    let j = 0;
+    console.log = () => {};
+    try { await loopPasses({ once: async () => (j++, 0), intervalS: 10, stopped: () => j >= 1, stamper: null, sleep: async () => {} }); } finally { console.log = log; }
+    assert((await row("heartbeat:board-sync")) === null, "a loop with no stamper (a dry run, an audit) writes no heartbeat");
+  } finally {
+    await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await hsql.close();
   }
 }
 

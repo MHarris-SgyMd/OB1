@@ -483,6 +483,21 @@ export function malformedAlarm(answers, malformed) {
 }
 
 /**
+ * The command that starts a long-running worker again, as preflight's workers
+ * row names it when the worker's heartbeat goes stale (SMD-2261,
+ * db/pass-stamp.ts). Built from the worker and its job alone — a heartbeat
+ * key's bounded alphabet — never from a command line, which can carry a URL
+ * with its password. board-sync runs as a compose profile; the claim workers
+ * run from a checkout until SMD-2424 makes them services. Consolidation takes
+ * no --job: its key follows the judge model, so the job is named beside it.
+ */
+export function restartCommand(worker, job) {
+  if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d board-sync (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
+  if (worker === "extract") return `cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job}` : ""}`;
+  return `cd db && bun consolidate.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_JUDGE_MODEL)` : ""}`;
+}
+
+/**
  * The window count one thought is extracted in at most: OB1_EXTRACT_MAX_WINDOWS
  * when it is a positive safe integer once floored, else EXTRACT_MAX_WINDOWS.
  * It sets the text bound a run chunk.ts cannot split meets too, so widening

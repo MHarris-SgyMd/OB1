@@ -1172,7 +1172,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
-| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
+| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --loop` and the followers, SMD-2261), and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
@@ -1735,7 +1735,7 @@ again.
 
 ```bash
 bun extract-entities.ts --url postgres://…              # the backlog, then exit
-bun extract-entities.ts --url … --follow [SECONDS]      # …then keep polling for new captures
+bun extract-entities.ts --url … --follow [SECONDS]      # …then keep polling for new captures, stamping a heartbeat each pass ("Long-running workers report their liveness", below)
 bun extract-entities.ts --url … --limit 25              # a trial: this many, then stop
 bun extract-entities.ts --url … --status                # the pass, and the graph so far
 bun extract-entities.ts --url … --dry-run               # what a run would do; writes nothing
@@ -2214,7 +2214,7 @@ with its newest capture.
 
 ```bash
 bun consolidate.ts --url postgres://…              # the backlog, then exit
-bun consolidate.ts --url … --follow [SECONDS]      # …then keep polling for newly extracted thoughts
+bun consolidate.ts --url … --follow [SECONDS]      # …then keep polling for newly extracted thoughts, stamping a heartbeat each pass
 bun consolidate.ts --url … --limit 25              # a trial: this many thoughts, then stop
 bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
@@ -3093,6 +3093,42 @@ measures both that awaited INSERT's cost and the prune plan flipping to an index
 scan. A cheaper insert path (a BRIN in place of the btree, the log being
 append-only with a monotonic `logged_at`) is a tracked follow-up (SMD-1950).
 
+## Long-running workers report their liveness (SMD-2261)
+
+board-sync was down for four days (2026-09-27 to 10-01) and nothing noticed:
+its container had gone, and preflight's `tier` row printed the last ingest as
+passing. The board-sync watermark cannot be the alarm — a quiet board stops it
+too — so each long-running worker stamps a **heartbeat** after every pass,
+whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --loop`
+and the `--follow` of `extract-entities.ts` and `consolidate.ts`. A one-shot run
+stamps nothing, so it leaves no row to go stale, and neither does a dry run or
+an audit.
+
+One `ob1_config` row per worker and job — `heartbeat:board-sync`,
+`heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3` — whose
+value says `every_s` (the worker's interval, at least a minute), whether a pass
+is `running`, the last pass's `outcome` (`ok`, `failed`, or `stopped` when the
+worker ended: a signal, its `--limit`, the provider refusing the request), the
+`passes` the process finished, and, for extraction, the last judged block's
+malformed answers and whether they passed SMD-2266's alarm. The time is the
+row's `updated_at`, the database's `now()`. A pass longer than the interval —
+a follower's first pass over a backlog — is re-stamped `running` every
+`every_s` while it runs, so it reads alive, as lease renewal keeps its claims.
+
+**Who reads it.** Keyed `/health`, `brain_info` (a `Workers` row) and
+`GET /v1/brain` carry every heartbeat as `database.workers`; preflight's
+`workers` row warns when one is older than three of its intervals, naming the
+command that starts that worker again, when a fresh one's last pass failed, and
+when its last block passed the malformed alarm — which a follower otherwise says
+only on stderr. A worker that never ran on a brain has no row, and nothing is
+said. A worker retired on purpose leaves its row to warn until it is deleted
+(`DELETE FROM ob1_config WHERE key = 'heartbeat:…'`, as preflight prints it).
+
+**Grants.** The write is a plain upsert into `ob1_config`, which the `worker`
+group holds (`migrate.ts --grant … --groups worker`); compose's `board-sync`
+connects as the database owner. A role without it is told once, and the work
+goes on: a heartbeat is reporting, never a reason to stop.
+
 ## The board in the brain (SMD-1954)
 
 `ingest-records.ts` above loads the Linear board from a corpus dump, once, for a
@@ -3105,7 +3141,7 @@ should read Done. `sync-linear.ts` is that sweep, and `deploy/compose.yaml`'s
 bun sync-linear.ts --url postgres://…                # one pass
 bun sync-linear.ts --url … --dry-run                 # what a pass would write
 bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any of the three
-bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300)
+bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300), each stamping a heartbeat
 bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
 bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # these identifiers, whatever the plan says of them
 bun sync-linear.ts --self-check                      # the pure rules and the write decisions, no network, no database
@@ -3300,7 +3336,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2429 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1063 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1077 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

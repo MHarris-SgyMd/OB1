@@ -137,6 +137,7 @@ import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, lease
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
+import { passStamper, stampKey, type MalformedBlock } from "./pass-stamp.ts";
 
 /**
  * Every argument accounted for (db/cli.ts): a flag this worker does not have,
@@ -1122,7 +1123,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     judged.answers = answers;
     judged.malformed = answersMalformed;
     judged.escalated = escalated;
-    if (!malformedAlarm(n, bad)) return undefined;
+    // The block the heartbeat carries, so an unattended follower's alarm
+    // reaches preflight's row and not stderr alone (SMD-2261).
+    lastBlock = { answers: n, bad, alarm: malformedAlarm(n, bad) };
+    if (!lastBlock.alarm) return undefined;
     alarms++;
     const models = esc ? `OB1_METADATA_MODEL (${cfg.metadataModel}) and OB1_EXTRACT_ESCALATE_MODEL (${WINDOWING.escalateModel}), which answered the runaways of ${esc} thought(s)` : `OB1_METADATA_MODEL (${cfg.metadataModel})`;
     const retries = [leftOut ? "--retry-left-out re-reads the partial rows" : "", failed ? "--retry-failed re-reads the failed ones" : ""].filter(Boolean).join(" and ");
@@ -1133,6 +1137,26 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       `\n    Check ${models}, the endpoint and the prompt. ${done ? `The rows written stand${leftOut ? ", each partial one naming its windows left out" : ""}` : "No row was written"}` +
       `${retries ? `; once the model is right, ${retries}, with --job ${JOB} if OB1_METADATA_MODEL changes` : ""}.`;
   }
+
+  /** The last judged block, for the heartbeat; null until one is judged. */
+  let lastBlock: MalformedBlock | null = null;
+  // A follower's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
+  // pass and re-stamped while one runs. A one-shot run stamps nothing.
+  const stamper = FOLLOW
+    ? passStamper({
+        sql, worker: "extract", job: JOB, intervalS: FOLLOW,
+        onError: (e) => err(`  heartbeat ${stampKey("extract", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
+      })
+    : null;
+  // A pass that throws ends the run; its heartbeat says so first.
+  const stampedPass = async () => {
+    try {
+      return await (stamper ? stamper.during(pass()) : pass());
+    } catch (e) {
+      await stamper?.stamp("failed");
+      throw e;
+    }
+  };
 
   let firstPass = true;
   async function pass(): Promise<Counts> {
@@ -1164,7 +1188,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   out(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
 
-  let after = await pass();
+  let after = await stampedPass();
   if (FOLLOW) {
     // Only a block it will poll after: the last pass's — the limit reached, or
     // stopped — is the final judgement's, which says the exit the run takes
@@ -1175,12 +1199,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       if (line) err(`${line} The follower keeps polling; stopped by a signal, it exits 0${LIMIT ? ", and at its --limit, 3" : ""}.`);
     };
     say();
+    await stamper?.stamp("ok", lastBlock);
     // "This many thoughts, then stop" holds while following too.
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
-      after = await pass();
+      after = await stampedPass();
       say();
+      await stamper?.stamp("ok", lastBlock);
     }
   }
 
@@ -1212,6 +1238,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // The exit code is settled first, so the line says the one the run exits with
   // (review pass 1: a signal or the provider's refusal exits otherwise).
   const alarmLine = judge();
+  // The follower ends — a signal, its --limit, or the provider refusing the
+  // request itself — and the row says so, with the final judgement's block: a
+  // follower stopped at its --limit on a tripped block exits 3, and its row
+  // carries the alarm too. Its age then warns, as it should.
+  await stamper?.stamp(configError ? "failed" : "stopped", lastBlock);
   const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
   // The alarm before the failures: a model at fault explains them, and
   // --retry-failed under it would fail them again. Leased and pending rows keep
