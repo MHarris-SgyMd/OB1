@@ -913,6 +913,13 @@ export type Actor = {
    * not read by name. Absent when both endpoints are declared local.
    */
   egress?: EgressRecord;
+  /**
+   * Who carried a forwarded write (SMD-2284): the forwarder key's name and
+   * agent id, RFC 8693's `act`. The actor above stays the client's key. Lands
+   * in thought_audit.actor_context as `act`, beside `egress` — no column of
+   * its own, so no migration.
+   */
+  act?: { name: string; agentId?: string };
 };
 
 /**
@@ -932,6 +939,8 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
     ...(actor.session !== undefined ? { session: actor.session } : {}),
     ...(actor.agentId !== undefined ? { agent_id: actor.agentId } : {}),
     ...(actor.egress !== undefined ? { egress: actor.egress } : {}),
+    // agent_id, not agentId — the trigger's spelling, as for the actor itself.
+    ...(actor.act !== undefined ? { act: { name: actor.act.name, ...(actor.act.agentId !== undefined ? { agent_id: actor.act.agentId } : {}) } } : {}),
   };
 }
 

@@ -110,13 +110,15 @@ const core = new Proxy({}, {
   },
 }) as unknown as Core;
 let identity: AgentOutcome = { status: "ok", agentId: "agent-1" };
+/** The registry's word on a forwarder key (SMD-2284), apart from the caller's. */
+let carrierIdentity: AgentOutcome = { status: "ok", agentId: "agent-f" };
 let resolveThrows = false;
 const lines: string[] = [];
 const app = createRestApp({
   core,
   init: () => {},
   keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},w:write:${hashKey("write-raw")},c:capture:${hashKey("cap-raw")},f:forward:${hashKey("fwd-raw")}` }),
-  resolve: async () => { if (resolveThrows) throw new Error("the registry threw"); return identity; },
+  resolve: async (p) => { if (resolveThrows) throw new Error("the registry threw"); return p.scope === "forward" ? carrierIdentity : identity; },
   track: (run) => run(),
   log: (l) => lines.push(l),
 });
@@ -178,6 +180,63 @@ console.log("\n[5] The authorization ladder: a wrong key 401, a revoked one 401,
   assert(who.status === 200 && who.body.scope === "capture" && JSON.stringify(who.body.operations) === JSON.stringify(CAPTURE_TOOL_NAMES), `whoami names the key's scope and its operations (${JSON.stringify(who.body)})`);
   const whoRead = await json(await hit("/v1/whoami", { key: "read-raw" }));
   assert(JSON.stringify(whoRead.body.operations) === JSON.stringify(READ_TOOL_NAMES), "…a read key's are the read group");
+}
+
+console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the client's key decides, the forwarder is named as act, any other key there refused (SMD-2284)");
+{
+  const fwd = (path: string, key: string | null, carrier: string, init: RequestInit = {}) =>
+    app.fetch(new Request(`http://api${path}`, { ...init, headers: { ...(key ? { "x-brain-key": key } : {}), "x-brain-forwarder": carrier, ...(init.body ? { "content-type": "application/json" } : {}) } }));
+  identity = { status: "ok", agentId: "agent-1" };
+  carrierIdentity = { status: "ok", agentId: "agent-f" };
+  let who = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
+  assert(who.status === 200 && who.body.name === "r" && who.body.scope === "read" && same(who.body.act, { name: "f", agentId: "agent-f" }),
+    `whoami, forwarded: the client's key is the caller, the forwarder its act with its agent id (${JSON.stringify(who.body).slice(0, 120)})`);
+  const plain = await json(await hit("/v1/whoami", { key: "read-raw" }));
+  assert(plain.status === 200 && !("act" in plain.body), "…and a request not forwarded carries no act");
+  calls.length = 0;
+  answer = async () => ok({});
+  let r = await json(await fwd("/v1/stats", "read-raw", "fwd-raw"));
+  assert(r.status === 200 && calls[0]?.principal.name === "r" && same(calls[0]?.principal.act, { name: "f", agentId: "agent-f" }), `the operation runs as the client's key, act set beside it (${r.status} ${JSON.stringify(calls[0]?.principal.act)})`);
+  r = await json(await fwd("/v1/thoughts", "read-raw", "fwd-raw", { method: "POST", body: JSON.stringify({ content: "x" }) }));
+  assert(r.status === 403 && r.body.needs === "capture", `the forwarder widens nothing: a read key forwarded still cannot capture (${r.status})`);
+  answer = async () => ok({ id: "fwd-id", reader: false, tags: {}, chunks: 0, contextFailures: 0, headWindow: null, recapture: null, embeddings: { allowed: true, reason: "allowed" }, chat: { allowed: true, reason: "allowed", base: "http://ollama:11434/v1" } });
+  calls.length = 0;
+  r = await json(await fwd("/v1/thoughts", "cap-raw", "fwd-raw", { method: "POST", body: JSON.stringify({ content: "x" }) }));
+  assert(r.status === 201 && calls[0]?.principal.scope === "capture" && calls[0]?.principal.act?.name === "f", `a capture key forwarded captures, act set (${r.status})`);
+  answer = async () => ok({});
+  r = await json(await fwd("/v1/stats", "cap-raw", "fwd-raw"));
+  assert(r.status === 403 && r.body.needs === "read", `…and still cannot read (${r.status})`);
+
+  // Anything else in the slot is refused, naming the slot; the operation never runs.
+  calls.length = 0;
+  for (const [label, carrier] of [["a read key", "read-raw"], ["a write key", "write-raw"], ["an unknown key", "nope"], ["an empty value", ""], ["the caller's own key", "cap-raw"]] as const) {
+    const x = await fwd("/v1/thoughts", "cap-raw", carrier, { method: "POST", body: JSON.stringify({ content: "x" }) });
+    const b = await json(x);
+    assert(b.status === 401 && b.body.code === "UNAUTHORIZED" && b.body.credential === "forwarder" && x.headers.get("www-authenticate") === "Bearer",
+      `${label} in the forwarder slot → 401 UNAUTHORIZED, credential forwarder (${b.status} ${JSON.stringify(b.body)})`);
+  }
+  assert(calls.length === 0, `…and no operation ran (${calls.length})`);
+  r = await json(await fwd("/v1/whoami", null, "fwd-raw"));
+  assert(r.status === 401 && r.body.code === "UNAUTHORIZED" && !("credential" in r.body), `the forwarder slot alone, no caller's key → the caller's 401 (${JSON.stringify(r.body)})`);
+  identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-05T00:00:00Z", reason: null };
+  r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
+  assert(r.status === 401 && r.body.code === "REVOKED" && !("credential" in r.body), `a revoked caller beside a sound forwarder → the caller's REVOKED (${JSON.stringify(r.body)})`);
+  identity = { status: "ok", agentId: "agent-1" };
+  carrierIdentity = { status: "revoked", agentId: "agent-f", revokedAt: "2026-10-05T00:00:00Z", reason: null };
+  r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
+  assert(r.status === 401 && r.body.code === "REVOKED" && r.body.credential === "forwarder", `a revoked forwarder → 401 REVOKED, credential forwarder (${JSON.stringify(r.body)})`);
+  carrierIdentity = { status: "busy" } as AgentOutcome;
+  const busy = await fwd("/v1/whoami", "read-raw", "fwd-raw");
+  assert(busy.status === 503 && busy.headers.get("retry-after") === "2", `a busy registry on the forwarder → 503 with Retry-After (${busy.status})`);
+  carrierIdentity = { status: "ok", agentId: undefined, unresolved: "unreachable" };
+  who = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
+  assert(who.status === 200 && same(who.body.act, { name: "f" }), `an unreachable registry names the forwarder without an id (${JSON.stringify(who.body.act)})`);
+  carrierIdentity = { status: "ok", agentId: "agent-f" };
+  const doc = await json(await hit("/openapi.json"));
+  const schemes = (doc.body.components as { securitySchemes: Record<string, { in?: string; name?: string }> }).securitySchemes;
+  const statsSecurity = ((doc.body.paths as Record<string, Record<string, { security?: Record<string, unknown>[] }>>)["/v1/stats"].get.security ?? []).map((x) => Object.keys(x).sort().join("+"));
+  assert(schemes.forwarder?.in === "header" && schemes.forwarder?.name === "x-brain-forwarder" && statsSecurity.includes("brainKey+forwarder") && statsSecurity.includes("brainKey") && !statsSecurity.includes("forwarder"),
+    `the document names the forwarder slot, beside a caller's key and never alone (${statsSecurity.join(", ")})`);
 }
 
 console.log("\n[6] Inputs are the tool's schema; a refused one names the field, never its value");

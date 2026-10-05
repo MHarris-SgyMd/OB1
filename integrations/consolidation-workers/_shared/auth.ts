@@ -37,10 +37,11 @@
  *   client's key decides what the request may do, and the forwarder's names
  *   who carried it. No server admits it as a caller — the core servers admit
  *   CLIENT_SCOPES, and the vendored copies DEFAULT_ADMIT — so alone it is
- *   refused like an unknown key everywhere; the REST core's forwarder slot,
- *   the one place it will be read, is SMD-2284's PR 4b, and until then nothing
- *   reads it. The registry records it with no scope (agents.ts, recordedScope):
- *   049's CHECK does not hold `forward`, and no migration widens it.
+ *   refused like an unknown key everywhere, and read in one place: the REST
+ *   core's forwarder slot (`x-brain-forwarder`, rest/app.ts), which records
+ *   it as the request's `act`. The registry records it with no scope
+ *   (agents.ts, recordedScope): 049's CHECK does not hold `forward`, and no
+ *   migration widens it.
  *
  *   Named keys, revocable independently. One per client, so retiring the key you
  *   pasted into a laptop does not break the rest.
@@ -86,8 +87,8 @@ export type Scope = "read" | "write" | "capture" | "forward";
 export const SCOPES: readonly Scope[] = Object.freeze(["read", "write", "capture", "forward"]);
 /**
  * The scopes a caller may hold: every one but `forward`, which grants nothing
- * and is for the REST core's forwarder slot alone (SMD-2284's PR 4b). What the
- * core servers admit.
+ * and is read in the REST core's forwarder slot alone (SMD-2284). What the core
+ * servers admit.
  */
 export const CLIENT_SCOPES: readonly Scope[] = Object.freeze(["read", "write", "capture"]);
 /**
@@ -122,6 +123,13 @@ export type Principal = {
   agentId?: string;
   /** Why `agentId` is absent, when it is: the registry could not be reached (a retry may answer) or refused the argument (it will not). Set beside agentId by index.ts from agents.ts's outcome. */
   agentUnresolved?: "unreachable" | "refused";
+  /**
+   * Who carried the request, when it was forwarded (SMD-2284): the forwarder
+   * key's name and agent id, from the REST core's forwarder slot — RFC 8693's
+   * `act`. The subject (name, scope, keyHash) stays the client's key; this
+   * grants nothing and decides nothing, it is recorded.
+   */
+  act?: { name: string; agentId?: string };
 };
 
 export type KeyRecord = { name: string; scope: Scope; sha256: string };

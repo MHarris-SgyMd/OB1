@@ -67,10 +67,11 @@ async function liveSubset(store: ThoughtStore, ids: string[]): Promise<string[] 
  * The audit trail's actor for a write through this core (SMD-1730): the key's
  * name — what the agent was CALLED when it wrote, which a later rename would
  * otherwise erase — the stable id migration 010 resolved it to (absent when
- * the registry could not answer; see agents.ts), and the door (046's origin).
- * One place, so a field added to the actor reaches every write.
+ * the registry could not answer; see agents.ts), the door (046's origin), and
+ * who carried it when it was forwarded (SMD-2284, `act`). One place, so a
+ * field added to the actor reaches every write.
  */
-const actorOf = (ctx: Ctx, principal: Principal) => ({ name: principal.name, agentId: principal.agentId, via: ctx.door });
+const actorOf = (ctx: Ctx, principal: Principal) => ({ name: principal.name, agentId: principal.agentId, via: ctx.door, ...(principal.act ? { act: principal.act } : {}) });
 
 /** A whole-content embedding that fell back to the head window (embed.ts): what an edit or a capture reply says about it. */
 export type HeadWindow = { fellBack: boolean; refused: boolean; error?: string };

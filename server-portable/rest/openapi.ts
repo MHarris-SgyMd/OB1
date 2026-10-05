@@ -20,14 +20,16 @@ function inputSchema(name: ToolName, omit: string[]): Json {
 }
 
 const refusal = (description: string) => ({ description, content: { "application/json": { schema: { $ref: "#/components/schemas/Refusal" } } } });
-const KEYED = [{ brainKey: [] }, { accessKey: [] }, { bearer: [] }];
+/** A caller's key in one of its three headers — alone, or forwarded with the forwarder slot beside it (SMD-2284). */
+const CALLER_FORMS = [{ brainKey: [] }, { accessKey: [] }, { bearer: [] }];
+const KEYED = [...CALLER_FORMS, ...CALLER_FORMS.map((form) => ({ ...form, forwarder: [] }))];
 
 /** Which refusal codes answer each status (REFUSAL_STATUS), so the document says what a client may see under each. */
 const codesAt = (status: number): string => Object.entries(REFUSAL_STATUS).filter(([code, s]) => s === status && code !== "EMBEDDING_NOT_ATTACHED").map(([code]) => code).join(", ");
 /** The answers every keyed operation may give besides its success: the caller's standing, the input, a refusal by its status, a fault. */
 const KEYED_ANSWERS = {
   "400": refusal(`The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: ${codesAt(400)}.`),
-  "401": refusal("No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED)."),
+  "401": refusal("No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one."),
   "403": refusal(`The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: ${codesAt(403)}.`),
   "404": refusal(`Nothing there: ${codesAt(404)}.`),
   "409": refusal(`The state conflicts: ${codesAt(409)}.`),
@@ -73,7 +75,7 @@ export function openApiDocument(): Json {
       security: KEYED,
     };
   }
-  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call.", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": refusal("No key, a wrong key or a revoked one."), "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
+  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": KEYED_ANSWERS["401"], "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
   paths["/v1/jobs/{job_id}/stream"] = { get: { operationId: "job_stream", summary: "A job's events", description: "The job's progress and its end as server-sent events, for the key that started it.", parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "An event stream.", content: { "text/event-stream": {} } }, "401": KEYED_ANSWERS["401"], "403": KEYED_ANSWERS["403"], "404": refusal("No such job for this key."), "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
   paths["/health"] = { get: { operationId: "health", summary: "Liveness", description: "Internal only: the process is serving. No key, nothing about the brain.", responses: { "200": { description: "Serving." }, "405": KEYED_ANSWERS["405"] }, security: [] } };
   return {
@@ -85,6 +87,8 @@ export function openApiDocument(): Json {
         brainKey: { type: "apiKey", in: "header", name: "x-brain-key" },
         accessKey: { type: "apiKey", in: "header", name: "x-access-key" },
         bearer: { type: "http", scheme: "bearer" },
+        // Beside a caller's key, never alone: the MCP server's forward-scope key, recorded as the request's `act` (SMD-2284).
+        forwarder: { type: "apiKey", in: "header", name: "x-brain-forwarder", description: "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing." },
       },
       schemas: {
         Refusal: { type: "object", required: ["code"], properties: { code: { type: "string" }, retryable: { type: "boolean" } }, additionalProperties: true },
