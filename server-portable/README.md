@@ -386,7 +386,9 @@ token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
 `unreleased`, `latestMigration`, `commit`, `store`, `tier`, `embedding`,
 `ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
 database's facts (the ledger as `{ present, readable }`, not its names) or
-`{ "error": … }` when it cannot answer. It answers within 2.5 s
+`{ "error": … }` when it cannot answer. Beside the record, `oauth` is the
+server's own view of its public origin (SMD-2382): `{ configured, origin,
+advertised }`, which `deploy/smoke.sh` compares with what reaches it. It answers within 2.5 s
 (`HEALTH_DEADLINE_MS`) whatever the database does — still a 200, since the
 process is serving. A database that refuses at once is `database.error`; one
 that never answers (a dropped route) leaves the agent registry unanswered too,
@@ -668,7 +670,7 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 619 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
+bun test-server.ts        # 624 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
 bun test-auth.ts          # 141 — scoped, hashed, named keys
 bun test-rest.ts          # 268 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential

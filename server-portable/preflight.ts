@@ -723,20 +723,20 @@ if (configuredIn(env.COMPOSE_PROFILES)) {
   const problem = originProblem(env.OB1_PUBLIC_ORIGIN);
   if (problem) {
     add("public origin", "warn",
-        `${problem}, and COMPOSE_PROFILES names auth — this server advertises no OAuth, and the authorization server will not start`,
+        `${problem}, and COMPOSE_PROFILES names auth — the MCP server advertises no OAuth, and the authorization server will not start`,
         "Set OB1_PUBLIC_ORIGIN in deploy/.env to the origin clients reach the stack at, e.g. https://brain.example.com");
   } else {
-    // "Reaches", not "answers": until the server joins the mesh (SMD-2382's
-    // next cut) it reaches no authorization server, and advertises nothing.
+    // The MCP server's, by name: the REST core's container runs this preflight
+    // on the same environment, and advertises nothing itself.
     const { origin } = edgeSettings(env);
     add("public origin", "ok",
-        `${origin} — configured for OAuth: ${origin}/mcp is advertised while this server reaches the authorization server`);
+        `${origin} — configured for OAuth: the MCP server advertises ${origin}/mcp while it reaches the authorization server`);
   }
 } else if (env.OB1_PUBLIC_ORIGIN) {
   // Named through originProblem, which never echoes a value holding an `@`.
   const problem = originProblem(env.OB1_PUBLIC_ORIGIN);
   if (problem) {
-    add("public origin", "warn", `${problem} — unused while COMPOSE_PROFILES does not name auth (keys only), and refused when it does`,
+    add("public origin", "warn", `${problem} — unused while COMPOSE_PROFILES does not name auth (keys only); with it, the authorization server refuses to start`,
         "Set OB1_PUBLIC_ORIGIN to the origin alone, e.g. https://brain.example.com, or unset it");
   } else {
     add("public origin", "ok", `${new URL(env.OB1_PUBLIC_ORIGIN).origin} — COMPOSE_PROFILES does not name auth, so keys only (no OAuth)`);

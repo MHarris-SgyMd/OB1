@@ -616,6 +616,21 @@ console.log("\n[11a] The public origin's rules (oauth-edge.ts, SMD-2382)");
     thrownRead = `threw ${(e as Error).message}`;
   }
   assert(thrownRead === "resolved false", `a fetch that throws at once reads as down, and neither throws nor rejects (${thrownRead})`);
+  // A fetch that ignores its signal entirely is still down at the timeout: the probe keeps a timer of its own.
+  const deaf = new E.AuthReachability("http://auth.test/healthz", 30_000, 50, (() => new Promise<Response>(() => {})) as unknown as typeof fetch);
+  const t1 = performance.now();
+  const deafUp = await Promise.race([deaf.reachable(), new Promise<string>((r) => setTimeout(() => r("still waiting"), 1000))]);
+  assert(deafUp === false && performance.now() - t1 < 1000, `a fetch that ignores its signal is down at the timeout (${deafUp})`);
+
+  // The edge's view for the keyed /health: no origin, nothing advertised, and no probe asked.
+  let viewProbes = 0;
+  const counted = async () => { viewProbes++; return true; };
+  const off = await E.edgeView({ configured: false, origin: null }, counted);
+  const unsound = await E.edgeView({ configured: true, origin: null }, counted);
+  const on = await E.edgeView({ configured: true, origin: PUBLIC_ORIGIN }, counted);
+  assert(JSON.stringify(off) === '{"configured":false,"origin":null,"advertised":false}' && JSON.stringify(unsound) === '{"configured":true,"origin":null,"advertised":false}',
+         `with no origin the view advertises nothing (${JSON.stringify(off)}, ${JSON.stringify(unsound)})`);
+  assert(on.advertised === true && viewProbes === 1, `…and only a view with an origin asks the probe (${viewProbes} probes)`);
 }
 
 console.log("\n[11b] At the public origin, configured (SMD-2382): the document and the challenge while the authorization server answers");
@@ -672,7 +687,15 @@ console.log("\n[11b] At the public origin, configured (SMD-2382): the document a
   const keyed = await at("/mcp", { method: "POST", headers: AUTH, body: INIT });
   assert(keyed.status === 200 && (await mcpBody(keyed))?.result !== undefined, `a right key at the public /mcp is served as ever (${keyed.status})`);
 
+  // The keyed /health body carries the edge's own view beside the record,
+  // which smoke.sh compares with what reaches it through a URL (SMD-2382).
+  type View = { oauth?: { configured?: unknown; origin?: unknown; advertised?: unknown } };
+  const viewOf = async () => ((await (await fetch(`${BASE}/health`, { headers: { "x-brain-key": KEY } })).json()) as View).oauth;
+  const upView = await viewOf();
+  assert(upView?.configured === true && upView?.origin === PUBLIC_ORIGIN && upView?.advertised === true, `the keyed /health names the edge: configured, its origin, advertised (${JSON.stringify(upView)})`);
   authUp = false;
+  const downView = await viewOf();
+  assert(downView?.configured === true && downView?.origin === PUBLIC_ORIGIN && downView?.advertised === false, `…and not advertised while the authorization server is down (${JSON.stringify(downView)})`);
   const downDoc = await at(prm);
   assert(downDoc.status === 404 && corsOk(downDoc), `the document while the authorization server is down is the 404, with CORS (${downDoc.status})`);
   const downKeyless = await at("/mcp", { method: "POST", headers: H, body: INIT });
