@@ -476,28 +476,29 @@ function edgeHere(): EdgeSettings {
  * that reads only the body still sees -32001; a notification gets none, as
  * notificationRefusedResponse says why.
  */
-function challengeResponse(origin: string, refusedToken: boolean, target: { expectsReply: boolean; id: string | number | null }): Response {
-  const headers: Record<string, string> = { ...corsHeaders, "WWW-Authenticate": challengeHeader(origin, refusedToken) };
-  if (!target.expectsReply) return new Response(null, { status: 401, headers });
-  headers["Content-Type"] = "application/json";
-  const body = { jsonrpc: "2.0", error: { code: JSON_RPC_UNAUTHORIZED_CODE, message: UNAUTHORIZED_MESSAGE }, id: target.id };
-  return new Response(JSON.stringify(body), { status: 401, headers });
+function challengeResponse(origin: string, refusedToken: boolean, target: RefusalTarget): Response {
+  return edgeRefusal(401, { "WWW-Authenticate": challengeHeader(origin, refusedToken) }, target, JSON_RPC_UNAUTHORIZED_CODE, UNAUTHORIZED_MESSAGE);
 }
 
 /**
  * An OAuth token at the public resource of a stack configured with a sound
  * origin, while the authorization server does not answer: 503 with
- * Retry-After, never a 401, which
- * would send the client back through a sign-in that cannot finish either.
+ * Retry-After, never a 401, which would send the client back through a
+ * sign-in that cannot finish either.
  */
 const UNREACHABLE_MESSAGE =
   "Temporarily unavailable: this server cannot reach the authorization server, so no OAuth token can be checked. Retry later; an access key still works.";
-function unavailableResponse(target: { expectsReply: boolean; id: string | number | null }): Response {
-  const headers: Record<string, string> = { ...corsHeaders, "Retry-After": String(UNREACHABLE_RETRY_AFTER_SECONDS) };
-  if (!target.expectsReply) return new Response(null, { status: 503, headers });
+function unavailableResponse(target: RefusalTarget): Response {
+  return edgeRefusal(503, { "Retry-After": String(UNREACHABLE_RETRY_AFTER_SECONDS) }, target, JSON_RPC_BUSY_CODE, UNREACHABLE_MESSAGE);
+}
+
+/** The edge's two refusals: the status and headers given, the JSON-RPC envelope for a request, no body for a notification. */
+type RefusalTarget = { expectsReply: boolean; id: string | number | null };
+function edgeRefusal(status: number, extra: Record<string, string>, target: RefusalTarget, code: number, message: string): Response {
+  const headers: Record<string, string> = { ...corsHeaders, ...extra };
+  if (!target.expectsReply) return new Response(null, { status, headers });
   headers["Content-Type"] = "application/json";
-  const body = { jsonrpc: "2.0", error: { code: JSON_RPC_BUSY_CODE, message: UNREACHABLE_MESSAGE }, id: target.id };
-  return new Response(JSON.stringify(body), { status: 503, headers });
+  return new Response(JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: target.id }), { status, headers });
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -897,7 +898,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     const bodyText = await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT);
     const target = refusalTarget(bodyText);
     settled = true;
-    if (answer.kind === "challenge") return challengeResponse(edgeHere().origin!, answer.refusedToken, target);
+    if (answer.kind === "challenge") return challengeResponse(answer.origin, answer.refusedToken, target);
     if (answer.kind === "unavailable") return unavailableResponse(target);
     // A notification (no id) gets no JSON-RPC body: 202, since no key never
     // changes on a retry (SMD-2106). A request keeps the 200 envelope.

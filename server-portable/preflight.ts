@@ -719,8 +719,9 @@ if (configuredIn(env.COMPOSE_PROFILES)) {
   } else {
     // "Reaches", not "answers": until the server joins the mesh (SMD-2382's
     // next cut) it reaches no authorization server, and advertises nothing.
+    const { origin } = edgeSettings(env);
     add("public origin", "ok",
-        `${edgeSettings(env).origin} — configured for OAuth: ${edgeSettings(env).origin}/mcp is advertised while this server reaches the authorization server`);
+        `${origin} — configured for OAuth: ${origin}/mcp is advertised while this server reaches the authorization server`);
   }
 } else if (env.OB1_PUBLIC_ORIGIN) {
   // Named through originProblem, which never echoes a value holding an `@`.

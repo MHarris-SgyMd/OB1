@@ -199,7 +199,7 @@ export function forPublicDocument(req: Request, origin: string): boolean {
  * server is not answering. `reachable` is asked only when the answer turns on
  * it, so a request off the public resource never waits on the probe.
  */
-export type EdgeAnswer = { kind: "today" } | { kind: "challenge"; refusedToken: boolean } | { kind: "unavailable" };
+export type EdgeAnswer = { kind: "today" } | { kind: "challenge"; origin: string; refusedToken: boolean } | { kind: "unavailable" };
 
 export async function refusalAt(
   settings: EdgeSettings,
@@ -209,7 +209,7 @@ export async function refusalAt(
   if (!settings.origin || !forPublicResource(req, settings.origin)) return { kind: "today" };
   const presented = presentedKind(req);
   if (presented === "key") return { kind: "today" };
-  if (await reachable()) return { kind: "challenge", refusedToken: presented === "token" };
+  if (await reachable()) return { kind: "challenge", origin: settings.origin, refusedToken: presented === "token" };
   return presented === "token" ? { kind: "unavailable" } : { kind: "today" };
 }
 

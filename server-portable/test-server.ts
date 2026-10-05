@@ -81,6 +81,8 @@ process.env.OB1_LLM_LOCAL = "1";
 // every section but [11b] runs on loopback, where the answers are the ones a
 // stack with no auth profile gives — which is the point, and [11b] counts it.
 const PUBLIC_ORIGIN = "https://brain.example.test";
+/** A bearer of a JWT's shape, as the authorization server issues (oauth-edge.ts JWT_SHAPE). */
+const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
 process.env.COMPOSE_PROFILES = "local-models, auth";
 process.env.OB1_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
 
@@ -486,7 +488,6 @@ console.log("\n[11a] The public origin's rules (oauth-edge.ts, SMD-2382)");
   assert(s("auth", "http://brain.example.com").origin === null && s("auth", "http://brain.example.com").configured, "configured with an unsound origin: configured, nothing to advertise");
 
   const req = (url: string, headers: Record<string, string> = {}) => new Request(url, { method: "POST", headers });
-  const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
   const HEX = "a".repeat(64);
   const kinds: [string, Request, string][] = [
     ["nothing", req(`${PUBLIC_ORIGIN}/mcp`), "none"],
@@ -623,7 +624,6 @@ console.log("\n[11b] At the public origin, configured (SMD-2382): the document a
   assert(authProbes === 0, `no loopback request above asked whether the authorization server answers (${authProbes} probes)`);
   const at = (path: string, init: RequestInit = {}) => worker.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, init));
   const prm = "/.well-known/oauth-protected-resource/mcp";
-  const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
   const NOTE = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
 
   authUp = true;
@@ -673,10 +673,8 @@ console.log("\n[11b] At the public origin, configured (SMD-2382): the document a
   assert(keyed.status === 200 && (await mcpBody(keyed))?.result !== undefined, `a right key at the public /mcp is served as ever (${keyed.status})`);
 
   authUp = false;
-  expectRefusal("the document while the authorization server is down", await (async () => {
-    const r = await at(prm);
-    return { status: r.status, cors: corsOk(r), allow: null, methods: null, envelope: false };
-  })(), 404);
+  const downDoc = await at(prm);
+  assert(downDoc.status === 404 && corsOk(downDoc), `the document while the authorization server is down is the 404, with CORS (${downDoc.status})`);
   const downKeyless = await at("/mcp", { method: "POST", headers: H, body: INIT });
   assert(downKeyless.status === 200 && downKeyless.headers.get("www-authenticate") === null && (await downKeyless.json())?.error?.code === -32001, `down: a keyless request gets today's refusal, no challenge (${downKeyless.status})`);
   const downToken = await at("/mcp", { method: "POST", headers: { ...H, authorization: `Bearer ${JWT}` }, body: INIT });
