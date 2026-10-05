@@ -811,7 +811,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // request, how many frames it got out before the client hung up.
   type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number } };
   const runs: Run[] = [];
-  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" | "emptyfinish" | "empty" | "cr" | "multiline" | "doneonly" | "braceopen" | "finishtail" | "loop4finish" | "rolefinish" | "crlfsplit" | "tokenloop" | "tokenshort" | "wsclose" | "tokenwhole" | "halfwhole" | "tokenwholeabsent" | "tokenwholeempty" | "punctwhole" | "punctcut" | "windowloop" | "paddedwhole" = "loop";
+  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" | "emptyfinish" | "empty" | "cr" | "multiline" | "doneonly" | "braceopen" | "finishtail" | "loop4finish" | "rolefinish" | "crlfsplit" | "tokenloop" | "tokenshort" | "wsclose" | "tokenwhole" | "halfwhole" | "tokenwholeabsent" | "tokenwholeempty" | "punctwhole" | "punctcut" | "windowloop" | "paddedwhole" | "closedrepeat" = "loop";
   // SMD-2449: the 7B naming an entity "Linear Linear …", one token a frame, as
   // Ollama streams it; Ollama's repeat limit ends such a stream with no
   // finish_reason and no [DONE] after 31 copies.
@@ -907,6 +907,11 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
         const one = JSON.stringify({ choices: [{ delta: { content: GOOD }, finish_reason: null }] });
         const cut = one.indexOf("[") + 1;
         frames = [`data: ${one.slice(0, cut)}\r`, `\ndata: ${one.slice(cut)}\r\n\r\n`, frame("", "stop").replace(/\n/g, "\r\n"), "data: [DONE]\r\n\r\n"];
+      } else if (gMode === "closedrepeat") {
+        // A complete answer and, in the same frame, a word repeated 30 times
+        // after its closing brace: the answer closed first, so the guard,
+        // read only while it is open, never fires (a layer batching frames).
+        frames = [frame(`${GOOD}${" ok".repeat(30)}`, "stop"), "data: [DONE]\n\n"];
       } else if (gMode === "punctcut") {
         // A loop of dashes, cut by Ollama's limit with no end sign: the guard
         // lets punctuation run, the cut is read as the runaway it is.
@@ -1149,6 +1154,14 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const tokenShort = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
   assert(!tokenShort.malformed && tokenShort.entities[0]?.name === SHORT_NAME && tokenShort.retried === undefined && tokenShort.abortedMs === undefined && runs.length === 1,
     `a name holding ${TOKEN_REPEATS - 1} copies of one word, in a complete answer, is parsed — not aborted, not retried (${JSON.stringify(tokenShort).slice(0, 100)})`);
+
+  // After the answer has closed the guard is not read: a frame carrying the
+  // whole answer and 30 copies of a word after it is the answer.
+  runs.length = 0;
+  gMode = "closedrepeat";
+  const closedRepeat = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!closedRepeat.malformed && closedRepeat.entities.length === 2 && closedRepeat.retried === undefined && closedRepeat.abortedMs === undefined && runs.length === 1,
+    `a complete answer followed, in its own frame, by ${TOKEN_REPEATS + 6} copies of a word is parsed — the guard never reads past the close (${JSON.stringify(closedRepeat).slice(0, 80)})`);
 
   // A cut ending in a run of whitespace: the guard let it run (whitespace can
   // indent an answer in progress), and the cut is classified as the runaway.
