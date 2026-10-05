@@ -154,7 +154,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
 | `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` and, on the `mesh` network, `auth.ob1.internal:3000` and — with `compose.api-public.yaml` named — `api.ob1.internal:8000` (resolved with no search domains) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
-| `server` | `server:8000` — the proxy, and n8n | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
+| `server` | `server:8000` — the proxy, and n8n; `mcp.ob1.internal` on `mesh`, from where it probes the authorization server's `/healthz` (SMD-2382) | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
 | `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on the default one, which every container there can reach until the network move (SMD-2294) — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` and `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
@@ -162,7 +162,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2294), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
+| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2294), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -226,7 +226,9 @@ paths today:
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
-| `/.well-known` and everything else under it | the proxy: a 404, `/.well-known/oauth-protected-resource/mcp` included until the proxy routes it to the server, which serves it while the authorization server answers (SMD-2382's next cut). A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246). The 404 carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
+| `/.well-known/oauth-protected-resource/mcp` | `server` — the MCP server's protected-resource document while it advertises OAuth: the `auth` profile on, the request at the origin's `Host`, and the authorization server answering the server's probe on the mesh. Otherwise the server's 404, and a server that is down is the proxy's 404, never a 502 (SMD-2382). A claude.ai connector at `https://host/mcp` asks this at the origin root before it uses its key, and proceeds on the key only on a 404 (SMD-1246) |
+| `/register`, `/authorize`, `/token` | the proxy's bodiless 404: where an MCP client that found the document but no authorization-server metadata would register and sign in, at the issuer's root. Kept off the legacy route, which would hand the POST to the MCP server (SMD-2382). The authorization server's own are under `/auth` |
+| `/.well-known` and everything else under it | the proxy: a 404. It carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
 | anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>`. It keeps every client configured before SMD-1846 working until v2.0.0, and every answer says so: a `Deprecation` header and a `Link` to "Moving a client to /mcp" below, where the server's line naming each key still on it is too (SMD-2306). SMD-2532 removes it, and `/` becomes the proxy's 404 |
 
 The path reaches the server as it came, prefix and all: the server answers POST
@@ -275,7 +277,7 @@ proxy is on (`mesh`, for the authorization server).
 server untouched, as `x-brain-key` or `?key=`, and the server checks it. No TLS:
 a remote client still comes through a tunnel or a TLS proxy on the host, which
 dials `127.0.0.1:${SERVER_PORT}` (step 4); TLS at this proxy, once the stack has
-a public origin, is SMD-2382's. It keeps `Host` as the client sent it, deletes a
+a public origin, is SMD-2382's. It keeps `Host` as the client sent it — the one `Host` the MCP server advertises OAuth at is the public origin's (SMD-2382) — deletes a
 header spelled with `_` or `.` that aliases another (`X_Brain_Key`), and passes
 an SSE stream through as it is written — the server's keepalive frame (every
 5 s on a long tool call, SMD-1864) reaches the client when it is sent.
@@ -431,14 +433,17 @@ headers and no line, and `/mcp` works too, since the server answers at every
 path. Moving those clients now is harmless and saves doing it later.
 
 Two more things belong here, though neither applies until the stack has a
-public origin and serves protected-resource metadata (SMD-2382):
+public origin and the `auth` profile on (SMD-2382):
 
-- **A sign-in prompt will usually mean a bad key.** Today a revoked or rotated
-  `?key=` gets an error: a 200 carrying a JSON-RPC refusal. Once the server
-  answers a public-origin request for a bad key with a 401 and
-  `WWW-Authenticate` (the plan in `docs/operator-surface-tiers.md`), claude.ai
-  meets it with an OAuth sign-in instead. A valid key never gets one, so a
-  prompt on a key-based connector will mean the key is the problem.
+- **A configured stack asks a claude.ai connector to sign in, key or no
+  key.** claude.ai asks for the protected-resource document before it uses a
+  connector's key, and the MCP server serves it at the public origin while
+  the authorization server answers. So a `?key=` connector at `/mcp` opens an
+  OAuth sign-in first — the operator's, at `/auth`. Once through, its key
+  still rides the URL and authenticates before the token, so it is served as
+  before. A connector with no key cannot get past the sign-in until SMD-2286
+  accepts the token. The server itself never sends a key client to sign in: a
+  bad key, in any form, still gets the 200 carrying a JSON-RPC refusal.
 - **Changing the public origin later costs a re-enrolment.** Every passkey has
   to be enrolled again and every connector registered again.
 
@@ -544,7 +549,26 @@ second argument, and a query string is refused. Check 2 probes the **origin root
 which is where claude.ai looks for OAuth discovery before it will open a custom
 connector (with the server's path as a suffix, when the URL carries one). A server
 behind a path prefix needs its proxy to route `/.well-known/` to it, or to 404 it
-there, for that check to pass — this stack's proxy 404s it ("One origin" above).
+there, for that check to pass — this stack's proxy routes the authorization
+server's three discovery documents to it and the protected-resource document to
+the server, whose 404 it is unless OAuth is advertised, and 404s the rest of
+`/.well-known/` ("One origin" above).
+Where OAuth is advertised at the URL's origin, the document decides (SMD-2382):
+for a URL at `<origin>/mcp` or the origin root, a document naming exactly
+`<origin>/mcp` must come with the challenge on a keyless request there, a 404
+at the root form, and the authorization server's metadata at
+`<origin>/.well-known/oauth-authorization-server/auth` naming the issuer
+`<origin>/auth` — a front that routes `/mcp` but not `/auth` fails here. The
+server's keyed `/health` is read for one verdict: when it says it advertises at
+exactly this origin and the document reached smoke as a 404, the tunnel or proxy
+in front does not keep the origin's `Host`, or does not route the document;
+with a key it does not show that record to, the pass line says this could not
+be judged. A URL spelled otherwise than the server's origin (`:443`, upper
+case), or a document naming another origin (`http` in front of an `https`
+tunnel), fails with the URL to use instead. A URL under another
+path (a tier at `/canary/mcp`, SMD-2294's) is asked at its own path form and
+the root form only. A server whose authorization server flips between up and
+down inside one run (its probe's 30 s) can fail it once; run it again.
 
 ## Keeping the board in the brain
 
@@ -1331,9 +1355,11 @@ OAuth for the brain (SMD-2285; `../docs/operator-surface-tiers.md`, decisions
 (`auth/server.ts`), which won the proof of concept (`../evals/README.md`). The
 `auth` profile runs it. It publishes no port: the proxy routes `/auth` and
 the three discovery paths outside it to it while it answers, and answers them
-404 itself while it does not ("One origin", above). Nothing signs in through
-it yet: the MCP server and the GUI become its clients with SMD-2286/2287, and
-the protected-resource document that sends a client to it is routed with SMD-2382's next cut.
+404 itself while it does not ("One origin", above). No service is its client
+yet: the MCP server and the GUI become its clients with SMD-2286/2287. The
+MCP server already sends clients to it (SMD-2382), a preview: at the public origin, while
+this server answers its probe on the mesh, it serves the protected-resource
+document and answers a keyless `/mcp` with the 401 challenge naming it.
 
 Below, `compose` stands for `podman compose -f deploy/compose.yaml --profile
 auth`, or docker compose, with whatever other `-f` files the stack was
@@ -1346,7 +1372,7 @@ must be set even to start this one.
 #              COMPOSE_PROFILES=auth   (with any other profiles, comma-separated)
 bun deploy/auth/provision.ts --init   # once: the profile's secrets into deploy/.env (it keeps every value it finds)
 bun deploy/auth/provision.ts          # what the server would refuse, read from deploy/.env
-compose up -d --wait --wait-timeout 60 auth proxy   # builds and starts it, the proxy beside it, and waits for both
+compose up -d --wait --wait-timeout 60 auth server proxy   # builds and starts it, recreates the server on the new .env (it advertises OAuth only when configured), and waits
 ```
 
 `COMPOSE_PROFILES=auth` in `deploy/.env` is the switch (ADR decision 16): the
@@ -1532,16 +1558,19 @@ re-runs the proof of concept against the new image
 (`bun evals/eval-auth.ts --up oidc-provider`, then `--verify`); CI's auth-poc
 job does the same.
 
-**Not yet.** The protected-resource document at
-`/.well-known/oauth-protected-resource/mcp` and `/mcp`'s 401 challenge. The
-MCP server answers both while the stack is configured and this server
-answers (SMD-2382), but it reaches this server only once it joins the mesh,
-and the proxy routes the document only then (SMD-2382's next cut). Until
-then an OAuth token at the public `/mcp` gets a 503, and nothing is
-advertised. Also not yet: passkey sign-in, which needs the public origin
-(SMD-2382, SMD-2286), and the MCP server and the GUI as this server's
-clients (SMD-2286, SMD-2287). The release overlay does
-not pin an image for it yet, so the profile builds from a checkout.
+**A preview until SMD-2286.** With the profile on, the MCP server
+advertises OAuth at the public origin, and a claude.ai connector at `/mcp`
+is asked to sign in here, `?key=` ones included. A `?key=` connector is
+served once through, since its key authenticates before the token; one with
+no key is not, since the MCP server accepts no token yet: it answers
+`invalid_token`, and the client signs in again. Only the operator can sign
+in today, so leave the profile off where others' claude.ai connectors must
+keep working; turning it off again makes the document a 404, and they
+proceed on the key.
+Not yet: passkey sign-in, which needs the public origin (SMD-2382,
+SMD-2286), and the MCP server and the GUI as this server's clients
+(SMD-2286, SMD-2287). The release overlay does not pin an image for it yet,
+so the profile builds from a checkout.
 
 ## What this does not cover
 
@@ -1593,7 +1622,8 @@ not pin an image for it yet, so the profile builds from a checkout.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
   The `auth` profile's authorization server runs behind the proxy's `/auth`,
-  but nothing signs in through it yet ("Authorization server", above).
+  but no service is its client yet, and a claude.ai connector's sign-in there
+  is a preview ("Authorization server", above).
 
 ## Related
 

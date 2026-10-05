@@ -27,8 +27,9 @@
  * challenge — and no rule that admits anyone keys on it. A key presented in
  * any form, even empty, is a key client's, and a wrong one is refused as
  * today, so this server's 401 never sends a key client to sign in. (A
- * claude.ai connector finds the document by itself, without its key, once
- * the proxy routes it: SMD-2382's next cut, and SMD-2286's.)
+ * claude.ai connector finds the document by itself, without its key, so on a
+ * configured stack a `?key=` connector is asked to sign in once; its key
+ * still authenticates first, so it is served after: SMD-2286's to settle.)
  *
  * The MCP server accepts no OAuth token yet: SMD-2286 checks them and
  * exchanges each at the hop. Until then a token is answered 401
@@ -214,6 +215,20 @@ export async function refusalAt(
 }
 
 /**
+ * The server's own view of the edge, for the keyed /health body (SMD-2382):
+ * whether the stack is configured, at which origin, and whether OAuth is
+ * advertised there now. deploy/smoke.sh compares it with what reaches the
+ * server through the URL it was given: advertised at that origin and a 404
+ * for the document means the tunnel or proxy in front did not deliver the
+ * origin's Host, or does not route the document.
+ */
+export type EdgeView = { configured: boolean; origin: string | null; advertised: boolean };
+
+export async function edgeView(settings: EdgeSettings, reachable: () => Promise<boolean>): Promise<EdgeView> {
+  return { configured: settings.configured, origin: settings.origin, advertised: settings.origin !== null && (await reachable()) };
+}
+
+/**
  * Whether the authorization server answers its health check: a 200 within
  * `timeoutMs`. The answer, either way, is kept for `ttlMs`, and one check is
  * in flight at a time, so a burst of keyless requests costs one probe.
@@ -236,14 +251,24 @@ export class AuthReachability {
   reachable(): Promise<boolean> {
     if (this.value !== null && this.now() < this.expires) return Promise.resolve(this.value);
     if (!this.inflight) {
-      // Started inside the chain, so a fetch that throws at once is down, not a rejection.
-      this.inflight = Promise.resolve()
-        .then(() => this.fetchFn(this.url, { signal: AbortSignal.timeout(this.timeoutMs), redirect: "manual" }))
-        .then((r) => {
-          void r.body?.cancel().catch(() => {});
-          return r.status === 200;
-        }, () => false)
-        .then((up) => {
+      this.inflight = new Promise<boolean>((resolve) => {
+        // Its own timer as well as the fetch's signal: a fetch that ignores
+        // its signal is still down at the timeout, so the keyed /health and a
+        // keyless /mcp never wait longer (review pass 1 of cut 2).
+        const timer = setTimeout(() => resolve(false), this.timeoutMs);
+        // Started inside the chain, so a fetch that throws at once is down, not a rejection.
+        void Promise.resolve()
+          .then(() => this.fetchFn(this.url, { signal: AbortSignal.timeout(this.timeoutMs), redirect: "manual" }))
+          .then((r) => {
+            void r.body?.cancel().catch(() => {});
+            return r.status === 200;
+          })
+          .catch(() => false)
+          .then((up) => {
+            clearTimeout(timer);
+            resolve(up);
+          });
+      }).then((up) => {
           this.value = up;
           this.expires = this.now() + this.ttlMs;
           this.inflight = null;

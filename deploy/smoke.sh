@@ -44,8 +44,13 @@ fi
 
 # The base URL must be a URL: check 2 derives the origin from it, and a scheme-less
 # or query-carrying value would silently probe the wrong place.
+authority=${BASE#*://}; authority=${authority%%[/?#]*}
+case "$authority" in
+  *@*) echo "base-url carries credentials (user@host); pass the key as the second argument, and the URL as clients are given it" >&2; exit 2 ;;
+esac
 case "$BASE" in
   *\?*) echo "base-url carries a query string; pass the key as the second argument, not in the URL" >&2; exit 2 ;;
+  *#*) echo "base-url carries a fragment (#…); pass the URL as clients are given it" >&2; exit 2 ;;
   [Hh][Tt][Tt][Pp]://[!/]*|[Hh][Tt][Tt][Pp][Ss]://[!/]*) ;;
   *) echo "base-url must be http://host[/path] or https://host[/path] (got: $BASE)" >&2; exit 2 ;;
 esac
@@ -79,7 +84,9 @@ echo "▸ $BASE"
 #    body must be the Unauthorized error (-32001, JSON_RPC_UNAUTHORIZED_CODE in
 #    server-portable/index.ts), asked twice: with no key, and with a key that is
 #    not one of the server's, which is the comparison and not only the presence
-#    check (SMD-2103, from recipes/brain-smoke-test's Auth category).
+#    check (SMD-2103, from recipes/brain-smoke-test's Auth category). Asked at
+#    "$BASE/", which is never the public resource: a keyless request at exactly
+#    <origin>/mcp of a stack advertising OAuth gets a deliberate 401, check 2's.
 # Prints the JSON-RPC error code of an initialize sent with these curl arguments,
 # or what came back instead.
 refusal() {
@@ -103,21 +110,111 @@ r=$(refusal -H 'x-brain-key: ob1-smoke-not-a-configured-key')
 #    suffix) before opening a connector, and proceeds on the key only on a 404.
 #    Probed without the key: the SDK copies the connector URL's query onto its
 #    first, path-aware discovery GET (the root fallback carries none), but the
-#    route answers 404 before authenticate() whether or not a key rides along,
+#    route answers before authenticate() whether or not a key rides along,
 #    so a keyless probe asks the same question. FORK.md
 #    change 42 has the rest, including the two deployment shapes that answer
 #    this path before the server does.
+#
+#    Unless OAuth is advertised at this origin (SMD-2382). The document decides,
+#    since it is what a connector reads: this server answers it only with a 404
+#    or naming <origin>/mcp, its own resource. For a URL at <origin>/mcp or at
+#    the origin root (the legacy window's), a document naming exactly
+#    <origin>/mcp must come with the challenge on a keyless request there and a
+#    404 at the root form. The server's keyed /health is read for one verdict
+#    only: when it says it advertises at exactly this origin and a 404 reached
+#    smoke instead, the tunnel or proxy in front does not keep the origin's
+#    Host, or does not route the document. A URL under another path is asked at
+#    its own path form and the root form (a tier at a prefix is SMD-2294's).
+#    The origin is compared as typed: the server's is canonical, so a URL
+#    spelled otherwise (`:443`, upper case) is told the one to use.
 origin=$(printf '%s' "$BASE" | sed -E 's#^([A-Za-z]+://[^/]+).*#\1#')
 suffix="${BASE#"$origin"}"
 disc="$origin/.well-known/oauth-protected-resource"
-miss=""
-for u in "$disc" ${suffix:+"$disc$suffix"}; do
-  code=$(status "$u")
-  [ "$code" = "404" ] || { miss="$u → HTTP $code"; break; }
-done
-[ -z "$miss" ] && ok "OAuth discovery at the origin root → HTTP 404 (no OAuth here; the connector proceeds on the key)" \
-               || bad "OAuth discovery: $miss (expected 404 — route /.well-known/ to the server or 404 it at the proxy; FORK.md change 42)"
-
+hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health")
+# The run's first keyed request: a registry not yet warm can miss the body's
+# deadline and answer `ok`. One keyed call warms it, then read again (review
+# pass 6 of cut 2); a key it does not show the record to stays `ok`.
+case "$hj" in
+  "{"*) ;;
+  *) rpc '{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{}}' > /dev/null
+     hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health") ;;
+esac
+# The server's view, when the body is its record: advertised, at which origin,
+# configured. Anything else (`ok` for a key it does not show the record to, a
+# server from before SMD-2382) reads as not advertised and not configured.
+view=$(printf '%s' "$hj" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+o = d.get("oauth") if isinstance(d, dict) else None
+o = o if isinstance(o, dict) else {}
+print("\x1f".join(["yes" if o.get("advertised") is True else "no", o.get("origin") or "", "yes" if o.get("configured") is True else "no"]))' 2>/dev/null)
+IFS=$'\x1f' read -r advertised adv_origin configured <<<"${view:-no}"
+mine=""
+[ "${advertised:-no}" = yes ] && [ "$adv_origin" = "$origin" ] && mine=1
+# The same origin spelled otherwise: lower case, the scheme's default port
+# dropped. No more than that — the server's spelling is the one to give.
+spelled() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's#^(https://[^/]+):443$#\1#; s#^(http://[^/]+):80$#\1#'; }
+respell=""
+[ "${advertised:-no}" = yes ] && [ -z "$mine" ] && [ "$(spelled "$adv_origin")" = "$(spelled "$origin")" ] && respell=1
+viewless=""
+case "$hj" in "{"*) ;; *) viewless=1 ;; esac
+note=""
+if [ "${advertised:-no}" = yes ] && [ -z "$mine" ]; then note="; the server advertises OAuth at ${adv_origin}/mcp, not at this origin"
+elif [ "${configured:-no}" = yes ] && [ "${advertised:-no}" != yes ]; then note="; the stack is configured, but its authorization server did not answer the server's probe, so nothing is advertised"; fi
+root_form=$(status "$disc")
+case "$suffix" in
+  ""|/mcp)
+    doc=$(curl -sL --max-redirs 5 --max-time 20 -w '\n%{http_code}' "$disc/mcp")
+    doc_code=${doc##*$'\n'}
+    resource=$(printf '%s' "${doc%$'\n'*}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("resource") or "")' 2>/dev/null)
+    if [ "$doc_code" = 200 ] && [ "$resource" = "$origin/mcp" ]; then
+      ch=$(curl -s --max-time 20 -D - -o /dev/null -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' "$origin/mcp" | tr -d '\r')
+      ch_code=$(printf '%s\n' "$ch" | sed -n '1s/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p')
+      challenge=$(printf '%s\n' "$ch" | sed -n 's/^[Ww][Ww][Ww]-[Aa]uthenticate: *//p' | head -1)
+      wrong=""
+      [ "$challenge" = "Bearer resource_metadata=\"$disc/mcp\"" ] || wrong="; a keyless request at $origin/mcp answered HTTP ${ch_code:-none} with the challenge '${challenge:-none}'"
+      [ "$root_form" = 404 ] || wrong="$wrong; the root form answered HTTP $root_form, not 404"
+      # The authorization server's metadata through the same front: one that
+      # routes /mcp and the document but not /auth leaves every sign-in to
+      # fail (review pass 6). Its issuer is built from the same origin, exactly.
+      as=$(curl -sL --max-redirs 5 --max-time 20 -w '\n%{http_code}' "$origin/.well-known/oauth-authorization-server/auth")
+      as_code=${as##*$'\n'}
+      issuer=$(printf '%s' "${as%$'\n'*}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("issuer") or "")' 2>/dev/null)
+      if [ "$as_code" != 200 ]; then wrong="$wrong; the authorization server's metadata at $origin/.well-known/oauth-authorization-server/auth answered HTTP $as_code"
+      elif [ "$issuer" != "$origin/auth" ]; then wrong="$wrong; the authorization server's metadata named the issuer '$issuer', not $origin/auth"; fi
+      at=""
+      [ -z "$suffix" ] && at="; judged at $origin/mcp: a connector given the root URL asks only the root form, a 404, and proceeds on its key"
+      if [ -z "$wrong" ]; then
+        ok "OAuth advertised at $origin/mcp: the document names it, a keyless request there gets the challenge, the root form is a 404, the authorization server answers as $issuer (the origin's Host reaches the server$at; SMD-2382)"
+      else
+        bad "OAuth is advertised at $origin/mcp, but${wrong#;} (SMD-2382)"
+      fi
+    elif [ -n "$respell" ]; then
+      bad "OAuth is advertised at $adv_origin/mcp, which this URL spells otherwise — give smoke the URL as the server spells it, $adv_origin$suffix, so its Host is the one the server matches (SMD-2382)"
+    elif [ -n "$mine" ]; then
+      bad "OAuth is advertised at $origin/mcp (the server's keyed /health says so), but the document answered HTTP $doc_code${resource:+ naming $resource} — the tunnel or proxy in front does not deliver the origin's Host, or does not route the document (SMD-2382)"
+    elif [ "$doc_code" = 200 ] && [ -n "$resource" ]; then
+      bad "OAuth discovery: $disc/mcp → HTTP 200 naming '$resource' — give smoke the URL at the origin the document names (SMD-2382)"
+    elif [ "$doc_code" = 404 ] && [ "$root_form" = 404 ]; then
+      [ -n "$viewless" ] && note="$note; the keyed /health gave no record (a key it does not show it to), so a front that drops the Host could not be told from no OAuth"
+      ok "OAuth discovery → HTTP 404 at $disc and $disc/mcp (no OAuth here; the connector proceeds on the key$note)"
+    else
+      miss="$disc → HTTP $root_form"
+      [ "$doc_code" = 404 ] || miss="$disc/mcp → HTTP $doc_code"
+      bad "OAuth discovery: $miss (expected 404 — route /.well-known/ to the server or 404 it at the proxy; FORK.md change 42$note)"
+    fi ;;
+  *)
+    [ -n "$mine" ] && note="; the server advertises OAuth at $origin/mcp, not at this path"
+    path_form=$(status "$disc$suffix")
+    if [ "$path_form" = 404 ] && [ "$root_form" = 404 ]; then
+      ok "OAuth discovery → HTTP 404 at $disc and $disc$suffix (no OAuth here; the connector proceeds on the key$note)"
+    else
+      miss="$disc → HTTP $root_form"
+      [ "$path_form" = 404 ] || miss="$disc$suffix → HTTP $path_form"
+      bad "OAuth discovery: $miss (expected 404 — route /.well-known/ to the server or 404 it at the proxy; FORK.md change 42$note)"
+    fi ;;
+esac
 # 3. GET at the endpoint is 405: it serves POST only (FORK.md change 75; before
 #    it, a keyed GET hung on an SSE stream the per-request transport never
 #    closed). Probed with NO key — the answer comes before authenticate(), and
@@ -207,7 +304,10 @@ esac
 #     checkout. No -L: curl forwards a custom header to whatever host a
 #     redirect names, and this one carries the key.
 #     A Supabase Edge Function fails here too: upstream has no such body.
-hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health")
+#     Read at check 2, which reads the edge's view from it (SMD-2382); again
+#     here when that first read gave no record — then it was the run's first
+#     keyed request, before checks 5–9 warmed the agent registry.
+case "$hj" in "{"*) ;; *) hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health") ;; esac
 facts=$(printf '%s' "$hj" | python3 -c '
 import sys, json
 d = json.load(sys.stdin); db = d.get("database") or {}

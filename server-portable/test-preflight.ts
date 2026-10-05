@@ -200,9 +200,9 @@ console.log("\n[2a] The public origin: configured for OAuth, or keys only (SMD-2
 {
   const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x" };
   const on = await run({ ...base, COMPOSE_PROFILES: "local-models,auth", OB1_PUBLIC_ORIGIN: "https://brain.example.com/" });
-  assert(/✓\s+public origin\s+https:\/\/brain\.example\.com — configured for OAuth: https:\/\/brain\.example\.com\/mcp is advertised while this server reaches the authorization server/.test(row(on.out, "public origin")), `configured with a sound origin: an ok row naming the resource (${row(on.out, "public origin")})`);
+  assert(/✓\s+public origin\s+https:\/\/brain\.example\.com — configured for OAuth: the MCP server advertises https:\/\/brain\.example\.com\/mcp while it reaches the authorization server/.test(row(on.out, "public origin")), `configured with a sound origin: an ok row naming the resource (${row(on.out, "public origin")})`);
   const missing = await run({ ...base, COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: undefined });
-  assert(/!\s+public origin\s+OB1_PUBLIC_ORIGIN is not set, and COMPOSE_PROFILES names auth — this server advertises no OAuth/.test(row(missing.out, "public origin")), `configured without an origin: a warning, not a failure (${row(missing.out, "public origin")})`);
+  assert(/!\s+public origin\s+OB1_PUBLIC_ORIGIN is not set, and COMPOSE_PROFILES names auth — the MCP server advertises no OAuth/.test(row(missing.out, "public origin")), `configured without an origin: a warning, not a failure (${row(missing.out, "public origin")})`);
   assert(/→ Set OB1_PUBLIC_ORIGIN in deploy\/\.env/.test(fix(missing.out, "public origin")), "…with the setting to add");
   const plain = await run({ ...base, COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "http://brain.example.com" });
   assert(/!\s+public origin\s+OB1_PUBLIC_ORIGIN must be https:\/\/ unless its host is loopback/.test(row(plain.out, "public origin")), `configured with plain http off loopback: a warning (${row(plain.out, "public origin")})`);
