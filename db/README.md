@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2411 assertions: 2411 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy-eight (78) migrations applied, and
+`bun test-schema.ts` prints `2429 assertions: 2429 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventy-nine (79) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1035,6 +1035,44 @@ one reconcile took every live row. Rows from before it take `open-brain`, the
 one serving process then, by the column's default, which also covers a server
 from before 078 writing against it. 078 refuses to apply without 069.
 test-upgrade [20ab], test-e2e-sql [18], test-rest-sql [9].
+
+Migration 079 never pairs two tickets Linear links for judgement (SMD-2448):
+`consolidation_candidates` leaves out a pair filed under two different tickets
+that an active Linear link relates in either direction — parent and child,
+blocks, relates (053's link rows; neither a text reference nor `duplicate_of`
+counts: a duplicate is Linear's own verdict that a ticket no longer holds, the
+nearest thing to a supersession the board records, so the judge still sees it).
+A thought's ticket is the one `node_state` reads it under,
+`coalesce(metadata->>'ticket', metadata->>'issue')` (a ticket's row by its
+issue, a dated section filed under it by its ticket), the text exactly; the
+predicate is `consolidation_tickets_linked(a, b)`, one definition for the
+candidate body, the count and the worker's settle reason. Two linked tickets
+are two records whose relationship is already stated, each with its own status;
+one "superseding" the other archives a record that still holds. On the stable
+dogfood brain 107 of the 128 proposals ever recorded pair two tickets Linear
+relates as of 2026-10-04 (94 by relates_to alone), all rejected, and neither
+accepted one does. Unlinked tickets stay candidates: the eval's hand-graded
+set (`evals/consolidate-labels.json`) holds six real supersessions between two
+tickets, a later ticket replacing an earlier one's decision, which the broader
+"any two tickets" rule would lose. That corpus carries no links, so it cannot
+measure what this narrower rule costs; a decision-replacing ticket filed as
+`relates_to` is left out — the residual risk. At the shipped defaults (k 3,
+cosine 0.6) a full pass makes 4.1% fewer judge calls (3,435 → 3,293 over
+1,241 pooled thoughts); the judge's cost on unlinked ticket pairs is
+SMD-1873's. Two rows of one ticket stay candidates, and a
+thought with no identity is judged against a ticket row as before.
+`consolidation_linked_ticket_pairs_left_out(thought, floor)` counts what the rule
+removes for one thought, every other term met; `db/consolidate.ts` turns it
+into judge calls fewer at `--k` (a lower bound: a stale pair past the cut is not
+counted) — in a run's summary, and in `--status` and `--dry-run` over the
+thoughts still to judge (about 6 ms a thought: 7.7 s over the dogfood's whole
+pool) — and settles a stale proposal on two linked tickets naming the rule. Nothing
+is stored: a link written or closed moves the rule at the next pass. The body
+carries `ob1:linked-tickets-not-paired`, which the worker reads before it
+reports the rule and preflight's `lineage` check reads to warn naming 079 when
+063 or 066 is re-applied by hand over it. Not taken: matching a ticket id in
+free text — on the 128 it would leave out 11 more pairs, one of them accepted.
+test-schema [70], test-live [16], test-upgrade [20ac].
 
 ## What changed relative to the guide
 
@@ -2120,7 +2158,11 @@ side of which names the other in `derived_from` (a page and the evidence its
 sections were generated from, a digest and its sources) never judged: a
 derivation says what its input says by construction, and re-deriving is
 `rebuild_derived`'s door, not supersession's (SMD-2292; direct members only,
-the array is one level). Older-only means a pair is reached from its newer
+the array is one level), and, since 079, a pair filed under two different
+tickets that an active Linear link relates (`consolidation_tickets_linked`)
+never judged: two records whose relationship is stated, each with its own
+lifecycle (SMD-2448; unlinked tickets are still judged — a later ticket can
+replace an earlier one's decision). Older-only means a pair is reached from its newer
 side once, with no memory needed; the day rule keeps an import's burst from
 being compared with itself (and means a same-day contradiction is not found,
 stated rather than hidden). The shared-entity restriction is the cheap signal
@@ -3247,8 +3289,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2411 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1057 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2429 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1063 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
