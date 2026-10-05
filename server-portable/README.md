@@ -397,7 +397,9 @@ token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
 `ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
 database's facts (the ledger as `{ present, readable }`, not its names; the
 watermark as `boardSync`, an ISO instant or null) or
-`{ "error": … }` when it cannot answer. It answers within 2.5 s
+`{ "error": … }` when it cannot answer. Beside the record, `oauth` is the
+server's own view of its public origin (SMD-2382): `{ configured, origin,
+advertised }`, which `deploy/smoke.sh` compares with what reaches it. It answers within 2.5 s
 (`HEALTH_DEADLINE_MS`) whatever the database does — still a 200, since the
 process is serving. A database that refuses at once is `database.error`; one
 that never answers (a dropped route) leaves the agent registry unanswered too,
@@ -620,12 +622,28 @@ stripped (`X-Forwarded-Prefix`).
   does not take is a 405 naming those it does.
 - **`GET /openapi.json`** is built from the same two sources, so it lists every
   operation with the input its route parses. **`GET /v1/whoami`** names the
-  calling key, its scope, its agent id and the operations it may call.
+  calling key, its scope, its agent id and the operations it may call, and — forwarded —
+  its `act`.
 - **Authorization** is the key's: `x-brain-key`, `x-access-key` or `Authorization:
   Bearer` — never `?key=`, which only URL-only MCP connectors need. No key or a
   wrong one is a 401 `UNAUTHORIZED`, a revoked one a 401 `REVOKED`, a busy registry
   a 503 `BUSY` with `Retry-After`, a scope that does not reach the operation a 403
   `FORBIDDEN` naming the scope it needs.
+- **Forwarded** (SMD-2284, the ADR's decision 7): beside a caller's key, the
+  `x-brain-forwarder` header carries the key of whoever forwarded it — the MCP
+  server's, a `forward`-scope key that grants nothing (`keygen.ts --scope
+  forward`). The caller's key still decides everything; the forwarder is
+  recorded as `act` (`{name, agentId}`) — on every thought write's audit row
+  (`thought_audit.actor_context.act`) and in `whoami`; the action log, jobs and
+  the query log keep the caller's id alone. Anything but a forward-scope key in
+  that header, an empty one or two of them included, is a 401 `UNAUTHORIZED`
+  with `credential: "forwarder"`, checked before either key reaches the
+  registry; a revoked one a 401 `REVOKED`, a busy registry a 503, each with the
+  same — so a client holding two keys cannot stamp one as the other's carrier.
+  The public `/api` route deletes the header, so it is read only inside the
+  stack (until SMD-2286 nothing sends it). Mint a
+  forwarder under a name never used before — the registry reads a known name
+  with a new digest as that agent's rotation.
 - **Answers.** A success is the operation's value, for a key that can read (a capture
   is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
   vector with the row, false when the egress gate refused the embedding call (on a
@@ -666,13 +684,13 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 623 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, and the board-sync watermark's shape
-bun test-auth.ts          # 139 — scoped, hashed, named keys
-bun test-rest.ts          # 238 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-server.ts        # 628 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, and the board-sync watermark's shape
+bun test-auth.ts          # 141 — scoped, hashed, named keys
+bun test-rest.ts          # 268 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
 bun run test:e2e          # 466 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 135 — the REST core beside the MCP server on one database: every operation through both
+../db/with-postgres.sh bun test-rest-sql.ts  # 149 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 

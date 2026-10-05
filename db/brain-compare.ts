@@ -28,7 +28,8 @@
  * What it reads and why it is HTTP, not SQL:
  *   • Identity — the keyed GET /health body is the whole brain_info record as JSON
  *     (version, commit, tier, releaseRange, the tree's latest migration against the
- *     ledger's highest, schema version, embedding, pgvector, counts, size). version
+ *     ledger's highest, schema version, embedding, pgvector, counts, size; beside it
+ *     the server's `oauth` view, SMD-2382, which compare does not read). version
  *     and commit are the server PROCESS's build facts, in no database — only the
  *     running brain can say them, so identity is an HTTP read by nature.
  *   • Freshness — counts.thoughts and the migration delta come from that same body
