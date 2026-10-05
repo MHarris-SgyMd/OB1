@@ -235,7 +235,9 @@ console.log("\n[2b] A forwarder key (SMD-2284) counts as no client: not a captur
   assert(scopeRows(alone.out).some((l) => /✗/.test(l) && /every key is a forwarder/.test(l)), `a list of forwarders alone fails: no client can authenticate (${scopeRows(alone.out).join(" | ")})`);
   assert(/keygen\.ts --name laptop --scope write/.test(fix(alone.out, "access keys scope")), "…with the command to mint a client's key");
   const legacy = await run({ ...base, MCP_ACCESS_KEYS: line("fwd", "forward"), MCP_ACCESS_KEY: "z".repeat(40) });
-  assert(!scopeRows(legacy.out).some((l) => /every key is a forwarder/.test(l)), `…but not beside the legacy single key, which still authenticates (${scopeRows(legacy.out).join(" | ")})`);
+  assert(!scopeRows(legacy.out).some((l) => /every key is a forwarder|every key is read-only/.test(l)), `…but not beside the legacy single key, which still authenticates, with write scope: neither "a forwarder" nor "read-only" (${scopeRows(legacy.out).join(" | ")})`);
+  const readLegacy = await run({ ...base, MCP_ACCESS_KEYS: line("chatgpt", "read"), MCP_ACCESS_KEY: "z".repeat(40) });
+  assert(!scopeRows(readLegacy.out).some((l) => /every key is read-only/.test(l)), `a read key beside the legacy single key: capture_thought is registered for the legacy key, so not "read-only" (${scopeRows(readLegacy.out).join(" | ")})`);
   const reader = await run({ ...base, MCP_ACCESS_KEYS: [line("fwd", "forward"), line("chatgpt", "read")].join(",") });
   assert(scopeRows(reader.out).some((l) => /!/.test(l) && /every key is read-only/.test(l)), `a forwarder beside a read key: every CLIENT key is read-only, said (${scopeRows(reader.out).join(" | ")})`);
   const writers = await run({ ...base, MCP_ACCESS_KEYS: [line("fwd", "forward"), line("laptop", "write"), line("phone", "write")].join(",") });

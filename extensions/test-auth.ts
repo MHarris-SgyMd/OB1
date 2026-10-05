@@ -540,6 +540,9 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
   assert((await run(s, WRITE_KEY, false)).status === 401, "the removed key stops working");
   assert(passed(await run(s, READ_KEY, true)), "…and the other keeps working");
 
+  env(s, `${KEYS},mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`);
+  assert((await run(s, FORWARD_KEY, true)).status === 401, "a configured forwarder key is refused with 401, even for a dry run — it grants nothing, and no vendored worker admits it (SMD-2284)");
+
   env(s, undefined, LEGACY_KEY);
   assert(passed(await run(s, LEGACY_KEY, false)), `the legacy single ${s.legacy} still authenticates, as write`);
   assert((await run(s, "nope", false)).status === 401, "…and a wrong legacy key is refused");

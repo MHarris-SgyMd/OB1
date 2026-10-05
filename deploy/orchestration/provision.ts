@@ -807,6 +807,12 @@ async function selfCheck(): Promise<number> {
   expect("a key as `Bearer <key>` is seen", throws(() => checkBrainKey({ name: "a", type: "httpHeaderAuth", data: { name: "Authorization", value: `Bearer ${wr}` } }, env), /WRITE-scope/));
   expect("a key in a URL's ?key= is seen", throws(() => checkBrainKey({ name: "u", type: "httpQueryAuth", data: { url: `http://server:8000/mcp?key=${wr}&x=1` } }, env), /WRITE-scope/));
   expect("a key nested under another field is seen", throws(() => checkBrainKey({ name: "n", type: "custom", data: { outer: { inner: [cap] } } }, env), /declares no brainScope/));
+  // A forwarder (SMD-2284): refused whatever the template declares — the only guard when it declares forward itself.
+  const fwd = "f".repeat(64);
+  const fwdEnv = { ...env, MCP_ACCESS_KEYS: `${env.MCP_ACCESS_KEYS},mcp-forwarder:forward:${hashKey(fwd)}` };
+  for (const declared of [undefined, "capture", "forward"]) {
+    expect(`a forwarder key is refused (brainScope ${declared ?? "none"})`, throws(() => checkBrainKey(brain(fwd, declared), fwdEnv), /FORWARD-scope/));
+  }
 
   const tricky = 'a"b\\c\nd';
   expect("render escapes a value into JSON", JSON.parse(render('{"v":"${K}"}', { K: tricky }, "t")).v === tricky);

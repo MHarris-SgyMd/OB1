@@ -37,8 +37,10 @@
  *   client's key decides what the request may do, and the forwarder's names
  *   who carried it. No server admits it as a caller — the core servers admit
  *   CLIENT_SCOPES, and the vendored copies DEFAULT_ADMIT — so alone it is
- *   refused like an unknown key everywhere, and the REST core reads it only in
- *   its own forwarder slot. Migration 079 lets the registry record it.
+ *   refused like an unknown key everywhere; the REST core's forwarder slot,
+ *   the one place it will be read, is SMD-2284's PR 4b, and until then nothing
+ *   reads it. The registry records it with no scope (agents.ts, recordedScope):
+ *   049's CHECK does not hold `forward`, and no migration widens it.
  *
  *   Named keys, revocable independently. One per client, so retiring the key you
  *   pasted into a laptop does not break the rest.
@@ -84,8 +86,8 @@ export type Scope = "read" | "write" | "capture" | "forward";
 export const SCOPES: readonly Scope[] = Object.freeze(["read", "write", "capture", "forward"]);
 /**
  * The scopes a caller may hold: every one but `forward`, which grants nothing
- * and is read only in the REST core's forwarder slot (SMD-2284). What the core
- * servers admit.
+ * and is for the REST core's forwarder slot alone (SMD-2284's PR 4b). What the
+ * core servers admit.
  */
 export const CLIENT_SCOPES: readonly Scope[] = Object.freeze(["read", "write", "capture"]);
 /**

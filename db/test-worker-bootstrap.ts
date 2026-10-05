@@ -135,6 +135,9 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
 
   const notListed = await workerIdentity(UNUSED_URL, { OB1_WORKER_KEY: "raw", MCP_ACCESS_KEYS: `someone:write:${hashKey("a-different-key")}` }, { noKeyWarning: "unused" });
   ok(!notListed.ok && /OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS/.test(notListed.message), "a key absent from MCP_ACCESS_KEYS is refused — the server would refuse it too");
+  // A forwarder (SMD-2284) is refused before a store is opened: no identity, and no `forward` row for 049's CHECK.
+  const forwarder = await workerIdentity(UNUSED_URL, { OB1_WORKER_KEY: "raw", MCP_ACCESS_KEYS: `mcp-forwarder:forward:${hashKey("raw")}` }, { noKeyWarning: "unused" });
+  ok(!forwarder.ok && /"mcp-forwarder", a forward-scope key — it grants nothing and names no worker/.test(forwarder.message), `a forwarder key is refused as the worker's identity (${forwarder.ok ? "accepted" : forwarder.message.trim().slice(0, 80)})`);
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);

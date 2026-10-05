@@ -305,6 +305,32 @@ console.log("\n[8b] GET /health says what the brain is to a key that may read it
   }
 }
 
+console.log("\n[8c] A forwarder key beside a client's key is passed over at every route the MCP server answers — the client's key is the caller (SMD-2284)");
+{
+  // presentedKeys() tries x-brain-key before x-access-key, so the forwarder is
+  // tried first: a route admitting it would take it for the caller and answer
+  // as a key that may do nothing (`ok`, or no tools). Each of index.ts's five
+  // authenticateRequest sites, held by the answer the client's key gets alone.
+  const send = (path: string, method: string, headers: Record<string, string>) => fetch(`${BASE}${path}`, { method, headers });
+  const shape = async (r: Response) => ({ status: r.status, type: r.headers.get("content-type") ?? "", body: await r.text() });
+  const JOB = "00000000-0000-4000-8000-000000000000";
+  for (const [path, method, client] of [["/health", "GET", READ_KEY], ["/worker-status", "GET", READ_KEY], ["/worker-retry-failed", "POST", WRITE_KEY], [`/jobs/${JOB}`, "GET", READ_KEY]] as const) {
+    const alone = await shape(await send(path, method, { "x-access-key": client }));
+    const beside = await shape(await send(path, method, { "x-brain-key": FORWARD_KEY, "x-access-key": client }));
+    assert(alone.body !== "ok" && beside.status === alone.status && beside.type === alone.type && beside.body !== "ok",
+      `${method} ${path}: a forwarder before the client's key answers as the client's key alone (${alone.status} ${alone.type.split(";")[0]}; beside ${beside.status} ${JSON.stringify(beside.body.slice(0, 40))})`);
+  }
+  const r = await fetch(BASE, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": FORWARD_KEY, "x-access-key": READ_KEY },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list", params: {} }),
+  });
+  const t = await r.text();
+  const line = t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
+  const tools = ((JSON.parse(line).result?.tools ?? []) as { name: string }[]).map((x) => x.name).sort();
+  assert(tools.join() === [...visibleToolNames({ scope: "read" })].sort().join(), `the MCP endpoint: a forwarder before a read key lists the read tools (${tools.length})`);
+}
+
 console.log("\n[9] Rejection still uses the JSON-RPC envelope");
 {
   const r = await fetch(BASE, {

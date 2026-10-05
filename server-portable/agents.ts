@@ -167,7 +167,10 @@ function cacheKey(keyHash: string, label: string): string {
  * names read, write and capture, and a migration widening it cannot help:
  * `migrate.ts --reapply` runs 049 again, whose ADD CONSTRAINT would then fail
  * on a `forward` row. NULL passes the CHECK, so a forwarder still gets its
- * stable agent id and a revocation in the registry still reaches it.
+ * stable agent id and a revocation in the registry still reaches it. A NULL is
+ * recorded on the key's first sight: resolve_agent keeps a recorded scope when
+ * sent none (054's COALESCE), so a digest re-listed as a forwarder keeps the
+ * scope it last had — mint a forwarder fresh, as keygen.ts does.
  */
 function recordedScope(principal: Principal): string | undefined {
   return principal.scope === "forward" ? undefined : principal.scope;

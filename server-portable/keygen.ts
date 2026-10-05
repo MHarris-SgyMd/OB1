@@ -48,9 +48,9 @@ if (minted === "read") {
   console.log(`  from a machine you do not sit at: a leak of this key can add, not read.\n`);
 } else if (minted === "forward") {
   console.log(`  Forward: this key grants nothing by itself — every server refuses it as a`);
-  console.log(`  caller. It is the MCP server's own key when it forwards a client's key to the`);
-  console.log(`  REST core: the client's key decides what the request may do, this one names`);
-  console.log(`  who carried it. Give it to the MCP server alone, never to a client.\n`);
+  console.log(`  caller. It is for the MCP server's own use when it forwards a client's key to`);
+  console.log(`  the REST core (SMD-2284's PR 4b; until then nothing reads it): the client's key`);
+  console.log(`  decides what the request may do, this one names who carried it. Never a client's.\n`);
 } else {
   console.log(`  Write scope: this key can capture and modify thoughts. Prefer --scope read`);
   console.log(`  for anything that only needs to search, --scope capture for a hook that`);
