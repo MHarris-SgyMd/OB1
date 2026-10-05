@@ -791,10 +791,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * tickets — where the body carries 078's sentinel, not merely where its
    * count stands: 063 or 066 re-applied by hand over 078 keeps the count and
    * puts back a body that judges such pairs (preflight warns of that state).
-   * What is reported is judge calls not spent: per thought, the --k cut over
+   * What is reported is judge calls fewer: per thought, the --k cut over
    * 066's list less the cut over 078's — least(k, kept + left out) − kept,
-   * kept already cut at k. A pair beyond the cut cost nothing under 066
-   * either, so it is not counted.
+   * kept already cut at k. A lower bound: a stale proposal beyond the cut,
+   * which 067 has the pass judge anyway, cost a call under 066 and is settled
+   * without one under 078 — not counted (rare: it needs a stale row on two
+   * tickets past the k nearest).
    */
   const [{ has_078: HAS_078 }] = (await sql`
     SELECT COALESCE((SELECT prosrc LIKE '%ob1:distinct-tickets-not-paired%' FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')), false)
@@ -877,8 +879,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let judged = 0;
   let llmMs = 0;
   const totals = { pairs: 0, agree: 0, unrelated: 0, conflict: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
-    // 078 (SMD-2448): the judge calls the candidate rule did not spend on a pair of two different tickets.
-    ticketCalls: 0,
+    // 078 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
+    ticketCalls: 0, ticketCallsUnread: 0,
     // 067: the stale rows this run met — replaced in place (a conflict found
     // again), settled after a judgement of no conflict, settled because the
     // pair no longer meets the candidate rule, left waiting for a vector, or
@@ -1202,7 +1204,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             let stopAfter = false;
             // 078: read once per claim, before the judge writes anything (a proposal it records holds its pair out of the list),
             // and added when the thought is finished — not again for a retry after a pause, nor for one the hard stop abandons.
-            const ticketCalls = HAS_078 ? (await ticketCallsSaved("SELECT $1::uuid AS id", row.id)).n : 0;
+            // A report, never the pass's: a failed read counts 0 and is said, where a throw here would stop every worker (second review pass).
+            const ticketCalls = HAS_078 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 outcome = await processRow(row);
@@ -1237,7 +1240,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             }
             if (hardStopped) return;
             judged++;
-            totals.ticketCalls += ticketCalls;
+            if (ticketCalls === null) totals.ticketCallsUnread++;
+            else totals.ticketCalls += ticketCalls;
             if (stopAfter) err(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
@@ -1414,7 +1418,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   out(
     `  ${totals.pairs} pair(s) judged${judged ? ` — ${(totals.pairs / judged).toFixed(2)} per thought judged, ${Math.round((totals.pairs / judged) * 1000)} calls per thousand thoughts` : ""}; ` +
       `${totals.noCandidates} thought(s) had no candidate; verdicts: ${totals.agree} agree, ${totals.unrelated} unrelated, ${totals.conflict} conflict` +
-      (HAS_078 ? `; ${totals.ticketCalls} judge call(s) not spent on a pair of two different tickets (078)` : "")
+      (HAS_078 ? `; ${totals.ticketCalls} judge call(s) fewer — pairs of two different tickets left out at --k ${K} (078${totals.ticketCallsUnread ? `; ${totals.ticketCallsUnread} thought(s) not counted, the read failed` : ""})` : "")
   );
   out(
     `  ${totals.proposed} proposal(s) recorded (${totals.undirected} without a direction)` +

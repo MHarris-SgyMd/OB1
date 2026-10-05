@@ -1041,7 +1041,8 @@ candidates (two writers of one identity can be genuine duplicates); a thought
 with no identity is judged against a ticket row as before.
 `consolidation_ticket_pairs_left_out(thought, floor)` counts what the rule
 removes for one thought, every other term met; `db/consolidate.ts` turns it
-into judge calls not spent at `--k` — in a run's summary, and in `--status`
+into judge calls fewer at `--k` (a lower bound: a stale pair past the cut is not
+counted) — in a run's summary, and in `--status`
 and `--dry-run` over the thoughts still to judge (one neighbour read each:
 3.3 s for the dogfood's pool) — and settles a stale proposal on two tickets
 naming the rule. The body carries `ob1:distinct-tickets-not-paired`, which the
@@ -3266,7 +3267,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2425 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1061 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1063 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

@@ -54,9 +54,10 @@
 --   where the body carries it. consolidation_ticket_pairs_left_out(thought,
 --   floor) counts the pairs this rule removes for one thought — every other
 --   term of the candidate rule met, at or above the floor, with no p_k cut;
---   db/consolidate.ts turns it into judge calls not spent (the k cut over
---   066's list less the cut over this one) for a run's summary and for
---   --status / --dry-run. Its body is the candidate body copied with the new
+--   db/consolidate.ts turns it into judge calls fewer (the k cut over 066's
+--   list less the cut over this one — a lower bound: a stale pair past the
+--   cut, which 067 has the pass judge anyway, is not counted) for a run's
+--   summary and for --status / --dry-run. Its body is the candidate body copied with the new
 --   condition turned round, so the kept list and the count partition 066's:
 --   test-schema [70] holds the sum for every thought of a corpus that
 --   exercises each shared term. (One body behind both was weighed: it would

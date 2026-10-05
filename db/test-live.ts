@@ -5487,8 +5487,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       return id;
     };
     await ticket("SMD-9001: tickets bill monthly", { source: "linear", issue: "SMD-9001" }, 10);
-    const other = await ticket("SMD-9002: tickets bill on the first", { source: "linear", issue: "SMD-9002" }, 10);
-    await ticket("## Update: SMD-9002's billing moved", { source: "linear", ticket: "SMD-9002" }, 10);
+    await ticket("SMD-9002: tickets bill on the first", { source: "linear", issue: "SMD-9002" }, 10);
+    const section = await ticket("## Update: SMD-9002's billing moved", { source: "linear", ticket: "SMD-9002" }, 10);
     await ticket("a note: tickets and billing", { source: "test" }, 10);
     const newerT = await ticket("SMD-9001: tickets bill weekly now", { source: "linear", issue: "SMD-9001" }, 0);
     const line = (out: string, re: RegExp) => out.split("\n").find((l) => re.test(l))?.trim();
@@ -5502,16 +5502,30 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("078_") });
     assert(/tickets: pairs of two different tickets are still judged — consolidation_candidates is from before migration 078/.test(undone.out),
       `with 066 re-applied by hand over 078 the count still stands but the rule is gone, and --status says such pairs are still judged (${line(undone.out, /tickets:/)})`);
+    // One thought claimed and judged: the other four are pending now, and the
+    // count still covers them (the pending arm of the set — second review pass).
     const from = seen.length;
+    const oneT = await consolidate("--workers", "1", "--limit", "1");
+    const afterOne = await consolidate("--status");
+    assert(oneT.code === 0 && /tickets: [01] judge call\(s\) fewer over the 4 thought\(s\) still to judge/.test(afterOne.out),
+      `after a run of one, --status counts over the four thoughts left pending (${line(afterOne.out, /tickets:/)})`);
     const runT = await consolidate("--workers", "1");
     const judgedT = seen.slice(from);
-    assert(runT.code === 0 && judgedT.length === 2 && judgedT.every((p) => !/SMD-9002/.test(p.a + p.b)) && /; 1 judge call\(s\) not spent on a pair of two different tickets \(078\)/.test(runT.out),
-      `the run judges the newer SMD-9001 row against its own ticket's row and the note, never SMD-9002's row or its section, and says one call was saved (${judgedT.length} judged; ${line(runT.out, /pair\(s\) judged/)})`);
-    // A proposal on the two tickets gone stale (judged before 078, a text
-    // moved since): the next pass re-pools the newer row, does not find the
-    // pair, and settles the row naming 078's rule (067's leftover path).
-    const [{ id: staleT }] = await sql`SELECT record_supersession_proposal(${other}::uuid, ${newerT}::uuid, 'newer_supersedes_older', 0.8, 'judged before 078', 0.9, ${KEY}, NULL) AS id`;
+    const oneSaved = Number(/; (\d) judge call\(s\) fewer/.exec(oneT.out)?.[1] ?? NaN), restSaved = Number(/; (\d) judge call\(s\) fewer/.exec(runT.out)?.[1] ?? NaN);
+    assert(runT.code === 0 && judgedT.length === 2 && judgedT.every((p) => !/SMD-9002/.test(p.a + p.b)) && oneSaved + restSaved === 1
+        && /judge call\(s\) fewer — pairs of two different tickets left out at --k 3 \(078\)/.test(runT.out),
+      `the two runs judge the newer SMD-9001 row against its own ticket's row and the note, never SMD-9002's row or its section, and between them say one call was saved (${judgedT.length} judged; ${oneSaved} + ${restSaved})`);
+    // A proposal from SMD-9002's dated section — a thought filed under the
+    // ticket by metadata.ticket alone — gone stale (judged before 078, a text
+    // moved since): --status counts the newer row the pass re-pools for it
+    // (the stale arm of the set), and the pass does not find the pair and
+    // settles the row naming 078's rule (067's leftover path, the stale
+    // read's key node_state's — second review pass).
+    const [{ id: staleT }] = await sql`SELECT record_supersession_proposal(${section}::uuid, ${newerT}::uuid, 'newer_supersedes_older', 0.8, 'judged before 078', 0.9, ${KEY}, NULL) AS id`;
     await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${staleT}::uuid`;
+    const staleStatus = await consolidate("--status");
+    assert(/tickets: \d judge call\(s\) fewer over the 1 thought\(s\) still to judge/.test(staleStatus.out),
+      `--status counts over the one thought the pass re-pools for the stale proposal (${line(staleStatus.out, /tickets:/)})`);
     const settleRun = await consolidate("--workers", "1");
     const [settled] = await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${staleT}::uuid`;
     assert(settleRun.code === 0 && settled.status === "rejected" && /no longer a candidate pair — two different tickets — each its own record \(078's rule\)/.test(String(settled.review_note)),
