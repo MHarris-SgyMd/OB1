@@ -45,7 +45,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { extractEntities, extractionKey, windowingFor, type Extraction } from "../server-portable/entities.ts";
+import { extractEntities, extractionKey, TOKEN_REPEATS, windowingFor, type Extraction } from "../server-portable/entities.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 import { loadLinearCorpus, insertLinearThought, entityAnswersPath, readEntityAnswers } from "./linear-corpus.ts";
 
@@ -234,7 +234,7 @@ if (!has("corpus")) {
   const labelled = CASES.reduce((n, c) => n + c.entities.length, 0);
   // The label is the windowing's, not the flag's: with OB1_METADATA_REASONING
   // on nothing streams whatever the flag (second review pass).
-  const answers = UNSTREAMED ? "read whole (--unstreamed)" : windowingFor(cfg).streamAbort ? "streamed, a runaway aborted at the third copy of one item" : "read whole (reasoning on: nothing streams)";
+  const answers = UNSTREAMED ? "read whole (--unstreamed)" : windowingFor(cfg).streamAbort ? `streamed, a runaway aborted at the third copy of one item or a word repeated ${TOKEN_REPEATS} times` : "read whole (reasoning on: nothing streams)";
   console.log(`\n  ${CASES.length} captures, ${labelled} labelled entities; scored over (type, normalised name) through the real write path; answers ${answers}\n`);
   console.log("  model                  prec   recall   tp  fp  fn  forbidden  relations  malformed  rejected   sec");
   console.log("  " + "─".repeat(104));

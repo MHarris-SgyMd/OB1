@@ -412,10 +412,9 @@ export const REPEAT_UNIT_MAX = 32;
  * whitespace, which an answer in progress can be indented with.
  */
 export function repeatedTail(text: string, opts: { cut?: boolean } = {}): string | null {
-  if (opts.cut) {
-    const ws = /\s+$/.exec(text.slice(-4 * TOKEN_REPEATS));
-    if (ws !== null && ws[0].length >= TOKEN_REPEATS) return "whitespace";
-  }
+  // A trailing run of TOKEN_REPEATS or more whitespace characters is the last
+  // TOKEN_REPEATS characters all whitespace.
+  if (opts.cut && text.length >= TOKEN_REPEATS && /^\s+$/.test(text.slice(-TOKEN_REPEATS))) return "whitespace";
   const need = TOKEN_REPEATS * REPEAT_UNIT_MAX;
   // Four times what the longest unit needs, before the whitespace goes: an
   // answer that is mostly whitespace yields fewer characters, and only the
