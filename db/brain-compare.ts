@@ -254,8 +254,10 @@ export interface BrainReading {
   newestCapture: string | null;
   /**
    * The board-sync watermark (SMD-2261): the newest Linear updatedAt the brain
-   * reflects, an ISO instant; null when it holds no Linear-sourced row — or when
-   * it was not read, and then `boardSyncUnread` says why.
+   * reflects, an ISO instant; null when no thought carries one — or when it was
+   * not read, and then `boardSyncUnread` says why. A high-water mark: it says
+   * the newest board move the brain reflects, not that it reflects every move
+   * before it.
    */
   boardSync: string | null;
   /** Why the watermark was not read (an older server, a read that did not answer); null when it was. */
@@ -283,23 +285,33 @@ export async function readBrain(ep: BrainEndpoint): Promise<BrainReading> {
 
 /**
  * The watermark the record carries, or why it does not: a server older than
- * SMD-2261 has no field, and a read that did not answer is named in `unread`.
- * Neither is "no Linear rows" — that is a null the record states.
+ * SMD-2261 has no field, a read that did not answer is named in `unread`, and a
+ * value that is not the server's ISO instant is not read here either. None of
+ * them is "no watermark" — that is a null the record states.
  */
 export function boardSyncOf(info: BrainInfo): Pick<BrainReading, "boardSync" | "boardSyncUnread"> {
   const db = dbOf(info);
   if (!db) return { boardSync: null, boardSyncUnread: "the database did not answer" };
   if (!("boardSync" in db)) return { boardSync: null, boardSyncUnread: "the server is older than SMD-2261" };
   if (db.unread?.boardSync) return { boardSync: null, boardSyncUnread: "the brain did not read it" };
-  return { boardSync: typeof db.boardSync === "string" ? db.boardSync : null, boardSyncUnread: null };
+  const w: unknown = db.boardSync;
+  if (w === null) return { boardSync: null, boardSyncUnread: null };
+  if (typeof w !== "string" || !ISO_INSTANT.test(w) || Number.isNaN(Date.parse(w))) return { boardSync: null, boardSyncUnread: "the record's value is not an ISO instant" };
+  return { boardSync: w, boardSyncUnread: null };
 }
+
+/** The watermark's one shape, as brain-info.ts's boardSyncValue sends it. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
  * How b's watermark stands against a's: whole days apart (b − a; negative when b
- * is behind), or one side holding no Linear rows while the other does. Null when
- * either side was not read, both hold none, or a value does not parse — an unread
- * axis is not a delta. Rounded as captureDaysApart rounds, so a canary half a day
- * or more behind reads as a day.
+ * is older), or one side holding none while the other does. Null when either side
+ * was not read or both hold none — an unread axis is not a delta. Rounded as
+ * captureDaysApart rounds, half a day or more reading as a day, by magnitude so
+ * the standing does not depend on which brain is a (Math.round(-0.5) is -0,
+ * Math.round(0.5) is 1). It is the gap between the two newest board moves each
+ * reflects, not how long a brain has been stale: a canary refreshed after a quiet
+ * week reads seven days older the hour the board next moves.
  */
 export type BoardSyncDelta = { days: number } | { none: "a" | "b" };
 export function boardSyncDelta(a: BrainReading, b: BrainReading): BoardSyncDelta | null {
@@ -309,8 +321,8 @@ export function boardSyncDelta(a: BrainReading, b: BrainReading): BoardSyncDelta
   if (b.boardSync === null) return { none: "b" };
   const ta = Date.parse(a.boardSync);
   const tb = Date.parse(b.boardSync);
-  if (Number.isNaN(ta) || Number.isNaN(tb)) return null;
-  return { days: Math.round((tb - ta) / 86_400_000) };
+  const d = (tb - ta) / 86_400_000;
+  return { days: Math.sign(d) * Math.round(Math.abs(d)) || 0 };
 }
 
 /** Whether a board-sync standing is a delta the report and the exit code count. */
@@ -699,13 +711,14 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
     parts.push(`${b.label}'s newest capture is ${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"} ${days < 0 ? "older" : "newer"}`);
   }
   // The board's status moves change no count, capture or migration: a brain that
-  // missed a day of them is caught here alone (SMD-2261).
+  // missed a day of them is caught here alone (SMD-2261). Worded as the capture
+  // gap is — the watermarks' gap, not a staleness the brain has been in.
   const board = boardSyncDelta(a, b);
   if (board && "none" in board) {
-    parts.push(`${board.none === "a" ? a.label : b.label} holds no board-sync rows`);
+    parts.push(`${board.none === "a" ? a.label : b.label} holds no board-sync watermark`);
   } else if (board && board.days !== 0) {
     const n = Math.abs(board.days);
-    parts.push(`${b.label} is ${n} day${n === 1 ? "" : "s"} ${board.days < 0 ? "behind" : "ahead of"} ${a.label} on board sync`);
+    parts.push(`${b.label}'s board-sync watermark is ${n} day${n === 1 ? "" : "s"} ${board.days < 0 ? "older" : "newer"}`);
   }
   const ca = a.thoughts;
   const cb = b.thoughts;
@@ -718,8 +731,9 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
     // (review pass 1: it read "same migration and thought count" over two nulls).
     const migKnown = migrationDelta !== null;
     const countsKnown = a.thoughts !== null && b.thoughts !== null;
-    const boardKnown = a.boardSyncUnread === null && b.boardSyncUnread === null;
-    if (migKnown && countsKnown) return `current with each other — same migration and thought count${boardKnown ? ", board sync under half a day apart" : ""}.`;
+    // Claimed only over two watermarks compared: none on both sides is not "apart".
+    const boardKnown = board !== null && "days" in board;
+    if (migKnown && countsKnown) return `current with each other — same migration and thought count${boardKnown ? ", board-sync watermarks under half a day apart" : ""}.`;
     const unread = [migKnown ? null : "migration ledger", countsKnown ? null : "thought count"].filter(Boolean).join(" and ");
     return `no delta on what could be read; ${unread} unread on one side, so freshness is not certain.`;
   }

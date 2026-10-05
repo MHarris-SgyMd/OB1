@@ -275,14 +275,26 @@ function frame(msg: unknown, sse?: boolean): Response {
   // The board-sync watermark (SMD-2261): the incident — same count, same newest
   // capture, same migration, but a day of the board's status moves missed.
   const behind = freshnessVerdict(a, mk({ label: "open-brain-canary", boardSync: "2026-09-23T11:00:00.000Z" }), 0);
-  ok(behind === "open-brain-canary is 1 day behind open-brain on board sync.", `verdict names a board-stale peer on the watermark alone (${behind})`);
+  ok(behind === "open-brain-canary's board-sync watermark is 1 day older.", `verdict names a board-stale peer on the watermark alone (${behind})`);
   const ahead = freshnessVerdict(a, mk({ label: "peer", boardSync: "2026-09-27T12:00:00.000Z" }), 0);
-  ok(/peer is 3 days ahead of open-brain on board sync/.test(ahead), `verdict names a peer ahead on board sync (${ahead})`);
+  ok(/peer's board-sync watermark is 3 days newer/.test(ahead), `verdict names a peer ahead on board sync (${ahead})`);
   // Under half a day apart is lockstep, and the claim says the watermark was compared.
   const near = freshnessVerdict(a, mk({ label: "peer", boardSync: "2026-09-24T01:00:00.000Z" }), 0);
-  ok(near === "current with each other — same migration and thought count, board sync under half a day apart.", `watermarks under half a day apart read current (${near})`);
+  ok(near === "current with each other — same migration and thought count, board-sync watermarks under half a day apart.", `watermarks under half a day apart read current (${near})`);
+  // Neither brain holds a watermark: no delta, and no claim about watermarks that do not exist.
+  const neither = freshnessVerdict(mk({ boardSync: null }), mk({ label: "peer", boardSync: null }), 0);
+  ok(neither === "current with each other — same migration and thought count.", `two brains with no watermark claim nothing about one (${neither})`);
+  // By magnitude: the standing does not depend on which brain is a.
+  const at = (h: number) => mk({ boardSync: new Date(Date.parse(SYNCED) + h * 3_600_000).toISOString() });
+  const days = [12, -12, 36, -36, 11, -11].map((h) => { const d = boardSyncDelta(mk({}), at(h)); return d && "days" in d ? d.days : "x"; });
+  ok(days.join(",") === "1,-1,2,-2,0,0", `whole days by magnitude, symmetric in a and b (${days.join(",")})`);
   const none = freshnessVerdict(a, mk({ label: "fresh", boardSync: null }), 0);
-  ok(/fresh holds no board-sync rows/.test(none), `a peer with no Linear rows is named (${none})`);
+  ok(/fresh holds no board-sync watermark/.test(none), `a peer with no watermark is named (${none})`);
+  // Either side: a's none named as a's, a's unread no delta (review pass 1: only b's side was driven).
+  const aNone = freshnessVerdict(mk({ label: "bare", boardSync: null }), mk({ label: "peer" }), 0);
+  ok(/bare holds no board-sync watermark/.test(aNone), `a's missing watermark is named as a's (${aNone})`);
+  const aUnread = freshnessVerdict(mk({ boardSync: null, boardSyncUnread: "the server is older than SMD-2261" }), mk({ label: "peer", boardSync: "2026-09-20T12:00:00.000Z" }), 0);
+  ok(aUnread === "current with each other — same migration and thought count.", `a's unread watermark is no delta and no claim (${aUnread})`);
   // An unread side is not a delta, and "current" does not claim the watermark.
   const older = freshnessVerdict(a, mk({ label: "old", boardSync: null, boardSyncUnread: "the server is older than SMD-2261" }), 0);
   ok(older === "current with each other — same migration and thought count.", `an unread watermark is no delta and no claim (${older})`);
@@ -299,6 +311,11 @@ function frame(msg: unknown, sse?: boolean): Response {
   if (!("error" in unreadInfo.database)) unreadInfo.database.unread = { boardSync: { reason: "timeout", message: "canceling statement due to statement timeout" } };
   ok(/did not read/.test(boardSyncOf(unreadInfo).boardSyncUnread ?? ""), "boardSyncOf: a read named in unread is unread, not no rows");
   ok(/did not answer/.test(boardSyncOf(baseInfo({ database: { error: "down" } })).boardSyncUnread ?? ""), "boardSyncOf: a database that did not answer is unread");
+  // A value that is not the server's ISO instant is unread, not "no watermark".
+  const odd = ["2026-09-24", "yesterday", "2026-13-40T00:00:00.000Z"].map((w) => boardSyncOf(baseInfo({ boardSync: w })));
+  const num = baseInfo({});
+  if (!("error" in num.database)) (num.database as { boardSync: unknown }).boardSync = 1727179200000;
+  ok([...odd, boardSyncOf(num)].every((r) => r.boardSync === null && /not an ISO instant/.test(r.boardSyncUnread ?? "")), "boardSyncOf: a malformed or non-string value is unread, not no watermark");
 }
 
 // trimBase: one or many trailing slashes removed.
@@ -596,7 +613,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok((await drift({})) === 0, "runCompare exits 0 when the two brains are identical");
   // SMD-2261: the watermark alone moves the gate — same count, capture and ledger.
   ok((await drift({ boardSync: "2026-09-23T12:00:00.000Z" })) === 1, "runCompare exits 1 on a board-sync watermark a day behind, nothing else differing");
-  ok((await drift({ boardSync: null })) === 1, "runCompare exits 1 when one brain holds no board-sync rows");
+  ok((await drift({ boardSync: null })) === 1, "runCompare exits 1 when one brain holds no board-sync watermark");
   ok((await drift({ boardSync: "2026-09-24T08:00:00.000Z" })) === 0, "runCompare exits 0 on watermarks under half a day apart");
   ok((await drift({ boardSync: "absent" })) === 0, "runCompare exits 0 when a brain older than SMD-2261 sends no watermark");
 }
@@ -610,6 +627,12 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     ok(out.includes(`  board sync: a=${SYNCED}  b=unread`), `the Freshness section prints each watermark, an older brain's as unread (${out.split("\n").find((l) => l.includes("board sync"))})`);
     ok(!/not on the read surface/.test(out), "the board-sync out-of-reach note is gone");
   } finally { a.server.stop(true); b.server.stop(true); }
+  const c = startFake({ info: baseInfo({ boardSync: null }), newest: "9/24/2026", hits: {} });
+  const d = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  try {
+    const out = renderComparison(await compareBrains(c.ep, d.ep, {}));
+    ok(out.includes(`  board sync: a=none  b=${SYNCED}`), `a brain with no watermark prints none, not unread (${out.split("\n").find((l) => l.includes("board sync"))})`);
+  } finally { c.server.stop(true); d.server.stop(true); }
 }
 
 // ---------------------------------------------------------------------------

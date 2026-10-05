@@ -103,9 +103,12 @@ export interface DatabaseFacts {
    * The board-sync watermark (SMD-2261): the newest Linear `updatedAt` any
    * thought reflects — max metadata.linear_updated_at, which sync-linear.ts
    * writes — as an ISO instant in UTC. Null when no thought carries one, when
-   * not read (`unread` names it) or not asked (`stats: false`). It moves when
-   * the board does, so a quiet board leaves it old on a current brain: it says
-   * how far behind the board a brain is, not whether its sync is alive.
+   * not read (`unread` names it) or not asked (`stats: false`). A high-water
+   * mark: the newest board move the brain reflects, not proof it reflects every
+   * move before it. It moves when the board does, so a quiet board leaves it old
+   * on a current brain, and it says nothing of whether the sync is alive. It is
+   * a thought's metadata — a write key can set it to any instant up to an hour
+   * from now — not a fact the database keeps.
    */
   boardSync: string | null;
   /** Every HNSW index on a table on this connection's search_path. */
@@ -166,13 +169,19 @@ const COUNT_SQL: Record<CountedTable, (sql: SqlTag) => Promise<{ n: number }[]>>
  * counts, and only one Postgres reads as a timestamp: a malformed value, a bare
  * date or a word timestamptz accepts ('infinity', 'now') is passed over rather
  * than failing the read or winning the max — the value is a thought's
- * metadata, and the record carries it unguarded (render.ts's AS_RECORD). The
- * pattern is spelled with [0-9], not \d: a Bun template drops the backslash.
- * `metadata ? key` is the GIN index 001 builds.
+ * metadata, and the record carries it unguarded (render.ts's AS_RECORD). So is
+ * an instant past an hour from now: Linear's updatedAt is never in the future,
+ * and a capture key's far-future value (any write key can set the key) would
+ * otherwise win the max for good — or, past 9999 in UTC, render a shape
+ * boardSyncValue refuses and leave the field unread for good (review pass 1).
+ * The cast sits in an inner CASE, after the validity test, because AND does
+ * not order its operands. The pattern is spelled with [0-9], not \d: a Bun
+ * template drops the backslash. `metadata ? key` is the GIN index 001 builds.
  */
 const BOARD_SYNC_SQL = (sql: SqlTag) => sql`
   SELECT to_char(max(CASE WHEN v ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)$'
-                           AND pg_input_is_valid(v, 'timestamptz') THEN v::timestamptz END) AT TIME ZONE 'UTC',
+                           AND pg_input_is_valid(v, 'timestamptz')
+                          THEN CASE WHEN v::timestamptz <= now() + interval '1 hour' THEN v::timestamptz END END) AT TIME ZONE 'UTC',
                  'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS w
     FROM (SELECT metadata->>'linear_updated_at' AS v FROM thoughts WHERE metadata ? 'linear_updated_at') s`;
 
