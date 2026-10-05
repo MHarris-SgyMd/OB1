@@ -191,7 +191,7 @@ const BOARD_SYNC_SQL = (sql: SqlTag) => sql`
                  'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS w
     FROM (SELECT metadata->>'linear_updated_at' AS v FROM thoughts WHERE metadata ? 'linear_updated_at') s`;
 
-/** The watermark as the record carries it: the read's instant, or null when no thought has one. Anything else is a read that did not answer. */
+/** The watermark as the record carries it: the read's instant, or null when no thought has a usable one. Anything else is a read that did not answer. */
 export function boardSyncValue(w: unknown): string | null {
   if (w == null) return null;
   if (typeof w !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(w)) throw new Error(`the board-sync watermark read answered ${typeof w === "string" ? "a value not shaped as an ISO instant" : typeof w}`);

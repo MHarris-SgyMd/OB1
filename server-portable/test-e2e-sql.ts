@@ -1695,19 +1695,15 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(new RegExp(`^Migrations: +${String(treeLast).padStart(3, "0")} applied — this server's tree ends at ${String(treeLast).padStart(3, "0")} \\(current: the ledger's highest is the tree's last\\)$`, "m").test(text),
     `the tool's Migrations row says the brain is current (${text.split("\n").find((l) => l.startsWith("Migrations"))})`);
   assert(new RegExp(`^Rows: +${truth.thoughts} thoughts · ${truth.audit} audit`, "m").test(text) && /^Postgres: +\S.* · pgvector \d/m.test(text), "…and its Rows and Postgres rows carry the same counts and versions");
-  // The board-sync watermark (SMD-2261): none while no thought carries one; then
-  // the newest full ISO instant, normalised to UTC — a later bare date, a word
-  // timestamptz accepts, and an impossible month passed over, not
-  // winning the max or failing the read…
+  // The board-sync watermark (SMD-2261): null while no thought carries one.
   assert("boardSync" in db && db.boardSync === null, `no Linear-sourced row: the watermark is null, and the field is there (${JSON.stringify(db.boardSync)})`);
-  // …and an instant past an hour from now: a capture key's far-future value
-  // would win the max for good (review pass 1).
-  // The winner is minute-precision with an offset. Each later one would win but
-  // is passed over: a bare date, an impossible month, an instant two hours from
-  // now (as a year past 9999 in UTC would be; the pattern, not the clamp, passes
-  // 'infinity' over), and four that miss the pattern by one mark — no offset, a
-  // space for the T, a leading or a trailing space. One per thought: the corpus
-  // here holds nine.
+  // Then the newest usable instant, in UTC. The winner is minute-precision with
+  // an offset; each later value would win but is passed over rather than failing
+  // the read: a bare date, an impossible month, an instant two hours from now (a
+  // capture key's far-future value would win for good, review pass 1; one past
+  // 9999 in UTC is passed over the same way), and four that miss the pattern by
+  // one mark — no offset, a space for the T, a leading or a trailing space. One
+  // per thought: the corpus here holds nine.
   const marks = ["2026-09-23T08:00:00.000Z", "2026-09-24T09:30+02:00", "2026-10-01", "2026-13-40T00:00:00Z", new Date(Date.now() + 2 * 3_600_000).toISOString(),
     "2026-09-30T00:00:00", "2026-09-29 00:00:00Z", " 2026-09-28T00:00:00Z", "2026-09-28T00:00:00Z "];
   const ids = (await sql`SELECT id FROM thoughts ORDER BY id LIMIT ${marks.length}`).map((r: { id: string }) => r.id);

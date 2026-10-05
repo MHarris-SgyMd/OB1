@@ -254,10 +254,10 @@ export interface BrainReading {
   newestCapture: string | null;
   /**
    * The board-sync watermark (SMD-2261): the newest Linear updatedAt the brain
-   * reflects, an ISO instant; null when no thought carries a usable one — or when it was
-   * not read, and then `boardSyncUnread` says why. A high-water mark: it says
-   * the newest board move the brain reflects, not that it reflects every move
-   * before it.
+   * reflects, an ISO instant; null when no thought carries a usable one — or
+   * when it was not read, and then `boardSyncUnread` says why. A high-water
+   * mark: the newest board move the brain reflects, not proof it reflects every
+   * move before it.
    */
   boardSync: string | null;
   /** Why the watermark was not read (an older server, a read that did not answer); null when it was. */
@@ -747,9 +747,10 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
     const countsKnown = a.thoughts !== null && b.thoughts !== null;
     // Claimed only over two watermarks compared: none on both sides is not "apart".
     const boardKnown = board !== null && "days" in board;
-    // A server that has the field but did not give it (its read is the last the
-    // /health deadline reaches) leaves the one signal this incident shows on
-    // unread: not "current" (review pass 2). An older server's absence stays quiet.
+    // A server that has the field but did not give it (a read that timed out or
+    // failed — the last the /health deadline reaches) leaves the one signal this
+    // incident shows on unread: not "current" (review pass 2). An older server's
+    // absence stays quiet.
     const boardMissed = boardSyncMissed(a) || boardSyncMissed(b);
     if (migKnown && countsKnown && !boardMissed) return `current with each other — same migration and thought count${boardKnown ? ", board-sync watermarks under half a day apart" : ""}.`;
     const unread = [migKnown ? null : "migration ledger", countsKnown ? null : "thought count", boardMissed ? "board-sync watermark" : null].filter((x): x is string => x !== null);
@@ -812,8 +813,8 @@ export function renderComparison(c: Comparison): string {
     lines.push(`  id-set: ${d.onlyA.length.toLocaleString("en-US")} only in a${ex(d.onlyA)}; ${d.onlyB.length.toLocaleString("en-US")} only in b${ex(d.onlyB)}.`);
   }
   // Why, when a server that has the field did not give it — the verdict's "not certain" (review pass 3).
-  const board = (r: BrainReading) => (r.boardSyncUnread === null ? r.boardSync ?? "none" : boardSyncMissed(r) ? `unread (${r.boardSyncUnread})` : "unread");
-  lines.push(`  board sync: a=${board(c.a)}  b=${board(c.b)}`);
+  const boardSide = (r: BrainReading) => (r.boardSyncUnread === null ? r.boardSync ?? "none" : boardSyncMissed(r) ? `unread (${r.boardSyncUnread})` : "unread");
+  lines.push(`  board sync: a=${boardSide(c.a)}  b=${boardSide(c.b)}`);
 
   lines.push("");
   lines.push("Retrieval:");
