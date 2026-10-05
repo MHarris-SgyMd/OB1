@@ -385,9 +385,10 @@ export const RUNAWAY_REPEATS = 3;
  * (97,812 tokens, evals/README.md), no token came more than three times in a
  * row (counted as Ollama counts, by token, not by this rule). 24 clears this
  * brain's 20 and still fires before Ollama's 31, so the call is aborted
- * rather than cut. Another brain can hold a longer run — a null SHA's forty
- * zeros, an `sk-xxxx…` placeholder — and a name copying one costs that call:
- * aborted, and the penalised retry, read whole, is the answer. The thought that
+ * rather than cut. Another brain can hold a longer run — an `sk-xxxx…`
+ * placeholder, a null SHA's forty zeros — and a name copying one costs that
+ * call: aborted, and the penalised retry, read whole, is the answer (if the
+ * retry copies the run too, that window is malformed). The thought that
  * found it (SMD-2286's row, `c7506226`) grows a name one `Linear` per item, 5
  * to 31; at 24 the abort lands at token 1,389 of the 1,816 Ollama cut at.
  */

@@ -1791,10 +1791,12 @@ Ollama's limit also cuts) or ends in 24 or more whitespace characters is that
 runaway too, streamed or read whole (a whole answer Ollama cuts comes back
 with `finish_reason: null`). A row failed before this change with `provider
 error after 3 retries: … closed mid-answer …` comes back with
-`--retry-failed`, and the thoughts a stopped worker left pending are taken by
-the next run. There is no setting for the 24, by design: a name that copies a
-longer run from its text (a null SHA's zeros) costs one extra call, and the
-retry's answer stands. A gateway between the worker and Ollama that batches
+`--retry-failed` under the same model (after a change of model, the new key's
+pass extracts it anyway), and the thoughts a stopped worker left pending are
+taken by the next run. There is no setting for the 24, by design: a name that
+copies a longer run from its text (an `sk-xxxx…` placeholder) costs one extra
+call, and the retry's answer stands — if the retry copies the run too, that
+window is malformed. A gateway between the worker and Ollama that batches
 its tokens into larger frames can delay the abort, and one that adds `[DONE]`
 or a `finish_reason` to the cut stream turns a loop of punctuation back into
 an unretried malformed answer. A call whose retry also runs away is a
