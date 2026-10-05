@@ -1051,7 +1051,7 @@ cosine 0.6) a full pass makes 4.1% fewer judge calls (3,435 → 3,293 over
 1,241 pooled thoughts); the judge's cost on unlinked ticket pairs is
 SMD-1873's. Two rows of one ticket stay candidates, and a
 thought with no identity is judged against a ticket row as before.
-`consolidation_ticket_pairs_left_out(thought, floor)` counts what the rule
+`consolidation_linked_ticket_pairs_left_out(thought, floor)` counts what the rule
 removes for one thought, every other term met; `db/consolidate.ts` turns it
 into judge calls fewer at `--k` (a lower bound: a stale pair past the cut is not
 counted) — in a run's summary, and in `--status` and `--dry-run` over the

@@ -12031,13 +12031,13 @@ console.log("\n[69] Migration 077: prefer_current also ranks below a thought who
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[70] Migration 079: two tickets Linear links are never paired for judgement — consolidation_candidates leaves out a pair filed under two different tickets (metadata.ticket, else metadata.issue — node_state's key) that an active Linear link relates, either direction; unlinked tickets, two rows of one ticket and a thought with no identity are still paired; consolidation_ticket_pairs_left_out counts what the rule removes, every other term met, and with the kept list partitions 066's (SMD-2448)");
+console.log("\n[70] Migration 079: two tickets Linear links are never paired for judgement — consolidation_candidates leaves out a pair filed under two different tickets (metadata.ticket, else metadata.issue — node_state's key) that an active Linear link relates, either direction; unlinked tickets, two rows of one ticket and a thought with no identity are still paired; consolidation_linked_ticket_pairs_left_out counts what the rule removes, every other term met, and with the kept list partitions 066's (SMD-2448)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const SIG = "consolidation_candidates(uuid, int, float)";
-  const LEFT = "consolidation_ticket_pairs_left_out(uuid, float)";
+  const LEFT = "consolidation_linked_ticket_pairs_left_out(uuid, float)";
   const LINKED = "consolidation_tickets_linked(jsonb, jsonb)";
   const ACTOR = { name: "op-key", via: "test-door" };
   const EXTRACT = "extract:stub@p1";
@@ -12049,10 +12049,10 @@ console.log("\n[70] Migration 079: two tickets Linear links are never paired for
   const link = (holder: string, relation: string, target: string) =>
     db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'link', jsonb_build_object('system', 'linear', 'relation', $2::text, 'target', $3::text))`, [holder, relation, target]);
   const cands = async (id: string) => (await q<{ o: string }>(`SELECT older_id::text AS o FROM consolidation_candidates($1::uuid, 1000, 0)`, [id])).map((r) => r.o).sort();
-  const leftOut = async (id: string, floor = 0) => Number((await one<{ n: number }>(`SELECT consolidation_ticket_pairs_left_out($1::uuid, $2::float) AS n`, [id, floor])).n);
+  const leftOut = async (id: string, floor = 0) => Number((await one<{ n: number }>(`SELECT consolidation_linked_ticket_pairs_left_out($1::uuid, $2::float) AS n`, [id, floor])).n);
   const linked = async (a: Record<string, unknown> | null, b: Record<string, unknown> | null) => (await one<{ l: boolean | null }>(`SELECT consolidation_tickets_linked($1::jsonb, $2::jsonb) AS l`, [a === null ? null : JSON.stringify(a), b === null ? null : JSON.stringify(b)])).l;
 
-  await restoreShipped("consolidation_candidates", "consolidation_ticket_pairs_left_out", "consolidation_tickets_linked");
+  await restoreShipped("consolidation_candidates", "consolidation_linked_ticket_pairs_left_out", "consolidation_tickets_linked");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
   await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
@@ -12066,7 +12066,7 @@ console.log("\n[70] Migration 079: two tickets Linear links are never paired for
       && /AND NOT consolidation_tickets_linked\(me\.metadata, o\.metadata\)/.test(body),
     `one consolidation_candidates, 079 its last definer, both sentinels, the stale clause, and the pair rule through the predicate (${lastDefinerOf("consolidation_candidates")})`);
   const vol = await q<{ f: string; v: string }>(`SELECT p.oid::regprocedure::text AS f, provolatile AS v FROM pg_proc p WHERE p.oid IN ($1::regprocedure, $2::regprocedure)`, [LEFT, LINKED]);
-  assert((await functionsNamed("consolidation_ticket_pairs_left_out")) === 1 && (await functionsNamed("consolidation_tickets_linked")) === 1 && vol.every((r) => r.v === "s")
+  assert((await functionsNamed("consolidation_linked_ticket_pairs_left_out")) === 1 && (await functionsNamed("consolidation_tickets_linked")) === 1 && vol.every((r) => r.v === "s")
       && /AND consolidation_tickets_linked\(me\.metadata, o\.metadata\)/.test(counter) && !/LIMIT/.test(counter)
       && /coalesce\(p_a->>'ticket', p_a->>'issue'\)/.test(predicate) && /IN \('child_of', 'blocks', 'blocked_by', 'relates_to'\)/.test(predicate) && /f\.valid_until IS NULL/.test(predicate),
     `the count holds the condition turned round with no k cut, and the predicate reads node_state's key, four structured relations (not duplicate_of), active links only — both STABLE (${vol.map((r) => `${r.f}:${r.v}`).join(", ")})`);
@@ -12191,7 +12191,7 @@ console.log("\n[70] Migration 079: two tickets Linear links are never paired for
 
   // A re-apply is a no-op: one body, the rule standing.
   await reapply("079");
-  assert((await functionsNamed("consolidation_candidates")) === 1 && (await functionsNamed("consolidation_ticket_pairs_left_out")) === 1 && (await functionsNamed("consolidation_tickets_linked")) === 1 && (await cands(N1)).join() === after.join() && (await leftOut(N1)) === 4,
+  assert((await functionsNamed("consolidation_candidates")) === 1 && (await functionsNamed("consolidation_linked_ticket_pairs_left_out")) === 1 && (await functionsNamed("consolidation_tickets_linked")) === 1 && (await cands(N1)).join() === after.join() && (await leftOut(N1)) === 4,
     "a re-apply leaves one body carrying the rule, one count and one predicate");
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts`);

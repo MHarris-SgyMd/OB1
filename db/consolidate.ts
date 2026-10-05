@@ -787,8 +787,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
 
   /**
-   * 079 (SMD-2448): the candidate rule leaves out pairs of two different
-   * tickets — where the body carries 079's sentinel, not merely where its
+   * 079 (SMD-2448): the candidate rule leaves out pairs of two tickets
+   * Linear links — where the body carries 079's sentinel, not merely where its
    * count stands: 063 or 066 re-applied by hand over 079 keeps the count and
    * puts back a body that judges such pairs (preflight warns of that state).
    * What is reported is judge calls fewer: per thought, the --k cut over
@@ -796,15 +796,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * kept already cut at k. A lower bound: a stale proposal beyond the cut,
    * which 067 has the pass judge anyway, cost a call under 066 and is settled
    * without one under 079 — not counted (rare: it needs a stale row on two
-   * tickets past the k nearest).
+   * linked tickets past the k nearest). The run reports it as well as
+   * --status and --dry-run because the ticket asked that a run say how many
+   * pairs it skipped (SMD-2448's second Work item).
    */
   const [{ has_079: HAS_079 }] = (await sql`
     SELECT COALESCE((SELECT prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')), false)
-           AND to_regprocedure('consolidation_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_079`) as { has_079: boolean }[];
+           AND to_regprocedure('consolidation_linked_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_079`) as { has_079: boolean }[];
   /** The judge calls 079 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
   async function ticketCallsSaved(ids: string, param: string): Promise<{ n: number; t: number }> {
     const [r] = (await sql.unsafe(`
-      SELECT coalesce(sum(least($2::int, k.n + consolidation_ticket_pairs_left_out(s.id, $3::float)) - k.n), 0)::int AS n, count(*)::int AS t
+      SELECT coalesce(sum(least($2::int, k.n + consolidation_linked_ticket_pairs_left_out(s.id, $3::float)) - k.n), 0)::int AS n, count(*)::int AS t
         FROM (${ids}) s CROSS JOIN LATERAL (SELECT count(*)::int AS n FROM consolidation_candidates(s.id, $2::int, $3::float)) k`, [param, K, MIN_SIM])) as { n: number; t: number }[];
     return { n: Number(r.n), t: Number(r.t) };
   }

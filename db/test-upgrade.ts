@@ -3423,7 +3423,7 @@ console.log("\n[20ac] Migration 079: refused by name without 025, 029, 053 or 06
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the079 });
   const [shape] = await sql`SELECT p.prosrc LIKE '%ob1:linked-tickets-not-paired%' AS x, p.prosrc LIKE '%ob1:lineage-excludes-the-pair%' AS l, p.proacl::text AS acl,
                                    (SELECT count(*)::int FROM pg_proc WHERE proname = 'consolidation_candidates') AS n,
-                                   to_regprocedure('consolidation_ticket_pairs_left_out(uuid, float)') IS NOT NULL AND to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS counter
+                                   to_regprocedure('consolidation_linked_ticket_pairs_left_out(uuid, float)') IS NOT NULL AND to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS counter
                               FROM pg_proc p WHERE p.oid = to_regprocedure(${SIG})`;
   assert(shape.x === true && shape.l === true && Number(shape.n) === 1 && shape.counter === true && shape.acl !== null && !/(^|[{,])=X/.test(shape.acl),
     `one candidate filter carrying both rules, the count and the predicate added, and an operator's REVOKE standing (${JSON.stringify(shape)})`);
@@ -3431,11 +3431,11 @@ console.log("\n[20ac] Migration 079: refused by name without 025, 029, 053 or 06
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert((await stamps()) === before && (await proposals()) === proposalsBefore && Number(auditAfter) === Number(auditBefore),
     "…no row, no proposal and no audit row moved — the proposal on two linked tickets stands pending for its reviewer");
-  const [{ n: left }] = await sql`SELECT consolidation_ticket_pairs_left_out(${newer}::uuid, 0) AS n`;
+  const [{ n: left }] = await sql`SELECT consolidation_linked_ticket_pairs_left_out(${newer}::uuid, 0) AS n`;
   assert((await cands()) === [t1, t4, note].sort().join() && Number(left) === 1,
     `…and the newer SMD-7801 row is judged against its own ticket's row, the unrelated SMD-7804 and the note, the one related ticket left out and counted (${(await cands()).split(",").map(name).join()}; left out ${left})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the079 });
-  const [{ n: again }] = await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname IN ('consolidation_candidates', 'consolidation_ticket_pairs_left_out', 'consolidation_tickets_linked')`;
+  const [{ n: again }] = await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname IN ('consolidation_candidates', 'consolidation_linked_ticket_pairs_left_out', 'consolidation_tickets_linked')`;
   assert(Number(again) === 3 && (await cands()) === [t1, t4, note].sort().join(), "a re-apply of 079 is a no-op: one of each, the same answers");
   await sql.close();
 }

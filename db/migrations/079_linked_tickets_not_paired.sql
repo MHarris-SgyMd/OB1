@@ -9,16 +9,17 @@
 --   The first full consolidation pass under consolidate:qwen2.5:7b@p3
 --   (2026-10-01, the stable dogfood brain) judged 1,001 thoughts and recorded
 --   98 proposals; on review 2 were accepted and 96 rejected. 68 of the 98
---   paired two thoughts carrying different ticket identities: a parent and
---   its child, tickets Linear already relates or blocks, a ticket and its
---   follow-up. Counted over every proposal the brain holds (2026-10-04),
---   reading a thought's ticket as node_state does (below): 109 of 128 pair
---   two different tickets, all rejected, and 107 of those 109 are tickets
---   Linear relates as of that day (94 relates_to alone, 12 through child_of,
---   1 blocks; about 72 of the 10-01 pass's 84 were already linked when they
---   were judged, a dozen linked during that review). Two tickets Linear relates are two records whose
---   relationship is already stated, each with its own status, which
---   board-sync keeps current and node_state (058, 068) reads; one
+--   paired two thoughts carrying different issues (84 reading a thought's
+--   ticket as node_state does, below): a parent and its child, tickets
+--   Linear already relates or blocks, a ticket and its follow-up. Counted
+--   over every proposal the brain holds (2026-10-04) on node_state's key:
+--   109 of 128 pair two different tickets, all rejected, and 107 of those
+--   109 are tickets Linear relates as of that day (94 relates_to alone, 12
+--   through child_of, 1 blocks; about 72 of the 10-01 pass's 84 were
+--   already linked when they were judged, a dozen linked during that
+--   review). Two tickets Linear relates are two records whose relationship
+--   is already stated, each with its own status, which board-sync keeps
+--   current and node_state (058, 068, 071) reads; one
 --   "superseding" the other would archive a record that still holds, and
 --   the judge calls tickets that build on each other a conflict (SMD-1873).
 --
@@ -46,8 +47,9 @@
 --   relating to it. Nor does duplicate_of: Linear's verdict that one ticket
 --   no longer holds is the nearest thing to a supersession the board
 --   records — six such pairs on the dogfood meet every other candidate term
---   (review pass 4) — so they stay for the judge. A thought's identity is the ticket node_state reads it
---   under (058, 068, 071): coalesce(metadata->>'ticket', metadata->>'issue')
+--   (review pass 4) — so they stay for the judge. A thought's identity is
+--   the ticket node_state reads it under (058, 068, 071):
+--   coalesce(metadata->>'ticket', metadata->>'issue')
 --   — a ticket's own row by its issue, a dated section, a reference or a
 --   fork change record filed under a ticket by its ticket — the text
 --   exactly, as 068 keys a head and as the links' targets are written. So a
@@ -75,7 +77,7 @@
 --   sentinel `ob1:linked-tickets-not-paired` marks the body for preflight,
 --   which warns naming this file when 063 or 066 is re-applied by hand over
 --   it, and for db/consolidate.ts, which reports the rule only where the
---   body carries it. consolidation_ticket_pairs_left_out(thought, floor)
+--   body carries it. consolidation_linked_ticket_pairs_left_out(thought, floor)
 --   counts the pairs this rule removes for one thought — every other term of
 --   the candidate rule met, at or above the floor, with no p_k cut;
 --   db/consolidate.ts turns it into judge calls fewer (the k cut over 066's
@@ -95,7 +97,8 @@
 --   worker's per-thought candidate read went from 2.3 s to about 3.2 s over
 --   the pool (+0.7 ms a thought, the predicate 0.1-0.2 ms a call through the
 --   link index); --status and --dry-run now spend about 6 ms a thought still
---   to judge (7.7 s over the whole pool, 0.6 s over the 68 waiting).
+--   to judge (7.7 s over the whole pool; 0.6 s over the 68 thoughts then
+--   waiting, in review pass 3's walkthrough).
 --
 -- SAFETY
 --   One body redefined on its own text with no arity change (CREATE OR
@@ -236,7 +239,7 @@ COMMENT ON FUNCTION consolidation_candidates(uuid, int, float) IS
 
 -- The candidate body with 079's condition turned round and no p_k cut: the
 -- pairs the rule removes for one thought, every other term met.
-CREATE OR REPLACE FUNCTION consolidation_ticket_pairs_left_out(
+CREATE OR REPLACE FUNCTION consolidation_linked_ticket_pairs_left_out(
   p_thought_id     uuid,
   p_min_similarity float DEFAULT 0
 )
@@ -275,5 +278,5 @@ AS $$
      AND 1 - (o.embedding <=> me.embedding) >= COALESCE(p_min_similarity, 0)
 $$;
 
-COMMENT ON FUNCTION consolidation_ticket_pairs_left_out(uuid, float) IS
+COMMENT ON FUNCTION consolidation_linked_ticket_pairs_left_out(uuid, float) IS
   'How many older thoughts consolidation_candidates leaves out of one thought''s list because the two are filed under two different tickets an active Linear link relates (consolidation_tickets_linked), every other term of the candidate rule met at or above p_min_similarity, with no p_k cut — db/consolidate.ts turns it into the judge calls a run did not spend. Read-only. Migration 079 (SMD-2448).';
