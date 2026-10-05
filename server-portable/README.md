@@ -291,7 +291,7 @@ both in the same commit.**
 Required in every environment:
 
 ```
-MCP_ACCESS_KEYS              name:scope:sha256 entries, scope read | write | capture — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
+MCP_ACCESS_KEYS              name:scope:sha256 entries, scope read | write | capture | forward (grants nothing; SMD-2284) — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
 DATABASE_URL                 the brain's postgres:// connection string — the SQL store, the default
 OPENROUTER_API_KEY           embeddings, and metadata extraction unless OB1_CHAT_BASE_URL gives chat its own endpoint — then OB1_CHAT_API_KEY (neither needed for a local endpoint)
 ```
@@ -652,8 +652,8 @@ those its own way.
 
 ```bash
 bun test-server.ts        # 527 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, and a proposal's one-line reason and note
-bun test-auth.ts          # 124 — scoped, hashed, named keys
-bun test-rest.ts          # 230 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-auth.ts          # 134 — scoped, hashed, named keys
+bun test-rest.ts          # 235 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
 bun run test:e2e          # 430 — the whole server over MCP with no Supabase at all, OB1_STORE unset

@@ -161,6 +161,18 @@ function cacheKey(keyHash: string, label: string): string {
   return `${keyHash} ${label}`;
 }
 
+/**
+ * The scope resolve_agent records for a key: the one it presents, except a
+ * forwarder's (SMD-2284), which is sent as none and recorded NULL. 049's CHECK
+ * names read, write and capture, and a migration widening it cannot help:
+ * `migrate.ts --reapply` runs 049 again, whose ADD CONSTRAINT would then fail
+ * on a `forward` row. NULL passes the CHECK, so a forwarder still gets its
+ * stable agent id and a revocation in the registry still reaches it.
+ */
+function recordedScope(principal: Principal): string | undefined {
+  return principal.scope === "forward" ? undefined : principal.scope;
+}
+
 export class AgentResolver {
   /**
    * Never evicted, and it does not need to be: resolution happens only AFTER
@@ -290,7 +302,7 @@ export class AgentResolver {
     const { attempts, budgetMs, pauseMs } = this.busyRetry;
     for (let attempt = 1; ; attempt++) {
       try {
-        return await store.resolveAgent({ keyHash: principal.keyHash, label: principal.name, scope: principal.scope });
+        return await store.resolveAgent({ keyHash: principal.keyHash, label: principal.name, scope: recordedScope(principal) });
       } catch (e) {
         const again = retryable(e) && !this.revocations.has(principal.keyHash)
           && attempt < attempts && performance.now() - started + pauseMs < budgetMs;

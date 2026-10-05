@@ -657,23 +657,29 @@ if (!env.MCP_ACCESS_KEYS && !env.MCP_ACCESS_KEY) {
 } else if (env.MCP_ACCESS_KEYS) {
   const { keys, problems } = accessKeys;
   if (problems.length) {
-    for (const p of problems) add("access keys", "fail", p, "bun keygen.ts --name <client> --scope read|write|capture");
+    for (const p of problems) add("access keys", "fail", p, "bun keygen.ts --name <client> --scope read|write|capture|forward");
   } else {
     // A capture-only key (SMD-1298) adds thoughts and reads nothing: it counts
     // as a capturer here and as a writer for the "every key can write" warning,
-    // since either kind of leak can put a thought into the brain.
-    const capturers = keys.filter((k) => k.scope !== "read").length;
+    // since either kind of leak can put a thought into the brain. A forwarder
+    // (SMD-2284) grants nothing and is no server's caller: it is neither, and
+    // a list of forwarders alone is a server no client can reach.
+    const clients = keys.filter((k) => k.scope !== "forward");
+    const capturers = clients.filter((k) => k.scope !== "read").length;
     add("access keys", "ok",
         `${keys.length} key(s): ${keys.map((k) => `${k.name}(${k.scope})`).join(", ")}`);
-    if (capturers === 0) {
+    if (clients.length === 0 && !env.MCP_ACCESS_KEY) {
+      add("access keys scope", "fail", "every key is a forwarder — forward scope grants nothing, so no client can authenticate",
+          "Mint a client key: bun keygen.ts --name laptop --scope write");
+    } else if (capturers === 0) {
       add("access keys scope", "warn", "every key is read-only — capture_thought will not be registered for anyone",
           "Mint a write key (or a capture key for a hook) if you intend to capture thoughts.");
     }
     // Write keys alone here: a capture key can add a thought and nothing else,
     // so a laptop's write key beside a hook's capture key is not "every key
     // can write" (second review pass).
-    const writers = keys.filter((k) => k.scope === "write").length;
-    if (writers === keys.length && keys.length > 1) {
+    const writers = clients.filter((k) => k.scope === "write").length;
+    if (writers === clients.length && clients.length > 1) {
       add("access keys scope", "warn", "every key can write",
           "Prefer --scope read for clients that only search, especially URL-embedded connectors.");
     }

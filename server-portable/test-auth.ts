@@ -12,7 +12,7 @@
  *                           nothing listens on and refused at once; [11] says why)
  */
 
-import { authenticate, hashKey, parseKeyRecords, canCapture, canRead, canWrite, secretMatches, SCOPES } from "./auth.ts";
+import { authenticate, hashKey, parseKeyRecords, canCapture, canRead, canWrite, secretMatches, CLIENT_SCOPES, SCOPES } from "./auth.ts";
 import { actorPayload } from "./store.ts";
 import { createAssert } from "../db/test-support.ts";
 import { visibleToolNames, READ_TOOL_NAMES, WRITE_TOOL_NAMES, type ToolName } from "./tools.ts";
@@ -30,10 +30,13 @@ const WRITE_KEY = "w".repeat(64);
 const READ_KEY = "r".repeat(64);
 // The capture-only scope (SMD-1298): the key a session-end hook holds.
 const CAPTURE_KEY = "c".repeat(64);
+// The forwarder (SMD-2284): grants nothing, the MCP server's own key when it forwards a client's.
+const FORWARD_KEY = "f".repeat(64);
 const KEYS = [
   `laptop:write:${hashKey(WRITE_KEY)}`,
   `chatgpt:read:${hashKey(READ_KEY)}`,
   `session-hook:capture:${hashKey(CAPTURE_KEY)}`,
+  `mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`,
 ].join(",");
 
 console.log("[1] Keys are stored as hashes, never as keys");
@@ -56,7 +59,7 @@ console.log("\n[2] Parsing rejects a config that stores raw keys");
 {
   const good = parseKeyRecords(KEYS);
   assert(good.problems.length === 0, "a well-formed config parses cleanly");
-  assert(good.keys.length === 3, "…yielding all three keys");
+  assert(good.keys.length === 4, "…yielding all four keys");
   assert(good.keys.map((k) => k.scope).sort().join() === [...SCOPES].sort().join(), "…one of each scope the module names");
 
   /**
@@ -74,15 +77,15 @@ console.log("\n[2] Parsing rejects a config that stores raw keys");
   assert(/keygen\.ts/.test(dup.problems[0] ?? ""), "…and how to mint a separate key");
   // The mirror: it must be the SHARED digest that trips this, not merely having
   // two keys. A check that rejected every multi-key config would also pass above.
-  assert(parseKeyRecords(KEYS).problems.length === 0, "three names with distinct digests still parse cleanly");
+  assert(parseKeyRecords(KEYS).problems.length === 0, "four names with distinct digests still parse cleanly");
 
   const raw = parseKeyRecords(`laptop:write:${WRITE_KEY}`);
   assert(raw.problems.length > 0, "a raw key in the hash position is rejected");
   assert(/Store the HASH, not the key/.test(raw.problems[0]), "…with an explanation");
   assert(/keygen\.ts/.test(raw.problems[0]), "…and the command to mint one properly");
 
-  assert(parseKeyRecords("laptop:admin:" + hashKey("x")).problems.some((p) => /expected read, write or capture/.test(p)),
-    "an unknown scope is rejected, naming the three");
+  assert(parseKeyRecords("laptop:admin:" + hashKey("x")).problems.some((p) => /expected read, write, capture or forward/.test(p)),
+    "an unknown scope is rejected, naming the four");
   assert(parseKeyRecords("laptop:admin:" + hashKey("x")).keys.length === 0, "…and yields no key");
   assert(parseKeyRecords("no-colons").problems.some((p) => /name:scope:sha256/.test(p)),
     "a malformed entry is rejected");
@@ -90,7 +93,7 @@ console.log("\n[2] Parsing rejects a config that stores raw keys");
     "a duplicate key name is rejected");
 
   const commented = parseKeyRecords(`# a comment\n${KEYS}\n\n`);
-  assert(commented.keys.length === 3 && commented.problems.length === 0,
+  assert(commented.keys.length === 4 && commented.problems.length === 0,
     "comments and blank lines are ignored, so the value can be readable");
 }
 
@@ -103,10 +106,19 @@ console.log("\n[3] Authentication resolves a principal, or nothing");
   assert(r?.name === "chatgpt" && r?.scope === "read", "the read key resolves to its principal");
   // Admission (first review pass): a consumer that names no scopes — every
   // vendored server, whose read tools are registered for any principal — does
-  // not see a capture key at all; the core server names SCOPES and does.
+  // not see a capture key at all; the core servers name CLIENT_SCOPES and do.
   assert(authenticate(CAPTURE_KEY, cfg) === null, "a capture key is NO principal to a consumer that does not admit the scope — the vendored servers");
-  const c = authenticate(CAPTURE_KEY, cfg, { admit: SCOPES });
-  assert(c?.name === "session-hook" && c?.scope === "capture", "…and resolves to its principal for one that admits every scope");
+  const c = authenticate(CAPTURE_KEY, cfg, { admit: CLIENT_SCOPES });
+  assert(c?.name === "session-hook" && c?.scope === "capture", "…and resolves to its principal for one that admits every caller's scope — the core servers");
+  // A forwarder (SMD-2284) is no caller anywhere: the vendored servers do not
+  // admit it, nor do the core servers; only a reader asking for `forward` alone
+  // — the REST core's forwarder slot — sees it.
+  assert(authenticate(FORWARD_KEY, cfg) === null, "a forwarder key is NO principal to the vendored servers");
+  assert(authenticate(FORWARD_KEY, cfg, { admit: CLIENT_SCOPES }) === null, "…nor to the core servers, which admit every caller's scope and not forward");
+  assert(!CLIENT_SCOPES.includes("forward") && SCOPES.includes("forward") && CLIENT_SCOPES.every((x) => SCOPES.includes(x)), "CLIENT_SCOPES is every scope but forward");
+  const f = authenticate(FORWARD_KEY, cfg, { admit: ["forward"] });
+  assert(f?.name === "mcp-forwarder" && f?.scope === "forward", "…and resolves to its principal only where forward is asked for by name");
+  assert(authenticate(WRITE_KEY, cfg, { admit: ["forward"] }) === null, "a client's key is no forwarder: a write key is refused where only forward is admitted");
   assert(authenticate(WRITE_KEY, cfg, { admit: ["read"] }) === null && authenticate(READ_KEY, cfg, { admit: ["read"] })?.scope === "read",
     "admission is by scope, not by kind of key: a write key is refused where only read is admitted");
   assert(authenticate("old-style-key", { MCP_ACCESS_KEY: "old-style-key" }, { admit: ["read", "capture"] }) === null,
@@ -131,6 +143,9 @@ console.log("\n[4] Scopes");
   assert(!canRead(c), "capture scope may not read");
   assert(canCapture(w) && canCapture(c), "write and capture scopes may capture");
   assert(!canCapture(r), "read scope may not capture");
+  const f = { name: "mcp-forwarder", scope: "forward", keyHash: hashKey(FORWARD_KEY) } as const;
+  assert(!canWrite(f) && !canRead(f) && !canCapture(f), "forward scope may not write, read or capture — it grants nothing (SMD-2284)");
+  assert(visibleToolNames({ scope: "forward" }).length === 0, "…and unlocks no tool");
 }
 
 console.log("\n[5] Independent revocation");
@@ -239,6 +254,21 @@ console.log("\n[7b] A capture key calling a read tool is told the tool does not 
   assert(!/ECONNREFUSED|connection/i.test(msg), "…and not a store error: the refusal came before any dial");
 }
 
+console.log("\n[7c] A forwarder key alone is no caller: the MCP server refuses it as it refuses a wrong key, header or URL (SMD-2284)");
+{
+  for (const via of ["header", "query"] as const) {
+    const r = await fetch(via === "query" ? `${BASE}/?key=${FORWARD_KEY}` : BASE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...(via === "header" ? { "x-brain-key": FORWARD_KEY } : {}) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list", params: {} }),
+    });
+    const t = await r.text();
+    const line = t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
+    const b = JSON.parse(line);
+    assert(b?.error?.code === -32001 && b?.result === undefined, `a forwarder key in the ${via === "header" ? "header" : "URL"} is refused with -32001, as an unknown key is — no tool list at all (${JSON.stringify(b).slice(0, 80)})`);
+  }
+}
+
 console.log("\n[8] Scope applies through the ?key= URL form too");
 {
   // This is the form that ends up in logs and browser history, so it is the one
@@ -269,7 +299,7 @@ console.log("\n[8b] GET /health says what the brain is to a key that may read it
     try { version = JSON.parse(r.body).version; } catch { /* not JSON */ }
     assert(r.status === 200 && typeof version === "string", `a ${label} key gets the record as JSON (${r.body.slice(0, 50)})`);
   }
-  for (const [label, key, via] of [["capture", CAPTURE_KEY, "header"], ["capture, in the URL", CAPTURE_KEY, "query"], ["wrong", "not-a-key", "header"], ["missing", null, "header"]] as const) {
+  for (const [label, key, via] of [["capture", CAPTURE_KEY, "header"], ["capture, in the URL", CAPTURE_KEY, "query"], ["forwarder", FORWARD_KEY, "header"], ["wrong", "not-a-key", "header"], ["missing", null, "header"]] as const) {
     const r = await health(key, via);
     assert(r.status === 200 && r.body === "ok", `a ${label} key gets \`ok\` and nothing else (${JSON.stringify(r.body.slice(0, 40))})`);
   }

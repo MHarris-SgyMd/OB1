@@ -386,6 +386,11 @@ pipeline, a credential that sits in a config file on a machine you do not watch;
 a leak of it can add a thought and cannot read one
 ([`recipes/session-capture-hook`](recipes/session-capture-hook/)).
 
+A fourth, `--scope forward`, grants nothing at all: every server refuses it as a
+caller. It is the MCP server's own key for when it forwards a client's key to the
+REST core, which reads it only in its forwarder slot, to record who carried the
+request (SMD-2284). Mint one only for that, and give it to no client.
+
 That matters because the key can travel in the URL (`?key=…`). Claude Desktop's
 custom connectors are URL-only, so this fork keeps that form — but query strings
 reach access logs, browser history and shell history. A read-only key limits what

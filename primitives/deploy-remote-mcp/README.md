@@ -130,7 +130,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 - Step 2 was skipped: `(cd extensions && bun install)`. For an integration or recipe server, add `NODE_PATH=extensions/node_modules` to the command, as its README shows.
 
 **401 on every request**
-- The URL or header must carry the **key**, the environment its **hash**. An entry that is not `name:read|write|capture:<64 hex characters>` is ignored, and the vendored servers do not log it: check each entry is three fields, the scope lower-case, the digest 64 hex characters. `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem.
+- The URL or header must carry the **key**, the environment its **hash**. An entry that is not `name:read|write|capture|forward:<64 hex characters>` is ignored, and the vendored servers do not log it (a `capture` or `forward` key, well formed, is no key to them either — they admit read and write): check each entry is three fields, the scope lower-case, the digest 64 hex characters. `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem.
 - A `read`-scoped key authenticates but is given no writing tool; a server whose only tools write (`delete-thought-mcp`, `update-thought-mcp`) shows a read key nothing to call.
 
 **`relation "…" does not exist`**

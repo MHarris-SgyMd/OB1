@@ -374,6 +374,9 @@ export function checkBrainKey(credential: any, env: Record<string, string>): voi
   const hits = candidates(credential.data).map(hashKey).flatMap((h) => records.filter((r) => r.sha256 === h));
   for (const r of hits) {
     if (r.scope === "write") throw new Error(`credential "${credential.name}": it holds ${r.name}, a WRITE-scope brain key — a workflow holds a capture key (or, for an eval's read tool, a read key), never a write key`);
+    // A forwarder grants nothing, but in the REST core's forwarder slot it names
+    // the actor of another key's request (SMD-2284): the MCP server's alone.
+    if (r.scope === "forward") throw new Error(`credential "${credential.name}": it holds ${r.name}, a FORWARD-scope brain key — the MCP server's own, which names who carried another key's request; a workflow holds a capture key (or, for an eval's read tool, a read key)`);
     if (!declared) throw new Error(`credential "${credential.name}": it holds the brain key ${r.name} (${r.scope}) but declares no brainScope — if it is meant to carry a brain key, add "brainScope": "${r.scope}" to its template; if it is an inbound key or a vendor's, it must not reuse a brain key's value`);
     if (r.scope !== declared) throw new Error(`credential "${credential.name}" declares brainScope ${declared} and holds ${r.name}, a ${r.scope}-scope key — mint a ${declared} key (server-portable/keygen.ts --scope ${declared})`);
   }

@@ -2,7 +2,7 @@
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
 import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";
-import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
+import { authenticateRequest, canCapture, canRead, canWrite, CLIENT_SCOPES, type Principal } from "./auth.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
@@ -555,7 +555,7 @@ app.get("*", async (c, next) => {
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
-  }, { admit: SCOPES });
+  }, { admit: CLIENT_SCOPES });
   if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
   // A HEAD has no body to carry the record: liveness, as without a key, and no
   // read for nothing (review pass 1: it paid the whole read, and the deadline).
@@ -594,7 +594,7 @@ app.get("*", async (c, next) => {
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
-  }, { admit: SCOPES });
+  }, { admit: CLIENT_SCOPES });
   if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
   // The same identity gate as /health: a revoked or unresolved key is shown nothing.
@@ -637,7 +637,7 @@ app.post("*", async (c, next) => {
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
-  }, { admit: SCOPES });
+  }, { admit: CLIENT_SCOPES });
   if (!principal || !canWrite(principal)) return c.text("ok", 200, corsHeaders);
   // The same identity gate as /worker-status: a revoked or unresolved key does nothing.
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -707,7 +707,7 @@ app.get("*", async (c, next) => {
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
-  }, { admit: SCOPES });
+  }, { admit: CLIENT_SCOPES });
   if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
   // HEAD carries no body for a job's state or stream: liveness, before the
   // identity resolve, exactly as /health and the worker mirrors answer it.
@@ -816,12 +816,13 @@ app.on(MCP_METHODS, "*", async (c) => {
   // `?key=` does not shadow it. The query form stays because Claude Desktop
   // custom connectors are URL-only; scopes are what limit the damage when such a
   // URL leaks. See auth.ts.
-  // Every scope: this is the one server that registers a tool group for a
-  // capture-only key. A consumer that does not say admits read and write alone.
+  // Every caller's scope: this is the one server that registers a tool group for a
+  // capture-only key. A consumer that does not say admits read and write alone,
+  // and none admits a forwarder's, which grants nothing (SMD-2284).
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
-  }, { admit: SCOPES });
+  }, { admit: CLIENT_SCOPES });
 
   if (!principal) {
     // Return a JSON-RPC 2.0 error envelope (HTTP 200) instead of a bare
