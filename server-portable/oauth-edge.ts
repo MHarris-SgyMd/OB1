@@ -38,7 +38,7 @@
 /** The hosts an `http:` origin may name: OAuth 2.1 allows plain HTTP for loopback alone. */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
-/** The scopes the authorization server issues (deploy/auth/layout.ts SCOPES), one per key scope. */
+/** The scopes the authorization server issues (deploy/auth/layout.ts SCOPES), one per caller's key scope (auth.ts CLIENT_SCOPES; a forwarder's grants nothing and has none). */
 export const OAUTH_SCOPES = ["brain:read", "brain:write", "brain:capture"] as const;
 
 /** The public resource's path, and where its protected-resource document lives (RFC 9728 §3.1, path-inserted). */

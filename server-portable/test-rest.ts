@@ -115,7 +115,7 @@ const lines: string[] = [];
 const app = createRestApp({
   core,
   init: () => {},
-  keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},w:write:${hashKey("write-raw")},c:capture:${hashKey("cap-raw")}` }),
+  keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},w:write:${hashKey("write-raw")},c:capture:${hashKey("cap-raw")},f:forward:${hashKey("fwd-raw")}` }),
   resolve: async () => { if (resolveThrows) throw new Error("the registry threw"); return identity; },
   track: (run) => run(),
   log: (l) => lines.push(l),
@@ -133,6 +133,17 @@ console.log("\n[5] The authorization ladder: a wrong key 401, a revoked one 401,
   assert(r.status === 401 && r.body.code === "UNAUTHORIZED", `a wrong key → 401 (${r.status})`);
   r = await json(await hit("/v1/stats?key=read-raw"));
   assert(r.status === 401, `a key in the query string is no key (${r.status})`);
+  // A forwarder key (SMD-2284) grants nothing: alone it is no caller, whatever
+  // it asks for, and the operation never runs.
+  calls.length = 0;
+  for (const [path, init] of [["/v1/stats", {}], ["/v1/whoami", {}], ["/v1/thoughts", { method: "POST", body: JSON.stringify({ content: "x" }) }]] as const) {
+    r = await json(await hit(path, { key: "fwd-raw", ...init }));
+    assert(r.status === 401 && r.body.code === "UNAUTHORIZED", `a forwarder key alone → 401 UNAUTHORIZED at ${"method" in init ? "POST " : "GET "}${path} (${r.status} ${r.body.code})`);
+  }
+  assert(calls.length === 0, `…and no operation ran (${calls.length})`);
+  // In a caller's slot beside a caller's key, it is passed over, not taken for the caller.
+  const beside = await json(await app.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "fwd-raw", authorization: "Bearer read-raw" } })));
+  assert(beside.status === 200 && beside.body.name === "r" && beside.body.scope === "read", `a forwarder key beside a read key: the read key is the caller (${beside.status} ${JSON.stringify(beside.body).slice(0, 60)})`);
   r = await json(await hit("/v1/stats", { key: "read-raw" }));
   assert(r.status === 200, `a read key reads (${r.status})`);
   r = await json(await hit("/v1/thoughts", { key: "read-raw", method: "POST", body: JSON.stringify({ content: "x" }) }));

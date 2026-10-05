@@ -654,7 +654,7 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
   assert(scanForSecrets("t adgjM14cfiMP3beiLO2aehKN1adgjM14cfiMP3beiLO2aehKN1ad t").some((x) => x.reason === "high-entropy token"), "a 52-character token at 4.23 bits is caught — the bar from 48 is 4.2");
   assert(scanForSecrets("t fetchUserAccountBalanceByIdV3LegacyQuickJumpsOverWXZ2026 t").length === 0, "a 56-character identifier at 4.9 bits is clean — word-shaped");
   const clean = [
-    uuid(1), "8541cec9f2a1b3c4d5e6f7a8b9c0d1e2f3a4b5c6", "session-hook:capture:" + "0123456789abcdef".repeat(4), "laptop:write:" + "ab12".repeat(16) + ",chatgpt:read:" + "cd34".repeat(16),
+    uuid(1), "8541cec9f2a1b3c4d5e6f7a8b9c0d1e2f3a4b5c6", "session-hook:capture:" + "0123456789abcdef".repeat(4), "mcp-forwarder:forward:" + "fedcba9876543210".repeat(4), "laptop:write:" + "ab12".repeat(16) + ",chatgpt:read:" + "cd34".repeat(16),
     "sha256:" + "0123456789abcdef".repeat(4), "docker.io/oven/bun@sha256:" + "0123456789abcdef".repeat(4),
     "https://github.com/o/r/commit/" + "0123456789abcdef".repeat(4), "https://bucket.s3.amazonaws.com/blobs/" + "0123456789abcdef".repeat(4) + "?x=1",
     "recipes/session-capture-hook/session-capture.mjs", "ob1-fork-md-front-door-1917.md", "michaelharris/smd-1298-session-end-capture",

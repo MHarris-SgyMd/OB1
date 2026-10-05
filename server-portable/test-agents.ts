@@ -326,6 +326,34 @@ console.log("\n[11] The registry holds digests, never keys");
          "neither raw key appears, so the table is not a credential store");
 }
 
+console.log("\n[11a] A forwarder key (SMD-2284) resolves with no scope recorded: an agent id, a revocation that reaches it, and 049's CHECK untouched");
+{
+  // The resolver sends a forwarder's scope as none — 049's CHECK names read,
+  // write and capture, and widening it would break `--reapply`, which runs 049
+  // again over the `forward` rows (agents.ts, recordedScope).
+  const sent: (string | undefined)[] = [];
+  const ok: AgentResolution = { ok: true, agentId: "agent-f", label: "mcp-forwarder", created: true, rotated: false, labelConflict: false };
+  const store = Promise.resolve({ resolveAgent: async (o: { scope?: string }) => { sent.push(o.scope); return ok; } } as unknown as ThoughtStore);
+  const r = new AgentResolver(0, () => 0);
+  await r.resolve(store, { name: "mcp-forwarder", scope: "forward", keyHash: H("f") });
+  await r.resolve(store, { name: "session-hook", scope: "capture", keyHash: H("e") });
+  assert(sent[0] === undefined && sent[1] === "capture", `a forwarder's scope is sent as none, a caller's as presented (${JSON.stringify(sent)})`);
+
+  // What the registry does with none, on the real schema (typed: an untyped NULL matches no form).
+  const resolveTyped = async (hash: string, label: string, scope: string | null) =>
+    (await sql`SELECT resolve_agent(${hash}::text, ${label}::text, ${scope}::text) AS r`)[0].r as Record<string, unknown>;
+  const fwd = H("9");
+  const first = await resolveTyped(fwd, "mcp-forwarder", null);
+  assert(first.ok === true && typeof first.agent_id === "string", `resolve_agent registers a key presenting no scope, with an agent id (${JSON.stringify(first)})`);
+  const [{ scope }] = await sql`SELECT scope FROM ob1_agent_keys WHERE key_hash = ${fwd}`;
+  assert(scope === null, `…recording its scope as NULL, which 049's CHECK admits (${scope})`);
+  const refused = await resolveTyped(H("8"), "would-be", "forward").then(() => "accepted", (e: Error) => e.message);
+  assert(/ob1_agent_keys_scope_check/.test(refused), `presenting \`forward\` itself would be refused by 049's CHECK — why none is sent (${refused.slice(0, 80)})`);
+  await revoke(fwd, "rotated");
+  const after = await resolveTyped(fwd, "mcp-forwarder", null);
+  assert(after.ok === false && after.error === "REVOKED" && after.agent_id === first.agent_id, `a revocation in the registry reaches the forwarder, which stays identified (${JSON.stringify(after)})`);
+}
+
 console.log("\n[11b] A server running against a database still at 009");
 {
   /**
