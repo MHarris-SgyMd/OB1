@@ -116,6 +116,8 @@ Bun.plugin({
 const WRITE_KEY = "w".repeat(64);
 const READ_KEY = "r".repeat(64);
 const LEGACY_KEY = "old-style-key";
+// A forwarder (SMD-2284): grants nothing; DEFAULT_ADMIT leaves it out, so to a vendored server it is no key at all.
+const FORWARD_KEY = "f".repeat(64);
 const KEYS = [`laptop:write:${hashKey(WRITE_KEY)}`, `chatgpt:read:${hashKey(READ_KEY)}`].join(",");
 
 type Kind = "mcp" | "rest" | "worker";
@@ -433,6 +435,10 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   assert((await call(s, WRITE_KEY, LIST)).status === 401, "the removed key stops working");
   assert(toolsOf(await call(s, READ_KEY, LIST)).join() === [...s.reads].sort().join(), "…and the other keeps working");
 
+  env(s, `${KEYS},mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`);
+  assert((await call(s, FORWARD_KEY, LIST)).status === 401, "a configured forwarder key is refused with 401 — it grants nothing, and no vendored server admits it (SMD-2284)");
+  env(s, `chatgpt:read:${hashKey(READ_KEY)}`);
+
   // The legacy single key: still accepted, with write scope, compared by digest now.
   env(s, undefined, LEGACY_KEY);
   assert(toolsOf(await call(s, LEGACY_KEY, LIST)).join() === all.join(), `the legacy single ${s.legacy} still authenticates, as write`);
@@ -502,6 +508,10 @@ for (const s of SERVERS.filter((s) => s.kind === "rest")) {
   assert((await http(s, WRITE_KEY, s.readProbe!)).status === 401, "the removed key stops working");
   assert(passed(await http(s, READ_KEY, s.readProbe!)), "…and the other keeps working");
 
+  env(s, `${KEYS},mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`);
+  assert((await http(s, FORWARD_KEY, s.readProbe!)).status === 401, "a configured forwarder key is refused with 401 — it grants nothing, and no vendored server admits it (SMD-2284)");
+  env(s, `chatgpt:read:${hashKey(READ_KEY)}`);
+
   env(s, undefined, LEGACY_KEY);
   assert(passed(await http(s, LEGACY_KEY, s.writes[0])), `the legacy single ${s.legacy} still authenticates, as write`);
   assert((await http(s, "nope", s.readProbe!)).status === 401, "…and a wrong legacy key is refused");
@@ -529,6 +539,9 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
   env(s, `chatgpt:read:${hashKey(READ_KEY)}`);
   assert((await run(s, WRITE_KEY, false)).status === 401, "the removed key stops working");
   assert(passed(await run(s, READ_KEY, true)), "…and the other keeps working");
+
+  env(s, `${KEYS},mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`);
+  assert((await run(s, FORWARD_KEY, true)).status === 401, "a configured forwarder key is refused with 401, even for a dry run — it grants nothing, and no vendored worker admits it (SMD-2284)");
 
   env(s, undefined, LEGACY_KEY);
   assert(passed(await run(s, LEGACY_KEY, false)), `the legacy single ${s.legacy} still authenticates, as write`);

@@ -151,6 +151,9 @@ const FUNCTIONS = [
   "extract_search_needles(text)",
   // 029 (SMD-1294)
   "consolidation_candidates(uuid, int, float)",
+  // 079 (SMD-2448): the count of pairs its candidate rule leaves out, and the rule's predicate.
+  "consolidation_linked_ticket_pairs_left_out(uuid, float)",
+  "consolidation_tickets_linked(jsonb, jsonb)",
   // 061 dropped the ten-argument form for the eleven-argument one (p_recipe);
   // both named, for a re-apply of 029 by hand.
   "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text)",

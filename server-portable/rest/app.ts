@@ -8,7 +8,7 @@
 
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { authenticate, canRead, SCOPES, type AuthConfig, type Principal } from "../auth.ts";
+import { authenticate, canRead, CLIENT_SCOPES, type AuthConfig, type Principal } from "../auth.ts";
 import type { AgentOutcome } from "../agents.ts";
 import { SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
@@ -152,15 +152,15 @@ export function createRestApp(deps: RestDeps): Hono {
   const headOnly = (c: Context, type = "application/json") => c.req.method === "HEAD" ? c.body(null, 200, { "content-type": type }) : null;
 
   /**
-   * The caller, or the answer that refuses it: a key that authenticates (any
-   * scope), then the registry's word on it — revoked is refused for good, busy
+   * The caller, or the answer that refuses it: a key that authenticates (a
+   * caller's scope — a forwarder key alone is unknown here), then the registry's word on it — revoked is refused for good, busy
    * for now — with its stable agent id set for the audit row.
    */
   async function caller(c: Context): Promise<Principal | Response> {
     const keys = deps.keys();
     let principal: Principal | null = null;
     for (const key of headerKeys(c.req.raw)) {
-      principal = authenticate(key, keys, { admit: SCOPES });
+      principal = authenticate(key, keys, { admit: CLIENT_SCOPES });
       if (principal) break;
     }
     if (!principal) return refuse(c, 401, { code: "UNAUTHORIZED" }, { "WWW-Authenticate": "Bearer" });

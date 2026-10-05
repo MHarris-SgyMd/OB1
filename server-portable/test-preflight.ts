@@ -225,6 +225,31 @@ console.log("\n[2a] The public origin: configured for OAuth, or keys only (SMD-2
   assert(row(neither.out, "public origin") === "", "neither set: no row");
 }
 
+console.log("\n[2b] A forwarder key (SMD-2284) counts as no client: not a capturer, not a writer, and a list of forwarders alone fails");
+{
+  const base = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OPENROUTER_API_KEY: "k", MCP_ACCESS_KEY: undefined };
+  const line = (name: string, scope: string) => `${name}:${scope}:${createHash("sha256").update(name.repeat(8)).digest("hex")}`;
+  const scopeRows = (out: string) => out.split("\n").filter((l) => /^\s*[✓✗!·]\s+access keys scope\s/.test(l));
+  const alone = await run({ ...base, MCP_ACCESS_KEYS: line("fwd", "forward") });
+  assert(/✓\s+access keys\s.*fwd\(forward\)/.test(row(alone.out, "access keys")), `the forwarder is listed by name and scope: ${row(alone.out, "access keys")}`);
+  assert(scopeRows(alone.out).some((l) => /✗/.test(l) && /every key is a forwarder/.test(l)), `a list of forwarders alone fails: no client can authenticate (${scopeRows(alone.out).join(" | ")})`);
+  assert(/keygen\.ts --name laptop --scope write/.test(fix(alone.out, "access keys scope")), "…with the command to mint a client's key");
+  const legacy = await run({ ...base, MCP_ACCESS_KEYS: line("fwd", "forward"), MCP_ACCESS_KEY: "z".repeat(40) });
+  assert(!scopeRows(legacy.out).some((l) => /every key is a forwarder|every key is read-only/.test(l)), `…but not beside the legacy single key, which still authenticates, with write scope: neither "a forwarder" nor "read-only" (${scopeRows(legacy.out).join(" | ")})`);
+  const readLegacy = await run({ ...base, MCP_ACCESS_KEYS: line("chatgpt", "read"), MCP_ACCESS_KEY: "z".repeat(40) });
+  assert(!scopeRows(readLegacy.out).some((l) => /every key is read-only/.test(l)), `a read key beside the legacy single key: capture_thought is registered for the legacy key, so not "read-only" (${scopeRows(readLegacy.out).join(" | ")})`);
+  const reader = await run({ ...base, MCP_ACCESS_KEYS: [line("fwd", "forward"), line("chatgpt", "read")].join(",") });
+  assert(scopeRows(reader.out).some((l) => /!/.test(l) && /every key is read-only/.test(l)), `a forwarder beside a read key: every CLIENT key is read-only, said (${scopeRows(reader.out).join(" | ")})`);
+  const writers = await run({ ...base, MCP_ACCESS_KEYS: [line("fwd", "forward"), line("laptop", "write"), line("phone", "write")].join(",") });
+  assert(scopeRows(writers.out).some((l) => /every client key can write/.test(l)), `a forwarder beside two write keys: every client key can write, said so — not every key (${scopeRows(writers.out).join(" | ")})`);
+  const writeLegacy = await run({ ...base, MCP_ACCESS_KEYS: line("laptop", "write"), MCP_ACCESS_KEY: "z".repeat(40) });
+  assert(scopeRows(writeLegacy.out).some((l) => /every client key can write/.test(l)), `a write key beside the legacy single key, itself write scope: every client key can write (${scopeRows(writeLegacy.out).join(" | ")})`);
+  const readWriteLegacy = await run({ ...base, MCP_ACCESS_KEYS: [line("chatgpt", "read"), line("laptop", "write")].join(","), MCP_ACCESS_KEY: "z".repeat(40) });
+  assert(!scopeRows(readWriteLegacy.out).some((l) => /can write/.test(l)), `…but not beside a read key too (${scopeRows(readWriteLegacy.out).join(" | ")})`);
+  const hook = await run({ ...base, MCP_ACCESS_KEYS: [line("fwd", "forward"), line("hook", "capture")].join(",") });
+  assert(scopeRows(hook.out).length === 0, `a forwarder beside a capture key: no scope row (${scopeRows(hook.out).join(" | ")})`);
+}
+
 console.log("\n[3] Credentials are not echoed");
 {
   const r = await run({ ...NO_DB, OB1_STORE: "sql", MCP_ACCESS_KEY: "s3cr3t-key-value-abcdefghijklmnop",
@@ -1269,7 +1294,7 @@ else {
   const olderWriter = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
   assert(olderWriter.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 extraction\\(s\\) \\(${tid} under extract:old@p2\\) — written by a producer from before 061`).test(olderWriter.out) && /Apply db\/migrations\/061_derivations\.sql\. Its backfill records every artifact standing, at the thought's current text, marked legacy\./.test(olderWriter.out) && !/Every producer is 061's/.test(olderWriter.out),
          `an extraction written by 056's writer — a producer from before 061 — does not start, the pair named, the file the remedy and not the raw writer (exit ${olderWriter.code}: ${olderWriter.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") || f.startsWith("073") || f.startsWith("063") || f.startsWith("066") || f.startsWith("067") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") || f.startsWith("073") || f.startsWith("063") || f.startsWith("066") || f.startsWith("067") || f.startsWith("079") });
   assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\): 1 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and 061 re-applied records the pair as legacy and leaves the one writer: ok again");
   await ctx.unsafe(`UPDATE thought_chunks SET context = 'Situating blurb.' WHERE context IS NULL`);
   const allCtxOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -1696,7 +1721,7 @@ else {
   const fortyTwoBody = await run(SQL_ENV);
   assert(/!  delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone, but its body is from before migration 060 \(migration 060 not yet applied, or 042 re-applied by hand\): the row is deleted first and the trigger derives the tombstone after it/.test(fortyTwoBody.out) && /Apply db\/migrations\/060_append_then_project\.sql\./.test(fortyTwoBody.out),
          "…which 042 re-applied performs, leaving 042's body: one form, and a warning naming 060 for the body (SMD-2116)");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("073") || f.startsWith("063") || f.startsWith("066") || f.startsWith("067") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("073") || f.startsWith("063") || f.startsWith("066") || f.startsWith("067") || f.startsWith("079") });
   assert(/✓  delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone, with 060's body/.test((await run(SQL_ENV)).out), "…and 060 after it is the shipped body, said as such");
   // A brain that stopped at 036 — a server deployed ahead of the migration:
   // the two-argument form alone. Every delete the server sends would fail at
@@ -1796,7 +1821,7 @@ else {
   const pre060 = await run(SQL_ENV);
   assert(/!  audit events\s+046's event shape present and every key classified, 055's payload in the capture event, but the audit trigger's body is from before 060 \(migration 060 not yet applied, or 055 re-applied by hand\): it derives the event after the write and checks no projected row against its event/.test(pre060.out) && /Apply db\/migrations\/060_append_then_project\.sql\./.test(pre060.out),
          "…055 re-applied over 060 puts a trigger back that checks nothing: the event check warns, naming 060 (SMD-2116)");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("073") || f.startsWith("063") || f.startsWith("066") || f.startsWith("067") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("060") || f.startsWith("061") || f.startsWith("073") || f.startsWith("063") || f.startsWith("066") || f.startsWith("067") || f.startsWith("079") });
   const shippedPair = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped — the 3-argument body \(073's\) carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event \(046\) and append it first, projecting the row from it \(060\); the 3-argument body records the tags' lineage with the write \(061\); both stamp the trust the write declares, never above the key \(073\); the 2-argument body \(073's\) refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
          "…and 060, 061 then 073 re-applied is the shipped pair again, said as such");
@@ -1856,6 +1881,13 @@ else {
   assert(pre066.code === 0 && /!  lineage\s+every derived row has its lineage row, but consolidation_candidates is from before 066 \(migration 066 not yet applied, or 063 re-applied by hand over it\): the judge is asked whether a page supersedes its own evidence, and a digest its sources \(SMD-2292\)/.test(pre066.out) && /Apply db\/migrations\/066_lineage_excludes_candidates\.sql\./.test(fix(pre066.out, "lineage")),
          `063 re-applied over 066 is a warning on the candidate body, naming 066 as the remedy (${(pre066.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("066") });
+  // 066 alone over 079 (SMD-2448): 066's candidate body carries the lineage
+  // sentinel but pairs two tickets Linear links; the check reads 079's sentinel
+  // and warns naming 079 — the next rung after 066's.
+  const pre079 = await run(SQL_ENV);
+  assert(pre079.code === 0 && /!  lineage\s+every derived row has its lineage row, but consolidation_candidates is from before 079 \(migration 079 not yet applied, or 063 or 066 re-applied by hand over it\): the judge is asked whether one ticket supersedes another that Linear already relates to it \(parent, child, blocker, related\), two records each with its own lifecycle \(SMD-2448\)/.test(pre079.out) && /Apply db\/migrations\/079_linked_tickets_not_paired\.sql\./.test(fix(pre079.out, "lineage")),
+         `066 re-applied over 079 is a warning on the candidate body, naming 079 as the remedy (${(pre079.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("079") });
   // 063 re-applied by hand over 067 (SMD-2297): 063's rebuild_derived keeps
   // every rejected row, so a proposal the pass settled is never judged again
   // when a text moves under it. The check reads the reopen sentinel where
