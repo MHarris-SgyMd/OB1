@@ -12068,8 +12068,8 @@ console.log("\n[70] Migration 078: two tickets Linear links are never paired for
   const vol = await q<{ f: string; v: string }>(`SELECT p.oid::regprocedure::text AS f, provolatile AS v FROM pg_proc p WHERE p.oid IN ($1::regprocedure, $2::regprocedure)`, [LEFT, LINKED]);
   assert((await functionsNamed("consolidation_ticket_pairs_left_out")) === 1 && (await functionsNamed("consolidation_tickets_linked")) === 1 && vol.every((r) => r.v === "s")
       && /AND consolidation_tickets_linked\(me\.metadata, o\.metadata\)/.test(counter) && !/LIMIT/.test(counter)
-      && /coalesce\(p_a->>'ticket', p_a->>'issue'\)/.test(predicate) && /'child_of', 'blocks', 'blocked_by', 'relates_to', 'duplicate_of'/.test(predicate) && /f\.valid_until IS NULL/.test(predicate),
-    `the count holds the condition turned round with no k cut, and the predicate reads node_state's key, the five structured relations, active links only — both STABLE (${vol.map((r) => `${r.f}:${r.v}`).join(", ")})`);
+      && /coalesce\(p_a->>'ticket', p_a->>'issue'\)/.test(predicate) && /IN \('child_of', 'blocks', 'blocked_by', 'relates_to'\)/.test(predicate) && /f\.valid_until IS NULL/.test(predicate),
+    `the count holds the condition turned round with no k cut, and the predicate reads node_state's key, four structured relations (not duplicate_of), active links only — both STABLE (${vol.map((r) => `${r.f}:${r.v}`).join(", ")})`);
   const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
   assert(/066/.test(comment) && /078/.test(comment) && /Linear link/.test(comment), "the comment names 066, 078 and the linked-tickets rule");
 
@@ -12097,6 +12097,13 @@ console.log("\n[70] Migration 078: two tickets Linear links are never paired for
   await link(O1, "references", "SMD-7");
   await link(O1, "child_of", "SMD-9");
   await db.query(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND payload->>'target' = 'SMD-9'`, [O1]);
+  // Two link holders outside the lists (no entity): SMD-11, Linear's
+  // duplicate of SMD-1 (duplicate_of is left to the judge — review pass 4);
+  // SMD-12, related to SMD-1 in another system's links.
+  const D11 = await cap("SMD-11: a duplicate of SMD-1", 5, { source: "linear", issue: "SMD-11" });
+  const G12 = await cap("SMD-12: related elsewhere", 5, { source: "linear", issue: "SMD-12" });
+  await link(D11, "duplicate_of", "SMD-1");
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'link', jsonb_build_object('system', 'github', 'relation', 'relates_to', 'target', 'SMD-1'))`, [G12]);
   // A row for each term the count must share with the candidate body
   // (run-it, first review pass: seven of its nine other terms could be
   // dropped with this section green): SMD-4 (linked) shares two entities
@@ -12131,9 +12138,12 @@ console.log("\n[70] Migration 078: two tickets Linear links are never paired for
     await linked(m("issue", "SMD-1"), m("issue", "SMD-2")), await linked(m("issue", "SMD-2"), m("issue", "SMD-1")), await linked(m("ticket", "SMD-2"), m("issue", "SMD-1")),
     await linked(m("issue", "SMD-1"), m("ticket", "SMD-1")), await linked(m("issue", "SMD-1"), { source: "mcp" }), await linked(m("issue", "SMD-1"), null),
     await linked(m("issue", "SMD-1"), m("issue", "SMD-7")), await linked(m("issue", "SMD-1"), m("issue", "SMD-9")), await linked(m("issue", "SMD-1"), m("issue", "SMD-6")),
+    // Review pass 4: a third ticket's link to SMD-1 relates nothing else to it (the holder's identity is read in both directions); a duplicate and another system's link do not count.
+    await linked(m("issue", "SMD-6"), m("issue", "SMD-1")), await linked(m("issue", "SMD-1"), m("issue", "SMD-6")),
+    await linked(m("issue", "SMD-11"), m("issue", "SMD-1")), await linked(m("issue", "SMD-12"), m("issue", "SMD-1")),
   ];
-  assert(truth.join() === "true,true,true,false,false,false,false,false,false",
-    `the predicate: SMD-1 and SMD-2 either way round and through SMD-2's section; never SMD-1 with itself, a note, NULL, a text reference, a closed link or an unrelated ticket — false, never NULL (${truth.join()})`);
+  assert(truth.join() === "true,true,true,false,false,false,false,false,false,false,false,false,false",
+    `the predicate: SMD-1 and SMD-2 either way round and through SMD-2's section; never SMD-1 with itself, a note, NULL, a text reference, a closed link, an unrelated ticket either way round (though others link to SMD-1), Linear's duplicate, or another system's link — false, never NULL (${truth.join()})`);
 
   // 066's list, the body this file replaces: every older row that nothing
   // supersedes — and its size for every thought in the corpus.

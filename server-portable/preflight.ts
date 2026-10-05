@@ -2331,7 +2331,7 @@ if (configFailed) {
               // 078 (SMD-2448): 063's or 066's candidate body over 078's — the
               // pass asks the judge whether one ticket supersedes another.
               add("lineage", "warn",
-                  `every derived row has its lineage row, but consolidation_candidates is from before 078 (migration 078 not yet applied, or 063 or 066 re-applied by hand over it): the judge is asked whether one ticket supersedes another that Linear already relates to it (parent, child, blocker, related, duplicate), two records each with its own lifecycle (SMD-2448). ${coverage}`,
+                  `every derived row has its lineage row, but consolidation_candidates is from before 078 (migration 078 not yet applied, or 063 or 066 re-applied by hand over it): the judge is asked whether one ticket supersedes another that Linear already relates to it (parent, child, blocker, related), two records each with its own lifecycle (SMD-2448). ${coverage}`,
                   ledgerRemedy("078", APPLY_078));
             } else if (reopenOlder) {
               add("lineage", "warn",

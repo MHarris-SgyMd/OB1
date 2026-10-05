@@ -2,7 +2,7 @@
 -- Migration 078: two tickets Linear links are never paired for judgement —
 --                consolidation_candidates leaves out a pair whose two thoughts
 --                are filed under two different tickets that Linear relates
---                (parent and child, blocks, relates, duplicate) (SMD-2448)
+--                (parent and child, blocks, relates) (SMD-2448)
 -- =============================================================================
 --
 -- WHY
@@ -14,7 +14,9 @@
 --   follow-up. Counted over every proposal the brain holds (2026-10-04),
 --   reading a thought's ticket as node_state does (below): 109 of 128 pair
 --   two different tickets, all rejected, and 107 of those 109 are tickets
---   Linear relates. Two tickets Linear relates are two records whose
+--   Linear relates as of that day (94 relates_to alone, 12 through child_of,
+--   1 blocks; about 72 of the 10-01 pass's 84 were already linked when they
+--   were judged, a dozen linked during that review). Two tickets Linear relates are two records whose
 --   relationship is already stated, each with its own status, which
 --   board-sync keeps current and node_state (058, 068) reads; one
 --   "superseding" the other would archive a record that still holds, and
@@ -26,18 +28,25 @@
 --   proposals graded by hand are real and all 6 pair two different tickets
 --   (a later ticket replacing an earlier ticket's decision), as do all 6
 --   labelled conflicts; under the broad rule eval-consolidate.ts measures
---   nothing (its corpus gives every row its own issue). Those pairs carry no
---   Linear relation there, so the narrower rule keeps them.
+--   nothing (its corpus gives every row its own issue). That corpus carries
+--   no links at all, so it cannot say what the narrower rule costs: in a live
+--   workspace a later ticket replacing an earlier one's decision is often
+--   filed as relates_to, which this file leaves out — the residual risk, to
+--   be measured on a labelled set that keeps Linear's relations.
 --
 -- THE RULE
 --   A pair is not a candidate when both thoughts carry a ticket identity,
 --   the identities differ, and an active Linear link joins the two tickets
 --   in either direction — a thought_facets row of kind 'link' (053), system
---   'linear', valid_until NULL, relation child_of, blocks, blocked_by,
---   relates_to or duplicate_of, held by a thought filed under one ticket and
+--   'linear', valid_until NULL (active as 058 and 071 read a link;
+--   record_source_links closes one with now()), relation child_of, blocks,
+--   blocked_by or relates_to, held by a thought filed under one ticket and
 --   targeting the other. A text cross-reference (relation 'references', an
 --   autolink in a description) does not count: naming a ticket is not
---   relating to it. A thought's identity is the ticket node_state reads it
+--   relating to it. Nor does duplicate_of: Linear's verdict that one ticket
+--   no longer holds is the nearest thing to a supersession the board
+--   records — six such pairs on the dogfood meet every other candidate term
+--   (review pass 4) — so they stay for the judge. A thought's identity is the ticket node_state reads it
 --   under (058, 068, 071): coalesce(metadata->>'ticket', metadata->>'issue')
 --   — a ticket's own row by its issue, a dated section, a reference or a
 --   fork change record filed under a ticket by its ticket — the text
@@ -79,11 +88,14 @@
 --   weighed: it would move 063's and 066's sentinels, which preflight and
 --   the suites read in consolidation_candidates' own text.)
 --   Measured at the shipped defaults (k 3, cosine 0.6) over the dogfood's
---   1,238 pooled thoughts: 3,432 judge calls before this file, 3,290 after
---   (-4.1%; the broad rule's -36.1% came from unlinked ticket pairs the
---   judge rarely proposes — their precision is SMD-1873's); the read took
---   3.1 s, which is also what --status and --dry-run now spend on a pool
---   that size, one neighbour read per thought still to judge.
+--   pool (1,241 thoughts, 2026-10-05): 3,435 judge calls before this file,
+--   3,293 after (-4.1%; the broad rule measured -36.1% the day before, 3,427
+--   -> 2,190 — its extra came from unlinked ticket pairs the judge rarely
+--   proposes, whose precision is SMD-1873's). On a copy of that brain the
+--   worker's per-thought candidate read went from 2.3 s to about 3.2 s over
+--   the pool (+0.7 ms a thought, the predicate 0.1-0.2 ms a call through the
+--   link index); --status and --dry-run now spend about 6 ms a thought still
+--   to judge (7.7 s over the whole pool, 0.6 s over the 68 waiting).
 --
 -- SAFETY
 --   One body redefined on its own text with no arity change (CREATE OR
@@ -155,7 +167,7 @@ AS $$
      WHERE f.kind = 'link'
        AND f.payload->>'system' = 'linear'
        AND f.valid_until IS NULL
-       AND f.payload->>'relation' IN ('child_of', 'blocks', 'blocked_by', 'relates_to', 'duplicate_of')
+       AND f.payload->>'relation' IN ('child_of', 'blocks', 'blocked_by', 'relates_to')
        AND ((f.payload->>'target' = k.b AND coalesce(h.metadata->>'ticket', h.metadata->>'issue') = k.a)
          OR (f.payload->>'target' = k.a AND coalesce(h.metadata->>'ticket', h.metadata->>'issue') = k.b))
   ) END
@@ -163,7 +175,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION consolidation_tickets_linked(jsonb, jsonb) IS
-  'Whether two thoughts (their metadata) are filed under two different tickets — metadata->>''ticket'', else metadata->>''issue'', as node_state reads them — that an active Linear link relates in either direction (thought_facets kind link, system linear, relation child_of | blocks | blocked_by | relates_to | duplicate_of; a text reference does not count). The pair rule consolidation_candidates applies since 078, and the reason db/consolidate.ts names when it settles a stale proposal. Read-only. Migration 078 (SMD-2448).';
+  'Whether two thoughts (their metadata) are filed under two different tickets — metadata->>''ticket'', else metadata->>''issue'', as node_state reads them — that an active Linear link relates in either direction (thought_facets kind link, system linear, relation child_of | blocks | blocked_by | relates_to; neither a text reference nor duplicate_of counts). The pair rule consolidation_candidates applies since 078, and the reason db/consolidate.ts names when it settles a stale proposal. Read-only. Migration 078 (SMD-2448).';
 
 -- 066's body, verbatim, plus the linked-tickets rule. The sentinel sits
 -- inside the body — preflight and the suites read pg_proc.prosrc.

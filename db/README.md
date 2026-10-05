@@ -1029,7 +1029,9 @@ its oracle on all 12 queries. test-schema [69], test-upgrade [20aa].
 Migration 078 never pairs two tickets Linear links for judgement (SMD-2448):
 `consolidation_candidates` leaves out a pair filed under two different tickets
 that an active Linear link relates in either direction — parent and child,
-blocks, relates, duplicate (053's link rows; a text reference does not count).
+blocks, relates (053's link rows; neither a text reference nor `duplicate_of`
+counts: a duplicate is Linear's own verdict that a ticket no longer holds, the
+nearest thing to a supersession the board records, so the judge still sees it).
 A thought's ticket is the one `node_state` reads it under,
 `coalesce(metadata->>'ticket', metadata->>'issue')` (a ticket's row by its
 issue, a dated section filed under it by its ticket), the text exactly; the
@@ -1038,20 +1040,23 @@ candidate body, the count and the worker's settle reason. Two linked tickets
 are two records whose relationship is already stated, each with its own status;
 one "superseding" the other archives a record that still holds. On the stable
 dogfood brain 107 of the 128 proposals ever recorded pair two tickets Linear
-relates, all rejected, and neither accepted one does. Unlinked tickets stay
-candidates: the eval's hand-graded set (`evals/consolidate-labels.json`) holds
-six real supersessions between two tickets, a later ticket replacing an
-earlier one's decision, which the broader "any two tickets" rule would lose.
-At the shipped defaults (k 3, cosine 0.6) a full pass makes 4.1% fewer judge
-calls (3,432 → 3,290 over 1,238 pooled thoughts); the judge's cost on unlinked
-ticket pairs is SMD-1873's. Two rows of one ticket stay candidates, and a
+relates as of 2026-10-04 (94 by relates_to alone), all rejected, and neither
+accepted one does. Unlinked tickets stay candidates: the eval's hand-graded
+set (`evals/consolidate-labels.json`) holds six real supersessions between two
+tickets, a later ticket replacing an earlier one's decision, which the broader
+"any two tickets" rule would lose. That corpus carries no links, so it cannot
+measure what this narrower rule costs; a decision-replacing ticket filed as
+`relates_to` is left out — the residual risk. At the shipped defaults (k 3,
+cosine 0.6) a full pass makes 4.1% fewer judge calls (3,435 → 3,293 over
+1,241 pooled thoughts); the judge's cost on unlinked ticket pairs is
+SMD-1873's. Two rows of one ticket stay candidates, and a
 thought with no identity is judged against a ticket row as before.
 `consolidation_ticket_pairs_left_out(thought, floor)` counts what the rule
 removes for one thought, every other term met; `db/consolidate.ts` turns it
 into judge calls fewer at `--k` (a lower bound: a stale pair past the cut is not
 counted) — in a run's summary, and in `--status` and `--dry-run` over the
-thoughts still to judge (one neighbour read each: 3.1 s for the dogfood's pool)
-— and settles a stale proposal on two linked tickets naming the rule. Nothing
+thoughts still to judge (about 6 ms a thought: 7.7 s over the dogfood's whole
+pool) — and settles a stale proposal on two linked tickets naming the rule. Nothing
 is stored: a link written or closed moves the rule at the next pass. The body
 carries `ob1:linked-tickets-not-paired`, which the worker reads before it
 reports the rule and preflight's `lineage` check reads to warn naming 078 when
