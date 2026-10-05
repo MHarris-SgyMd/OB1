@@ -653,10 +653,12 @@ migration 034, never the thoughts corpus), as any client search does. The
 watermark is the one freshness signal a missed day of board moves changes: a
 status move rewrites a ticket's thought, so the count, the newest capture and the
 ledger all stay the same. The Freshness section prints `board sync: a=… b=…`, and
-watermarks half a day or more apart, or one brain holding none, are a delta the
+watermarks half a day or more apart, or one brain holding no usable one, are a delta the
 verdict names ("open-brain-canary's board-sync watermark is 1 day older") and the
 exit code counts. A brain older than SMD-2261 reads `unread` there and is not
-called older. The gap is between the newest board move each brain reflects, not
+called older; a brain that has the field but did not read it (its read is the
+last the keyed `/health` deadline reaches) makes the verdict "not certain"
+rather than "current". The gap is between the newest board move each brain reflects, not
 how long one has been stale: a canary refreshed after a quiet week reads a week
 older the hour the board next moves, and a pass that synced one stale ticket of
 fifty moves the watermark as far as all fifty would. It moves when the board

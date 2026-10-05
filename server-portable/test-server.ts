@@ -920,7 +920,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `the table says which count was not read and which table is absent, and a timed-out ledger is not called a grant (${readText.split("\n").find((l) => l.startsWith("Migrations"))})`);
   const noBoard = renderBrainInfo(await brainInfo(server, async () => planted(52, { boardSync: null }), 1000));
   const lostBoard = renderBrainInfo(await brainInfo(server, async () => planted(52, { boardSync: null, unread: { boardSync: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
-  assert(/^Board sync: +2026-09-24T12:00:00\.000Z$/m.test(readText) && /^Board sync: +none — no thought carries a Linear watermark$/m.test(noBoard) && /^Board sync: +\?$/m.test(lostBoard),
+  assert(/^Board sync: +2026-09-24T12:00:00\.000Z$/m.test(readText) && /^Board sync: +none — no thought carries a usable Linear watermark$/m.test(noBoard) && /^Board sync: +\?$/m.test(lostBoard),
     `the table's board-sync row: the watermark, none, or ? when not read (${[readText, noBoard, lostBoard].map((t) => t.split("\n").find((l) => l.startsWith("Board sync"))).join(" / ")})`);
 
   // The deadline keeps what was read (review pass 2: it threw every fact away).

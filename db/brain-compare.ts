@@ -292,13 +292,19 @@ export async function readBrain(ep: BrainEndpoint): Promise<BrainReading> {
 export function boardSyncOf(info: BrainInfo): Pick<BrainReading, "boardSync" | "boardSyncUnread"> {
   const db = dbOf(info);
   if (!db) return { boardSync: null, boardSyncUnread: "the database did not answer" };
-  if (!("boardSync" in db)) return { boardSync: null, boardSyncUnread: "the server is older than SMD-2261" };
+  if (!("boardSync" in db)) return { boardSync: null, boardSyncUnread: OLDER_SERVER };
   if (db.unread?.boardSync) return { boardSync: null, boardSyncUnread: "the brain did not read it" };
   const w: unknown = db.boardSync;
   if (w === null) return { boardSync: null, boardSyncUnread: null };
   if (typeof w !== "string" || !ISO_INSTANT.test(w) || Number.isNaN(Date.parse(w))) return { boardSync: null, boardSyncUnread: "the record's value is not an ISO instant" };
   return { boardSync: w, boardSyncUnread: null };
 }
+
+/** Why an older server's watermark is unread — every v1.5.0 peer, so the verdict stays quiet about it. */
+export const OLDER_SERVER = "the server is older than SMD-2261";
+
+/** A watermark a server that has the field did not give: a read past the /health deadline, refused, or malformed. */
+const boardSyncMissed = (r: BrainReading) => r.boardSyncUnread !== null && r.boardSyncUnread !== OLDER_SERVER;
 
 /** The watermark's one shape, as brain-info.ts's boardSyncValue sends it. */
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -715,7 +721,7 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
   // gap is — the watermarks' gap, not a staleness the brain has been in.
   const board = boardSyncDelta(a, b);
   if (board && "none" in board) {
-    parts.push(`${board.none === "a" ? a.label : b.label} holds no board-sync watermark`);
+    parts.push(`${board.none === "a" ? a.label : b.label} holds no usable board-sync watermark`);
   } else if (board && board.days !== 0) {
     const n = Math.abs(board.days);
     parts.push(`${b.label}'s board-sync watermark is ${n} day${n === 1 ? "" : "s"} ${board.days < 0 ? "older" : "newer"}`);
@@ -733,8 +739,12 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
     const countsKnown = a.thoughts !== null && b.thoughts !== null;
     // Claimed only over two watermarks compared: none on both sides is not "apart".
     const boardKnown = board !== null && "days" in board;
-    if (migKnown && countsKnown) return `current with each other — same migration and thought count${boardKnown ? ", board-sync watermarks under half a day apart" : ""}.`;
-    const unread = [migKnown ? null : "migration ledger", countsKnown ? null : "thought count"].filter(Boolean).join(" and ");
+    // A server that has the field but did not give it (its read is the last the
+    // /health deadline reaches) leaves the one signal this incident shows on
+    // unread: not "current" (review pass 2). An older server's absence stays quiet.
+    const boardMissed = boardSyncMissed(a) || boardSyncMissed(b);
+    if (migKnown && countsKnown && !boardMissed) return `current with each other — same migration and thought count${boardKnown ? ", board-sync watermarks under half a day apart" : ""}.`;
+    const unread = [migKnown ? null : "migration ledger", countsKnown ? null : "thought count", boardMissed ? "board-sync watermark" : null].filter(Boolean).join(" and ");
     return `no delta on what could be read; ${unread} unread on one side, so freshness is not certain.`;
   }
   return parts.join("; ") + ".";
@@ -901,8 +911,8 @@ export async function runCompare(args: CompareArgs): Promise<number> {
   // A read that could not be had — `unavailable` (older brain) or `failed` — is not a
   // delta: the count stand-in already spoke and we do not force the gate on an unread axis.
   const idSetDelta = !c.idDiff.unavailable && !c.idDiff.failed && !c.idDiff.equal;
-  // A board-sync watermark a day or more apart (SMD-2261), or one side with no
-  // Linear rows; a side that did not read it is not a delta.
+  // Board-sync watermarks half a day or more apart once rounded (SMD-2261), or one
+  // side with no usable watermark; a side that did not give it is not a delta.
   const boardDelta = isBoardSyncDelta(boardSyncDelta(c.a, c.b));
   const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0) || idSetDelta || boardDelta;
   const anyDelta =

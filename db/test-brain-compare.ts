@@ -289,13 +289,19 @@ function frame(msg: unknown, sse?: boolean): Response {
   const days = [12, -12, 36, -36, 11, -11].map((h) => { const d = boardSyncDelta(mk({}), at(h)); return d && "days" in d ? d.days : "x"; });
   ok(days.join(",") === "1,-1,2,-2,0,0", `whole days by magnitude, symmetric in a and b (${days.join(",")})`);
   const none = freshnessVerdict(a, mk({ label: "fresh", boardSync: null }), 0);
-  ok(/fresh holds no board-sync watermark/.test(none), `a peer with no watermark is named (${none})`);
+  ok(/fresh holds no usable board-sync watermark/.test(none), `a peer with no watermark is named (${none})`);
   // Either side: a's none named as a's, a's unread no delta (review pass 1: only b's side was driven).
   const aNone = freshnessVerdict(mk({ label: "bare", boardSync: null }), mk({ label: "peer" }), 0);
-  ok(/bare holds no board-sync watermark/.test(aNone), `a's missing watermark is named as a's (${aNone})`);
+  ok(/bare holds no usable board-sync watermark/.test(aNone), `a's missing watermark is named as a's (${aNone})`);
   const aUnread = freshnessVerdict(mk({ boardSync: null, boardSyncUnread: "the server is older than SMD-2261" }), mk({ label: "peer", boardSync: "2026-09-20T12:00:00.000Z" }), 0);
   ok(aUnread === "current with each other — same migration and thought count.", `a's unread watermark is no delta and no claim (${aUnread})`);
   // An unread side is not a delta, and "current" does not claim the watermark.
+  // A new server that did not read it (the /health deadline) is not "current" — on
+  // either side; an older server's absence stays quiet (review pass 2).
+  for (const [side, x, y] of [["b", a, mk({ label: "peer", boardSync: null, boardSyncUnread: "the brain did not read it" })], ["a", mk({ boardSync: null, boardSyncUnread: "the brain did not read it" }), mk({ label: "peer" })]] as const) {
+    const v = freshnessVerdict(x, y, 0);
+    ok(v === "no delta on what could be read; board-sync watermark unread on one side, so freshness is not certain.", `a watermark the ${side} side did not read is not "current" (${v})`);
+  }
   const older = freshnessVerdict(a, mk({ label: "old", boardSync: null, boardSyncUnread: "the server is older than SMD-2261" }), 0);
   ok(older === "current with each other — same migration and thought count.", `an unread watermark is no delta and no claim (${older})`);
   ok(boardSyncDelta(a, mk({ boardSync: null, boardSyncUnread: "x" })) === null && boardSyncDelta(mk({ boardSync: null }), mk({ boardSync: null })) === null, "boardSyncDelta: unread or none on both sides is no delta");

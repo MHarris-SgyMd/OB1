@@ -383,7 +383,8 @@ the whole database's. The server's embedding and the brain's are printed side by
 side without a verdict (preflight's embedding rows judge them; SMD-2071).
 `Board sync` is the board-sync watermark (SMD-2261): the newest Linear
 `updatedAt` any thought carries in `metadata.linear_updated_at`, which
-`db/sync-linear.ts` writes, in UTC; `none` when no thought carries one. It is a
+`db/sync-linear.ts` writes, in UTC; `none` when no thought carries a usable one
+(a malformed value, or one past an hour from now, is passed over). It is a
 high-water mark — the newest board move the brain reflects, not proof it reflects
 every one before it — and a quiet board leaves it old on a current brain.
 `tier.ts --compare` diffs it between two brains.
@@ -563,7 +564,8 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `brain_info` answers its whole record beside the table: it holds the
   server's and the database's own facts, and one value read from thoughts'
   metadata — the board-sync watermark, which the read itself holds to one shape
-  (a UTC instant to the millisecond, never past an hour from now) or leaves null.
+  (a UTC instant to the millisecond, never past an hour from now by the
+  database's clock) or leaves null.
 - A refusal answers `{ code, retryable, text }`. The reads': `NOT_FOUND`,
   `REFUSED_FILTER`, `REFUSED_EGRESS` (with its `rule`), `REFUSED_SINCE`,
   `REFUSED_CURSOR`. Capture's: the pointer and metadata shapes

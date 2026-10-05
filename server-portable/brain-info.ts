@@ -102,13 +102,15 @@ export interface DatabaseFacts {
   /**
    * The board-sync watermark (SMD-2261): the newest Linear `updatedAt` any
    * thought reflects — max metadata.linear_updated_at, which sync-linear.ts
-   * writes — as an ISO instant in UTC. Null when no thought carries one, when
+   * writes — as an ISO instant in UTC. Null when no thought carries a usable one
+   * (malformed and future values are passed over, see BOARD_SYNC_SQL), when
    * not read (`unread` names it) or not asked (`stats: false`). A high-water
    * mark: the newest board move the brain reflects, not proof it reflects every
    * move before it. It moves when the board does, so a quiet board leaves it old
    * on a current brain, and it says nothing of whether the sync is alive. It is
    * a thought's metadata — a write key can set it to any instant up to an hour
-   * from now — not a fact the database keeps.
+   * past the database's clock, and a later one counts once the clock reaches
+   * it — not a fact the database keeps.
    */
   boardSync: string | null;
   /** Every HNSW index on a table on this connection's search_path. */
@@ -170,7 +172,9 @@ const COUNT_SQL: Record<CountedTable, (sql: SqlTag) => Promise<{ n: number }[]>>
  * date or a word timestamptz accepts ('infinity', 'now') is passed over rather
  * than failing the read or winning the max — the value is a thought's
  * metadata, and the record carries it unguarded (render.ts's AS_RECORD). So is
- * an instant past an hour from now: Linear's updatedAt is never in the future,
+ * an instant past an hour from now by the database's clock — Linear's updatedAt
+ * is never in the future, so a host clock more than an hour slow passes a fresh
+ * move over until it catches up —
  * and a capture key's far-future value (any write key can set the key) would
  * otherwise win the max for good — or, past 9999 in UTC, render a shape
  * boardSyncValue refuses and leave the field unread for good (review pass 1).
@@ -547,7 +551,7 @@ export function renderBrainInfo(info: BrainInfo): string {
     lines.push(
       row("Rows", `${num("thoughts")} thoughts · ${num("thought_audit")} audit events · ${num("thought_chunks")} chunks · ${num("ob1_entities")} entities`),
       row("Database size", db.databaseBytes === null ? "?" : formatBytes(db.databaseBytes)),
-      row("Board sync", db.boardSync ?? ("boardSync" in db.unread ? "?" : "none — no thought carries a Linear watermark")),
+      row("Board sync", db.boardSync ?? ("boardSync" in db.unread ? "?" : "none — no thought carries a usable Linear watermark")),
     );
   }
   lines.push(row("HNSW", db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")));
