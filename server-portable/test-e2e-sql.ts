@@ -141,8 +141,8 @@ const H = {
 };
 
 let rpcId = 1;
-async function call(name: string, args: Record<string, unknown> = {}, key = "e2e-key"): Promise<string> {
-  const r = await fetch(BASE, {
+async function call(name: string, args: Record<string, unknown> = {}, key = "e2e-key", path = ""): Promise<string> {
+  const r = await fetch(BASE + path, {
     method: "POST",
     headers: { ...H, "x-brain-key": key },
     body: JSON.stringify({
@@ -613,6 +613,39 @@ console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll w
   const handle = JSON.parse(await call("scan_thoughts", { limit: 5 })) as { jobId: string; status: string; poll: string; stream: string };
   assert(handle.status === "accepted", `the tool returns an accepted handle, not a blocked result (${handle.status})`);
   assert(handle.poll === `/jobs/${handle.jobId}` && handle.stream === `/jobs/${handle.jobId}/stream`, `the handle carries the poll and stream routes (${handle.poll}, ${handle.stream})`);
+  // Called at /mcp (the proxy's path), the links are under it, and answer
+  // there: behind the proxy a root-relative one reached the server only
+  // through the legacy route v2.0.0 removes (SMD-2306).
+  const mounted = JSON.parse(await call("scan_thoughts", { limit: 1 }, "e2e-key", "/mcp/")) as { jobId: string; poll: string; stream: string };
+  assert(mounted.poll === `/mcp/jobs/${mounted.jobId}` && mounted.stream === `/mcp/jobs/${mounted.jobId}/stream`, `called at /mcp/, the links are under /mcp (${mounted.poll}, ${mounted.stream})`);
+  const viaMount = await fetch(`${BASE}${mounted.poll}`, { headers: { "x-brain-key": "e2e-key" } });
+  assert(viaMount.status === 200 && ((await viaMount.json()) as { jobId?: string }).jobId === mounted.jobId, `the /mcp poll link answers the job (${viaMount.status})`);
+  // The path as it came, still encoded: a decoded one put a raw space or quote in the link (review pass 1).
+  const encoded = JSON.parse(await call("scan_thoughts", { limit: 1 }, "e2e-key", "/mcp/a%20b")) as { jobId: string; poll: string };
+  assert(encoded.poll === `/mcp/a%20b/jobs/${encoded.jobId}`, `called at /mcp/a%20b, the link keeps the path encoded (${encoded.poll})`);
+  // The path alone: a query on the call (a connector's `?key=`) never rides into a link (review pass 3).
+  const queried = JSON.parse(await call("scan_thoughts", { limit: 1 }, "e2e-key", "/mcp?x=1")) as { jobId: string; poll: string; stream: string };
+  assert(queried.poll === `/mcp/jobs/${queried.jobId}` && !queried.stream.includes("?"), `called at /mcp?x=1, the links carry no query (${queried.poll}, ${queried.stream})`);
+  // A path that came as `//x` (no proxy in front, or one that does not clean
+  // paths): one slash, never a `//x/jobs/…` a client resolves as host `x`
+  // (review pass 2). Written as a raw request-target: fetch collapses a
+  // leading `//` itself (measured), so through it the case was vacuous.
+  const rawBody = JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "scan_thoughts", arguments: { limit: 1 } } });
+  const rawReply = await new Promise<string>((resolve, reject) => {
+    let got = "";
+    const timer = setTimeout(() => reject(new Error("the raw request got no complete answer in 10 s")), 10_000);
+    Bun.connect({
+      hostname: "127.0.0.1", port: server.port ?? 0,
+      socket: {
+        open(s) { s.write(`POST //evil.example/mcp// HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nx-brain-key: e2e-key\r\nContent-Length: ${Buffer.byteLength(rawBody)}\r\nConnection: close\r\n\r\n${rawBody}`); },
+        data(_s, d) { got += new TextDecoder().decode(d); },
+        close() { clearTimeout(timer); resolve(got); },
+        error(_s, e) { clearTimeout(timer); reject(e); },
+      },
+    }).catch(reject);
+  });
+  const rawPoll = /\\"poll\\":\\"([^\\"]+)\\"/.exec(rawReply)?.[1] ?? "";
+  assert(/^\/evil\.example\/mcp\/jobs\/[0-9a-f-]{36}$/.test(rawPoll), `called at //evil.example/mcp//, the link stays on this origin (${rawPoll || rawReply.slice(0, 200)})`);
 
   // Poll the keyed REST route until the job reaches a terminal state.
   const pollJob = async (id: string, key = "e2e-key"): Promise<{ httpStatus: number; job: Record<string, unknown> }> => {
@@ -1833,6 +1866,21 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   await call("thought_stats", {}, "bot-raw"); // registers bot-key in the registry, as any first request does
   await sql`SELECT revoke_agent_key(${hashKey("bot-raw")}, 'SMD-2041 e2e')`;
   assert(await health("bot-raw") === "ok", "a revoked write key → `ok`, not the record");
+  {
+    // Nor is a revoked key named as still on the old root URL (SMD-2306): the
+    // line comes after the refusal, on the MCP endpoint and a REST route alike.
+    const warned: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+    try {
+      const MARK = { "x-ob1-legacy-route": "1", "x-brain-key": "bot-raw" };
+      await fetch(BASE, { method: "POST", headers: { ...H, ...MARK }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }).then((r) => r.text());
+      await fetch(`${BASE}/worker-status`, { headers: MARK }).then((r) => r.text());
+    } finally {
+      console.warn = realWarn;
+    }
+    assert(!warned.some((w) => w.includes(`key "bot-key" reached`)), `a revoked key, marked, on POST / and GET /worker-status → no old-root-URL line (${warned.filter((w) => w.includes("old root URL")).join(" | ") || "none"})`);
+  }
   // The registry's lookup under a lock (SMD-2072). Each lock wait is capped
   // (agents.ts's RESOLVE_LOCK_TIMEOUT_MS, 250 ms) and a timed-out lookup is
   // retried for up to 2 s (BUSY_RETRY), so every key answers inside /health's

@@ -22,9 +22,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+own_stack=""
 if [ $# -ge 2 ]; then
   BASE="$1"; KEY="$2"
 elif [ -f "$HERE/.env" ]; then
+  own_stack=1
   BASE="http://127.0.0.1:$(grep -E '^SERVER_PORT=' "$HERE/.env" | cut -d= -f2 || echo 8000)/mcp"
   # deploy/.env holds key HASHES, not keys — by design. A raw key has to be
   # supplied, so read it from OB1_SMOKE_KEY or take it as an argument.
@@ -237,6 +239,36 @@ else
     { [ "$hv" = "$want" ] && [ "$hlast" = "$wantLast" ]; } && checkout=" (the checkout's)" || checkout=" (this checkout: $want, tree to $wantLast)"
   fi
   ok "GET /health with the key → version $hv, tree to $hlast$checkout, commit $hc, highest migration $hm (ledger: $hl)"
+fi
+
+# 11. The old root URL (SMD-2306). Behind this stack's proxy the root still
+#     answers for a window that closes with v2.0.0, and every answer says so:
+#     a Deprecation header and a Link to the upgrade guide. From 2.0.0 it is
+#     the proxy's 404 (SMD-2532). Judged only when no URL was given, so the
+#     target is this stack's own proxy: told apart by its body alone, any
+#     Traefik in front (a user's own, k3s's ingress) would pass for it, and a
+#     server with no proxy in front rightly answers at every path with no
+#     header. Given a URL, the answer is reported, not counted. No key: the
+#     refusal carries the headers too (measured), and a keyed probe would put
+#     the smoke key's name in the server's "old root URL" log, where an
+#     operator looks for clients still to move (review pass 1).
+root_h=$(curl -s --max-time 20 -D - -o /dev/null -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":11,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
+  "$origin/" | tr -d '\r')
+root_code=$(printf '%s\n' "$root_h" | sed -n '1s/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p')
+root_dep=$(printf '%s\n' "$root_h" | sed -n 's/^[Dd]eprecation: *//p' | head -1)
+root_link=$(printf '%s\n' "$root_h" | grep -i '^link:' | grep -c 'rel="deprecation"')
+said="POST $origin/ → HTTP ${root_code:-none}, Deprecation '${root_dep}', $root_link deprecation Link"
+if [ -z "$own_stack" ]; then
+  echo "  ·  $said (reported, not counted: run with no URL to judge this stack's own proxy; SMD-2306)"
+elif [ "$root_code" = "200" ] && [ -n "$root_dep" ] && [ "$root_link" -ge 1 ]; then
+  ok "POST $origin/ → 200, deprecated (Deprecation: $root_dep, Link rel=deprecation): move its clients to $origin/mcp before v2.0.0 (SMD-2306)"
+elif [ "$root_code" = "404" ] && [ "${hv%%.*}" -ge 2 ] 2>/dev/null; then
+  ok "POST $origin/ → the proxy's 404 at $hv: the old root URL is retired; clients use $origin/mcp (SMD-2532)"
+elif [ "$root_code" = "502" ] || [ "${root_code:-000}" = "000" ]; then
+  bad "$said: the legacy route got no answer from the server (a 502 or no connection), so the window could not be judged"
+else
+  bad "$said (expected 200 with both, the legacy route's window, until 2.0.0, and the proxy's 404 from it; SMD-2306)"
 fi
 
 echo

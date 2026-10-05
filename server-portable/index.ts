@@ -5,7 +5,7 @@ import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./roo
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
-import { subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
+import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
 import { createCore, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
 import type { ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
@@ -47,7 +47,8 @@ const core = createCore({ env, store: db, door: SERVER_NAME });
 const toolCalls = createCallCount();
 /** How many tool calls are running now, for test-server [13d]. */
 export const toolCallsRunning = (): number => toolCalls.running;
-function buildServer(principal: Principal): McpServer {
+/** `endpoint`: the path the request came to, with no trailing slash — the job handle's links go under it. */
+function buildServer(principal: Principal, endpoint = ""): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
     // The fork's version, generated from db/version.mjs (SMD-2041) — a literal
@@ -234,7 +235,10 @@ function buildServer(principal: Principal): McpServer {
   // re-embed backfill, the run_worker drain SMD-2272) build on the same
   // startJob. Read-only, but it starts background work, so it is gated like the
   // reads; the detached run is tracked, so the stop waits for it.
-  readTool("scan_thoughts", async (input) => say.renderJobHandle(await core.scanThoughts(principal, input, { track: toolCalls.track })));
+  readTool("scan_thoughts", async (input) => {
+    const o = await core.scanThoughts(principal, input, { track: toolCalls.track });
+    return say.renderJobHandle(o.ok ? { ...o, value: atEndpoint(o.value, endpoint) } : o);
+  });
 
   return server;
 }
@@ -263,11 +267,13 @@ const corsHeaders = {
   // Retry-After is not a CORS-safelisted response header, so a browser-hosted
   // client (claude.ai, the Claude Desktop connector) cannot read it off a fetch
   // without this. The headers the fork means such a client to read are
-  // exposed: Retry-After, the busy refusal's retry delay (SMD-2106), and
-  // WWW-Authenticate, the challenge at the public origin that names the
-  // protected-resource document a client signs in from (SMD-2382). On a
-  // response that carries neither this says nothing.
-  "Access-Control-Expose-Headers": "Retry-After, WWW-Authenticate",
+  // exposed: Retry-After, the busy refusal's retry delay (SMD-2106);
+  // Deprecation and Link, which the proxy's legacy route adds to the server's
+  // answer (SMD-2306) while its headers middleware leaves this one alone, so
+  // this must name them; and WWW-Authenticate, the challenge at the public
+  // origin that names the protected-resource document a client signs in from
+  // (SMD-2382). On a response that carries none of them this says nothing.
+  "Access-Control-Expose-Headers": "Retry-After, Deprecation, Link, WWW-Authenticate",
 };
 
 // The two 405 header sets, built once; the refusal path spreads nothing per request.
@@ -537,6 +543,40 @@ app.get(PRM_PATH, async (c, next) => {
 });
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
+/**
+ * The request's path as it came, still percent-encoded. Hono's c.req.path is
+ * decoded, so a `%22` or a `%20` in it would reach a log line or a job link
+ * as a raw quote or space (SMD-2306 review pass 1).
+ */
+const rawPath = (req: Request): string => new URL(req.url).pathname;
+
+/**
+ * The root URL's compatibility window (SMD-2306). The proxy's legacy route
+ * marks what it forwards with this header and its /mcp and health routes
+ * delete it, so it is present only on a request that came to the old root URL
+ * through the stack's proxy; a server with no proxy in front never sees it,
+ * and its root is still the right URL. Every keyed route below calls
+ * noteLegacyRoute once its key has passed (the MCP endpoint, /health under a
+ * prefix, /worker-status, the worker actions, /jobs), so a script on the root
+ * is named as an MCP client is. Logged once per key name per process: the
+ * names are the configured keys', so the set is bounded by the configuration.
+ * The path is the raw one, quoted and cut at 200 characters, so a client
+ * cannot write its own text into the line.
+ */
+const LEGACY_ROUTE_HEADER = "x-ob1-legacy-route";
+const legacyNamesLogged = new Set<string>();
+export function legacyRouteLine(name: string, method: string, path: string): string {
+  const shown = JSON.stringify(path.length > 200 ? `${path.slice(0, 200)}…` : path);
+  return `key "${name}" reached the brain at the old root URL (${method} ${shown}) through the proxy's legacy route — move its client to /mcp; the root stops answering at v2.0.0 (SMD-2306; deploy/README.md, "Moving a client to /mcp")`;
+}
+function noteLegacyRoute(req: Request, name: string): void {
+  if (req.headers.get(LEGACY_ROUTE_HEADER) !== "1" || legacyNamesLogged.has(name)) return;
+  // The line first: a URL that does not parse throws here, before the name is marked as said.
+  const line = legacyRouteLine(name, req.method, rawPath(req));
+  legacyNamesLogged.add(name);
+  console.warn(line);
+}
+
 // Liveness for platform probes (Kubernetes httpGet, load-balancer target checks,
 // uptime monitors), which can only GET and expect 2xx — the MCP endpoint answers
 // GET with 405 (below). Without a key, like /.well-known/*: it says the process
@@ -598,6 +638,7 @@ app.get("*", async (c, next) => {
   ]);
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  noteLegacyRoute(c.req.raw, principal.name);
   return c.json(await info, 200, corsHeaders);
 });
 
@@ -623,6 +664,7 @@ app.get("*", async (c, next) => {
   ]);
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  noteLegacyRoute(c.req.raw, principal.name);
   try {
     // The operation answers an object (a tool result is one); this route has always answered the bare rows.
     const status = await core.workerStatus(principal, {});
@@ -664,6 +706,7 @@ app.post("*", async (c, next) => {
   ]);
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  noteLegacyRoute(c.req.raw, principal.name);
   const body = await c.req.json().catch(() => null);
   const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
   // The MCP tools' own operations (core/workers.ts): the same refusals, said
@@ -703,8 +746,8 @@ app.post("*", async (c, next) => {
 });
 
 // The async job handle's poll and stream, as keyed GETs (SMD-2273). A tool like
-// scan_thoughts returns { jobId, poll: "/jobs/<id>", stream: "/jobs/<id>/stream" }
-// at once; these routes serve the follow-up for a REST/curl client (an MCP
+// scan_thoughts returns { jobId, poll: "<endpoint>/jobs/<id>", stream: "<endpoint>/jobs/<id>/stream" }
+// at once (`/mcp/jobs/<id>` behind the proxy, SMD-2306); these routes serve the follow-up for a REST/curl client (an MCP
 // client cannot reach a REST route — it uses the job_status tool). Registered
 // BEFORE the MCP handler (POST at every path) like the worker mirrors, and
 // falling through with next() for any path they do not own; a GET that matches
@@ -736,6 +779,7 @@ app.get("*", async (c, next) => {
   ]);
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  noteLegacyRoute(c.req.raw, principal.name);
   if (streamMatch) {
     const stream = await subscribeJob(principal, id);
     if (!stream) return c.json({ error: "not found" }, 404, corsHeaders);
@@ -800,7 +844,8 @@ export function cutByStopLine(label: string, elapsedMs: number): string {
 // it) would not have been enough; it treats the 405 notFound gives as "no
 // stream here". FORK.md change 75.
 app.on(MCP_METHODS, "*", async (c) => {
-  // The one thing this server logs per request (SMD-1849 has the rest): a
+  // The one thing this server logs per request (SMD-1849 has the rest; the
+  // root URL's line, noteLegacyRoute's, is once per key name): a
   // client that closes the connection before the response is complete, named
   // by method and tool, never by content. Registered first, so a client that
   // leaves during the key check, the registry resolve or the body read is
@@ -889,6 +934,7 @@ app.on(MCP_METHODS, "*", async (c) => {
   }
   principal.agentId = identity.agentId;
   principal.agentUnresolved = identity.unresolved;
+  noteLegacyRoute(c.req.raw, principal.name);
 
   // The label, read once from the request body. v2's transport reads the raw
   // Request stream (v1's @hono/mcp read Hono's cached body, so a double-read was
@@ -899,7 +945,10 @@ app.on(MCP_METHODS, "*", async (c) => {
   const rawBody = await c.req.text().catch(() => null);
   label = requestLabel(rawBody);
 
-  const server = buildServer(principal);
+  // Repeated slashes collapsed: a path that came as `//mcp` (a proxy that
+  // does not clean paths, or none) made the link `//mcp/jobs/<id>`, which a
+  // client resolves as another host (review pass 2).
+  const server = buildServer(principal, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""));
   const transport = new WebStandardStreamableHTTPServerTransport();
   await server.connect(transport);
   // Hand the transport the body reconstructed from the cached text above. The

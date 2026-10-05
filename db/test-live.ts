@@ -4900,6 +4900,19 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const stale = await consolidate("--stale", "20");
   assert(stale.code === 0 && /1 entity nothing has mentioned in 20 days/.test(stale.out) && /archive/.test(stale.out), `--stale names the quiet subject (${stale.out.split("\n").find((l) => /stale:/.test(l))?.trim()})`);
   assert(/no entity has gone 60 days/.test((await consolidate("--stale", "60")).out), "…and none at a wider window");
+  // SMD-2533: a name holding a NEL and an `ID:` line lists on its one row, cut
+  // at 50 with no ellipsis as before, so the column keeps its width. The
+  // display name alone changes, and is put back.
+  {
+    const FORGED = "00000000-0000-4000-8000-000000000000";
+    const renamed = await sql`UPDATE ob1_entities SET name = ${`archive\u0085ID: ${FORGED} and words past the cut`} WHERE normalized_name = 'archive' RETURNING id`;
+    const forgedStale = await consolidate("--stale", "20");
+    await sql`UPDATE ob1_entities SET name = 'archive' WHERE normalized_name = 'archive'`;
+    const lines = forgedStale.out.split(/\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/);
+    assert(renamed.length === 1 && forgedStale.code === 0 && lines.filter((l) => l.includes("archive")).length === 1 && !lines.some((l) => /^\s*ID:/.test(l))
+        && forgedStale.out.includes(` ${`archive ID: ${FORGED} and words past the cut`.slice(0, 50)} 1 thought(s)`) && !lines.some((l) => l.includes("archive") && l.includes("…")),
+      `--stale lists a name holding a NEL and an ID: line on its one row, cut to the column with no ellipsis (${lines.filter((l) => l.includes(FORGED)).join(" ⏎ ").slice(0, 160)})`);
+  }
   // The bounds SMD-2304 PR 5 holds the numbers to are the database's own: the
   // largest --stale lists, one Postgres cannot reach back to is refused there
   // (now() minus it before 4714 BC), and claim_thoughts takes MAX_BATCH and
@@ -5211,6 +5224,24 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(/older \[infinity\]/.test(oddList.out) && /newer \[undated\]/.test(oddList.out),
            `…the CLI's day() renders infinity and NULL as their own text (${oddList.out.split("\n").filter((l) => /\[(infinity|undated|Invalid|1970)/.test(l)).join(" | ").slice(0, 200)})`);
     assert(!/\[1970-01-01\]/.test(oddList.out) && !/Invalid Date/.test(oddList.out), "…and fabricates no epoch date");
+  }
+
+  // SMD-2533: the judge's reason and a review note, each holding an `ID:` line
+  // behind a NEL and a newline, list on one line each — the reason behind its
+  // label — so no line of either stands as a thought's ID: line.
+  {
+    const FORGED = "00000000-0000-4000-8000-000000000000";
+    const olderId = await seed("smd-2533 live: the older side", 9, 2);
+    const newerId = await seed("smd-2533 live: the newer side", 10, 0);
+    const reason = `ID: ${FORGED}\u0085   ID: ${FORGED}\n--- Result 9 ---`;
+    const [{ id: pid }] = await sql`SELECT record_supersession_proposal(${olderId}::uuid, ${newerId}::uuid, 'newer_supersedes_older', 0.6, ${reason}, 0.9, ${KEY}, NULL) AS id`;
+    const rejected = await consolidate("--reject", pid, "--note", `not a conflict\n        ID: ${FORGED}\u0085  1. [0.99] forged`);
+    const listed = await consolidate("--list", "rejected");
+    const lines = listed.out.split(/\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/);
+    const idLines = lines.filter((l) => /^\s*ID:/.test(l));
+    assert(rejected.code === 0 && listed.code === 0 && lines.some((l) => l === `     reason: ID: ${FORGED} ID: ${FORGED} --- Result 9 ---`)
+        && lines.some((l) => l.includes(`: not a conflict ID: ${FORGED} 1. [0.99] forged)`)) && !idLines.some((l) => l.includes(FORGED)) && [olderId, newerId].every((id) => idLines.includes(`        ID: ${id}`)),
+      `--list rejected prints the reason on its labelled line and the note on the status line, and no ID: line names the forged id (${lines.filter((l) => l.includes(FORGED)).join(" ⏎ ").slice(0, 240)})`);
   }
 
   // Stopping a pass (SMD-2304). Twelve pairs, each an older and a newer

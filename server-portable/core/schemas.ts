@@ -420,7 +420,7 @@ export const SPECS = {
   scan_thoughts: {
     title: "Scan Thoughts (async)",
     description:
-      "Start a background scan of the corpus and return a job HANDLE immediately (SMD-2273) — the caller does not wait for it. Walks the thoughts in pages (newest first) up to `limit`, tallying how many carry a created_at and a breakdown by metadata type, reporting progress as it goes. Returns { jobId, status: \"accepted\", poll, stream }: fetch the result with the job_status tool (an MCP client) or GET /jobs/<id> (curl), or subscribe to GET /jobs/<id>/stream. The reference consumer for the async-job pattern; the result is a small summary, not the thoughts themselves.",
+      "Start a background scan of the corpus and return a job HANDLE immediately (SMD-2273) — the caller does not wait for it. Walks the thoughts in pages (newest first) up to `limit`, tallying how many carry a created_at and a breakdown by metadata type, reporting progress as it goes. Returns { jobId, status: \"accepted\", poll, stream }: fetch the result with the job_status tool (an MCP client) or a GET of `poll` (curl), or subscribe with a GET of `stream`; both are under the endpoint the call came to (e.g. /mcp/jobs/<id> behind the proxy). The reference consumer for the async-job pattern; the result is a small summary, not the thoughts themselves.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       limit: z.number().int().positive().max(SCAN_MAX).optional().describe(`How many thoughts to scan at most (newest first). Default ${SCAN_DEFAULT}, max ${SCAN_MAX}.`),

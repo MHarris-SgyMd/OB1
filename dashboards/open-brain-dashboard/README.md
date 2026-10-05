@@ -110,11 +110,11 @@ HOSTING
 - A hosted dashboard needs a server it can reach: not `127.0.0.1:8000`, but a
   TLS proxy or tunnel in front of it ([deploy/README.md](../../deploy/README.md),
   "What is reachable from where"). A dashboard in a container on the same host
-  as the compose stack reaches it as `http://host.docker.internal:8000/`
+  as the compose stack reaches it as `http://host.docker.internal:8000/mcp`
   (`host.containers.internal` on podman) where the VM forwards to the host's
   loopback — Docker Desktop, podman machine; on a Linux host that name is the
   bridge gateway, which a `127.0.0.1` publish does not answer, so put the
-  dashboard on the compose network and use `http://server:8000/`, or set
+  dashboard on the compose network and use `http://server:8000/mcp`, or set
   `SERVER_BIND`.
 
 The session cookie is marked `Secure` when the request's URL is HTTPS — Vercel
