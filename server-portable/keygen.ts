@@ -49,8 +49,9 @@ if (minted === "read") {
 } else if (minted === "forward") {
   console.log(`  Forward: this key grants nothing by itself — every server refuses it as a`);
   console.log(`  caller. It is for the MCP server's own use when it forwards a client's key to`);
-  console.log(`  the REST core (SMD-2284's PR 4b; until then nothing reads it): the client's key`);
-  console.log(`  decides what the request may do, this one names who carried it. Never a client's.\n`);
+  console.log(`  the REST core, in the x-brain-forwarder header: the client's key decides what`);
+  console.log(`  the request may do, this one names who carried it (act). Never a client's.`);
+  console.log(`  Use a name no key has had: the registry reads a known name as a rotation.\n`);
 } else {
   console.log(`  Write scope: this key can capture and modify thoughts. Prefer --scope read`);
   console.log(`  for anything that only needs to search, --scope capture for a hook that`);

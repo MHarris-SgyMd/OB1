@@ -12,8 +12,11 @@
 # X-Forwarded-Prefix: /api, which the REST core puts back on the links it
 # answers — and forwards to api.ob1.internal. No port, no authentication of
 # its own: the key travels to the REST core in its header, and the REST core
-# checks it (header keys only; never ?key=). Dropping the file and running
-# `up -d` again recreates the proxy without it (the label below changes, which
+# checks it (header keys only; never ?key=). The forwarder slot
+# (x-brain-forwarder, SMD-2284) is deleted on the way in: the MCP server, the
+# one legitimate forwarder, reaches the REST core inside the stack, so a request
+# from outside never names a carrier — a leaked forwarder key stamps nothing
+# here. Dropping the file and running `up -d` again recreates the proxy without it (the label below changes, which
 # is what makes compose recreate; an inline config alone does not).
 
 x-api-route: &api-route |
@@ -23,9 +26,14 @@ x-api-route: &api-route |
         rule: "Path(`/api`) || PathPrefix(`/api/`)"
         priority: 36
         entryPoints: [web]
-        middlewares: [api-strip]
+        middlewares: [api-no-forwarder, api-strip]
         service: api
     middlewares:
+      # An empty value deletes the header, as compose.yaml's not-legacy does.
+      api-no-forwarder:
+        headers:
+          customRequestHeaders:
+            X-Brain-Forwarder: ""
       api-strip:
         stripPrefix:
           prefixes: ["/api"]

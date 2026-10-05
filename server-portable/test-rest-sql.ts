@@ -71,10 +71,13 @@ process.env.MCP_ACCESS_KEY = "legacy-raw"; // the legacy single key: full write,
 delete process.env.OB1_QUERY_LOG; // off: a read through one door must leave nothing the other door's read would see
 process.env.DATABASE_URL = URL_;
 process.env.OB1_AGENT_CACHE_TTL_MS = "0"; // a revocation reaches the next request
-const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw", gone: "gone-raw" } as const;
+const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw", gone: "gone-raw", forwarder: "forwarder-raw", forwarderGone: "forwarder-gone-raw", fresh: "fresh-raw" } as const;
 process.env.MCP_ACCESS_KEYS = [
   `writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`,
   `hook:capture:${hashKey(KEYS.hook)}`, `gone:write:${hashKey(KEYS.gone)}`,
+  // Forwarders (SMD-2284): grant nothing; read in the REST core's forwarder slot alone.
+  `mcp-forwarder:forward:${hashKey(KEYS.forwarder)}`, `old-forwarder:forward:${hashKey(KEYS.forwarderGone)}`,
+  `fresh:write:${hashKey(KEYS.fresh)}`, // never used but by [6b]'s refused forwarded request
 ].join(",");
 
 // Both doors in one process, over the one process root (root.ts): one store.
@@ -354,6 +357,57 @@ console.log("\n[6] test-auth's cases against REST: a read key cannot write, a ca
   assert(legacy.status === 200 && legacy.body.name === "MCP_ACCESS_KEY" && legacy.body.scope === "write", `the legacy single key is a write key named MCP_ACCESS_KEY (${JSON.stringify(legacy.body).slice(0, 80)})`);
   const who = await rest("GET", "/v1/whoami", undefined, KEYS.reader);
   assert(who.status === 200 && who.body.name === "reader" && who.body.scope === "read" && typeof who.body.agentId === "string", `whoami names the key, its scope and its agent id (${JSON.stringify(who.body).slice(0, 120)})`);
+}
+
+console.log("\n[6b] Forwarded through REST: the client's key is the subject, the forwarder recorded as act on the audit row, registered with no scope; a revoked or wrong forwarder refused (SMD-2284)");
+{
+  const forwarded = async (method: string, path: string, key: string, carrier: string, body?: unknown): Promise<Answer> => {
+    const r = await fetch(`${API}${path}`, {
+      method,
+      headers: { "x-brain-key": key, "x-brain-forwarder": carrier, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: r.status, body: await r.json() as Record<string, unknown>, headers: r.headers };
+  };
+  const agentOf = async (label: string) => (await sql`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = ${label}`)[0]?.id as string | undefined;
+  type Row = { actor_name: string; canonical_agent_id: string | null; origin: string; act: { name?: string; agent_id?: string } | null };
+  const auditOf = async (id: string, action: string) =>
+    (await sql`SELECT actor_name, canonical_agent_id::text AS canonical_agent_id, origin, actor_context->'act' AS act FROM thought_audit WHERE thought_id = ${id}::uuid AND action = ${action} ORDER BY id DESC LIMIT 1`)[0] as Row | undefined;
+
+  const cap = await forwarded("POST", "/v1/thoughts", KEYS.hook, KEYS.forwarder, { content: "iota: a hook's thought, carried by the MCP server" });
+  assert(cap.status === 201 && typeof cap.body.id === "string", `a capture key forwarded captures (${cap.status} ${JSON.stringify(cap.body).slice(0, 80)})`);
+  const fwdId = await agentOf("mcp-forwarder");
+  const capRow = await auditOf(String(cap.body.id), "capture");
+  assert(capRow?.actor_name === "hook" && capRow?.canonical_agent_id === (await agentOf("hook")) && capRow?.origin === "open-brain-api",
+    `the audit row's subject is the client's key and its door the REST core (${JSON.stringify(capRow)})`);
+  assert(typeof fwdId === "string" && same(capRow?.act, { name: "mcp-forwarder", agent_id: fwdId }), `…and its act the forwarder, by name and agent id (${JSON.stringify(capRow?.act)})`);
+  const [fwdKey] = await sql`SELECT scope FROM ob1_agent_keys WHERE key_hash = ${hashKey(KEYS.forwarder)}`;
+  assert(fwdKey !== undefined && fwdKey.scope === null, `the forwarder is registered with no scope recorded — 049's CHECK holds none for it (${JSON.stringify(fwdKey)})`);
+  const edit = await forwarded("PATCH", `/v1/thoughts/${cap.body.id}`, KEYS.writer, KEYS.forwarder, { content: "iota: a hook's thought, carried and then edited" });
+  const editRow = await auditOf(String(cap.body.id), "update");
+  assert(edit.status === 200 && editRow?.actor_name === "writer" && same(editRow?.act, { name: "mcp-forwarder", agent_id: fwdId }), `a forwarded edit records the forwarder as act too (${edit.status} ${JSON.stringify(editRow)})`);
+  const del = await forwarded("DELETE", `/v1/thoughts/${cap.body.id}`, KEYS.writer, KEYS.forwarder);
+  const delRow = await auditOf(String(cap.body.id), "delete");
+  assert(del.status === 200 && delRow?.actor_name === "writer" && same(delRow?.act, { name: "mcp-forwarder", agent_id: fwdId }), `a forwarded delete records the forwarder as act too (${del.status} ${JSON.stringify(delRow)})`);
+  const direct = await rest("POST", "/v1/thoughts", { content: "kappa: a hook's thought, not forwarded" }, KEYS.hook);
+  const directRow = await auditOf(String(direct.body.id), "capture");
+  assert(direct.status === 201 && directRow?.act === null, `a write not forwarded records no act (${JSON.stringify(directRow)})`);
+  const who = await forwarded("GET", "/v1/whoami", KEYS.reader, KEYS.forwarder);
+  assert(who.status === 200 && who.body.name === "reader" && same(who.body.act, { name: "mcp-forwarder", agentId: fwdId }), `whoami, forwarded, names the act (${JSON.stringify(who.body).slice(0, 140)})`);
+  const read = await forwarded("GET", "/v1/stats", KEYS.hook, KEYS.forwarder);
+  assert(read.status === 403 && read.body.code === "FORBIDDEN", `the forwarder widens nothing: a capture key forwarded still cannot read (${read.status})`);
+
+  const before = Number((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c);
+  const wrong = await forwarded("POST", "/v1/thoughts", KEYS.hook, KEYS.reader, { content: "lambda: carried by a client's key" });
+  assert(wrong.status === 401 && wrong.body.code === "UNAUTHORIZED" && wrong.body.credential === "forwarder", `a client's key in the forwarder slot → 401, credential forwarder (${JSON.stringify(wrong.body)})`);
+  const fresh = await forwarded("GET", "/v1/whoami", KEYS.fresh, "not-a-forwarder");
+  const [freshRow] = await sql`SELECT count(*)::int AS c FROM ob1_agent_keys WHERE key_hash = ${hashKey(KEYS.fresh)}`;
+  assert(fresh.status === 401 && fresh.body.credential === "forwarder" && Number(freshRow.c) === 0, `a never-seen caller refused for its forwarder is not registered: the forwarder is checked before either key reaches the registry (${fresh.status}, ${freshRow.c} row)`);
+  assert((await forwarded("GET", "/v1/whoami", KEYS.reader, KEYS.forwarderGone)).status === 200, "the forwarder to be revoked carries first");
+  await sql`SELECT revoke_agent_key(${hashKey(KEYS.forwarderGone)}, ${"rest suite"})`;
+  const revoked = await forwarded("POST", "/v1/thoughts", KEYS.hook, KEYS.forwarderGone, { content: "mu: carried by a revoked forwarder" });
+  assert(revoked.status === 401 && revoked.body.code === "REVOKED" && revoked.body.credential === "forwarder", `a revoked forwarder → 401 REVOKED, credential forwarder (${JSON.stringify(revoked.body)})`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c) === before, "…and neither refused request wrote a thought");
 }
 
 console.log("\n[7] The OpenAPI document and the internal liveness answer with no key");
