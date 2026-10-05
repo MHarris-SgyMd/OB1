@@ -787,42 +787,42 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
 
   /**
-   * 078 (SMD-2448): the candidate rule leaves out pairs of two different
-   * tickets — where the body carries 078's sentinel, not merely where its
-   * count stands: 063 or 066 re-applied by hand over 078 keeps the count and
+   * 079 (SMD-2448): the candidate rule leaves out pairs of two different
+   * tickets — where the body carries 079's sentinel, not merely where its
+   * count stands: 063 or 066 re-applied by hand over 079 keeps the count and
    * puts back a body that judges such pairs (preflight warns of that state).
    * What is reported is judge calls fewer: per thought, the --k cut over
-   * 066's list less the cut over 078's — least(k, kept + left out) − kept,
+   * 066's list less the cut over 079's — least(k, kept + left out) − kept,
    * kept already cut at k. A lower bound: a stale proposal beyond the cut,
    * which 067 has the pass judge anyway, cost a call under 066 and is settled
-   * without one under 078 — not counted (rare: it needs a stale row on two
+   * without one under 079 — not counted (rare: it needs a stale row on two
    * tickets past the k nearest).
    */
-  const [{ has_078: HAS_078 }] = (await sql`
+  const [{ has_079: HAS_079 }] = (await sql`
     SELECT COALESCE((SELECT prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')), false)
-           AND to_regprocedure('consolidation_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_078`) as { has_078: boolean }[];
-  /** The judge calls 078 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
+           AND to_regprocedure('consolidation_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_079`) as { has_079: boolean }[];
+  /** The judge calls 079 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
   async function ticketCallsSaved(ids: string, param: string): Promise<{ n: number; t: number }> {
     const [r] = (await sql.unsafe(`
       SELECT coalesce(sum(least($2::int, k.n + consolidation_ticket_pairs_left_out(s.id, $3::float)) - k.n), 0)::int AS n, count(*)::int AS t
         FROM (${ids}) s CROSS JOIN LATERAL (SELECT count(*)::int AS n FROM consolidation_candidates(s.id, $2::int, $3::float)) k`, [param, K, MIN_SIM])) as { n: number; t: number }[];
     return { n: Number(r.n), t: Number(r.t) };
   }
-  /** 078's predicate on two thoughts by id — the reason a stale proposal no longer meets the candidate rule. */
+  /** 079's predicate on two thoughts by id — the reason a stale proposal no longer meets the candidate rule. */
   async function linkedTickets(olderId: string, newerId: string): Promise<boolean> {
     const [r] = (await sql`SELECT consolidation_tickets_linked(o.metadata, n.metadata) AS l FROM thoughts o, thoughts n WHERE o.id = ${olderId}::uuid AND n.id = ${newerId}::uuid`) as { l: boolean }[];
     return r?.l === true;
   }
   /** --status and --dry-run: over the thoughts the next run judges — pending, not yet pooled, re-pooled for a stale proposal, and failed under --retry-failed. */
   async function printTicketCalls(): Promise<void> {
-    if (!HAS_078) {
-      out("  tickets: pairs of two tickets Linear links are still judged — consolidation_candidates is from before migration 078: apply it (cd db && bun migrate.ts --url <url>), or, where the ledger already records 078 and 063 or 066 was re-applied by hand over it, re-apply (add --reapply)");
+    if (!HAS_079) {
+      out("  tickets: pairs of two tickets Linear links are still judged — consolidation_candidates is from before migration 079: apply it (cd db && bun migrate.ts --url <url>), or, where the ledger already records 079 and 063 or 066 was re-applied by hand over it, re-apply (add --reapply)");
       return;
     }
     const { n, t } = await ticketCallsSaved(
       `SELECT thought_id AS id FROM thought_work_claims WHERE work_type = $1 AND status IN ('pending'${RETRY_FAILED ? ", 'failed'" : ""})
        UNION SELECT consolidation_pool($1) UNION SELECT id FROM (${STALE_REPOOL_SQL}) r`, JOB);
-    out(`  tickets: ${n} judge call(s) fewer over the ${t} thought(s) still to judge${DRY_RUN && LIMIT ? " (before --limit)" : ""} — pairs of two tickets Linear links left out at --k ${K} (078)`);
+    out(`  tickets: ${n} judge call(s) fewer over the ${t} thought(s) still to judge${DRY_RUN && LIMIT ? " (before --limit)" : ""} — pairs of two tickets Linear links left out at --k ${K} (079)`);
   }
 
   if (STATUS_ONLY || DRY_RUN) {
@@ -884,7 +884,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let judged = 0;
   let llmMs = 0;
   const totals = { pairs: 0, agree: 0, unrelated: 0, conflict: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
-    // 078 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
+    // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
     // 067: the stale rows this run met — replaced in place (a conflict found
     // again), settled after a judgement of no conflict, settled because the
@@ -1121,8 +1121,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // no write function makes are the remainder.
       const why = s.superseded ? "a side superseded"
         : s.lineage_pair ? "a lineage pair — one side derived from the other (066's rule)"
-        // 078 (SMD-2448): read through its own predicate, only where 078 stands — the function exists nowhere else.
-        : HAS_078 && await linkedTickets(s.older_id, row.id) ? "two tickets Linear links — each its own record (078's rule)"
+        // 079 (SMD-2448): read through its own predicate, only where 079 stands — the function exists nowhere else.
+        : HAS_079 && await linkedTickets(s.older_id, row.id) ? "two tickets Linear links — each its own record (079's rule)"
         : s.shared === 0 ? "no shared entity"
         : s.similarity !== null && s.similarity < MIN_SIM ? `under the similarity floor ${MIN_SIM} (cosine ${s.similarity.toFixed(3)})`
         : "outside the candidate rule (the day rule, or a change no write function makes)";
@@ -1205,10 +1205,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             outcome = { outcome: "vanished" };
           } else {
             let stopAfter = false;
-            // 078: read once per claim, before the judge writes anything (a proposal it records holds its pair out of the list),
+            // 079: read once per claim, before the judge writes anything (a proposal it records holds its pair out of the list),
             // and added when the thought is finished — not again for a retry after a pause, nor for one the hard stop abandons.
             // A report, never the pass's: a failed read counts 0 and is said, where a throw here would stop every worker (second review pass).
-            const ticketCalls = HAS_078 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
+            const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 outcome = await processRow(row);
@@ -1421,7 +1421,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   out(
     `  ${totals.pairs} pair(s) judged${judged ? ` — ${(totals.pairs / judged).toFixed(2)} per thought judged, ${Math.round((totals.pairs / judged) * 1000)} calls per thousand thoughts` : ""}; ` +
       `${totals.noCandidates} thought(s) had no candidate; verdicts: ${totals.agree} agree, ${totals.unrelated} unrelated, ${totals.conflict} conflict` +
-      (HAS_078 ? `; ${totals.ticketCalls} judge call(s) fewer — pairs of two tickets Linear links left out at --k ${K} (078${totals.ticketCallsUnread ? `; ${totals.ticketCallsUnread} thought(s) not counted, the read failed` : ""})` : "")
+      (HAS_079 ? `; ${totals.ticketCalls} judge call(s) fewer — pairs of two tickets Linear links left out at --k ${K} (079${totals.ticketCallsUnread ? `; ${totals.ticketCallsUnread} thought(s) not counted, the read failed` : ""})` : "")
   );
   out(
     `  ${totals.proposed} proposal(s) recorded (${totals.undirected} without a direction)` +

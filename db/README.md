@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2448).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 079 SMD-2448).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1026,7 +1026,7 @@ per search (paired median, +6.0 at p90) over 075's 4.5 ms, the hybrid alone
 --sql-check` held the SQL to the rule on all 1,464 thoughts and the ranking to
 its oracle on all 12 queries. test-schema [69], test-upgrade [20aa].
 
-Migration 078 never pairs two tickets Linear links for judgement (SMD-2448):
+Migration 079 never pairs two tickets Linear links for judgement (SMD-2448):
 `consolidation_candidates` leaves out a pair filed under two different tickets
 that an active Linear link relates in either direction — parent and child,
 blocks, relates (053's link rows; neither a text reference nor `duplicate_of`
@@ -1059,10 +1059,10 @@ thoughts still to judge (about 6 ms a thought: 7.7 s over the dogfood's whole
 pool) — and settles a stale proposal on two linked tickets naming the rule. Nothing
 is stored: a link written or closed moves the rule at the next pass. The body
 carries `ob1:linked-tickets-not-paired`, which the worker reads before it
-reports the rule and preflight's `lineage` check reads to warn naming 078 when
+reports the rule and preflight's `lineage` check reads to warn naming 079 when
 063 or 066 is re-applied by hand over it. Not taken: matching a ticket id in
 free text — on the 128 it would leave out 11 more pairs, one of them accepted.
-test-schema [70], test-live [16], test-upgrade [20ab].
+test-schema [70], test-live [16], test-upgrade [20ac].
 
 ## What changed relative to the guide
 
@@ -2148,7 +2148,7 @@ side of which names the other in `derived_from` (a page and the evidence its
 sections were generated from, a digest and its sources) never judged: a
 derivation says what its input says by construction, and re-deriving is
 `rebuild_derived`'s door, not supersession's (SMD-2292; direct members only,
-the array is one level), and, since 078, a pair filed under two different
+the array is one level), and, since 079, a pair filed under two different
 tickets that an active Linear link relates (`consolidation_tickets_linked`)
 never judged: two records whose relationship is stated, each with its own
 lifecycle (SMD-2448; unlinked tickets are still judged — a later ticket can

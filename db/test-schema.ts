@@ -9494,8 +9494,8 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     `029's two status CHECKs replaced by 063's named pair: four statuses, and unreviewed = pending or stale (${pcons.join(" | ")})`);
   for (const fn of ["derivation_descendants", "record_supersession_proposal"])
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
-  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("078"),
-    `one consolidation_candidates, 078 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) and the ticket rule ([70]) (${lastDefinerOf("consolidation_candidates")})`);
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079"),
+    `one consolidation_candidates, 079 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) and the ticket rule ([70]) (${lastDefinerOf("consolidation_candidates")})`);
   assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("064") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
     `one ob1_record_derivation, 064 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]) (${lastDefinerOf("ob1_record_derivation")})`);
   // rebuild_derived's last definer is 067 (SMD-2297: the proposal arm reopens a pass-settled row); [61] asserts it.
@@ -10145,10 +10145,10 @@ console.log("\n[60] Migration 066: a derivation and its inputs are never paired 
   await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
   await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
 
-  // The shape: one body, 078's, carrying 066's rule on 063's text.
+  // The shape: one body, 079's, carrying 066's rule on 063's text.
   const body = await src(SIG);
-  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("078") && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body),
-    `one consolidation_candidates, 078 its last definer, 066's sentinel and 063's stale clause in the body (${lastDefinerOf("consolidation_candidates")})`);
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079") && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body),
+    `one consolidation_candidates, 079 its last definer, 066's sentinel and 063's stale clause in the body (${lastDefinerOf("consolidation_candidates")})`);
   // The spelling, not only the behaviour: `'["a"]'::jsonb @> '"a"'` is TRUE
   // in Postgres (array-contains-scalar is membership), so to_jsonb(id::text)
   // would be the same rule and every behavioural assertion below would pass
@@ -12031,7 +12031,7 @@ console.log("\n[69] Migration 077: prefer_current also ranks below a thought who
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[70] Migration 078: two tickets Linear links are never paired for judgement — consolidation_candidates leaves out a pair filed under two different tickets (metadata.ticket, else metadata.issue — node_state's key) that an active Linear link relates, either direction; unlinked tickets, two rows of one ticket and a thought with no identity are still paired; consolidation_ticket_pairs_left_out counts what the rule removes, every other term met, and with the kept list partitions 066's (SMD-2448)");
+console.log("\n[70] Migration 079: two tickets Linear links are never paired for judgement — consolidation_candidates leaves out a pair filed under two different tickets (metadata.ticket, else metadata.issue — node_state's key) that an active Linear link relates, either direction; unlinked tickets, two rows of one ticket and a thought with no identity are still paired; consolidation_ticket_pairs_left_out counts what the rule removes, every other term met, and with the kept list partitions 066's (SMD-2448)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -12058,20 +12058,20 @@ console.log("\n[70] Migration 078: two tickets Linear links are never paired for
   await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
   await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
 
-  // The shape: one body, 078's — 066's rule and 063's stale clause kept, the
+  // The shape: one body, 079's — 066's rule and 063's stale clause kept, the
   // predicate on both thoughts' metadata — the count beside it, read-only,
   // and the predicate, one definition read by both.
   const body = await src(SIG), counter = await src(LEFT), predicate = await src(LINKED);
-  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("078") && /ob1:linked-tickets-not-paired/.test(body) && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body)
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079") && /ob1:linked-tickets-not-paired/.test(body) && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body)
       && /AND NOT consolidation_tickets_linked\(me\.metadata, o\.metadata\)/.test(body),
-    `one consolidation_candidates, 078 its last definer, both sentinels, the stale clause, and the pair rule through the predicate (${lastDefinerOf("consolidation_candidates")})`);
+    `one consolidation_candidates, 079 its last definer, both sentinels, the stale clause, and the pair rule through the predicate (${lastDefinerOf("consolidation_candidates")})`);
   const vol = await q<{ f: string; v: string }>(`SELECT p.oid::regprocedure::text AS f, provolatile AS v FROM pg_proc p WHERE p.oid IN ($1::regprocedure, $2::regprocedure)`, [LEFT, LINKED]);
   assert((await functionsNamed("consolidation_ticket_pairs_left_out")) === 1 && (await functionsNamed("consolidation_tickets_linked")) === 1 && vol.every((r) => r.v === "s")
       && /AND consolidation_tickets_linked\(me\.metadata, o\.metadata\)/.test(counter) && !/LIMIT/.test(counter)
       && /coalesce\(p_a->>'ticket', p_a->>'issue'\)/.test(predicate) && /IN \('child_of', 'blocks', 'blocked_by', 'relates_to'\)/.test(predicate) && /f\.valid_until IS NULL/.test(predicate),
     `the count holds the condition turned round with no k cut, and the predicate reads node_state's key, four structured relations (not duplicate_of), active links only — both STABLE (${vol.map((r) => `${r.f}:${r.v}`).join(", ")})`);
   const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
-  assert(/066/.test(comment) && /078/.test(comment) && /Linear link/.test(comment), "the comment names 066, 078 and the linked-tickets rule");
+  assert(/066/.test(comment) && /079/.test(comment) && /Linear link/.test(comment), "the comment names 066, 079 and the linked-tickets rule");
 
   // The corpus, ten days old, every row mentioning billing. Ticket SMD-1's
   // own rows (its issue row, a second writer's, a dated section filed by
@@ -12161,7 +12161,7 @@ console.log("\n[70] Migration 078: two tickets Linear links are never paired for
   // and the count names exactly those four — SMD-4 once for its two shared
   // entities, superseded SMD-5 never.
   const after = await cands(N1);
-  assert(after.join() === [O1, W1, S1, OU, OR, OX, ON, OJ].sort().join(), `under 078 it is judged against its own ticket's three rows, the unlinked, merely named and no-longer-linked tickets, the note and the null-issue row — never a ticket Linear relates, from either side, or that ticket's section (${after.map(name).join()})`);
+  assert(after.join() === [O1, W1, S1, OU, OR, OX, ON, OJ].sort().join(), `under 079 it is judged against its own ticket's three rows, the unlinked, merely named and no-longer-linked tickets, the note and the null-issue row — never a ticket Linear relates, from either side, or that ticket's section (${after.map(name).join()})`);
   assert((await leftOut(N1)) === 4 && after.length + (await leftOut(N1)) === before.length, `the count is the four left out, and with the kept list it partitions 066's (${await leftOut(N1)} + ${after.length} of ${before.length})`);
   const parts: string[] = [];
   for (const id of corpus) if ((await cands(id)).length + (await leftOut(id)) !== lists066.get(id)) parts.push(name(id));
@@ -12190,7 +12190,7 @@ console.log("\n[70] Migration 078: two tickets Linear links are never paired for
   await db.query(`UPDATE thought_facets SET valid_until = NULL WHERE thought_id = $1::uuid AND kind = 'link'`, [O2]);
 
   // A re-apply is a no-op: one body, the rule standing.
-  await reapply("078");
+  await reapply("079");
   assert((await functionsNamed("consolidation_candidates")) === 1 && (await functionsNamed("consolidation_ticket_pairs_left_out")) === 1 && (await functionsNamed("consolidation_tickets_linked")) === 1 && (await cands(N1)).join() === after.join() && (await leftOut(N1)) === 4,
     "a re-apply leaves one body carrying the rule, one count and one predicate");
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);

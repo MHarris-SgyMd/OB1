@@ -3415,7 +3415,7 @@ They matter here because the labelled conflicts live in exactly those documents
 `consolidation_candidates` restricts to older thoughts (by a UTC calendar day)
 sharing an entity, nearest by exact cosine, at most k, at or above a floor
 (since migration 066 it also leaves out a pair one side of which names the
-other in `derived_from`, and since 078 a pair of two tickets Linear links — not
+other in `derived_from`, and since 079 a pair of two tickets Linear links — not
 this corpus's, which carries no links, so nothing below moves; the
 table below was measured under 029's rule alone).
 The judge cost is one call per pair, so the table is what k and the floor were

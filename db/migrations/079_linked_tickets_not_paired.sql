@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 078: two tickets Linear links are never paired for judgement —
+-- Migration 079: two tickets Linear links are never paired for judgement —
 --                consolidation_candidates leaves out a pair whose two thoughts
 --                are filed under two different tickets that Linear relates
 --                (parent and child, blocks, relates) (SMD-2448)
@@ -125,27 +125,27 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                   WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'derived_from') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 078 needs 025 (thoughts.derived_from); this schema lacks it',
+      MESSAGE = 'migration 079 needs 025 (thoughts.derived_from); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regclass('supersession_proposals') IS NULL OR to_regprocedure('consolidation_candidates(uuid, int, float)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 078 needs 029 (supersession_proposals, consolidation_candidates); this schema lacks it',
+      MESSAGE = 'migration 079 needs 029 (supersession_proposals, consolidation_candidates); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regclass('thought_facets_link_target_idx') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 078 needs 053 (link rows on thought_facets, thought_facets_link_target_idx); this schema lacks it',
+      MESSAGE = 'migration 079 needs 053 (link rows on thought_facets, thought_facets_link_target_idx); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
                   WHERE conname = 'supersession_proposals_status_check' AND pg_get_constraintdef(oid) LIKE '%''stale''%') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 078 needs 063 (the stale proposal status this body reads); this schema lacks it',
+      MESSAGE = 'migration 079 needs 063 (the stale proposal status this body reads); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -175,7 +175,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION consolidation_tickets_linked(jsonb, jsonb) IS
-  'Whether two thoughts (their metadata) are filed under two different tickets — metadata->>''ticket'', else metadata->>''issue'', as node_state reads them — that an active Linear link relates in either direction (thought_facets kind link, system linear, relation child_of | blocks | blocked_by | relates_to; neither a text reference nor duplicate_of counts). The pair rule consolidation_candidates applies since 078, and the reason db/consolidate.ts names when it settles a stale proposal. Read-only. Migration 078 (SMD-2448).';
+  'Whether two thoughts (their metadata) are filed under two different tickets — metadata->>''ticket'', else metadata->>''issue'', as node_state reads them — that an active Linear link relates in either direction (thought_facets kind link, system linear, relation child_of | blocks | blocked_by | relates_to; neither a text reference nor duplicate_of counts). The pair rule consolidation_candidates applies since 079, and the reason db/consolidate.ts names when it settles a stale proposal. Read-only. Migration 079 (SMD-2448).';
 
 -- 066's body, verbatim, plus the linked-tickets rule. The sentinel sits
 -- inside the body — preflight and the suites read pg_proc.prosrc.
@@ -221,7 +221,7 @@ AS $$
      -- is "names nothing", not unknown.
      AND NOT COALESCE(me.derived_from @> jsonb_build_array(o.id::text), false)
      AND NOT COALESCE(o.derived_from @> jsonb_build_array(me.id::text), false)
-     -- 078 (ob1:linked-tickets-not-paired): two tickets Linear relates are
+     -- 079 (ob1:linked-tickets-not-paired): two tickets Linear relates are
      -- two records whose relationship is stated, each with its own lifecycle
      -- — never one superseding the other. The predicate is false, never
      -- NULL, for a side with no ticket.
@@ -232,9 +232,9 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION consolidation_candidates(uuid, int, float) IS
-  'The older thoughts a thought is judged against for a supersession: sharing at least one entity (016), captured at least a calendar day (UTC) earlier, nearest by exact cosine, at or above p_min_similarity, at most p_k; pairs already proposed and thoughts already superseded are left out — since 063 a pair whose proposal is stale (rebuild_derived found a text moved) is judged again; since 066 a pair one side of which names the other in derived_from (a page and its evidence, a digest and its sources) is never judged: re-deriving is rebuild_derived''s door, not supersession''s; since 078 a pair filed under two different tickets that an active Linear link relates (consolidation_tickets_linked) is never judged: two records whose relationship is stated, each with its own lifecycle. Migrations 029, 063, 066, 078.';
+  'The older thoughts a thought is judged against for a supersession: sharing at least one entity (016), captured at least a calendar day (UTC) earlier, nearest by exact cosine, at or above p_min_similarity, at most p_k; pairs already proposed and thoughts already superseded are left out — since 063 a pair whose proposal is stale (rebuild_derived found a text moved) is judged again; since 066 a pair one side of which names the other in derived_from (a page and its evidence, a digest and its sources) is never judged: re-deriving is rebuild_derived''s door, not supersession''s; since 079 a pair filed under two different tickets that an active Linear link relates (consolidation_tickets_linked) is never judged: two records whose relationship is stated, each with its own lifecycle. Migrations 029, 063, 066, 079.';
 
--- The candidate body with 078's condition turned round and no p_k cut: the
+-- The candidate body with 079's condition turned round and no p_k cut: the
 -- pairs the rule removes for one thought, every other term met.
 CREATE OR REPLACE FUNCTION consolidation_ticket_pairs_left_out(
   p_thought_id     uuid,
@@ -276,4 +276,4 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION consolidation_ticket_pairs_left_out(uuid, float) IS
-  'How many older thoughts consolidation_candidates leaves out of one thought''s list because the two are filed under two different tickets an active Linear link relates (consolidation_tickets_linked), every other term of the candidate rule met at or above p_min_similarity, with no p_k cut — db/consolidate.ts turns it into the judge calls a run did not spend. Read-only. Migration 078 (SMD-2448).';
+  'How many older thoughts consolidation_candidates leaves out of one thought''s list because the two are filed under two different tickets an active Linear link relates (consolidation_tickets_linked), every other term of the candidate rule met at or above p_min_similarity, with no p_k cut — db/consolidate.ts turns it into the judge calls a run did not spend. Read-only. Migration 079 (SMD-2448).';
