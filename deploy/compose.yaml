@@ -380,6 +380,17 @@ services:
       OB1_TIER: ${OB1_TIER:-}
       OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
+      # The stack's configured state and its public origin, as the
+      # authorization server gets them (below): the server advertises OAuth at
+      # <origin>/mcp only while COMPOSE_PROFILES names auth and the
+      # authorization server answers on the mesh (SMD-2382, oauth-edge.ts).
+      # Off the mesh, as the server is until the stack's network move, it never
+      # answers there, so nothing is advertised yet: an OAuth token at the
+      # public /mcp gets the 503 for an authorization server that is down, and
+      # a keyless request there waits on the probe (a failed lookup, at most
+      # 2 s, once per 30 s).
+      OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
       # No `:-10` here any more: store-sql.ts owns the default and reads "" as
       # unset (it read Number("") = 0 until SMD-1843's first review pass found
       # the copy and the reader together — Bun's SQL refuses a pool of 0 at

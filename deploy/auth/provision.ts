@@ -326,6 +326,11 @@ async function selfCheck(): Promise<number> {
       ["https://brain.example.com/auth", /an origin alone/],
       ["https://brain.example.com/?x=1", /an origin alone/],
       ["https://brain.example.com/#top", /an origin alone/],
+      // A pasted connector URL: its key is never echoed (SMD-2382 review pass 3).
+      ["https://brain.example.com/mcp?key=not-echoed", /^(?!.*not-echoed).*an origin alone.*"https:\/\/brain\.example\.com\/mcp", the rest not shown/],
+      ["brain.example.com/mcp?key=not-echoed", /^(?!.*not-echoed).*not a URL \("brain\.example\.com\/mcp", the rest not shown\)/],
+      ["http://brain.example.com/#not-echoed", /^(?!.*not-echoed).*unless its host is loopback \("http:\/\/brain\.example\.com\/", the rest not shown\)/],
+      ["ftp://brain.example.com/?key=not-echoed", /^(?!.*not-echoed).*must be https:\/\/ \("ftp:\/\/brain\.example\.com\/", the rest not shown\)/],
       ["https://user:not-echoed@brain.example.com", /^OB1_PUBLIC_ORIGIN holds an @, so it may hold credentials \(not shown\): give the origin alone, e\.g\. https:\/\/brain\.example\.com$/],
       ["user:not-echoed@brain.example.com", /^OB1_PUBLIC_ORIGIN holds an @, so it may hold credentials \(not shown\)/],
       ["https://user:not-echoed@", /^OB1_PUBLIC_ORIGIN holds an @, so it may hold credentials \(not shown\)/],

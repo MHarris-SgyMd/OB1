@@ -222,7 +222,7 @@ paths today:
 | `/auth` and everything under it, `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, the bare `/.well-known/oauth-authorization-server` | `auth` (`--profile auth`), as `auth.ob1.internal` on the `mesh` network — the issuer, sign-in, registration and the three discovery documents outside the issuer's path (the bare one is the only one Claude Code reads). Only while it answers: with the profile off, the server stopped or still starting, the proxy's own bodiless 404, so an origin without it says "no OAuth here" as before. Its own answers pass through untouched, the registration cap's 503 and `Retry-After` included |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `GET`/`HEAD /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key |
-| `/.well-known` and everything else under it | the proxy: a 404, `/.well-known/oauth-protected-resource/mcp` included until the server serves it (SMD-2382). A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246). The 404 carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
+| `/.well-known` and everything else under it | the proxy: a 404, `/.well-known/oauth-protected-resource/mcp` included until the proxy routes it to the server, which serves it while the authorization server answers (SMD-2382's next cut). A claude.ai connector at `https://host/mcp` asks `/.well-known/oauth-protected-resource/mcp` at the origin root, and proceeds on the key only on a 404 (SMD-1246). The 404 carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
 | anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>` (the poll links `scan_thoughts` returns are root-relative). It keeps every client configured before SMD-1846 working; SMD-2306 gives it a deprecation window and then removes it, after which `/` is the proxy's 404 |
 
 The path reaches the server as it came, prefix and all: the server answers POST
@@ -1199,7 +1199,7 @@ OAuth for the brain (SMD-2285; `../docs/operator-surface-tiers.md`, decisions
 the three discovery paths outside it to it while it answers, and answers them
 404 itself while it does not ("One origin", above). Nothing signs in through
 it yet: the MCP server and the GUI become its clients with SMD-2286/2287, and
-the protected-resource document that sends a client to it comes with SMD-2382.
+the protected-resource document that sends a client to it is routed with SMD-2382's next cut.
 
 Below, `compose` stands for `podman compose -f deploy/compose.yaml --profile
 auth`, or docker compose, with whatever other `-f` files the stack was
@@ -1399,10 +1399,14 @@ re-runs the proof of concept against the new image
 job does the same.
 
 **Not yet.** The protected-resource document at
-`/.well-known/oauth-protected-resource/mcp`, served by the MCP server while
-this one answers (SMD-2382, SMD-2286); passkey
-sign-in, which needs the public origin (SMD-2382, SMD-2286); the MCP server
-and the GUI as its clients (SMD-2286, SMD-2287). The release overlay does
+`/.well-known/oauth-protected-resource/mcp` and `/mcp`'s 401 challenge. The
+MCP server answers both while the stack is configured and this server
+answers (SMD-2382), but it reaches this server only once it joins the mesh,
+and the proxy routes the document only then (SMD-2382's next cut). Until
+then an OAuth token at the public `/mcp` gets a 503, and nothing is
+advertised. Also not yet: passkey sign-in, which needs the public origin
+(SMD-2382, SMD-2286), and the MCP server and the GUI as this server's
+clients (SMD-2286, SMD-2287). The release overlay does
 not pin an image for it yet, so the profile builds from a checkout.
 
 ## What this does not cover

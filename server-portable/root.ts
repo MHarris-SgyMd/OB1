@@ -180,6 +180,21 @@ export type Env = {
    * resolves on every request. See agents.ts.
    */
   OB1_AGENT_CACHE_TTL_MS?: string;
+  /**
+   * The stack's one public origin (SMD-2382): scheme, host and port, no path —
+   * `https://`, or `http://` on loopback. The authorization server's issuer is
+   * `<origin>/auth`, and this server's public resource `<origin>/mcp`. The
+   * server reads it only while COMPOSE_PROFILES names auth (oauth-edge.ts);
+   * preflight warns whenever it is set and is not a sound origin.
+   */
+  OB1_PUBLIC_ORIGIN?: string;
+  /**
+   * deploy/.env's compose profiles, forwarded so this server knows whether the
+   * stack is configured for OAuth — `auth` among them (ADR decision 16). A
+   * profile cannot set another service's environment, so compose passes the
+   * list itself, as it does to the authorization server.
+   */
+  COMPOSE_PROFILES?: string;
 };
 
 let ENV: Env | null = null;

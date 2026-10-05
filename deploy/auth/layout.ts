@@ -99,6 +99,17 @@ export type Layout = ReturnType<typeof layout>;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
+ * The value as an error may quote it: up to its first `?` or `#`. A pasted
+ * connector URL carries the access key as `?key=` (SMD-2382 review pass 3),
+ * so a query or fragment is never echoed, as an `@` is not. The MCP server's
+ * copy is server-portable/oauth-edge.ts.
+ */
+function shown(given: string): string {
+  const cut = given.search(/[?#]/);
+  return cut < 0 ? `"${given}"` : `"${given.slice(0, cut)}", the rest not shown`;
+}
+
+/**
  * OB1_PUBLIC_ORIGIN, without a trailing slash: a scheme, a host and an
  * optional port, nothing else. Every URL the server names starts with it, so
  * a path, a query, a fragment or credentials would leak into the issuer and
@@ -115,11 +126,11 @@ export function originFromEnv(env: Record<string, string | undefined> = process.
   try {
     url = new URL(given);
   } catch {
-    throw new Error(`OB1_PUBLIC_ORIGIN is not a URL ("${given}"): give the origin, e.g. https://brain.example.com`);
+    throw new Error(`OB1_PUBLIC_ORIGIN is not a URL (${shown(given)}): give the origin, e.g. https://brain.example.com`);
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(`OB1_PUBLIC_ORIGIN must be https:// ("${given}")`);
-  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) throw new Error(`OB1_PUBLIC_ORIGIN must be https:// unless its host is loopback ("${given}")`);
-  if (given.replace(/\/$/, "") !== url.origin) throw new Error(`OB1_PUBLIC_ORIGIN must be an origin alone, with no path, query, fragment or credentials ("${given}" — the origin is ${url.origin})`);
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(`OB1_PUBLIC_ORIGIN must be https:// (${shown(given)})`);
+  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) throw new Error(`OB1_PUBLIC_ORIGIN must be https:// unless its host is loopback (${shown(given)})`);
+  if (given.replace(/\/$/, "") !== url.origin) throw new Error(`OB1_PUBLIC_ORIGIN must be an origin alone, with no path, query, fragment or credentials (${shown(given)} — the origin is ${url.origin})`);
   return url.origin;
 }
 
