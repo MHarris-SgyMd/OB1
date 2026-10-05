@@ -1695,6 +1695,22 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(new RegExp(`^Migrations: +${String(treeLast).padStart(3, "0")} applied — this server's tree ends at ${String(treeLast).padStart(3, "0")} \\(current: the ledger's highest is the tree's last\\)$`, "m").test(text),
     `the tool's Migrations row says the brain is current (${text.split("\n").find((l) => l.startsWith("Migrations"))})`);
   assert(new RegExp(`^Rows: +${truth.thoughts} thoughts · ${truth.audit} audit`, "m").test(text) && /^Postgres: +\S.* · pgvector \d/m.test(text), "…and its Rows and Postgres rows carry the same counts and versions");
+  // The board-sync watermark (SMD-2261): none while no thought carries one; then
+  // the newest full ISO instant, normalised to UTC — a later bare date, a word
+  // timestamptz accepts ('infinity') and an impossible month passed over, not
+  // winning the max or failing the read.
+  assert("boardSync" in db && db.boardSync === null, `no Linear-sourced row: the watermark is null, and the field is there (${JSON.stringify(db.boardSync)})`);
+  const marks = ["2026-09-23T08:00:00.000Z", "2026-09-24T09:30:00+02:00", "2027-01-01", "infinity", "2026-13-40T00:00:00Z", "not a date"];
+  const ids = (await sql`SELECT id FROM thoughts ORDER BY id LIMIT ${marks.length}`).map((r: { id: string }) => r.id);
+  assert(ids.length === marks.length, `enough thoughts to plant ${marks.length} watermarks (${ids.length})`);
+  for (const [i, id] of ids.entries()) await sql`UPDATE thoughts SET metadata = metadata || ${{ linear_updated_at: marks[i] }}::jsonb WHERE id = ${id}::uuid`;
+  const synced = (await health("e2e-key") as Record<string, any>).database ?? {};
+  const [want] = await sql`SELECT to_char(max(v::timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS w FROM unnest(${sql.array(["2026-09-23T08:00:00.000Z", "2026-09-24T09:30:00+02:00"], "TEXT")}::text[]) v`;
+  assert(synced.boardSync === "2026-09-24T07:30:00.000Z" && synced.boardSync === want.w && !("boardSync" in (synced.unread ?? {})),
+    `the watermark is the newest full instant, in UTC, the malformed ones passed over (${synced.boardSync}, ${JSON.stringify(synced.unread)})`);
+  const boardRow = (await call("brain_info")).split("\n").find((l) => l.startsWith("Board sync"));
+  assert(/^Board sync: +2026-09-24T07:30:00\.000Z$/.test(boardRow ?? ""), `the tool's table carries the same watermark (${boardRow})`);
+  await sql`UPDATE thoughts SET metadata = metadata - 'linear_updated_at' WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
 
   // A ledger short of the tree's last file is behind it, by name.
   const last = String(treeLast).padStart(3, "0");
