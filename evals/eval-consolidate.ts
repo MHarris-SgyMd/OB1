@@ -49,7 +49,7 @@ import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { estimateTokens } from "../server-portable/chunk.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import {
-  buildJudgeMessages, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_SIMILARITY, type Judgement,
+  buildJudgeMessages, consolidateKey, cutByCodePoint, judgePair, oneLine, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_SIMILARITY, REASON_MAX, type Judgement,
 } from "../server-portable/consolidate.ts";
 import { isoDay } from "../server-portable/store.ts";
 import { requireDatabaseUrl, resetSchema, runScript } from "../db/test-support.ts";
@@ -175,7 +175,13 @@ const sideOf = async (issue: string): Promise<Side | null> => {
   return rows[0] ?? null;
 };
 type DumpLine = { newer: string; older: string; similarity?: number; key?: string; verdict: string; supersedes: string; confidence: number; reason: string; recorded: string | null };
-const replayLines: DumpLine[] = REPLAY ? readFileSync(REPLAY, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as DumpLine) : [];
+// A dump written before SMD-2536 can hold a reason parseJudgement no longer
+// lets through (a NEL, a C1 control): its breaks and controls are cleaned here,
+// so the replayed verdicts and the proposals re-recorded from them carry one
+// line. What the old rule already lost stays lost: words it glued, and half a
+// surrogate pair its UTF-16 cut left.
+const replayLines: DumpLine[] = REPLAY ? readFileSync(REPLAY, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as DumpLine)
+  .map((l) => ({ ...l, reason: cutByCodePoint(oneLine(String(l.reason ?? "")), REASON_MAX) })) : [];
 const replayByPair = new Map(replayLines.map((l) => [`${l.older}|${l.newer}`, l]));
 
 const judgeOne = async (older: Side, newer: Side): Promise<Judgement | null> => {
@@ -216,7 +222,7 @@ if (!NO_JUDGE && labels.pairs.length) {
     else if (!saidConflict && isConflict) fn++;
     else tn++;
     const mark = saidConflict === isConflict ? "✓" : "✗";
-    rows.push(`  ${mark} ${p.older} → ${p.newer}: label ${p.label}${p.supersedes ? `/${p.supersedes}` : ""}, judge ${j.verdict}${saidConflict ? `/${j.supersedes}` : ""} @${j.confidence.toFixed(2)}${isCandidate ? "" : "  (not a candidate at this k/floor)"}${j.reason ? ` — ${j.reason.slice(0, 90)}` : ""}`);
+    rows.push(`  ${mark} ${p.older} → ${p.newer}: label ${p.label}${p.supersedes ? `/${p.supersedes}` : ""}, judge ${j.verdict}${saidConflict ? `/${j.supersedes}` : ""} @${j.confidence.toFixed(2)}${isCandidate ? "" : "  (not a candidate at this k/floor)"}${j.reason ? ` — ${cutByCodePoint(j.reason, 90)}` : ""}`);
   }
   for (const r of rows) console.log(r);
   const prec = tp + fp ? tp / (tp + fp) : 0, rec = tp + fn ? tp / (tp + fn) : 0;
@@ -276,6 +282,10 @@ if (FULL || REPLAY) {
   // The rows are raw driver values (a Date, the number Infinity, null), not the
   // store's normalised ones — String(d).slice(0, 10) printed "Wed Sep 09" (SMD-1842).
   const day = (v: unknown) => isoDay(v) ?? "undated";
+  // The judge's reason and both texts on one line each (SMD-2536): a row any
+  // caller recorded can hold a line break, a NEL or a C1 control, which `\s`
+  // alone left standing to break the sheet's layout.
+  const sheetLine = (v: unknown, max: number) => cutByCodePoint(oneLine(String(v ?? "")), max);
   let gTrue = 0, gFalse = 0, ungraded = 0;
   const md: string[] = [`# Supersession proposals — ${cfg.judgeModel}, k=${K}, floor ${MIN_SIM}, ${new Date().toISOString().slice(0, 10)}`, "", "Grade each: true (a real supersession/contradiction) or false, and copy the verdict into evals/consolidate-labels.json → proposals.", ""];
   for (const p of proposals) {
@@ -283,7 +293,7 @@ if (FULL || REPLAY) {
     const g = graded.get(`${oi}|${ni}`);
     if (g) { if (g.true) gTrue++; else gFalse++; } else ungraded++;
     md.push(`## ${oi} (${day(p.older_created_at)}) → ${ni} (${day(p.newer_created_at)}) — ${p.verdict} @${Number(p.confidence).toFixed(2)}${g ? ` — graded ${g.true ? "TRUE" : "FALSE"}${g.reason ? `: ${g.reason}` : ""}` : ""}`,
-      "", `judge: ${p.reason ?? ""}`, "", `**older ${oi}:** ${String(p.older_content).replace(/\s+/g, " ").slice(0, 700)}`, "", `**newer ${ni}:** ${String(p.newer_content).replace(/\s+/g, " ").slice(0, 700)}`, "");
+      "", `judge: ${sheetLine(p.reason, REASON_MAX)}`, "", `**older ${oi}:** ${sheetLine(p.older_content, 700)}`, "", `**newer ${ni}:** ${sheetLine(p.newer_content, 700)}`, "");
   }
   writeFileSync(OUT, md.join("\n"));
   console.log(`  ${proposals.length} proposals written to ${OUT} for grading`);
