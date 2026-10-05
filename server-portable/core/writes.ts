@@ -159,7 +159,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       if (principal.agentUnresolved === "unreachable") return refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
       pointer = undefined;
     } else if (supersedes !== undefined && !reader) {
-      let writer: { actorName: string | null; agentId: string | null } | null;
+      let writer: Awaited<ReturnType<ThoughtStore["captureActorOf"]>>;
       let present: boolean;
       try {
         // Both reads for every target, so no cell is a query shorter.
@@ -179,8 +179,8 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
         // Bun's SQL puts the SQLSTATE, as agents.ts reads it; `code` for a
         // PostgREST error); a dropped connection or a timeout gets the store's
         // own words, since `--grant` would change nothing there (sixth review pass).
-        const state = String((e as { errno?: unknown; code?: unknown }).errno ?? (e as { code?: unknown }).code ?? "");
-        const noPrivilege = state === "42501" || /permission denied/i.test(why);
+        const { errno, code } = e as { errno?: unknown; code?: unknown };
+        const noPrivilege = String(errno ?? code ?? "") === "42501" || /permission denied/i.test(why);
         return refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "check_failed", detail: why, noPrivilege });
       }
       // The audit row outlives a delete: a deleted thought of this key's

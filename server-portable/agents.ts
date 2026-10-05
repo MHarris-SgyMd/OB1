@@ -259,12 +259,13 @@ export class AgentResolver {
         ttl = failureTtl(this.ttlMs);
       }
     } catch (e) {
-      // Unreachable, unmigrated, misconfigured, or locked past the cap. See the
-      // header. Said once per key and outcome while the failure lasts, so a
+      // Unreachable, misconfigured (unmigrated, or a search_path or grant
+      // gap), or locked past the cap. See the header. Said once per key and outcome while the failure lasts, so a
       // brain whose CHECK refuses a scope (049, SMD-1298) is not silent about
       // the unattributed writes, and a key that moves from one outcome to
       // another is said again.
       const cause = String((e as Error)?.message ?? e).split("\n")[0].slice(0, 200);
+      const remedy = misconfigured(e);
       const revoked = this.revocations.get(principal.keyHash);
       if (revoked) {
         this.warnOnce(key, "revoked", `agent registry: resolve_agent failed for key "${principal.name}" — its revocation stands until the registry answers: ${cause}`);
@@ -274,10 +275,10 @@ export class AgentResolver {
         this.warnOnce(key, "busy", `agent registry: resolve_agent timed out on a lock or failed to serialize for key "${principal.name}", tried up to ${this.busyRetry.attempts} times within ${this.busyRetry.budgetMs} ms — its requests are refused with a retry until the registry answers: ${cause}`);
         outcome = { status: "busy" };
         ttl = Math.min(this.ttlMs, BUSY_TTL_MS);
-      } else if (misconfigured(e) !== null) {
+      } else if (remedy !== null) {
         // Said once per SQLSTATE, not per kind: each names its own remedy, and
         // a brain migrated by its owner can meet the grant gap next (review pass 2).
-        this.warnOnce(key, `misconfigured:${String((e as { errno?: unknown })?.errno ?? "")}`, `agent registry: resolve_agent cannot attribute key "${principal.name}" as this server is set up — writes are attributed by name only, and a capture-only key's \`supersedes\` is dropped, until ${misconfigured(e)}: ${cause}`);
+        this.warnOnce(key, `misconfigured:${sqlState(e)}`, `agent registry: resolve_agent cannot attribute key "${principal.name}" as this server is set up — writes are attributed by name only, and a capture-only key's \`supersedes\` is dropped, until ${remedy}: ${cause}`);
         outcome = { status: "ok", agentId: undefined, unresolved: "misconfigured" };
         ttl = failureTtl(this.ttlMs);
       } else {
@@ -354,8 +355,13 @@ export class AgentResolver {
  * PostgREST store copies PostgREST's code there.
  */
 function retryable(e: unknown): boolean {
-  const state = String((e as { errno?: unknown })?.errno ?? "");
+  const state = sqlState(e);
   return state === "55P03" || state === "57014" || state === "40P01" || state === "40001";
+}
+
+/** A failed lookup's SQLSTATE, from `errno` (Bun's SQL; the PostgREST store copies its code there), or "". */
+function sqlState(e: unknown): string {
+  return String((e as { errno?: unknown })?.errno ?? "");
 }
 
 /**
@@ -375,7 +381,7 @@ function retryable(e: unknown): boolean {
  * when one can heal (SMD-2473).
  */
 function misconfigured(e: unknown): string | null {
-  const state = String((e as { errno?: unknown })?.errno ?? "");
+  const state = sqlState(e);
   if (state === "42883" || state === "42P01") return "the server role's search_path reaches resolve_agent and the registry tables, and the brain is migrated (cd db && bun migrate.ts)";
   if (state === "23514") return "the brain is migrated (cd db && bun migrate.ts) so the registry takes this key's scope";
   if (state === "42501") return "the server role holds the registry tables' grants (cd db && bun migrate.ts --grant <role>)";
