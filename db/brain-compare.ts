@@ -69,7 +69,7 @@ import type { BrainInfo } from "../server-portable/brain-info.ts";
 
 /** A brain the caller can reach: where it is, the key to read it, and the name to print (never the key). */
 export interface BrainEndpoint {
-  /** The label shown in the report — the connector name, or the URL's host. */
+  /** The label shown in the report — the connector name, or the URL's host and path. */
   label: string;
   /** The MCP base URL, no trailing slash and no ?key= (the key rides a header). */
   base: string;

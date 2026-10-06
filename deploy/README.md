@@ -171,7 +171,11 @@ on it (SMD-2294): `/mcp` the stable tier's server, `/canary/mcp` and
 servers, REST cores, three Postgres services and shared Ollama publish nothing.
 Nothing public routes to a REST core, and the root, `/.well-known` and `/api`
 are the proxy's 404: that stack has no legacy window, no authorization server
-and no `/api`. A canary stood beside this
+and no `/api`. It reads `SERVER_PORT` as this file does, so to run the two side
+by side set `SERVER_PORT` in the shell for one of them, which wins over
+`deploy/.env`. Its proxy starts with stable's servers alone, so a canary or
+working tier that fails to migrate is a 404 at its path, not an outage of the
+origin. A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own network,
 less the proxy, its server and REST core also on this stack's `mesh` as
@@ -870,8 +874,8 @@ made again, re-run `up`.
 
 A stable from before SMD-2294 has no `/canary` route, and `up` refuses there
 unless `--port N` names a loopback port for the canary's own proxy, the way
-every canary was stood up before (the old default was the port after
-stable's): its server at
+every canary was stood up before (on its old fixed default port, which
+`--port` now names): its server at
 `/mcp` on `127.0.0.1:N`, whatever `SERVER_BIND` says for stable, and its
 servers off stable's mesh. Re-run `up` without `--port` once stable is
 upgraded, and the canary's proxy is removed.

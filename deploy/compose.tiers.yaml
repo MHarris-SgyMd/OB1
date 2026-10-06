@@ -19,13 +19,14 @@
 # instead — deploy/README.md, "Pinning a release"). Secrets come from deploy/.env (gitignored); copy
 # .env.example first. Each server's OB1_TIER falls back to its own tier, so leave
 # OB1_TIER UNSET in deploy/.env for this stack — setting it would force all three
-# tiers to the same tier. Everything else is forwarded exactly as compose.yaml
-# forwards it (check 14 holds every OB1_* value to `${NAME}`/`${NAME:-default}`),
-# via the anchors below so the tiers cannot drift.
+# tiers to the same tier. The knobs in x-server-env below are forwarded as
+# compose.yaml forwards them (check 14 holds every OB1_* value to
+# `${NAME}`/`${NAME:-default}`), through the anchors so the tiers cannot drift.
 #
 # What the host can reach: the proxy alone, on 127.0.0.1:${SERVER_PORT:-8000}
 # unless SERVER_BIND says otherwise (check 13, SMD-1844) — compose.yaml's knobs,
-# since this stack stands in for it, and the two are not run on one port. The
+# since this stack stands in for it: run the two side by side with SERVER_PORT
+# set in the shell for one of them, which wins over deploy/.env. The
 # servers, the REST cores, the three Postgres services and Ollama publish
 # nothing. Each server reaches its own database by service name on the compose
 # network, and db/tier.ts reaches them the same way through deploy/tier.sh
@@ -47,8 +48,9 @@ name: open-brain-tiers
 #   tier-off every other path starting with /canary or /working, in any case:
 #            a bare 404, never another tier's server;
 #   health   GET, HEAD and OPTIONS /health at the origin root — stable's.
-# A tier that is stopped or still starting is a bare 404 (`tier-absent`, 502
-# rewritten). No route answers the root, /.well-known or /api: this stack has
+# A canary or working tier that is stopped or still starting is a bare 404
+# (`tier-absent`, 502 rewritten); stable's /mcp and /health answer 502 then,
+# as compose.yaml's do. No route answers the root, /.well-known or /api: this stack has
 # no legacy window (SMD-2306), no authorization server and no public REST
 # path, so each is Traefik's own 404, and a tier is reached with keys.
 x-tier-routes: &tier-routes |
@@ -189,6 +191,12 @@ x-tier-migrate: &tier-migrate
     dockerfile: db/Dockerfile
   restart: "no"
 
+# The host's name for Docker on Linux, which provides none (podman and Docker
+# Desktop do): compose.yaml's server and REST core carry the same entry, so
+# .env.example's host-Ollama form is one address per runtime here too.
+x-host-alias: &host-alias
+  - "host.docker.internal:host-gateway"
+
 # The Ollama image, one anchor as in compose.yaml and held equal to its pin by
 # scripts/release-artifacts.ts (a rehearsal runs on every PR touching deploy/).
 x-ollama-image: &ollama-image ollama/ollama:0.34.3
@@ -229,14 +237,15 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
     networks:
       default: {}
       mesh:
         aliases: [mcp.ob1.internal]
 
   # The stable tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
-  # the server's environment. Reached on the mesh alone; nothing public routes
-  # to it.
+  # the server's environment. Reached on the mesh, and on the default network
+  # where its database is; nothing public routes to it.
   stable-api:
     image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-stable-server
     pull_policy: never
@@ -249,6 +258,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
     networks:
       default: {}
       mesh:
@@ -295,14 +305,15 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
     networks:
       default: {}
       mesh:
         aliases: [mcp.canary.ob1.internal]
 
   # The canary tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
-  # the server's environment. Reached on the mesh alone; nothing public routes
-  # to it.
+  # the server's environment. Reached on the mesh, and on the default network
+  # where its database is; nothing public routes to it.
   canary-api:
     image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-canary-server
     pull_policy: never
@@ -315,6 +326,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
     networks:
       default: {}
       mesh:
@@ -361,14 +373,15 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
     networks:
       default: {}
       mesh:
         aliases: [mcp.working.ob1.internal]
 
   # The working tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
-  # the server's environment. Reached on the mesh alone; nothing public routes
-  # to it.
+  # the server's environment. Reached on the mesh, and on the default network
+  # where its database is; nothing public routes to it.
   working-api:
     image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-working-server
     pull_policy: never
@@ -381,6 +394,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
     networks:
       default: {}
       mesh:
@@ -433,18 +447,14 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    # Stable's servers alone: a canary or working tier whose migration fails
+    # never starts, and its path is the route table's 404 meanwhile, so one
+    # broken tier does not keep the origin, and stable, down. `up` with no
+    # service named still starts every tier.
     depends_on:
       stable-server:
         condition: service_started
-      canary-server:
-        condition: service_started
-      working-server:
-        condition: service_started
       stable-api:
-        condition: service_started
-      canary-api:
-        condition: service_started
-      working-api:
         condition: service_started
     restart: unless-stopped
 

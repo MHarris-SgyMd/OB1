@@ -3093,8 +3093,8 @@ tell from stable's:
 claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working/mcp
 ```
 
-A canary stood beside a running stack with `deploy/canary.sh` answers the same
-way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
+A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers the
+same way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
 deploy/README.md), and `--compare` takes the two URLs as they are:
 `bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
 each labelled by host and path.
