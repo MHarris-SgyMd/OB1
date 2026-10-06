@@ -702,6 +702,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let leftOut = 0;
   let leftOutWindows = 0;
   let failed = 0;
+  /** Workers that stopped on the provider still failing after their pauses — the heartbeat's "failed" (SMD-2261). */
+  let providerStops = 0;
+  /** Whether the last pass found nothing to do: its stamp keeps the word before it. */
+  let lastPassIdle = false;
   let vanished = 0;
   let superseded = 0;
   let lost = 0;
@@ -983,7 +987,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               }
             }
             if (hardStopped) return;
-            if (stopAfter) err(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
+            if (stopAfter) {
+              // The heartbeat's "failed" (SMD-2261): the provider, not a document.
+              providerStops++;
+              err(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
+            }
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
               let recorded = false;
@@ -1161,21 +1169,22 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         onError: (e) => err(`  heartbeat ${stampKey("extract", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
       })
     : null;
-  // A pass that throws ends the run; its heartbeat says so first. One that
-  // failed rows and finished none — a provider down, each worker failing its
-  // thought and stopping — is "failed" too, not a loop that merely turned
-  // (review pass 1); a poll with nothing to do keeps the last pass's word, so
-  // the failure stands until a pass finishes a thought.
+  // A pass that throws ends the run; its heartbeat says so first, as the
+  // worker's end. A pass is "failed" when a worker of it stopped on the
+  // provider still failing after its pauses — the provider down, not a
+  // document it cannot read (review pass 2: counting rows done against rows
+  // failed read a down judge as ok); a pass with work is "ok" otherwise, and a
+  // poll with nothing to do keeps the last pass's word.
   let passOutcome: "ok" | "failed" = "ok";
   const stampedPass = async () => {
-    const at = { done, failed };
+    const at = providerStops;
     try {
       const counted = await (stamper ? stamper.during(pass()) : pass());
-      if (done > at.done) passOutcome = "ok";
-      else if (failed > at.failed) passOutcome = "failed";
+      if (providerStops > at) passOutcome = "failed";
+      else if (!lastPassIdle) passOutcome = "ok";
       return counted;
     } catch (e) {
-      await stamper?.stamp("failed");
+      await stamper?.end("failed");
       throw e;
     }
   };
@@ -1190,7 +1199,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const before = await counts();
     if (added > 0 || !FOLLOW) out(`  pool: ${added} thought(s) added`);
     total += before.pending + before.claimed;
-    if (before.pending + before.claimed === 0) return before;
+    lastPassIdle = before.pending + before.claimed === 0;
+    if (lastPassIdle) return before;
     if (!FOLLOW || added > 0 || before.pending > 0) {
       printCounts(before, "before");
     }
@@ -1264,7 +1274,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // request itself — and the row says so, with the final judgement's block: a
   // follower stopped at its --limit on a tripped block exits 3, and its row
   // carries the alarm too. Its age then warns, as it should.
-  await stamper?.stamp(configError ? "failed" : "stopped", lastBlock);
+  await stamper?.end(configError ? "failed" : "stopped", lastBlock);
   const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
   // The alarm before the failures: a model at fault explains them, and
   // --retry-failed under it would fail them again. Leased and pending rows keep

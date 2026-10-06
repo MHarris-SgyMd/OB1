@@ -145,6 +145,8 @@ export interface WorkerHeartbeat {
   running: boolean;
   /** How the last pass ended; null before the first ends. */
   outcome: "ok" | "failed" | "stopped" | null;
+  /** The worker's process has ended — stopped, or failed on a refusal or a thrown pass — so its row speaks for nothing running. */
+  ended: boolean;
   /** Passes this worker's process has finished. */
   passes: number;
   /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm (extraction only). */
@@ -155,7 +157,9 @@ export interface WorkerHeartbeat {
 export const STALE_AFTER_INTERVALS = 3;
 
 const HEARTBEAT_KEY = /^heartbeat:(board-sync|extract|consolidate)(?::([A-Za-z0-9._:@/+-]{1,120}))?$/;
-const JOB_TOKEN = /^[A-Za-z0-9._:@/+-]{1,120}$/;
+// As long as a key's suffix with the worker's prefix on it, so every key
+// stampKey writes is one the reader takes (review pass 2: 121–128 were not).
+const JOB_TOKEN = /^[A-Za-z0-9._:@/+-]{1,132}$/;
 /** A heartbeat stamped this far past the reader's now() is not one: a stamp's now() can trail the read's by its own transaction, never by a minute. */
 const FUTURE_SLACK_S = 60;
 const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -197,6 +201,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       && count(v.every_s, 2_147_483) && (v.every_s as number) >= 1
       && typeof v.running === "boolean"
       && (v.outcome === null || v.outcome === "ok" || v.outcome === "failed" || v.outcome === "stopped")
+      && (v.ended === undefined || v.ended === true)
       && count(v.passes) && malformed !== undefined
       && typeof r.at === "string" && UTC_INSTANT.test(r.at) && Number.isFinite(ageS) && ageS > -FUTURE_SLACK_S;
     if (!ok) {
@@ -214,6 +219,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       stale: ageS > STALE_AFTER_INTERVALS * everyS,
       running: v!.running as boolean,
       outcome: v!.outcome as WorkerHeartbeat["outcome"],
+      ended: v!.ended === true || v!.outcome === "stopped",
       passes: v!.passes as number,
       malformed: malformed ?? null,
     });
@@ -629,8 +635,9 @@ export function ago(s: number): string {
 export function heartbeatState(h: WorkerHeartbeat): string {
   const alarm = h.malformed?.alarm ? `; ${h.malformed.bad} of its last ${h.malformed.answers} answers malformed` : "";
   const when = `last stamped ${ago(h.ageS)} ago, every ${h.everyS} s${alarm}`;
-  // A worker that said it ended is stopped, fresh or not (review pass 1: it read "alive").
-  if (h.outcome === "stopped") return `stopped (${when})`;
+  // A worker that said it ended is stopped, fresh or not (review pass 1: it
+  // read "alive"); one that ended on a failure says so (review pass 2).
+  if (h.ended) return `${h.outcome === "failed" ? "ended on a failure" : "stopped"} (${when})`;
   if (h.stale) return `stale (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
   return `${h.running ? "running a pass" : h.outcome === "failed" ? "alive, its last pass failed" : "alive"} (${when})`;
 }

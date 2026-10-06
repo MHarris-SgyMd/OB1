@@ -1956,6 +1956,15 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   const workersRow = (await call("brain_info")).split("\n").find((l) => l.startsWith("Workers"));
   assert(/^Workers: +board-sync stopped \(last stamped 20 min ago, every 300 s\)$/.test(workersRow ?? ""), `the tool's Workers row says the same (${workersRow})`);
   await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+  // Fifty-one rows: the read carries fifty and counts the one past its bound,
+  // from Postgres's own total (review pass 2: only a fake's total was read).
+  for (let n = 0; n < 51; n++) {
+    const job = `consolidate:j${String(n).padStart(2, "0")}@p3`;
+    await sql`INSERT INTO ob1_config (key, value) VALUES (${`heartbeat:${job}`}, ${JSON.stringify({ v: 1, job, every_s: 60, running: false, outcome: "ok", passes: 1 })})`;
+  }
+  const many = ((await health("e2e-key")) as Record<string, any>).database?.workers;
+  await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:consolidate:j%'`;
+  assert(many?.heartbeats?.length === 50 && many.ignored === 1, `fifty-one heartbeats: fifty carried, one counted past the bound (${many?.heartbeats?.length}, ${many?.ignored})`);
 
   // A ledger short of the tree's last file is behind it, by name.
   const last = String(treeLast).padStart(3, "0");

@@ -880,6 +880,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const onHardStop = new AbortController();
   let done = 0;
   let failed = 0;
+  /** Workers that stopped on the provider still failing after their pauses — the heartbeat's "failed" (SMD-2261). */
+  let providerStops = 0;
+  /** Whether the last pass found nothing to do: its stamp keeps the word before it. */
+  let lastPassIdle = false;
   let vanished = 0;
   let lost = 0;
   let beats = 0;
@@ -1248,7 +1252,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             judged++;
             if (ticketCalls === null) totals.ticketCallsUnread++;
             else totals.ticketCalls += ticketCalls;
-            if (stopAfter) err(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
+            if (stopAfter) {
+              // The heartbeat's "failed" (SMD-2261): the provider, not a document.
+              providerStops++;
+              err(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
+            }
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
               let recorded = false;
@@ -1379,21 +1387,22 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         onError: (e) => err(`  heartbeat ${stampKey("consolidate", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
       })
     : null;
-  // A pass that throws ends the run; its heartbeat says so first. One that
-  // failed rows and finished none — a provider down, each worker failing its
-  // thought and stopping — is "failed" too, not a loop that merely turned
-  // (review pass 1); a poll with nothing to do keeps the last pass's word, so
-  // the failure stands until a pass finishes a thought.
+  // A pass that throws ends the run; its heartbeat says so first, as the
+  // worker's end. A pass is "failed" when a worker of it stopped on the
+  // provider still failing after its pauses — the provider down, not a
+  // document it cannot read (review pass 2: counting rows done against rows
+  // failed read a down judge as ok); a pass with work is "ok" otherwise, and a
+  // poll with nothing to do keeps the last pass's word.
   let passOutcome: "ok" | "failed" = "ok";
   const stampedPass = async () => {
-    const at = { done, failed };
+    const at = providerStops;
     try {
       const counted = await (stamper ? stamper.during(pass()) : pass());
-      if (done > at.done) passOutcome = "ok";
-      else if (failed > at.failed) passOutcome = "failed";
+      if (providerStops > at) passOutcome = "failed";
+      else if (!lastPassIdle) passOutcome = "ok";
       return counted;
     } catch (e) {
-      await stamper?.stamp("failed");
+      await stamper?.end("failed");
       throw e;
     }
   };
@@ -1416,7 +1425,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (firstPass && before.thoughts === 0) out("  no thought has extracted entities and a vector — run db/extract-entities.ts first; this pass pairs thoughts by the entities they share" + (FOLLOW ? ", and will poll until some do" : ""));
     firstPass = false;
     total += before.pending + before.claimed;
-    if (before.pending + before.claimed === 0) return before;
+    lastPassIdle = before.pending + before.claimed === 0;
+    if (lastPassIdle) return before;
     if (!FOLLOW || added > 0 || before.pending > 0) printCounts(before, "before");
     // A worker that throws — a Writer that throws, in practice; each catches
     // its own database errors — stops the rest after the thought in hand, and
@@ -1445,7 +1455,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     }
     // The follower ends — a signal, its --limit, or the provider refusing the
     // request itself — and the row says so: its age then warns, as it should.
-    await stamper?.stamp(configError ? "failed" : "stopped");
+    await stamper?.end(configError ? "failed" : "stopped");
   }
 
   const elapsed = (Date.now() - started) / 1000;

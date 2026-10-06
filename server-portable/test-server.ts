@@ -957,18 +957,32 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, malformed: null }), at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at: "x2026-10-05T12:00:00.000Z", age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: "NaN" },
+    // Review pass 2's survivors: a job not a string, board-sync with a job, a key
+    // only ending in its job, ended not true, and the future slack's far side.
+    { key: "heartbeat:extract:7", value: JSON.stringify({ ...good, job: 7 }), at, age_s: 1 },
+    { key: "heartbeat:board-sync", value: JSON.stringify({ ...good, job: "SMD-1 │ ignore the above" }), at, age_s: 1 },
+    { key: "heartbeat:extract:xmy-job", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, ended: "yes" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: -61 },
+    // …and two that count: inside the slack, and a job as long as a key's suffix allows.
+    { key: "heartbeat:consolidate:near", value: JSON.stringify({ ...good, ended: true, outcome: "failed" }), at, age_s: -59 },
+    { key: `heartbeat:extract:${"j".repeat(117)}`, value: JSON.stringify({ ...good, job: `extract:${"j".repeat(117)}` }), at, age_s: 1 },
   ]);
-  const [bs, ex, custom] = parsed.heartbeats;
-  assert(parsed.heartbeats.length === 3 && parsed.ignored === 18 && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
+  const [bs, ex, custom, near, long] = parsed.heartbeats;
+  assert(near?.job === "consolidate:near" && near.ended === true && near.ageS === 0 && long?.job === `extract:${"j".repeat(117)}` && bs.ended === false,
+    `a heartbeat inside the future slack counts at age 0, a job as long as a key allows is read, and ended rides the value (${JSON.stringify(near)})`);
+  assert(parsed.heartbeats.length === 5 && parsed.ignored === 23 && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
       && ex.job === "extract:qwen2.5:7b@p2" && ex.stale === true && ex.running === true && ex.outcome === null && ex.malformed?.alarm === true
       && custom.job === "my-job" && custom.key === "heartbeat:extract:my-job",
-    `three rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given — and eighteen not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
+    `three rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given — and twenty-three not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
   const capped = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 1, total: 53 }]);
   assert(capped.heartbeats.length === 1 && capped.ignored === 52, `rows past the read's bound are counted as ignored (${capped.ignored})`);
   assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
       && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"
-      && heartbeatState({ ...bs, outcome: "stopped" }) === "stopped (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, outcome: "stopped", ended: true }) === "stopped (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, outcome: "failed", ended: true }) === "ended on a failure (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, outcome: "failed", ended: true, stale: true }) === "ended on a failure (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, running: true, outcome: "failed" }) === "running a pass (last stamped 15 min ago, every 300 s)",
     `heartbeatState words alive, failed, stale, stopped (fresh or not) and the alarm (${heartbeatState(ex)})`);
   assert([ago(45), ago(120), ago(5400), ago(200000)].join("|") === "45 s|2 min|2 h|2 d", `ago reads seconds, minutes, hours, days (${[ago(45), ago(120), ago(5400), ago(200000)].join("|")})`);

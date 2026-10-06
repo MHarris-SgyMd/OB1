@@ -4008,7 +4008,7 @@ if (configFailed) {
           } else if (w.heartbeats.length === 0) {
             add("workers", "skip", `no long-running worker has stamped a heartbeat on this brain${w.ignored ? ` (${w.ignored} heartbeat row(s) not of the shape, ignored)` : ""}.`);
           } else {
-            const wrong = w.heartbeats.filter((h) => h.stale || h.outcome === "stopped" || h.outcome === "failed" || h.malformed?.alarm);
+            const wrong = w.heartbeats.filter((h) => h.stale || h.ended || h.outcome === "failed" || h.malformed?.alarm);
             const detail = w.heartbeats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + (w.ignored ? `; ${w.ignored} heartbeat row(s) not of the shape, ignored` : "");
             if (wrong.length === 0) {
               add("workers", "ok", detail);
@@ -4016,9 +4016,12 @@ if (configFailed) {
               const fixes = wrong.map((h) => {
                 const name = h.job ?? h.worker;
                 const key = h.key;
-                if (h.stale || h.outcome === "stopped") return `${name} ${h.outcome === "stopped" ? `stopped ${ago(h.ageS)} ago` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
-                if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266).`;
-                return `${name}'s last pass failed: its log says why.`;
+                const checkModel = h.malformed?.alarm ? ", once OB1_METADATA_MODEL, the endpoint and the prompt are checked (its last block passed the malformed alarm)" : "";
+                if (h.stale || h.ended) return `${name} ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again${checkModel} — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
+                if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row keeps the block until the follower judges a healthy one of 48 answers; once fixed, DELETE FROM ob1_config WHERE key = '${key}' clears it and the follower stamps afresh.`;
+                return h.worker === "board-sync"
+                  ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
+                  : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
               });
               add("workers", "warn", detail, fixes.join(" "));
             }

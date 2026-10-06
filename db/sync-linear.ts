@@ -1774,7 +1774,7 @@ export async function loopPasses(opts: {
     await opts.stamper?.stamp(code === 0 ? "ok" : "failed");
     for (let waited = 0; waited < opts.intervalS && !opts.stopped(); waited++) await sleep(1000);
   }
-  await opts.stamper?.stamp("stopped");
+  await opts.stamper?.end("stopped");
   return code;
 }
 

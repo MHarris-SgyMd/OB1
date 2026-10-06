@@ -3131,28 +3131,44 @@ One `ob1_config` row per worker and job — `heartbeat:board-sync`,
 `heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3` — whose
 value names the `job` (a claim worker's, as given — the restart works that
 pool), `every_s` (the worker's interval, at least a minute), whether a pass is
-`running`, the last pass's `outcome`, the `passes` the process finished, and,
-for extraction, the last judged block's malformed answers and whether they
-passed SMD-2266's alarm. The outcome is `ok` when a pass finished; `failed`
-when it threw, when board-sync's pass reported errors, or when a follower's
-pass failed rows and finished none (a provider down); `stopped` when the worker
-ended — a signal, a follower's `--limit` — or `failed` when the provider refused
-the request itself. The time is the row's `updated_at`, the database's `now()`.
+`running`, the last pass's `outcome`, whether the worker has `ended`, the
+`passes` the process finished, and, for extraction, the last judged block's
+malformed answers and whether they passed SMD-2266's alarm. The time is the
+row's `updated_at`, the database's `now()`.
+
+- **`ok`:** the pass ran, whatever its rows came to — a document the model
+  cannot read is a failed row and the malformed alarm's business, not the
+  worker's.
+- **`failed`:** a worker of the pass stopped because the provider kept failing
+  after its pauses (5, 15, 45 s), board-sync's pass reported errors, or a pass
+  threw. A poll with nothing to do keeps the last pass's word, so a down
+  provider reads failed until a pass with work runs again.
+- **`ended`:** the worker's process is gone — `stopped` on a signal or a
+  follower's `--limit`, `failed` when the provider refused the request itself or
+  a pass threw. Its row says so at once rather than "alive" until it goes stale.
+
 A pass is stamped `running` as it starts and every `every_s` while it runs, so
 a follower's first pass over a backlog reads alive, as lease renewal keeps its
-claims. A restarted follower keeps the row's malformed block until it judges a
-block of its own: restarting on the same broken model does not clear the alarm.
-There is one row per job, not per process — two followers of one job share it,
-the last to stamp written — and a tier refresh deletes the source's rows
-(`tier.ts`), so a canary never reports stable's workers.
+claims. A restarted follower keeps the row's malformed block (one of the shape
+this module writes) until it judges a block of its own, so restarting on the
+same broken model does not clear the alarm. Once the model is fixed, the block
+clears when the follower judges 48 healthy answers, or at once by deleting the
+row. There is one row per job, not per process: two followers of one job share
+it, the last to stamp written. A tier refresh deletes the source's rows
+(`tier.ts`), so a canary never reports stable's workers; a `pg_dump` restored
+onto another host carries them too, and they read stopped or stale until
+deleted.
 
 **Who reads it.** Keyed `/health`, `brain_info` (a `Workers` row) and
-`GET /v1/brain` carry every heartbeat as `database.workers`; preflight's
-`workers` row warns when one is older than three of its intervals or says its
-worker stopped, naming the command that starts that worker again, when a fresh
-one's last pass failed, and when its last block passed the malformed alarm —
-which a follower otherwise says only on stderr. A worker that never ran on a brain has no row, and nothing is
-said. A worker retired on purpose leaves its row to warn until it is deleted
+`GET /v1/brain` carry every heartbeat as `database.workers`. Preflight's
+`workers` row warns, naming the command that starts the worker again:
+- when a heartbeat is older than three of its intervals, or its worker ended;
+- when a fresh one's last pass failed;
+- when its last block passed the malformed alarm, which a follower otherwise
+  says only on stderr.
+
+A worker that never ran on a brain has no row, and nothing is said. A worker
+retired on purpose leaves its row to warn until it is deleted
 (`DELETE FROM ob1_config WHERE key = 'heartbeat:…'`, as preflight prints it).
 
 **Grants.** The write is a plain upsert into `ob1_config`, which the `worker`
@@ -3367,7 +3383,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2429 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1094 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1097 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
