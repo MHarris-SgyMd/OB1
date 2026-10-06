@@ -1543,8 +1543,10 @@ every start and warns, in the counts `--status` prints, for every unfinished
 key that starts with `reembed:` (the configured model's key, or a backfill's;
 extraction keys are left out because 016's trigger keeps that pool fed). A key
 a worker holds a live lease under is *running*, an ok row with no remedy that
-would start a second worker; one whose only leases expired names a worker that
-died holding them, which the next pass reclaims (the stale rule is
+would start a second worker — a warning only for failed rows beside it, which a
+worker never retries, with the `--retry-failed` that puts them back; one whose
+only leases expired names a worker that died holding them, which the next pass
+reclaims, a row on its third expiry marked failed (the stale rule is
 `release_stale_leases`' and `worker_status`', `ttl_expires_at < now()`;
 SMD-2423). No marker to clear: the claim table is the record of the pass and
 nothing else.
@@ -2370,8 +2372,9 @@ judge model — and otherwise says `none unfinished`, with the number of
 proposals pending review beside it and the `--list` that shows them: a queue
 is a reviewer's to work, not a defect. A key a worker holds a live lease under,
 or whose follower stamped a fresh heartbeat and has not ended (between polls it
-holds none), reads *running*, ok and with no remedy; one whose only leases
-expired names a worker that died holding them (SMD-2423, SMD-2261).
+holds none), reads *running*, ok and with no remedy — a warning only for failed
+rows beside it, which a follower never retries; one whose only leases expired
+names a worker that died holding them (SMD-2423, SMD-2261).
 
 **Verified.** `test-schema.ts` [28] holds the candidate rule's every exclusion,
 the one write, the review path's states and refusals with the audit row, the
