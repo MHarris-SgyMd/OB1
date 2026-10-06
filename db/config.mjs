@@ -492,9 +492,9 @@ export function malformedAlarm(answers, malformed) {
  * no --job: its key follows the judge model, so the job is named beside it.
  */
 export function restartCommand(worker, job) {
-  if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d board-sync (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
-  if (worker === "extract") return `cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job}` : ""}`;
-  return `cd db && bun consolidate.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_JUDGE_MODEL)` : ""}`;
+  if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d --no-deps board-sync, with the -f files and -p the stack was started with (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
+  if (worker === "extract") return `cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
+  return `cd db && bun consolidate.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL)` : ""}`;
 }
 
 /**

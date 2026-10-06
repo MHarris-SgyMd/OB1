@@ -4008,15 +4008,15 @@ if (configFailed) {
           } else if (w.heartbeats.length === 0) {
             add("workers", "skip", `no long-running worker has stamped a heartbeat on this brain${w.ignored ? ` (${w.ignored} heartbeat row(s) not of the shape, ignored)` : ""}.`);
           } else {
-            const wrong = w.heartbeats.filter((h) => h.stale || h.outcome === "failed" || h.malformed?.alarm);
+            const wrong = w.heartbeats.filter((h) => h.stale || h.outcome === "stopped" || h.outcome === "failed" || h.malformed?.alarm);
             const detail = w.heartbeats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + (w.ignored ? `; ${w.ignored} heartbeat row(s) not of the shape, ignored` : "");
             if (wrong.length === 0) {
               add("workers", "ok", detail);
             } else {
               const fixes = wrong.map((h) => {
                 const name = h.job ?? h.worker;
-                const key = `heartbeat:${name}`;
-                if (h.stale) return `${name} has not stamped for ${ago(h.ageS)}: start it again — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
+                const key = h.key;
+                if (h.stale || h.outcome === "stopped") return `${name} ${h.outcome === "stopped" ? `stopped ${ago(h.ageS)} ago` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266).`;
                 return `${name}'s last pass failed: its log says why.`;
               });

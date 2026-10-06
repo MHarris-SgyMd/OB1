@@ -910,7 +910,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     "…and the reads that answered stand");
   statements.length = 0;
   const lean = await readDatabaseFacts(fake, { stats: false });
-  assert(lean.counts === null && lean.databaseBytes === null && !statements.some((t) => /count\(\*\)|pg_database_size/.test(t)) && lean.schemaVersion === "1.1.0+upstream.9543c29",
+  assert(lean.counts === null && lean.databaseBytes === null && !statements.some((t) => /count\(\*\)::float8|pg_database_size/.test(t)) && lean.schemaVersion === "1.1.0+upstream.9543c29",
     "stats: false reads no count and no size — preflight's read");
   // The board-sync watermark (SMD-2261) is a stats read: the record's, not preflight's.
   assert(facts.boardSync === "2026-09-24T12:00:00.000Z" && !("boardSync" in facts.unread) && lean.boardSync === null && !statements.some((t) => /linear_updated_at/.test(t)),
@@ -946,14 +946,31 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, passes: -1 }), at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, malformed: { answers: 5, bad: 6, alarm: false } }), at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at: "yesterday", age_s: 1 },
+    // A custom --job: the value's job, under the key stampKey derives from it; a key that is not its job's.
+    { key: "heartbeat:extract:my-job", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 5 },
+    { key: "heartbeat:extract:other", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 5 },
+    // Stamped two minutes past the read's now(): not a heartbeat (review pass 1).
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: -120 },
+    // Each remaining guard on its own (review pass 1's run-it survivors).
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, every_s: 2_147_484 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, malformed: { answers: 50, bad: 1, alarm: "yes" } }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, malformed: null }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at: "x2026-10-05T12:00:00.000Z", age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: "NaN" },
   ]);
-  const [bs, ex] = parsed.heartbeats;
-  assert(parsed.heartbeats.length === 2 && parsed.ignored === 11 && bs.worker === "board-sync" && bs.job === null && bs.ageS === 900 && bs.stale === false
-      && ex.job === "extract:qwen2.5:7b@p2" && ex.stale === true && ex.running === true && ex.outcome === null && ex.malformed?.alarm === true,
-    `two rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale — and eleven not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
-  assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale — last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed"
-      && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)" && heartbeatState({ ...bs, stale: true, outcome: "stopped" }) === "stale — last stamped 15 min ago, every 300 s, stopped",
-    `heartbeatState words alive, failed, stale, stopped and the alarm (${heartbeatState(ex)})`);
+  const [bs, ex, custom] = parsed.heartbeats;
+  assert(parsed.heartbeats.length === 3 && parsed.ignored === 18 && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
+      && ex.job === "extract:qwen2.5:7b@p2" && ex.stale === true && ex.running === true && ex.outcome === null && ex.malformed?.alarm === true
+      && custom.job === "my-job" && custom.key === "heartbeat:extract:my-job",
+    `three rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given — and eighteen not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
+  const capped = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 1, total: 53 }]);
+  assert(capped.heartbeats.length === 1 && capped.ignored === 52, `rows past the read's bound are counted as ignored (${capped.ignored})`);
+  assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
+      && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"
+      && heartbeatState({ ...bs, outcome: "stopped" }) === "stopped (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, running: true, outcome: "failed" }) === "running a pass (last stamped 15 min ago, every 300 s)",
+    `heartbeatState words alive, failed, stale, stopped (fresh or not) and the alarm (${heartbeatState(ex)})`);
   assert([ago(45), ago(120), ago(5400), ago(200000)].join("|") === "45 s|2 min|2 h|2 d", `ago reads seconds, minutes, hours, days (${[ago(45), ago(120), ago(5400), ago(200000)].join("|")})`);
   const server0 = () => ({ version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } });
   heartbeatRows = [{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 10 }, { key: "heartbeat:x", value: "{}", at, age_s: 1 }];
@@ -961,6 +978,13 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   heartbeatRows = [];
   assert(/^Workers: +board-sync alive \(last stamped 10 s ago, every 300 s\) \(1 heartbeat row\(s\) not of the shape, ignored\)$/m.test(withBeats),
     `the table's Workers row names each heartbeat and the rows ignored (${withBeats.split("\n").find((l) => l.startsWith("Workers"))})`);
+  // The row's other states: none stamped (with what was ignored), and ob1_config not read.
+  heartbeatRows = [{ key: "heartbeat:x", value: "{}", at, age_s: 1 }];
+  const noneRow = renderBrainInfo(await brainInfo(server0(), async () => readDatabaseFacts(fake), 1000)).split("\n").find((l) => l.startsWith("Workers"));
+  heartbeatRows = [];
+  const lostRow = renderBrainInfo(await brainInfo(server0(), async () => ({ ...facts, workers: null, unread: { workers: { reason: "refused", message: "permission denied for table ob1_config" } } }), 1000)).split("\n").find((l) => l.startsWith("Workers"));
+  assert(/^Workers: +none stamped — no long-running worker has run here \(1 heartbeat row\(s\) not of the shape, ignored\)$/.test(noneRow ?? "") && /^Workers: +\? \(ob1_config not readable by this role\)$/.test(lostRow ?? ""),
+    `the Workers row reads none stamped, or ? when not read (${noneRow} / ${lostRow})`);
 
 
   const server = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };

@@ -1954,7 +1954,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(beats?.heartbeats?.length === 1 && hb.worker === "board-sync" && hb.job === null && hb.stale === true && hb.outcome === "stopped" && hb.passes === 7 && hb.everyS === 300 && hb.ageS >= 1199 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(hb.at),
     `keyed /health carries the heartbeat, stale past three intervals (${JSON.stringify(hb)})`);
   const workersRow = (await call("brain_info")).split("\n").find((l) => l.startsWith("Workers"));
-  assert(/^Workers: +board-sync stale — last stamped 20 min ago, every 300 s, stopped$/.test(workersRow ?? ""), `the tool's Workers row says the same (${workersRow})`);
+  assert(/^Workers: +board-sync stopped \(last stamped 20 min ago, every 300 s\)$/.test(workersRow ?? ""), `the tool's Workers row says the same (${workersRow})`);
   await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
 
   // A ledger short of the tree's last file is behind it, by name.

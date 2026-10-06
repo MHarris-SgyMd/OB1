@@ -1148,10 +1148,19 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         onError: (e) => err(`  heartbeat ${stampKey("extract", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
       })
     : null;
-  // A pass that throws ends the run; its heartbeat says so first.
+  // A pass that throws ends the run; its heartbeat says so first. One that
+  // failed rows and finished none — a provider down, each worker failing its
+  // thought and stopping — is "failed" too, not a loop that merely turned
+  // (review pass 1); a poll with nothing to do keeps the last pass's word, so
+  // the failure stands until a pass finishes a thought.
+  let passOutcome: "ok" | "failed" = "ok";
   const stampedPass = async () => {
+    const at = { done, failed };
     try {
-      return await (stamper ? stamper.during(pass()) : pass());
+      const counted = await (stamper ? stamper.during(pass()) : pass());
+      if (done > at.done) passOutcome = "ok";
+      else if (failed > at.failed) passOutcome = "failed";
+      return counted;
     } catch (e) {
       await stamper?.stamp("failed");
       throw e;
@@ -1199,14 +1208,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       if (line) err(`${line} The follower keeps polling; stopped by a signal, it exits 0${LIMIT ? ", and at its --limit, 3" : ""}.`);
     };
     say();
-    await stamper?.stamp("ok", lastBlock);
+    await stamper?.stamp(passOutcome, lastBlock);
     // "This many thoughts, then stop" holds while following too.
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
       after = await stampedPass();
       say();
-      await stamper?.stamp("ok", lastBlock);
+      await stamper?.stamp(passOutcome, lastBlock);
     }
   }
 

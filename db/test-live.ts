@@ -56,7 +56,7 @@ import { passStamper, stampKey } from "./pass-stamp.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, replayOne, targetRefusal, where } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, replayOne, settleRefreshed, targetRefusal, where } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -3690,7 +3690,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // passes it finished counted, judged against a minute (a 1-second poll).
   const extractBeats = await beatsOf("extract");
   const eb = extractBeats.length === 1 ? JSON.parse(extractBeats[0].value) : null;
-  assert(eb !== null && /^heartbeat:extract:\S+@p\d+$/.test(extractBeats[0].key) && eb.v === 1 && eb.outcome === "stopped" && eb.running === false && eb.passes >= 1 && eb.every_s === 60,
+  assert(eb !== null && /^heartbeat:extract:\S+@p\d+$/.test(extractBeats[0].key) && eb.v === 1 && eb.outcome === "stopped" && eb.running === false && eb.passes >= 2 && eb.every_s === 60,
     `the follower stamped one heartbeat, stopped, with its passes (${extractBeats.map((b) => `${b.key} ${b.value}`).join("; ")})`);
 
   // Stopping a pass (SMD-2304). Four notes the stub answers with nothing, one
@@ -3784,6 +3784,15 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          && !fatal.stderr.includes("stopping after the current thought") && !fatal.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(fatal.stdout)
          && (await noteClaims()).succeeded === 2 && !(await noteClaims()).claimed,
          `after the provider's refusal, the pass's first stop is the hard one: the other worker's thought in hand is released, not finished (exit ${fatal.code}, ${afterFatal instanceof Promise ? "a release" : String(afterFatal)}, claims ${JSON.stringify(await noteClaims())})`);
+  // A follower the provider refuses ends, and its heartbeat says failed, not
+  // stopped: a restart will not help until the request is fixed (SMD-2261).
+  const refusedNote = await seed("A note the provider will refuse while followed.");
+  refuseCalls = 1;
+  const refusedFollow = await extractInProcess({ workers: 1, follow: 30 });
+  refuseCalls = 0;
+  const refusedBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+  assert(refusedFollow.code === 2 && refusedBeat.outcome === "failed", `a follower ended by the provider's refusal stamps failed (exit ${refusedFollow.code}, ${JSON.stringify(refusedBeat)})`);
+  await sql`SELECT delete_thought(${refusedNote}::uuid, NULL::jsonb)`;
 
   // A caller's signal aborted during start-up stops the run before its next
   // write, and the failed row stays failed rather than returned to a pool
@@ -3931,6 +3940,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     return { code, ms: Date.now() - at };
   };
   const followSoft = await followRun((_, ac2) => ac2.abort());
+  // One pass, then asleep, then stopped: the row counts that pass and says stopped (SMD-2261).
+  const softBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+  assert(softBeat.passes === 1 && softBeat.outcome === "stopped" && softBeat.running === false, `a follower stopped asleep after its first pass stamped that pass, then stopped (${JSON.stringify(softBeat)})`);
   const followHard = await followRun((st) => { st?.(); void st?.(); });
   assert(followSoft.code === 0 && followSoft.ms < 1500 && followHard.code === 130 && followHard.ms < 1500,
          `a follower asleep wakes on a caller's abort (exit ${followSoft.code} after ${followSoft.ms} ms) and on the hard stop, which is 130 (exit ${followHard.code} after ${followHard.ms} ms)`);
@@ -4136,6 +4148,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     await Bun.sleep(1500);
   }
   await Bun.sleep(2500);
+  // Every pass failed its rows and finished none: the heartbeat says failed, and
+  // the empty polls after keep it (review pass 1: it read ok every poll).
+  const failingBeat = (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0];
+  assert(JSON.parse(failingBeat?.value ?? "{}").outcome === "failed" && JSON.parse(failingBeat?.value ?? "{}").malformed?.alarm === true,
+    `a follower whose passes fail every row stamps failed, through the empty polls after, its tripped block on the poll's stamp (${failingBeat?.value})`);
   alarmFollower.kill("SIGINT");
   const alarmFollowErr = await new Response(alarmFollower.stderr).text();
   const alarmFollowOut = (await new Response(alarmFollower.stdout).text()) + alarmFollowErr;
@@ -5187,7 +5204,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
            `…and the summary counts the row once, settled, with no wait clause (${staleLine(followOut)})`);
     const cb = await consolidateBeats();
     const cv = cb.length === 1 ? JSON.parse(cb[0].value) : null;
-    assert(cv !== null && cb[0].key === `heartbeat:${KEY}` && cv.outcome === "stopped" && cv.passes >= 1 && cv.every_s === 60 && !("malformed" in cv),
+    assert(cv !== null && cb[0].key === `heartbeat:${KEY}` && cv.outcome === "stopped" && cv.passes >= 2 && cv.every_s === 60 && !("malformed" in cv),
       `the consolidation follower stamped one heartbeat under its key, stopped, with no malformed block (${cb.map((b) => `${b.key} ${b.value}`).join("; ")})`);
     const olderBack = await consolidate("--status");
     assert(olderBack.code === 0 && !/stale/.test(olderBack.out.split("\n").find((l) => /queue:/.test(l)) ?? "x stale"), `no stale row is left (${olderBack.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 160)})`);
@@ -9324,8 +9341,8 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
   };
   try {
     // The key names its worker first, once.
-    assert(stampKey("board-sync") === "heartbeat:board-sync" && stampKey("extract", "extract:qwen2.5:7b@p2") === "heartbeat:extract:qwen2.5:7b@p2" && stampKey("extract", "my-job") === "heartbeat:extract:my-job",
-      "stampKey: board-sync alone, a job named for its worker kept, a custom job prefixed");
+    assert(stampKey("board-sync") === "heartbeat:board-sync" && stampKey("extract", "extract:qwen2.5:7b@p2") === "heartbeat:extract:qwen2.5:7b@p2" && stampKey("extract", "my-job") === "heartbeat:extract:my-job" && stampKey("extract", "extractor-v2") === "heartbeat:extract:extractor-v2",
+      "stampKey: board-sync alone, a job named for its worker kept, a custom job prefixed — one that only begins with the worker's name too");
 
     // A pass's stamp: outcome, passes, the malformed block, the interval's minute floor.
     const st = passStamper({ sql: hsql as never, worker: "extract", job: "extract:test@p2", intervalS: 15 });
@@ -9335,7 +9352,26 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
       `a stamp records the outcome, the pass, the block and a minute's floor (${JSON.stringify(one)})`);
     await st.stamp("stopped");
     const two = await row(st.key);
-    assert(two?.outcome === "stopped" && two.passes === 1 && two.malformed?.bad === 12, `a stop is no pass, and the last block stays (${JSON.stringify(two)})`);
+    assert(two?.outcome === "stopped" && two.passes === 1 && two.malformed?.bad === 12 && two.job === "extract:test@p2", `a stop is no pass, the last block stays, and the job is in the value (${JSON.stringify(two)})`);
+    // A restarted follower (a new stamper, no block of its own) keeps the row's
+    // block, so a restart on the same model does not clear the alarm; its own
+    // judged block replaces it (review pass 1).
+    const restarted = passStamper({ sql: hsql as never, worker: "extract", job: "extract:test@p2", intervalS: 15 });
+    await restarted.stamp("ok");
+    const kept = await row(st.key);
+    await restarted.stamp("ok", { answers: 48, bad: 2, alarm: false });
+    const replaced = await row(st.key);
+    assert(kept?.malformed?.alarm === true && kept.passes === 1 && replaced?.malformed?.alarm === false && replaced.malformed.bad === 2,
+      `a restart keeps the row's tripped block until it judges its own (${JSON.stringify(kept?.malformed)} → ${JSON.stringify(replaced?.malformed)})`);
+    // A pass is stamped running as it starts, before the timer's first tick.
+    const starting = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:start@p3", intervalS: 15 });
+    let atStart: { running?: boolean } | null = null;
+    await starting.during((async () => { await Bun.sleep(400); atStart = await row(starting.key); })());
+    assert((atStart as { running?: boolean } | null)?.running === true, `a pass is stamped running as it starts (${JSON.stringify(atStart)})`);
+    // An interval past what a timer holds is recorded at the cap, which the reader takes.
+    const huge = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:huge@p3", intervalS: 3_000_000 });
+    await huge.stamp("ok");
+    assert((await row(huge.key))?.every_s === 2_147_483, `a huge interval is recorded at the cap (${(await row(huge.key))?.every_s})`);
 
     // While a pass runs the row is re-stamped "running" on the timer; the
     // pass's own stamp after it is the last word.
@@ -9365,6 +9401,13 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     failNow = true;
     await denied.stamp("failed");
     assert(errors.length === 2 && errors.every((m) => /permission denied/.test(m)), `a failed write is said once, and again only after one succeeded (${errors.length})`);
+    // A reporter that throws leaves no later stamp broken (review pass 1).
+    failNow = true;
+    const throwing = passStamper({ sql: flaky, worker: "consolidate", job: "consolidate:throw@p3", intervalS: 60, onError: () => { throw new Error("stderr closed"); } });
+    const first = await throwing.stamp("ok").then(() => "resolved", () => "rejected");
+    failNow = false;
+    await throwing.stamp("ok");
+    assert(first === "resolved" && (await row(throwing.key))?.passes === 2, `a throwing reporter neither rejects the stamp nor stops the next (${first})`);
 
     // board-sync's loop: a pass that reports errors, one that throws, one that
     // finishes; then the signal. The loop's code is the last pass's.
@@ -9379,9 +9422,10 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     console.log = () => {};
     console.error = () => {};
     let loopCode: number;
+    let midLoop: { running?: boolean } | null = null;
     try {
       loopCode = await loopPasses({
-        once: async () => { const c = codes[i++]; if (c === "throw") throw new Error("Linear unreachable"); return c; },
+        once: async () => { if (i === 0) { await Bun.sleep(300); midLoop = await row("heartbeat:board-sync"); } const c = codes[i++]; if (c === "throw") throw new Error("Linear unreachable"); return c; },
         intervalS: 10, stopped: () => i >= codes.length, stamper: loopStamper, sleep: async () => {},
       });
     } finally {
@@ -9389,6 +9433,7 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
       console.error = error;
     }
     const board = await row("heartbeat:board-sync");
+    assert((midLoop as { running?: boolean } | null)?.running === true, `board-sync's pass is stamped running while it runs (${JSON.stringify(midLoop)})`);
     assert(seenOutcomes.join(",") === "failed,failed,ok,stopped" && loopCode! === 0 && board?.outcome === "stopped" && board.passes === 3 && board.every_s === 60,
       `the loop stamps each pass's outcome (errors and a throw both failed), then stopped (${seenOutcomes.join(",")}; ${JSON.stringify(board)})`);
     // A dry run or an audit passes no stamper: the loop writes no row.
@@ -9397,6 +9442,16 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     console.log = () => {};
     try { await loopPasses({ once: async () => (j++, 0), intervalS: 10, stopped: () => j >= 1, stamper: null, sleep: async () => {} }); } finally { console.log = log; }
     assert((await row("heartbeat:board-sync")) === null, "a loop with no stamper (a dry run, an audit) writes no heartbeat");
+
+    // A tier refresh copies ob1_config whole: its settle step deletes the
+    // source's heartbeats, so a canary never reports stable's workers (review pass 1).
+    const keep = await hsql`SELECT key, value FROM ob1_config WHERE key IN ('tier', 'last_refresh')`;
+    await passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 300 }).stamp("ok");
+    await settleRefreshed(hsql as never, "canary");
+    const [after2] = await hsql`SELECT (SELECT count(*)::int FROM ob1_config WHERE key LIKE 'heartbeat:%') AS beats, (SELECT value FROM ob1_config WHERE key = 'tier') AS tier, (SELECT value FROM ob1_config WHERE key = 'last_refresh') AS refreshed`;
+    await hsql`DELETE FROM ob1_config WHERE key IN ('tier', 'last_refresh')`;
+    for (const k of keep as { key: string; value: string }[]) await hsql`INSERT INTO ob1_config (key, value) VALUES (${k.key}, ${k.value})`;
+    assert(after2.beats === 0 && after2.tier === "canary" && /^\d{4}-/.test(after2.refreshed ?? ""), `a refresh's settle stamps the tier and its time and leaves no heartbeat (${JSON.stringify(after2)})`);
   } finally {
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await hsql.close();

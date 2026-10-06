@@ -1379,10 +1379,19 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         onError: (e) => err(`  heartbeat ${stampKey("consolidate", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
       })
     : null;
-  // A pass that throws ends the run; its heartbeat says so first.
+  // A pass that throws ends the run; its heartbeat says so first. One that
+  // failed rows and finished none — a provider down, each worker failing its
+  // thought and stopping — is "failed" too, not a loop that merely turned
+  // (review pass 1); a poll with nothing to do keeps the last pass's word, so
+  // the failure stands until a pass finishes a thought.
+  let passOutcome: "ok" | "failed" = "ok";
   const stampedPass = async () => {
+    const at = { done, failed };
     try {
-      return await (stamper ? stamper.during(pass()) : pass());
+      const counted = await (stamper ? stamper.during(pass()) : pass());
+      if (done > at.done) passOutcome = "ok";
+      else if (failed > at.failed) passOutcome = "failed";
+      return counted;
     } catch (e) {
       await stamper?.stamp("failed");
       throw e;
@@ -1427,12 +1436,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   let after = await stampedPass();
   if (FOLLOW) {
-    await stamper?.stamp("ok");
+    await stamper?.stamp(passOutcome);
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
       after = await stampedPass();
-      await stamper?.stamp("ok");
+      await stamper?.stamp(passOutcome);
     }
     // The follower ends — a signal, its --limit, or the provider refusing the
     // request itself — and the row says so: its age then warns, as it should.

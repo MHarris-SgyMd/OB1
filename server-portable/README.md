@@ -390,7 +390,11 @@ past the database's clock, is passed over), and `?` when the read did not answer
 (named in `Not read`). It is a
 high-water mark — the newest board move the brain reflects, not proof it reflects
 every one before it — and a quiet board leaves it old on a current brain.
-`tier.ts --compare` diffs it between two brains.
+`tier.ts --compare` diffs it between two brains. `Workers` is each long-running
+worker's heartbeat (SMD-2261): alive, running a pass, stopped, or stale past
+three of its intervals, with the last pass's outcome and a tripped malformed
+alarm; preflight's `workers` row warns on the same and names the restart
+(`db/README.md`, "Long-running workers report their liveness").
 
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
 token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
@@ -571,7 +575,10 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   server's and the database's own facts, and one value read from thoughts'
   metadata — the board-sync watermark, which the read itself holds to one shape
   (a UTC instant to the millisecond, never past an hour from now by the
-  database's clock) or leaves null.
+  database's clock) or leaves null — and the workers' heartbeats, rows any role
+  with the worker group can write, which `parseHeartbeats` carries only in full
+  (a known worker's key and job of a bounded alphabet, counts, the enums as
+  written, the database's own instant) and otherwise counts as ignored.
 - A refusal answers `{ code, retryable, text }`. The reads': `NOT_FOUND`,
   `REFUSED_FILTER`, `REFUSED_EGRESS` (with its `rule`), `REFUSED_SINCE`,
   `REFUSED_CURSOR`. Capture's: the pointer and metadata shapes
@@ -686,7 +693,7 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 633 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape and the heartbeats' parsing
+bun test-server.ts        # 635 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape and the heartbeats' parsing
 bun test-auth.ts          # 141 — scoped, hashed, named keys
 bun test-rest.ts          # 268 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential

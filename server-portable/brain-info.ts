@@ -129,8 +129,10 @@ export interface DatabaseFacts {
 
 /** One long-running worker's heartbeat as the record carries it (SMD-2261). */
 export interface WorkerHeartbeat {
+  /** The ob1_config row's key — what retiring the worker deletes. */
+  key: string;
   worker: "board-sync" | "extract" | "consolidate";
-  /** The claim job it works (extract:qwen2.5:7b@p2); null for board-sync. */
+  /** The claim job it works (extract:qwen2.5:7b@p2, or a custom --job as given); null for board-sync. */
   job: string | null;
   /** When it last stamped, a UTC instant, and how long ago by the database's clock. */
   at: string;
@@ -153,6 +155,9 @@ export interface WorkerHeartbeat {
 export const STALE_AFTER_INTERVALS = 3;
 
 const HEARTBEAT_KEY = /^heartbeat:(board-sync|extract|consolidate)(?::([A-Za-z0-9._:@/+-]{1,120}))?$/;
+const JOB_TOKEN = /^[A-Za-z0-9._:@/+-]{1,120}$/;
+/** A heartbeat stamped this far past the reader's now() is not one: a stamp's now() can trail the read's by its own transaction, never by a minute. */
+const FUTURE_SLACK_S = 60;
 const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const count = (n: unknown, max = Number.MAX_SAFE_INTEGER): n is number => Number.isSafeInteger(n) && (n as number) >= 0 && (n as number) <= max;
 
@@ -165,9 +170,10 @@ const count = (n: unknown, max = Number.MAX_SAFE_INTEGER): n is number => Number
  * counts, the enums as written, and the database's own instant. Anything else
  * is counted in `ignored`, and its text goes nowhere.
  */
-export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknown; age_s: unknown }[]): { heartbeats: WorkerHeartbeat[]; ignored: number } {
+export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknown; age_s: unknown; total?: unknown }[]): { heartbeats: WorkerHeartbeat[]; ignored: number } {
   const heartbeats: WorkerHeartbeat[] = [];
-  let ignored = 0;
+  // Rows past the read's bound are counted, not carried (review pass 1).
+  let ignored = Math.max(0, Number(rows[0]?.total ?? rows.length) - rows.length) || 0;
   for (const r of rows) {
     const k = typeof r.key === "string" ? HEARTBEAT_KEY.exec(r.key) : null;
     const worker = k?.[1] as WorkerHeartbeat["worker"] | undefined;
@@ -180,21 +186,28 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       : m !== null && typeof m === "object" && count(m.answers) && count(m.bad, m.answers as number) && typeof m.alarm === "boolean"
         ? { answers: m.answers as number, bad: m.bad as number, alarm: m.alarm }
         : undefined;
-    const ok = worker !== undefined && (worker === "board-sync") === (suffix === undefined)
+    // The job the worker works is the value's; its key must be the one
+    // db/pass-stamp.ts's stampKey derives from it (a custom --job prefixed).
+    const job = v?.job === undefined ? (suffix === undefined ? null : `${worker}:${suffix}`) : v.job;
+    const jobOk = worker === "board-sync"
+      ? suffix === undefined && v?.job === undefined
+      : suffix !== undefined && typeof job === "string" && JOB_TOKEN.test(job) && r.key === `heartbeat:${job.startsWith(`${worker}:`) ? job : `${worker}:${job}`}`;
+    const ok = worker !== undefined && jobOk
       && v !== null && typeof v === "object" && v.v === 1
       && count(v.every_s, 2_147_483) && (v.every_s as number) >= 1
       && typeof v.running === "boolean"
       && (v.outcome === null || v.outcome === "ok" || v.outcome === "failed" || v.outcome === "stopped")
       && count(v.passes) && malformed !== undefined
-      && typeof r.at === "string" && UTC_INSTANT.test(r.at) && Number.isFinite(ageS);
+      && typeof r.at === "string" && UTC_INSTANT.test(r.at) && Number.isFinite(ageS) && ageS > -FUTURE_SLACK_S;
     if (!ok) {
       ignored++;
       continue;
     }
     const everyS = v!.every_s as number;
     heartbeats.push({
+      key: r.key as string,
       worker: worker!,
-      job: suffix === undefined ? null : `${worker}:${suffix}`,
+      job: job as string | null,
       at: r.at as string,
       ageS: Math.max(0, Math.round(ageS)),
       everyS,
@@ -211,7 +224,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
 /** The heartbeat rows, at most fifty — one per worker and job, so a brain holds a handful. */
 const HEARTBEAT_SQL = (sql: SqlTag) => sql`
   SELECT key, value, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
-         extract(epoch FROM now() - updated_at)::float8 AS age_s
+         extract(epoch FROM now() - updated_at)::float8 AS age_s, count(*) OVER () AS total
     FROM ob1_config WHERE key LIKE 'heartbeat:%' ORDER BY key LIMIT 50`;
 
 export interface ReadOptions {
@@ -614,10 +627,12 @@ export function ago(s: number): string {
 
 /** One heartbeat's state in a few words: what a reader acts on first. */
 export function heartbeatState(h: WorkerHeartbeat): string {
-  const when = `last stamped ${ago(h.ageS)} ago, every ${h.everyS} s`;
   const alarm = h.malformed?.alarm ? `; ${h.malformed.bad} of its last ${h.malformed.answers} answers malformed` : "";
-  if (h.stale) return `stale — ${when}${h.outcome === "stopped" ? ", stopped" : h.outcome === "failed" ? ", its last pass failed" : ""}${alarm}`;
-  return `${h.running ? "running a pass" : h.outcome === "failed" ? "alive, its last pass failed" : "alive"} (${when})${alarm}`;
+  const when = `last stamped ${ago(h.ageS)} ago, every ${h.everyS} s${alarm}`;
+  // A worker that said it ended is stopped, fresh or not (review pass 1: it read "alive").
+  if (h.outcome === "stopped") return `stopped (${when})`;
+  if (h.stale) return `stale (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
+  return `${h.running ? "running a pass" : h.outcome === "failed" ? "alive, its last pass failed" : "alive"} (${when})`;
 }
 
 /** The Workers row: each heartbeat's state, none, or why it was not read. */

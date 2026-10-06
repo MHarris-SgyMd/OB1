@@ -15,7 +15,7 @@
  * `heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3` —
  * and a JSON value: the version, `every_s` (the longest the worker lets pass
  * between two stamps), `running` (a pass is under way), the last pass's
- * `outcome` (ok, failed, or stopped by a signal), `passes` this process has
+ * `outcome` (ok, failed, or stopped — PassOutcome below), `passes` this process has
  * finished, and for extraction the last judged block's malformed answers
  * (SMD-2266's alarm, which a follower otherwise says only on stderr). The time
  * is the row's updated_at — now() on the database, so a worker's clock is not
@@ -45,8 +45,15 @@ export type StampingWorker = (typeof STAMPING_WORKERS)[number];
 
 /** The shortest gap a worker promises between stamps: a 15-second follower stamps every pass, and is judged against a minute. */
 export const MIN_STAMP_EVERY_S = 60;
+/** The longest a row records: what a timer holds in seconds, and what the reader takes (brain-info.ts). */
+export const MAX_STAMP_EVERY_S = Math.floor(MAX_TIMER_MS / 1000);
 
-/** How a pass ended: it finished (`ok`), it threw or reported errors (`failed`), or a signal stopped the worker (`stopped`). */
+/**
+ * How a pass ended: it finished (`ok`); it threw, reported errors, or failed
+ * rows with none done — a provider down (`failed`); or the worker ended — a
+ * signal, a follower's --limit (`stopped`). A provider refusing the request
+ * itself ends a follower `failed`.
+ */
 export type PassOutcome = "ok" | "failed" | "stopped";
 
 /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm. */
@@ -64,7 +71,10 @@ export interface PassStamper {
 /**
  * The key for a worker and its job. A job already named for its worker
  * (extract:…, consolidate:…) is not prefixed twice; one that is not (a custom
- * --job) is, so every key names its worker first.
+ * --job) is, so every key names its worker first. The job itself goes in the
+ * value, so the restart preflight names works the same pool (review pass 1).
+ * One row per job, not per process: two followers of one job share it, the
+ * last to stamp written.
  */
 export function stampKey(worker: StampingWorker, job?: string): string {
   if (job === undefined) return `heartbeat:${worker}`;
@@ -87,7 +97,7 @@ export function passStamper(opts: {
   minEveryS?: number;
 }): PassStamper {
   const key = stampKey(opts.worker, opts.job);
-  const everyS = Math.max(opts.minEveryS ?? MIN_STAMP_EVERY_S, Math.ceil(opts.intervalS));
+  const everyS = Math.min(MAX_STAMP_EVERY_S, Math.max(opts.minEveryS ?? MIN_STAMP_EVERY_S, Math.ceil(opts.intervalS)));
   let passes = 0;
   let outcome: PassOutcome | null = null;
   let malformed: MalformedBlock | null = null;
@@ -95,14 +105,26 @@ export function passStamper(opts: {
   // Writes go one after another, so a timer's "running" stamp in flight when
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
+  // A stamp with no judged block of its own keeps the row's: a follower
+  // restarted on the same broken model would otherwise clear its alarm with
+  // its first stamp (review pass 1). Its own block, once judged, replaces it.
+  // The inner CASE reads the old value as JSON only once it is known to be.
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, every_s: everyS, running, outcome, passes, ...(malformed ? { malformed } : {}) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, passes, ...(malformed ? { malformed } : {}) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
-                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+                     ON CONFLICT (key) DO UPDATE SET
+                       value = CASE WHEN NOT (EXCLUDED.value::jsonb ? 'malformed') AND pg_input_is_valid(ob1_config.value, 'jsonb')
+                                    THEN CASE WHEN jsonb_typeof(ob1_config.value::jsonb -> 'malformed') = 'object'
+                                              THEN (EXCLUDED.value::jsonb || jsonb_build_object('malformed', ob1_config.value::jsonb -> 'malformed'))::text
+                                              ELSE EXCLUDED.value END
+                                    ELSE EXCLUDED.value END,
+                       updated_at = now()`;
       failing = false;
     } catch (e) {
-      if (!failing) opts.onError?.(e as Error);
+      // A reporter that throws (a Writer on a closed stream) must not leave
+      // the queue rejected for every later stamp (review pass 1).
+      if (!failing) try { opts.onError?.(e as Error); } catch { /* reporting only */ }
       failing = true;
     }
   };
@@ -116,6 +138,9 @@ export function passStamper(opts: {
       await write(false);
     },
     async during(pass) {
+      // Stamped as it starts, so a restarted worker's first long pass is not
+      // read as the stopped one's stale row until the timer's first tick.
+      void write(true);
       // Unref'd, as lease.ts's beat is: the timer never holds the process open.
       const timer = setInterval(() => void write(true), Math.min(everyS * 1000, MAX_TIMER_MS));
       timer.unref?.();
