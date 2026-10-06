@@ -1539,7 +1539,7 @@ the pass over as before 021, since that key cannot judge by label.
 **What preflight sees.** A pass is *unfinished* while any row under its key is
 pending, leased or failed — `passUnfinished` in `config.mjs`, one rule for this
 tool and for `server-portable/preflight.ts`, which reads the claim table on
-every start and warns, in the counts `--status` prints, for every unfinished
+every start and reports, in the counts `--status` prints, every unfinished
 key that starts with `reembed:` (the configured model's key, or a backfill's;
 extraction keys are left out because 016's trigger keeps that pool fed). A key
 a worker holds a live lease under is *running*, an ok row with no remedy that
@@ -2376,8 +2376,11 @@ or whose follower stamped a fresh heartbeat and has not ended (between polls it
 holds none), reads *running*, ok and with no remedy — a warning only for failed
 rows beside it, which a follower never retries, naming the `retry_failed` tool;
 one whose only leases expired names a worker that died holding them. A key
-whose follower stopped points to the `workers` row's restart, which finishes
-the pass, rather than a one-shot run beside it (SMD-2423, SMD-2261).
+whose follower stopped or went stale points to the `workers` row's restart,
+which finishes the pass, rather than a one-shot run beside it — even while the
+claims a killed follower held keep live leases until they lapse (SMD-2423,
+SMD-2261). A re-embed run killed outright reads running until its lease ends:
+it has no heartbeat to say otherwise.
 
 **Verified.** `test-schema.ts` [28] holds the candidate rule's every exclusion,
 the one write, the review path's states and refusals with the audit row, the

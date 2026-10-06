@@ -71,8 +71,6 @@ async function run(env: Record<string, string | undefined>, ...args: string[]) {
 
 /** The report row named `name` — glyph, name, detail — or "" when none printed. Fix lines start with →, so they never match. */
 const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
-/** `row` under a name no block shadows (some blocks bind a `row` of their own). */
-const rowNamed = (out: string, name: string) => row(out, name);
 /** The → fix line under the row named `name`, or "" when the row has none. */
 const fix = (out: string, name: string) => { const ls = out.split("\n"); const i = ls.findIndex((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)); return i >= 0 && /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1] : ""; };
 
@@ -1154,10 +1152,10 @@ else {
    * would mean running two servers with different settings; what preflight
    * reads is the rows, and this is the rows.
    */
-  const [row] = await ctx.unsafe(
+  const [ctxRow] = await ctx.unsafe(
     "SELECT upsert_thought('a chunked thought', '{\"metadata\":{}}'::jsonb, NULL::vector) AS r"
   );
-  const tid = (row.r as { id: string }).id;
+  const tid = (ctxRow.r as { id: string }).id;
   const vec = `('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector`;
   await ctx.unsafe(
     `INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding, context)
@@ -1373,15 +1371,15 @@ else {
   // …held by a live lease, the pass is running: an ok row with no remedy that
   // would start a second worker (SMD-2423).
   assert(/✓\s+re-embed pass\s+\S+: 6 thoughts — .* — a pass under this key is running: 1 in flight \(leases live until \d\d:\d\d UTC\), 0 pending; until it finishes, the rows it has not reached carry what they had before it$/m.test(leased.out) && !/Finish it/.test(fix(leased.out, "re-embed pass")),
-         `a live lease reads running, ok, with no remedy (${rowNamed(leased.out, "re-embed pass")})`);
+         `a live lease reads running, ok, with no remedy (${row(leased.out, "re-embed pass")})`);
   assert((leased.out.match(/^\s*[✓✗!·]\s+re-embed pass\s/gm) ?? []).length === 1 && !/none unfinished|stopped before it finished|has not finished/.test(leased.out.split("\n").filter((l) => /re-embed pass/.test(l)).join("\n")),
          "…one row for the key and no other: neither a stopped row beside the running one nor none unfinished (review pass 1)");
   // The configured key's lease run out: its own words, the dead worker named and the reclaim (review pass 1).
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${KEY} AND thought_id = ${leasedId}::uuid`;
   const leaseLapsed = await run(SQL_ENV);
-  assert(/!\s+re-embed pass\s+the pass to \S+ @ \d+ has not finished: .* — until it does, .* and searches rank across the two; a worker died holding 1 claim\(s\), their leases expired$/m.test(leaseLapsed.out)
-      && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool returns them now\. Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL/m.test(leaseLapsed.out),
-         `the configured key's expired lease reads as a worker that died, under the key's own words (${rowNamed(leaseLapsed.out, "re-embed pass")})`);
+  assert(/!\s+re-embed pass\s+the pass to \S+ @ \d+ has not finished: .* — until it does, .* and searches rank across the two; a worker died holding 1 of the claim\(s\) in flight, their leases expired$/m.test(leaseLapsed.out)
+      && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool \(work_type \S+\) returns them now\. Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL/m.test(leaseLapsed.out),
+         `the configured key's expired lease reads as a worker that died, under the key's own words (${row(leaseLapsed.out, "re-embed pass")})`);
   await claims`SELECT release_thought(${leasedId}::uuid, ${KEY}, 'preflight-test', 'succeeded')`;
 
   const CTX = `${KEY}:ctx`;
@@ -1397,9 +1395,9 @@ else {
   await claims`SELECT claim_thoughts(${CTX}, 'preflight-dead', 1)`;
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CTX} AND status = 'claimed'`;
   const died = await run(SQL_ENV);
-  assert(/!\s+re-embed pass\s+\S+:ctx: 6 thoughts — 0 succeeded, 0 failed, 1 in flight, 0 pending, 5 not yet in the pool — a worker died holding 1 claim\(s\), their leases expired$/m.test(died.out)
-      && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool returns them now\. Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --job \S+:ctx/m.test(fix(died.out, "re-embed pass")),
-         `an expired lease reads as a worker that died holding it, with the reclaim and the remedy (${rowNamed(died.out, "re-embed pass")})`);
+  assert(/!\s+re-embed pass\s+\S+:ctx: 6 thoughts — 0 succeeded, 0 failed, 1 in flight, 0 pending, 5 not yet in the pool — a worker died holding 1 of the claim\(s\) in flight, their leases expired$/m.test(died.out)
+      && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool \(work_type \S+\) returns them now\. Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --job \S+:ctx/m.test(fix(died.out, "re-embed pass")),
+         `an expired lease reads as a worker that died holding it, with the reclaim and the remedy (${row(died.out, "re-embed pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CTX}`;
   // One key, four rows: a live lease, an expired one, two pending — running,
   // the dead claim and the pending rows said; then a failed row beside them:
@@ -1417,7 +1415,7 @@ else {
   const mixedFailed = await run(SQL_ENV);
   assert(/!\s+re-embed pass\s+\S+:mix: .* 2 failed, .* — a pass under this key is running: .*; 2 failed row\(s\) the running pass will not retry$/m.test(mixedFailed.out)
       && /^\s*→ Once their cause is fixed, the retry_failed tool \(work_type \S+:mix\) puts the failed rows back to pending, and the running worker takes them: no second worker\.$/m.test(mixedFailed.out),
-         `a running pass with a failed row warns, naming it and how it goes back (${mixedFailed.out.split("\n").find((l) => l.includes(":mix:"))?.trim()} | ${mixedFailed.out.split("\n").find((l) => l.includes(":mix --retry-failed"))?.trim()})`);
+         `a running pass with a failed row warns, naming it and how it goes back (${mixedFailed.out.split("\n").find((l) => l.includes(":mix:"))?.trim()} | ${fix(mixedFailed.out, "re-embed pass")})`);
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${MIX}`;
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: refused this text' WHERE work_type = ${CTX}`;
   const otherFailed = await run(SQL_ENV);
@@ -1446,7 +1444,7 @@ else {
   await claims`SELECT claim_thoughts(${OTHER}, 'preflight-live', 1)`;
   const otherLive = await run(SQL_ENV);
   assert(new RegExp(`✓\\s+re-embed pass\\s+${rx(OTHER)}: .* — a pass under this key is running: 1 in flight`).test(otherLive.out) && !/abandoned or reverted/.test(otherLive.out),
-         `an abandoned switch's key a worker holds a live lease under reads running (${rowNamed(otherLive.out, "re-embed pass")})`);
+         `an abandoned switch's key a worker holds a live lease under reads running (${row(otherLive.out, "re-embed pass")})`);
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${OTHER}`;
 
   /**
@@ -1567,13 +1565,13 @@ else {
   await claims`SELECT claim_thoughts(${CONS}, 'preflight-live', 1)`;
   const consLive = await run(SQL_ENV);
   assert(/✓\s+consolidate pass\s+\S+: 3 thoughts with entities — 1 succeeded, 0 failed, 1 in flight, 0 pending, 1 not yet in the pool — a pass under this key is running: 1 in flight \(leases live until \d\d:\d\d UTC\), 0 pending; 1 proposal\(s\) pending review/.test(consLive.out) && !/Finish it/.test(fix(consLive.out, "consolidate pass")),
-         `a live lease on a consolidation pass reads running, ok, with the queue and no remedy (${rowNamed(consLive.out, "consolidate pass")})`);
-  assert((consLive.out.match(/^\s*[✓✗!·]\s+consolidate pass\s/gm) ?? []).length === 1 && !/none unfinished/.test(rowNamed(consLive.out, "consolidate pass")),
+         `a live lease on a consolidation pass reads running, ok, with the queue and no remedy (${row(consLive.out, "consolidate pass")})`);
+  assert((consLive.out.match(/^\s*[✓✗!·]\s+consolidate pass\s/gm) ?? []).length === 1 && !/none unfinished/.test(row(consLive.out, "consolidate pass")),
          "…one row for the key: no stopped row beside it, no none unfinished (review pass 1)");
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
   const consDied = await run(SQL_ENV);
-  assert(/!\s+consolidate pass\s+\S+: .* — a worker died holding 1 claim\(s\), their leases expired; 1 proposal/.test(consDied.out) && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool returns them now\. Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts/m.test(fix(consDied.out, "consolidate pass")),
-         `an expired lease reads as a worker that died holding it (${rowNamed(consDied.out, "consolidate pass")})`);
+  assert(/!\s+consolidate pass\s+\S+: .* — a worker died holding 1 of the claim\(s\) in flight, their leases expired; 1 proposal/.test(consDied.out) && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool \(work_type \S+\) returns them now\. Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts/m.test(fix(consDied.out, "consolidate pass")),
+         `an expired lease reads as a worker that died holding it (${row(consDied.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   // A follower between its polls holds no lease: its fresh heartbeat for the
   // key reads running; a stale or ended one does not (SMD-2261 item 7).
@@ -1583,30 +1581,46 @@ else {
   // A live lease and a fresh heartbeat together: the lease's words, which say more.
   await claims`SELECT claim_thoughts(${CONS}, 'preflight-live', 1)`;
   await followerBeat(20);
-  assert(/a pass under this key is running: 1 in flight/.test(rowNamed((await run(SQL_ENV)).out, "consolidate pass")), "a live lease beside a fresh heartbeat reads the lease's words");
+  assert(/a pass under this key is running: 1 in flight/.test(row((await run(SQL_ENV)).out, "consolidate pass")), "a live lease beside a fresh heartbeat reads the lease's words");
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   // A fresh heartbeat for another key is not this key's follower.
   await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${CONS}`}`;
   await claims`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:someone-else@p3', ${JSON.stringify({ v: 1, job: "consolidate:someone-else@p3", every_s: 60, running: false, outcome: "ok", passes: 1 })})`;
-  assert(/stopped before it finished/.test(rowNamed((await run(SQL_ENV)).out, "consolidate pass")), "a fresh heartbeat under another key leaves this one stopped");
+  assert(/stopped before it finished/.test(row((await run(SQL_ENV)).out, "consolidate pass")), "a fresh heartbeat under another key leaves this one stopped");
   await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:someone-else@p3'`;
   await followerBeat(20);
   // …and beside a dead worker's claim, the follower's words name it (review pass 2).
   await claims`SELECT claim_thoughts(${CONS}, 'preflight-dead', 1)`;
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
-  assert(/a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls, 1 left by a worker that died, which its next poll reclaims/.test(rowNamed((await run(SQL_ENV)).out, "consolidate pass")),
+  assert(/a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls, 1 left by a worker that died, which its next poll reclaims/.test(row((await run(SQL_ENV)).out, "consolidate pass")),
          "a follower beside an expired claim names the dead claim");
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
+  // Stamped again right before the read: its age is asserted to the second (review pass 3).
+  await followerBeat(20);
   const consFollowed = await run(SQL_ENV);
   assert(/✓\s+consolidate pass\s+\S+: .* — a follower is running this key \(stamped 20 s ago\): 1 pending between its polls; 1 proposal/.test(consFollowed.out),
-         `a fresh follower heartbeat for the key reads running between polls (${rowNamed(consFollowed.out, "consolidate pass")})`);
+         `a fresh follower heartbeat for the key reads running between polls (${row(consFollowed.out, "consolidate pass")})`);
+  // A follower mid-pass says so, not "between its polls" (review pass 3).
+  await followerBeat(20, { running: true });
+  assert(/a follower is running this key \(stamped \d+ s ago\): 1 pending; 1 proposal/.test(row((await run(SQL_ENV)).out, "consolidate pass")), "a follower stamped mid-pass is not said to be between its polls");
+  // A follower killed outright: its heartbeat stale, its claim's lease still
+  // live until it lapses. The heartbeat is the fresher word — the row says the
+  // follower is gone, not running (review pass 3, a walkthrough).
+  await claims`SELECT claim_thoughts(${CONS}, 'preflight-killed', 1)`;
+  await followerBeat(600, { running: true });
+  const consKilled = await run(SQL_ENV);
+  assert(/!\s+consolidate pass\s+\S+: .* — its follower is not running \(the workers row says so\), and 1 claim\(s\) it held keep live leases until \d\d:\d\d UTC; 1 proposal/.test(consKilled.out)
+      && /Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool \(work_type consolidate:other-judge@p1, include_live with the worker_id worker_status names\) returns them now\./.test(fix(consKilled.out, "consolidate pass")),
+         `a follower whose heartbeat went stale while its claim's lease is live reads not running, pointing to the restart (${row(consKilled.out, "consolidate pass")})`);
+  await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
+  await followerBeat(20);
   // A follower beside a failed row: running, but the row warns, naming it and
   // how it goes back — a follower never retries it (review pass 1).
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND status = 'pending'`;
   const consFollowFailed = await run(SQL_ENV);
   assert(/!\s+consolidate pass\s+\S+: .* 1 failed, .* — a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls; 1 failed row\(s\) the running pass will not retry; 1 proposal/.test(consFollowFailed.out)
       && /Once their cause is fixed, the retry_failed tool \(work_type consolidate:other-judge@p1\) puts the failed rows back to pending, and the running worker takes them: no second worker\./.test(fix(consFollowFailed.out, "consolidate pass")),
-         `a follower beside a failed row warns, naming it and the retry (${rowNamed(consFollowFailed.out, "consolidate pass")})`);
+         `a follower beside a failed row warns, naming it and the retry (${row(consFollowFailed.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL, last_error = NULL WHERE work_type = ${CONS} AND last_error = 'stub: not JSON'`;
   await followerBeat(600);
   const consBeatStale = await run(SQL_ENV);
@@ -3838,7 +3852,6 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
       : Response.json({ error: "the model failed" }, { status: 500 })),
   });
   const TIER = `http://127.0.0.1:${stub.port}`;
-  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
   const JEV = { OB1_JEV_BASE_URL: undefined, OB1_JEV_MODEL: undefined, OB1_JEV_LOCAL: undefined, OB1_EGRESS_POLICY: undefined, OB1_EGRESS_ALLOW: undefined, OB1_EGRESS_DENY: undefined };
 
   const off = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV });
