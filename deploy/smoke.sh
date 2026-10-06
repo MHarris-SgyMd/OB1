@@ -125,7 +125,8 @@ r=$(refusal -H 'x-brain-key: ob1-smoke-not-a-configured-key')
 #    only: when it says it advertises at exactly this origin and a 404 reached
 #    smoke instead, the tunnel or proxy in front does not keep the origin's
 #    Host, or does not route the document. A URL under another path is asked at
-#    its own path form and the root form (a tier at a prefix is SMD-2294's).
+#    its own path form and the root form (a tier at a prefix is reached with
+#    keys; OAuth per tier is SMD-2286's).
 #    The origin is compared as typed: the server's is canonical, so a URL
 #    spelled otherwise (`:443`, upper case) is told the one to use.
 origin=$(printf '%s' "$BASE" | sed -E 's#^([A-Za-z]+://[^/]+).*#\1#')

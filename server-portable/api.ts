@@ -6,7 +6,7 @@
 // reached as api.ob1.internal on the mesh, and at /api only where the operator
 // names deploy/compose.api-public.yaml.
 
-import { agents, closeStore, db, env, initEnv, serveHere } from "./root.ts";
+import { agents, closeStore, db, env, initEnv, routable, serveHere } from "./root.ts";
 import { createCore } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
@@ -61,6 +61,7 @@ export default {
   port: Number(process.env.PORT || 8000),
   fetch: (req: Request, server?: unknown) => {
     if (SERVES_ON_BUN && !bunServer && isStoppable(server)) bunServer = server;
-    return calls.track(() => app.fetch(req));
+    // A request whose URL will not parse, rebuilt so it is routed and refused, not a 500 (SMD-2535).
+    return calls.track(() => app.fetch(routable(req)));
   },
 };

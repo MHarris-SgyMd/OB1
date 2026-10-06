@@ -12,9 +12,9 @@
  *                           nothing listens on and refused at once; [11] says why)
  */
 
-import { authenticate, hashKey, parseKeyRecords, canCapture, canRead, canWrite, secretMatches, CLIENT_SCOPES, SCOPES } from "./auth.ts";
+import { authenticate, hashKey, parseKeyRecords, canCapture, canRead, canWrite, presentedKeys, queryOf, secretMatches, CLIENT_SCOPES, SCOPES } from "./auth.ts";
 import { actorPayload } from "./store.ts";
-import { createAssert } from "../db/test-support.ts";
+import { createAssert, RuntimeUrl } from "../db/test-support.ts";
 import { visibleToolNames, READ_TOOL_NAMES, WRITE_TOOL_NAMES, type ToolName } from "./tools.ts";
 
 const { assert, report } = createAssert();
@@ -395,6 +395,30 @@ console.log("\n[12] secretMatches — a secret the caller echoes, compared diges
   assert(!secretMatches("undefined", undefined) && !secretMatches("null", null), "the literal spellings of nothing do not match nothing");
   assert(!secretMatches(hashKey("s3cret"), "s3cret"), "the digest is not the secret");
   assert(!secretMatches(12345, "12345") && !secretMatches({ secret: "s3cret" }, "s3cret"), "a value that is not a string is refused, not hashed");
+}
+
+console.log("\n[13] The ?key= form is read from the query alone, so a URL that will not parse is no 500 (SMD-2535)");
+{
+  // A URL that parses: the same parameters as its searchParams, in order.
+  const parsable = [
+    "http://h/mcp", "http://h/mcp?", "http://h/mcp?key=k", "http://h/?a=1&key=k&key=j", "http://h/mcp?key=a%20b+c",
+    "http://h/mcp?key=%zz", "http://h/mcp?key=é&x=%E2%9C%93", "http://h/mcp?key=k#frag", "http://h/mcp#?key=k",
+    "http://h/mcp?key=k?x=1", "http://h/mcp??key=k", "http://h/mcp???key=k", "http://h/a/b?key=&k2", "https://u:p@h:8443/mcp?key=k;x", "http://h/mcp?key='\"<>`",
+  ];
+  for (const u of parsable) {
+    assert(queryOf(u).toString() === new URL(u).searchParams.toString(), `${u}: queryOf reads what searchParams does (${queryOf(u)} vs ${new URL(u).searchParams})`);
+  }
+  // A URL that will not: the query all the same, and no throw.
+  for (const [u, key] of [["http://x:99999/mcp?key=k", "k"], ["http://[::1/mcp?key=k", "k"], ["http://brain.example.test:abc/mcp?key=k", "k"],
+    ["/mcp?key=k", "k"], ["/mcp", null], ["http://::1:8000/mcp?key=k#x", "k"], ["/mcp#?key=k", null]] as const) {
+    assert(queryOf(u).get("key") === key, `${u}: ?key= is ${JSON.stringify(key)}`);
+  }
+  // A throw is a failed row, not a crashed suite.
+  const keysOf = (req: Request) => { try { return presentedKeys(req).join(); } catch (e) { return `threw ${(e as Error).message}`; } };
+  const keys = keysOf(new RuntimeUrl("http://x:99999/mcp?key=from-url", { headers: { "x-brain-key": "from-header", authorization: "Bearer from-bearer" } }));
+  assert(keys === "from-header,from-url,from-bearer", `presentedKeys under a Host the URL parser refuses: every form, in order (${keys})`);
+  const none = keysOf(new RuntimeUrl("/mcp"));
+  assert(none === "", `presentedKeys of a bare request target with no key: none, not a throw (${none})`);
 }
 
 server.stop();
