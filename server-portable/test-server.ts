@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createAssert, RuntimeUrl } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, pendingSettled, requestHead, RuntimeUrl } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
 import { FORK_VERSION } from "../db/version.mjs";
@@ -2146,22 +2146,7 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   const { routable, REBUILD_ORIGIN } = await import("./auth.ts");
   const rest = Bun.serve({ ...(await import("./api.ts")).default, port: 0 });
   const { connect } = await import("node:net");
-  const raw = (port: number, text: string) => new Promise<string>((resolve, reject) => {
-    const sock = connect(port, "127.0.0.1", () => sock.write(text));
-    let got = "";
-    sock.on("data", (d) => (got += d));
-    sock.on("close", () => resolve(got));
-    sock.on("error", reject);
-    setTimeout(() => sock.destroy(), 3_000);
-  });
-  /** The request line and Host: HTTP/1.0 with none for `null`, which HTTP/1.1 would make Bun's own 400. */
-  const headOf = (method: string, target: string, host: string | null) =>
-    [`${method} ${target} HTTP/${host === null ? "1.0" : "1.1"}`, ...(host === null ? [] : [`host: ${host}`])];
-  const ask = async (port: number, method: string, target: string, host: string | null, headers: string[] = [], body = "") => {
-    const head = [...headOf(method, target, host), ...headers, "connection: close", `content-length: ${Buffer.byteLength(body)}`];
-    const got = await raw(port, `${head.join("\r\n")}\r\n\r\n${body}`);
-    return { status: Number(got.split(" ")[1]), body: got.slice(got.indexOf("\r\n\r\n") + 4) };
-  };
+  const ask = askRaw;
   const J = ["content-type: application/json", "accept: application/json, text/event-stream"];
   const LIST = JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list" });
   for (const host of ["x:99999", "[::1", "brain.example.test:abc", null, "a@brain.example.test", "brain.example.test/x", "::1:8000"]) {
@@ -2192,13 +2177,6 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   // body throws as the request's own does, where a copy of the request never
   // settled and its handler waited forever (review pass 1). Keyless at the
   // MCP endpoint, keyed at the REST core's capture; localhost the control.
-  // Returns how many requests were pending as the client left: one, or the row would hold nothing (review pass 2).
-  const leave = (s: { port?: number; pendingRequests: number }, target: string, host: string | null, headers: string[]) => new Promise<number>((resolve) => {
-    const head = [...headOf("POST", target, host), "content-type: application/json", ...headers, "content-length: 1000"];
-    const sock = connect(s.port!, "127.0.0.1", () => { sock.write(`${head.join("\r\n")}\r\n\r\n{"jsonrpc":"2.0","id":1`); setTimeout(() => { const pending = s.pendingRequests; sock.destroy(); resolve(pending); }, 150); });
-    sock.on("error", () => resolve(-1));
-  });
-  const settled = async (s: { pendingRequests: number }) => { for (let i = 0; i < 40 && s.pendingRequests > 0; i++) await Bun.sleep(50); return s.pendingRequests; };
   // Each MCP hang-up is logged as abandoned; muted here, so the suite's output
   // stays its own (review pass 3). The row below checks that line.
   const realWarn = console.warn;
@@ -2206,10 +2184,10 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   try {
     for (const host of ["localhost", "x:99999", null]) {
       const at = host === null ? "no Host (HTTP/1.0)" : `Host ${host}`;
-      const mcpHeld = await leave(server, "/mcp", host, J.slice(1));
-      const mcpLeft = await settled(server);
-      const restHeld = await leave(rest, "/v1/thoughts", host, [`x-brain-key: ${KEY}`]);
-      const restLeft = await settled(rest);
+      const mcpHeld = await leaveMidUpload(server, "/mcp", host, J.slice(1), '{"jsonrpc":"2.0","id":1');
+      const mcpLeft = await pendingSettled(server);
+      const restHeld = await leaveMidUpload(rest, "/v1/thoughts", host, [`x-brain-key: ${KEY}`], '{"jsonrpc":"2.0","id":1');
+      const restLeft = await pendingSettled(rest);
       assert(mcpHeld === 1 && restHeld === 1 && mcpLeft === 0 && restLeft === 0,
         `${at}: a client that leaves mid-upload leaves no request pending (pending as it left: MCP ${mcpHeld}, REST ${restHeld}; after: MCP ${mcpLeft}, REST ${restLeft})`);
     }
@@ -2224,7 +2202,7 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   try {
     const call = JSON.stringify({ jsonrpc: "2.0", id: 52, method: "tools/call", params: { name: "search_thoughts", arguments: { query: "left at a bad Host" } } });
     await new Promise<void>((resolve) => {
-      const head = [...headOf("POST", "/mcp", "x:99999"), ...J, `x-brain-key: ${KEY}`, `content-length: ${Buffer.byteLength(call)}`];
+      const head = [...requestHead("POST", "/mcp", "x:99999"), ...J, `x-brain-key: ${KEY}`, `content-length: ${Buffer.byteLength(call)}`];
       const sock = connect(PORT, "127.0.0.1", () => { sock.write(`${head.join("\r\n")}\r\n\r\n${call}`); setTimeout(() => { sock.destroy(); resolve(); }, 500); });
       sock.on("error", () => resolve());
     });

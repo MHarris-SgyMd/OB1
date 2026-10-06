@@ -63,7 +63,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
-import { createAssert, PACKAGES, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, PACKAGES, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -770,23 +770,8 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
     process.env.SUPABASE_URL = saved.url;
   }
   const handlerOf = (file: string): Handler | undefined => singleKey[file] ?? handlers[SERVERS.findIndex((s) => s.file === file)];
-  const { connect } = await import("node:net");
-  const raw = (port: number, text: string) => new Promise<string>((resolve) => {
-    const sock = connect(port, "127.0.0.1", () => sock.write(text));
-    let got = "";
-    sock.on("data", (d) => (got += d));
-    sock.on("close", () => resolve(got));
-    sock.on("error", () => resolve(got));
-    setTimeout(() => sock.destroy(), 3_000);
-  });
-  /** The request line and Host: HTTP/1.0 with none for `null`, which HTTP/1.1 would make Bun's own 400. */
-  const headOf = (method: string, target: string, host: string | null) =>
-    [`${method} ${target} HTTP/${host === null ? "1.0" : "1.1"}`, ...(host === null ? [] : [`host: ${host}`])];
-  const ask = async (port: number, method: string, target: string, host: string | null, headers: string[], body: string) => {
-    const head = [...headOf(method, target, host), "content-type: application/json", ...headers, "connection: close", `content-length: ${Buffer.byteLength(body)}`];
-    const got = await raw(port, `${head.join("\r\n")}\r\n\r\n${body}`);
-    return { status: Number(got.split(" ")[1]), body: got.slice(got.indexOf("\r\n\r\n") + 4) };
-  };
+  const ask = (port: number, method: string, target: string, host: string | null, headers: string[], body: string) =>
+    askRaw(port, method, target, host, ["content-type: application/json", ...headers], body);
   const HOSTS = ["x:99999", "[::1", "brain.example.test:abc", "::1:8000", null, "a@brain.example.test", "brain.example.test/x"];
   const read = [`x-brain-key: ${READ_KEY}`], legacy = [`x-brain-key: ${LEGACY_KEY}`];
   /** A request, the status it gets at localhost and a word its body holds at every Host: each row names the route it reached. */
@@ -832,22 +817,15 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
     // server is handed throws when the client leaves, as the request's own
     // does, where a copy made by `new Request(url, req)` never settles and its
     // handler waits forever. Each server that reads a body, at a route that
-    // reads it; returns how many requests were pending as the client left —
-    // one, or the row holds nothing.
-    const leave = (s: { port?: number; pendingRequests: number }, target: string, host: string | null, headers: string[]) => new Promise<number>((resolve) => {
-      const head = [...headOf("POST", target, host), "content-type: application/json", ...headers, "content-length: 1000"];
-      const sock = connect(s.port!, "127.0.0.1", () => { sock.write(`${head.join("\r\n")}\r\n\r\n{"text":"part`); setTimeout(() => { const pending = s.pendingRequests; sock.destroy(); resolve(pending); }, 150); });
-      sock.on("error", () => resolve(-1));
-    });
-    const settled = async (s: { pendingRequests: number }) => { for (let i = 0; i < 40 && s.pendingRequests > 0; i++) await Bun.sleep(50); return s.pendingRequests; };
+    // reads it.
     const write = [`x-brain-key: ${WRITE_KEY}`];
     for (const [file, target, headers] of [["integrations/agent-memory-api/index.ts", "/writeback", write], ["integrations/open-brain-rest/index.ts", "/capture", write],
       ["integrations/rest-api/index.ts", "/search", legacy], ["integrations/smart-ingest/index.ts", "/", legacy]] as const) {
       const server = servers.get(file);
       if (!server) continue;
       for (const host of ["localhost", "x:99999", null]) {
-        const held = await leave(server, target, host, [...headers]);
-        const left = await settled(server);
+        const held = await leaveMidUpload(server, target, host, [...headers], '{"text":"part');
+        const left = await pendingSettled(server);
         verdicts.push([held === 1 && left === 0, `${file}: POST ${target} at ${host === null ? "no Host" : `Host ${host}`}, the client leaving mid-upload, leaves no request pending (as it left ${held}, after ${left})`]);
       }
     }
