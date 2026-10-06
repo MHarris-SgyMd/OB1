@@ -74,7 +74,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   | `/api` | REST core (SMD-2284), off by default |
   | `/health` | MCP server: keyed BrainInfo JSON read from the REST core, plain `ok` without a key (today's contract) |
   | `/hooks/<name>` | a plugin's inbound webhook, served by the REST core. Off by default and turned on per plugin, like `/api` (decision 9). There is no `/ext/<name>`: extensions are plugins, not servers |
-  | `/canary/...` | the canary tier's equivalents (SMD-2294). As built: `/canary/mcp` and `/working/mcp` reach that tier's MCP server as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the mesh, a 404 while it is absent; the rest under either prefix is a 404 |
+  | `/canary/...` | the canary tier's equivalents (SMD-2294). As built: `/canary/mcp` and `/working/mcp` reach that tier's MCP server as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the mesh, a 404 while it is absent; the rest under either prefix, in any letter case, is a 404 |
 
 - **Two networks.**
   - **Mesh network.** Internal names are network aliases on a compose network with `internal: true`: `api.ob1.internal`, `mcp.ob1.internal`, `app.ob1.internal`, `auth.ob1.internal`. Postgres and every service join it. Calls between services still authenticate; being on the network is not trust.

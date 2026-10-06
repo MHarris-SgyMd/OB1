@@ -1791,59 +1791,61 @@ jobs:
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
       # /canary/mcp and /working/mcp there. With no tier both are the proxy's
-      # bodiless 404, and so is everything else under either prefix, which
-      # never falls to the legacy route. A stand-in per tier on the mesh, under
-      # its tier's name and under `server` as a tier's container is, answers
-      # its own route: the client's Host passed, the legacy marker deleted,
-      # its own 404, 500 and 503 untouched (only a 502 is the proxy's 404).
-      # From the mesh, `server` then names more than one container — the
-      # collision the route table's mesh names avoid, which the static check
+      # bodiless 404, and so is everything else under either prefix in any
+      # case, which never falls to the legacy route. A stand-in per tier on
+      # the mesh, under its tier's name and under `server` as a tier's
+      # container is, answers its own route: the client's Host passed, the
+      # legacy marker deleted, its own 4xx and 5xx untouched, headers and all
+      # (only a 502 is the proxy's 404). From the mesh, `server` then names
+      # more than one container: the collision the route table's mesh names
+      # avoid while no tier claims stable's own names, which the static check
       # in "Every published port binds loopback" holds. Gone, each is a 404.
       - name: The tier routes reach a tier on the mesh, and nothing else under its prefix
         working-directory: deploy
         run: |
           B=http://127.0.0.1:8010
-          code() { curl -s -o /tmp/tier-body -w '%{http_code}' --max-time 15 "$@"; }
-          bare404() { c=$(code "${@:2}"); if ! { [ "$c" = 404 ] && [ ! -s /tmp/tier-body ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's bodiless 404" >&2; exit 1; fi; }
+          code() { curl -sS -o /tmp/tier-body -D /tmp/tier-head -w '%{http_code}' --max-time 15 "$@"; }
+          bare404() { c=$(code "${@:2}") || c="no answer (curl exit $?)"; if ! { [ "$c" = 404 ] && [ ! -s /tmp/tier-body ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's bodiless 404" >&2; exit 1; fi; }
           bare404 'GET /canary/mcp/health with no canary' "$B/canary/mcp/health"
           bare404 'a keyed tools/list at /canary/mcp with no canary' -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
           bare404 'GET /working/mcp/health with no working tier' "$B/working/mcp/health"
           offprefix() {
-            for p in /canary /canary/ /canary/health /canary/mcpx /working /working/ /working/x; do
+            for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /working /working/ /working/x /working/mcpx /WORKING/mcp; do
               bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
             done
           }
           offprefix ""
           trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
           IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
-          # Each answers /…/status/NNN with that status, and anything else
-          # with the path, the Host and the legacy marker it was sent.
+          # Each answers /…/status/NNN with that status, its body and an
+          # x-tier header, and anything else with the path, the Host and the
+          # legacy marker it was sent.
           for tier in canary working; do
             docker run -d --name "ob1-ci-$tier-stand-in" --network open-brain_mesh --network-alias "mcp.$tier.ob1.internal" --network-alias server --entrypoint bun "$IMAGE" \
-              -e "Bun.serve({ port: 8000, fetch(r) { const p = new URL(r.url).pathname; const s = /\/status\/(\d+)$/.exec(p); if (s) return new Response('$tier ' + s[1], { status: Number(s[1]) }); return new Response('$tier ' + p + ' host=' + r.headers.get('host') + ' legacy=' + (r.headers.get('x-ob1-legacy-route') ?? '-')); } })" > /dev/null
+              -e "Bun.serve({ port: 8000, fetch(r) { const p = new URL(r.url).pathname; const s = /\/status\/(\d+)$/.exec(p); if (s) return new Response('$tier ' + s[1], { status: Number(s[1]), headers: { 'x-tier': '$tier' } }); return new Response('$tier ' + p + ' host=' + r.headers.get('host') + ' legacy=' + (r.headers.get('x-ob1-legacy-route') ?? '-')); } })" > /dev/null
           done
           H="${B#http://}"
           for tier in canary working; do
             want="$tier /$tier/mcp/health host=$H legacy=-"
             for _ in $(seq 1 40); do [ "$(curl -s --max-time 2 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health")" = "$want" ] && break; sleep 0.5; done
-            got=$(curl -s --max-time 5 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health")
+            got=$(curl -sS --max-time 5 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health") || got="no answer (curl exit $?)"
             [ "$got" = "$want" ] || { echo "/$tier/mcp/health did not reach the $tier stand-in with the client's Host and no legacy marker: '$got'" >&2; exit 1; }
-            got=$(curl -s --max-time 5 -X POST -d '{}' "$B/$tier/mcp")
+            got=$(curl -sS --max-time 5 -X POST -d '{}' "$B/$tier/mcp") || got="no answer (curl exit $?)"
             [ "$got" = "$tier /$tier/mcp host=$H legacy=-" ] || { echo "a POST to /$tier/mcp did not reach the $tier stand-in: '$got'" >&2; exit 1; }
-            for s in 404 500 503; do
-              c=$(code "$B/$tier/mcp/status/$s")
-              if ! { [ "$c" = "$s" ] && [ "$(cat /tmp/tier-body)" = "$tier $s" ]; }; then echo "the $tier tier's own $s came back as $c '$(head -c 80 /tmp/tier-body)': only a 502 is the proxy's" >&2; exit 1; fi
+            for s in 401 404 429 500 503 504; do
+              c=$(code "$B/$tier/mcp/status/$s") || c="no answer (curl exit $?)"
+              if ! { [ "$c" = "$s" ] && [ "$(cat /tmp/tier-body)" = "$tier $s" ] && grep -qix "x-tier: $tier"$'\r' /tmp/tier-head; }; then echo "the $tier tier's own $s came back as $c '$(head -c 80 /tmp/tier-body)', or without its header: only a 502 is the proxy's" >&2; exit 1; fi
             done
             bare404 "the $tier tier's own 502" "$B/$tier/mcp/status/502"
           done
           offprefix " beside both tiers"
-          holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", {})).map((a) => a.address)).size)')
+          holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')
           [ "$holders" -ge 2 ] || { echo "from the mesh, \`server\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }
           [ "$(curl -s --max-time 5 "$B/mcp/health")" = ok ] || { echo "stable's /mcp/health stopped answering ok beside the tiers" >&2; exit 1; }
           docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
           for tier in canary working; do
-            for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health")" = 404 ] && break; sleep 0.5; done
+            for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health" || true)" = 404 ] && break; sleep 0.5; done
             bare404 "GET /$tier/mcp/health once the tier left" "$B/$tier/mcp/health"
           done
 

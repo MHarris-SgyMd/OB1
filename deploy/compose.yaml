@@ -99,9 +99,10 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #           (`tier-absent`), as auth-absent does for the authorization
 #           server. The tiers' protected-resource paths are not routed, so
 #           a tier is reached with keys (OAuth per tier is SMD-2286's);
-#   tier-off everything else under /canary or /working: a bare 404
-#           (`not-served`), so a client handed a tier's prefix without its
-#           /mcp never reaches this stack's server by the legacy route;
+#   tier-off everything else under /canary or /working, in any case: a
+#           bare 404 (`not-served`), so a client handed a tier's prefix
+#           without its /mcp, or with its case changed, never reaches this
+#           stack's server by the legacy route;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
 #           probe and a browser's CORS preflight;
 #   legacy  everything but /.well-known — what clients reach today at the root
@@ -184,9 +185,13 @@ x-proxy-routes: &proxy-routes |
         middlewares: [not-legacy, tier-absent]
         service: working
       # Under a tier's prefix, only its /mcp is served: the rest is a bare
-      # 404 rather than the legacy route's way into this stack's server.
+      # 404 rather than the legacy route's way into this stack's server. In
+      # any case (`/CANARY/mcp` too): a client handed a tier's URL mistyped
+      # would otherwise write to this stack's brain with the same key. Single
+      # quotes, for the backslash: `\z` is the end of the path, and compose
+      # would read a `$` as one of its own.
       tier-off:
-        rule: "Path(`/canary`) || PathPrefix(`/canary/`) || Path(`/working`) || PathPrefix(`/working/`)"
+        rule: 'PathRegexp(`(?i)^/(canary|working)(/|\z)`)'
         priority: 25
         entryPoints: [web]
         middlewares: [not-served]
@@ -735,7 +740,8 @@ services:
     # none, and the route's name written rooted (`auth.ob1.internal.`), the
     # one lookup is the stack's own name under the reserved .internal TLD.
     # An absent tier's name (mcp.canary.ob1.internal.) is written the same
-    # way, for the same reason. That one lookup still reaches the host's
+    # way, for the same reason, as is this stack's own server's while it is
+    # stopped or recreated. That one lookup still reaches the host's
     # resolvers, since the default network forwards a name it does not hold:
     # one that answers *.ob1.internal itself would get the route's requests,
     # keys included, until the network move puts the proxy on internal
