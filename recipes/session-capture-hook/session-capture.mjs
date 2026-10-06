@@ -1514,7 +1514,9 @@ export async function postCapture(cfg, payload) {
   }
   if (result.isError) notes.push(oneLine(text).slice(0, 160));
   if (!id) throw new CaptureError("failed", `capture answered without an id: ${oneLine(text).slice(0, 200)}`);
-  return { id: id.toLowerCase(), note: notes.join("; ") };
+  // `sent`: the pointer the post that landed named — none when a mend dropped
+  // it, which is what the captured line reports (SMD-2473 PR 2 review pass 1).
+  return { id: id.toLowerCase(), note: notes.join("; "), sent: args.supersedes };
 }
 
 // ── The two halves of a hook run ─────────────────────────────────────────────
@@ -2105,7 +2107,7 @@ export async function postPending(cfg, own) {
         // A payload that already landed (its bookkeeping failed last time) is not
         // posted again: the id is on the payload (second review pass — a local
         // fault after the capture counted as a failed attempt and re-posted).
-        posted = payload.captured_id ? { id: payload.captured_id, note: payload.captured_note ?? "" } : await postCapture(cfg, payload);
+        posted = payload.captured_id ? { id: payload.captured_id, note: payload.captured_note ?? "", sent: payload.captured_sent } : await postCapture(cfg, payload);
       } catch (e) {
         payload.attempts = (payload.attempts ?? 0) + 1;
         payload.last_error = String(e.message ?? e).slice(0, 300);
@@ -2142,13 +2144,15 @@ export async function postPending(cfg, own) {
       // read before it, a stall between the two let a sibling's state, written
       // meanwhile, be overwritten by this older one (ninth review pass).
       try {
-        if (!payload.captured_id) writeJson(here, { ...payload, captured_id: id, captured_note: note });
+        if (!payload.captured_id) writeJson(here, { ...payload, captured_id: id, captured_note: note, ...(posted.sent ? { captured_sent: posted.sent } : {}) });
         const stateIsNewerNow = stateIsNewer || recordedAfter(readState(chain), payload.prepared_at);
         // summary_at never runs ahead of the clock that will read it back.
         const summaryAt = Number.isNaN(pastMs(payload.prepared_at)) ? new Date().toISOString() : payload.prepared_at;
         if (!stateIsNewerNow) writeState(chain, { chain_id: chain, thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
         unlinkSync(here);
-        log(`captured ${who} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${payload.redactions?.length ? ` redactions=${payload.redactions.length}` : ""}${note ? ` note="${note}"` : ""}`);
+        // `supersedes_sent`: postCapture's `sent`, what the post asked — a
+        // capture-only key's server may drop it without a word (SMD-2473).
+        log(`captured ${who} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${posted.sent ? ` supersedes_sent=${posted.sent}` : ""}${payload.redactions?.length ? ` redactions=${payload.redactions.length}` : ""}${note ? ` note="${note}"` : ""}`);
         outcomes.push({ file, ok: true, id, note });
       } catch (e) {
         moveTo(here, PENDING_DIR());
