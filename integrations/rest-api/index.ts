@@ -68,6 +68,9 @@
  */
 
 import { createClient } from "../../compat/supabase-sql/index.ts";
+// One name from the shared module, the request rebuilt where its URL will not parse (SMD-2595); the key is
+// still this file's own compare (change 67 left it off the module); deploy ../_shared/auth.ts (integrations/_shared/) with it.
+import { routable } from "../_shared/auth.ts";
 import {
   embedText,
   embeddingModelUsed,
@@ -470,8 +473,12 @@ function internalError(error: unknown): Response {
   return json({ error: "internal_error", code: "GENERIC", error_id: errorId }, 500);
 }
 
-/** Every answer carries the request's CORS headers (withCors, SMD-2079): route's, or the 500 for what escaped its try — the preflight, auth, the rate limit and the URL stand before it. */
-const handler = async (req: Request): Promise<Response> => withCors(req, await route(req).catch(internalError));
+/**
+ * Every answer carries the request's CORS headers (withCors, SMD-2079): route's, or the 500 for what escaped its try — the
+ * preflight, auth and the rate limit stand before it. Routed as rebuilt where its URL will not parse (routable,
+ * SMD-2595), so the URL route parses is one that parses.
+ */
+const handler = async (req: Request): Promise<Response> => withCors(req, await route(routable(req)).catch(internalError));
 
 export default {
   port: Number(process.env.PORT || 8000),

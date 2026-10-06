@@ -173,7 +173,7 @@ export function presentedKind(req: Request): Presented {
  * parser cleans up to the origin's name is (a Latin-1 spelling of a punycode
  * name, an embedded tab, a trailing `\`).
  * A request with no `Host` is read by its URL's: a suite's, or HTTP/1.0's,
- * which root.ts routable rebuilt at no origin's (SMD-2535).
+ * which auth.ts routable rebuilt at no origin's (SMD-2535).
  */
 function atOrigin(req: Request, origin: string): URL | null {
   const o = new URL(origin);
