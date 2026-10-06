@@ -169,7 +169,10 @@ server per tier, each on loopback by default; its three Postgres services and
 shared Ollama publish nothing, exactly as above. A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own network,
-its proxy on `127.0.0.1:8011` (`--port`), its server at `/mcp` there. The tier
+less the proxy, its server and REST core also on this stack's `mesh` as
+`mcp.canary.ob1.internal` and `api.canary.ob1.internal`, and reached at
+`/canary/mcp` on this stack's port (SMD-2294). Beside a stable from before
+that, `--port` gives it its own proxy on loopback, as before. The tier
 file's servers still publish a port each; SMD-2294 moves them onto proxy paths.
 
 | Service | On the compose network | On the host | From another machine |
@@ -831,19 +834,37 @@ deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
 ```
 
 The canary is `compose.yaml` again under the project `open-brain-canary`, with
-its own Postgres, volume, network and images, and `OB1_TIER=canary`. It needs
-Docker Compose v2 (`config --format json`, `up --wait`), which is what
-`docker compose` is and what `podman compose` runs when it is installed; the
-Python podman-compose is not enough. Its proxy listens on `127.0.0.1:8011`
-(`--port`), on loopback whatever `SERVER_BIND` says for stable, with its server
-at `/mcp` there. It reads the stack's env file, so the canary's
-server gets stable's knobs and none is copied. Four things are the canary's
-own: the port, the address, the tier, and the compose profiles (none). Each
-tier has its own Postgres server, never a second database on stable's: a
-canary exists to absorb the risky migration, reembed or index rebuild, and a
-shared server would share its memory, its WAL and its crashes with the
-record. The canary's server is not on stable's network, so it cannot reach
-stable's database, or a service a compose profile runs there.
+its own Postgres, volume, network and images, `OB1_TIER=canary`, and two
+servers: the MCP server and the REST core. It needs Docker Compose v2
+(`config --format json`, `up --wait`), which is what `docker compose` is and
+what `podman compose` runs when it is installed; the Python podman-compose is
+not enough. It reads the stack's env file, so the canary's servers get
+stable's knobs and none is copied. The tier and the compose profiles (none)
+are the canary's own. Each tier has its own Postgres server, never a second
+database on stable's: a canary exists to absorb the risky migration, reembed
+or index rebuild, and a shared server would share its memory, its WAL and its
+crashes with the record.
+
+It answers at `/canary/mcp` on stable's own origin (SMD-2294): the URL is
+stable's with `/canary` in front of `/mcp`, on stable's `SERVER_PORT`.
+`deploy/compose.canary.yaml` puts its two servers on
+stable's `mesh` network as `mcp.canary.ob1.internal` and
+`api.canary.ob1.internal` (only those: the canary's own `mesh` names would
+share stable's `/mcp`, `/api` and `/auth`), and stable's proxy routes
+`/canary/mcp` to the first ("One origin", above). They stay off stable's
+default network, so they cannot reach stable's database, or a service a
+compose profile runs there. With no profiles the canary advertises no OAuth;
+on stable's mesh it could otherwise find stable's authorization server.
+While a canary is attached, stable's `compose down` leaves stable's mesh in
+place (it is in use), so take the canary down first; if stable's mesh is
+made again, re-run `up`.
+
+A stable from before SMD-2294 has no `/canary` route, and `up` refuses there
+unless `--port N` names a loopback port for the canary's own proxy, the way
+every canary was stood up before (8011 was the default): its server at
+`/mcp` on `127.0.0.1:N`, whatever `SERVER_BIND` says for stable, and its
+servers off stable's mesh. Re-run `up` without `--port` once stable is
+upgraded, and the canary's proxy is removed.
 
 `up` can be re-run, and re-running it is how the canary catches up after
 stable is redeployed:
@@ -862,10 +883,13 @@ stable is redeployed:
      needs `OB1_LLM_LOCAL=` cleared there, or the egress gate takes it for
      local. A stack whose only model server is the `local-models` profile
      needs an Ollama on the host for its canary;
-   - its port is taken. For another container's, pass another `--port`; if
-     that container is a canary stood up by hand, remove it instead, since
-     the new canary is refreshed from stable and nothing is lost that stable
-     does not hold. A process on the host listening there is refused too;
+   - stable's running proxy routes no `/canary/mcp`, or stable has no `mesh`
+     network, and no `--port` was given;
+   - with `--port`, its port is taken. For another container's, pass another
+     `--port`; if that container is a canary stood up by hand, remove it
+     instead, since the new canary is refreshed from stable and nothing is
+     lost that stable does not hold. A process on the host listening there is
+     refused too;
    - `--connect` finds another connector under the name (below);
    - stable's Postgres, found by its compose labels (`--stable-project`,
      default `open-brain`), is stamped `canary` or `working`, or carries a
@@ -878,11 +902,12 @@ stable is redeployed:
 2. It starts the canary's Postgres, and refreshes it from stable through
    `tier.sh` on both networks: the dump, the settings, a migration with this
    checkout, the stamp and the mark ("Refreshing a tier", above).
-3. It builds the server from this checkout and recreates it, so the pool
-   opens on the refreshed database. A standing canary's server is stopped
-   before the refresh, so nothing serves the copy mid-restore through the
-   connector, or writes rows the restore then collides with. `OB1_GIT_SHA` is
-   the checkout's `git describe`, unless the shell sets it.
+3. It builds the server from this checkout and recreates it and the REST
+   core, which runs the server's image, so their pools open on the refreshed
+   database. Standing servers are stopped before the refresh, so nothing
+   serves the copy mid-restore through the connector, or writes rows the
+   restore then collides with. `OB1_GIT_SHA` is the checkout's
+   `git describe`, unless the shell sets it.
 4. It smoke-tests the canary with `OB1_SMOKE_KEY`. The keyed `/health` must
    say `tier` `canary`, and `smoke.sh` must pass. Then the vector arm, which
    `smoke.sh` leaves out and a `--diff` replays only with a provider
@@ -913,15 +938,18 @@ stable is redeployed:
    `--no-smoke` skips the smoke and needs no key.
 5. With `--connect` it registers the Claude Code connector
    `open-brain-canary` (`--name`) at user scope, under the same key; a new
-   session sees its tools. The URL is `http://127.0.0.1:8011/mcp`, the
-   canary's own proxy; SMD-2294 moves it to `/canary/mcp` on stable's origin.
+   session sees its tools. The URL is the canary's: `/canary/mcp` on
+   stable's origin, or `/mcp` on `--port`.
 
-`down` removes the canary's containers and network. It deregisters the
-connector only when `claude` has it at user scope and at the canary's port
-(any path or `?key=` after it). The port is read from the canary's proxy
-container, running or stopped (after a reboot podman leaves it stopped, and
-Docker restarts it but not its Postgres); once that is gone, pass the
-`--port` it was stood up with. `claude mcp get` shows the
+`down` removes the canary's containers and its own networks; stable's mesh
+stays. It deregisters the connector only when `claude` has it at user scope
+and at a URL of the canary's: `/canary/mcp` on a loopback origin, which no
+other service answers, or a canary proxy's port with any path (and either
+with any `?key=`). A connector at stable's own `/mcp` is never the canary's.
+A canary proxy's port is read from its container, running or stopped (after
+a reboot podman leaves it stopped, and Docker restarts it but not its
+Postgres); once that is gone, pass the `--port` it was stood up with.
+`claude mcp get` shows the
 entry that wins for the current directory, so a local entry by the name
 hides a user one behind it. One by that name anywhere else, or in local or
 project scope, is left alone with a line saying so, and `up --connect`
@@ -936,19 +964,25 @@ is started to find out. Neither touches stable: `down` acts on the project
 
 On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing
-started, stamped or registered. The second is the canary's life:
-- `up --connect` over a stable carrying the protective mark `stable`, under
-  `SERVER_BIND=0.0.0.0`. The canary must stay on loopback, and its probe must
-  pass on a thought whose text holds literals, searched for without them;
-- a second `up` against a provider stub serving another model. The thought
-  put on stable just before it must reach the canary, and the smoke must
-  fail on the floor;
+started, stamped or registered (an old stable by its proxy's route label). The
+second is the canary's life:
+- `up --connect` over a stable carrying the protective mark `stable`. The
+  canary must answer at `/canary/mcp` with tier `canary` and OAuth not
+  configured, run no proxy, and hold only its tier's names on stable's mesh;
+  its probe must pass on a thought whose text holds literals, searched for
+  without them;
+- a second `up`, with `--port 8011` under `SERVER_BIND=0.0.0.0`, against a
+  provider stub serving another model. The canary's proxy must be on
+  loopback, its servers off stable's mesh, `/canary/mcp` the proxy's 404
+  again; the thought put on stable just before it must reach the canary, and
+  the smoke must fail on the floor;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope
   connector left alone);
 - a volume by the canary's name that compose did not make, holding a table,
   refused with nothing left running;
-- a last `down` that removes its own connector.
+- a connector at stable's own `/mcp` left alone, and a last `down` that
+  removes the canary's.
 
 Afterwards the stack's Postgres container, its thoughts and its server are
 checked unchanged. A stand-in `claude` on PATH answers `mcp get` there. The

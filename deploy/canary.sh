@@ -3,12 +3,19 @@
 #
 # The canary is this same deploy/compose.yaml run again as its own compose
 # project, open-brain-canary, with its own Postgres, volume, network and images,
-# its proxy on 127.0.0.1:8011 (--port) with its server at /mcp there (SMD-1846),
-# and OB1_TIER=canary. It reads the
-# stack's env file, so the canary's server gets stable's knobs and none is
-# copied. The port, the address, the tier and the profiles are the canary's own.
-# `down` acts on that project alone, so it cannot reach stable. SMD-1806 calls
-# the running stack stable, the record the canary is refreshed from.
+# OB1_TIER=canary, and two servers: the MCP server and the REST core. It reads
+# the stack's env file, so the canary's servers get stable's knobs and none is
+# copied. The tier and the profiles (none) are the canary's own. `down` acts on
+# that project alone, so it cannot reach stable. SMD-1806 calls the running
+# stack stable, the record the canary is refreshed from.
+#
+# Where it answers (SMD-2294): at /canary/mcp on stable's own origin. The
+# canary's servers join stable's mesh network (deploy/compose.canary.yaml) as
+# mcp.canary.ob1.internal and api.canary.ob1.internal, and stable's proxy
+# routes /canary/mcp to the first. That route is in stable's compose.yaml from
+# SMD-2294 on; a stable running an older release has none, and then `up`
+# refuses unless --port names a loopback port for the canary's own proxy, the
+# way every canary was stood up before (8011 was the default).
 #
 #   deploy/canary.sh --env-file ~/stack/deploy/.env up --connect
 #   deploy/canary.sh --env-file ~/stack/deploy/.env down --volumes
@@ -16,11 +23,14 @@
 # `up` stands the canary up, or brings a standing one level with stable again
 # (after stable is redeployed, say). It can be re-run:
 #   1. refuses, before changing anything, when:
-#      - the canary's server could not reach its provider: an OB1_LLM_BASE_URL,
+#      - the canary's servers could not reach their provider: an OB1_LLM_BASE_URL,
 #        OB1_CHAT_BASE_URL or OB1_JEV_BASE_URL naming a service on stable's
-#        network (`ollama`, `jev`, from a compose profile), which the canary's
-#        own network does not have;
-#      - its port is taken, by another container or a process on the host;
+#        default network (`ollama`, `jev`, from a compose profile), which the
+#        canary's own network does not have;
+#      - stable's running proxy carries no /canary route, or stable has no mesh
+#        network, and no --port was given;
+#      - with --port, that port is taken, by another container or a process on
+#        the host;
 #      - --connect finds another connector under the name;
 #      - stable's Postgres is stamped canary or working, or carries a
 #        refresh's mark (canary, working): that is a copy, not the record.
@@ -29,9 +39,12 @@
 #   3. refreshes it from stable through deploy/tier.sh, on both projects'
 #      networks. The refresh copies stable's database settings, 014's HNSW
 #      bounds among them (SMD-2037), and migrates the copy with this checkout;
-#   4. builds the server from this checkout and (re)creates it, so its pool
-#      opens on the refreshed database (a standing canary's server is stopped
-#      before the refresh, so nothing serves or writes a half-restored copy);
+#   4. builds the server from this checkout and (re)creates it and the REST
+#      core, which runs the server's image, so their pools open on the
+#      refreshed database. Standing servers are stopped before the refresh, so
+#      nothing serves or writes a half-restored copy. On stable's origin a
+#      canary proxy from before SMD-2294 is removed; with --port the canary's
+#      own proxy is (re)started;
 #   5. smoke-tests it with OB1_SMOKE_KEY, a raw write key whose hash is in the
 #      env file's MCP_ACCESS_KEYS (the canary accepts stable's keys; smoke.sh
 #      checks the whole tool surface, which a read key does not see). The keyed
@@ -42,24 +55,33 @@
 #      candidates. A canary with no thought to probe is not checked, unless
 #      stable had one: then its vectors were emptied, and the smoke fails;
 #   6. with --connect, registers the Claude Code connector (user scope) under
-#      the same key.
+#      the same key, at the canary's URL.
 #
-# `down` removes the canary's containers and network. It deregisters the
-# connector when `claude` has it at user scope and at the canary's port, and
-# says so when one by that name is anything else, leaving it alone. --volumes
-# also deletes the canary's database: when it is stamped canary, marked by a
-# refresh, or holds nothing (a first refresh that died before its mark); a
-# refusal puts its Postgres back as it was. With no canary volume there is
-# nothing to delete, and nothing is created to find out. Its port is read from
-# the canary's proxy container (a canary from before SMD-1846: its server's),
-# running or stopped; once that is gone, only --port says it.
+# `down` removes the canary's containers and its own networks; stable's mesh is
+# stable's, and stays. It deregisters the connector when `claude` has it at user
+# scope and at a URL of the canary's (/canary/mcp on a loopback origin, or the
+# port of a canary proxy), and says so when one by that name is anything else,
+# leaving it alone. --volumes also deletes the canary's database: when it is
+# stamped canary, marked by a refresh, or holds nothing (a first refresh that
+# died before its mark); a refusal puts its Postgres back as it was. With no
+# canary volume there is nothing to delete, and nothing is created to find out.
+# A canary proxy's port is read from its container, running or stopped; once
+# that is gone, only --port says it.
+#
+# While a canary is attached, stable's `compose down` leaves stable's mesh in
+# place (the network is in use), so take the canary down first when stable is.
+# If stable's mesh is removed and made again, the canary's servers lose it:
+# re-run `up`, which recreates them.
 #
 # Options, all optional:
 #   --env-file PATH       the running stack's env file (default deploy/.env beside
 #                         this script — which a branch worktree does not have)
 #   --runtime CLI         docker or podman (default: docker when on PATH, else podman)
 #   --stable-project NAME stable's compose project (default open-brain)
-#   --port N              the canary proxy's loopback port (default 8011)
+#   --port N              serve the canary from its own proxy on 127.0.0.1:N, not
+#                         at /canary/mcp on stable's origin (for a stable from
+#                         before SMD-2294); with `down`, the port such a canary
+#                         was stood up on
 #   --name NAME           the connector's name (default open-brain-canary)
 #   up --connect          register the connector after the smoke passes
 #   up --no-smoke         skip step 5 (no key needed; the connector needs one)
@@ -89,7 +111,7 @@ usage() {
 ENV_FILE="$HERE/.env"
 RUNTIME=""
 STABLE=open-brain
-PORT=8011
+PORT=""
 NAME=open-brain-canary
 CMD=""
 CONNECT=0
@@ -116,8 +138,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$CMD" ] || usage
-case "$PORT" in ''|*[!0-9]*|0*) echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2 ;; esac
-[ "$PORT" -le 65535 ] || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
+if [ -n "$PORT" ]; then
+  case "$PORT" in *[!0-9]*|0*) echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2 ;; esac
+  [ "$PORT" -le 65535 ] || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
+fi
 [ "$STABLE" != "$CANARY" ] || { echo "--stable-project names the canary's own project." >&2; exit 2; }
 [ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ]; } || { echo "--connect and --no-smoke go with up." >&2; exit 2; }
 [ "$CMD" = down ] || [ $VOLUMES = 0 ] || { echo "--volumes goes with down." >&2; exit 2; }
@@ -134,14 +158,24 @@ fi
 
 say() { printf '▸ %s\n' "$*"; }
 
-# The canary's compose: stable's file under the canary's project name. The
-# port, the address, the tier and an empty profile list are set for these calls
-# alone, where the shell wins over the env file; tier.sh, run between them,
-# reads the env file without them. The address is loopback whatever
-# SERVER_BIND says for stable: a canary is for this host.
+# Where the canary answers, which `up` decides: `path`, at /canary/mcp on
+# stable's origin, its servers on stable's mesh (compose.canary.yaml); `port`,
+# behind its own proxy on --port. Empty for `down`, which needs neither.
+MODE=""
+# The canary's compose: stable's file under the canary's project name, with
+# the overlay that joins stable's mesh when it answers there. The port, the
+# address, the tier, an empty profile list and stable's mesh are set for these
+# calls alone, where the shell wins over the env file; tier.sh, run between
+# them, reads the env file without them. The address is loopback whatever
+# SERVER_BIND says for stable: a canary is for this host. With no --port the
+# canary's proxy is never started, and SERVER_PORT is only what compose reads.
+# No profiles, so the canary's server advertises no OAuth: on stable's mesh it
+# would find stable's authorization server, for stable's resource.
 canary_compose() {
-  SERVER_PORT="$PORT" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
-    "$RUNTIME" compose -p "$CANARY" --env-file "$ENV_FILE" -f "$HERE/compose.yaml" "$@"
+  local files=(-f "$HERE/compose.yaml")
+  [ "$MODE" != path ] || files+=(-f "$HERE/compose.canary.yaml")
+  SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" CANARY_STABLE_MESH="${STABLE}_mesh" \
+    "$RUNTIME" compose -p "$CANARY" --env-file "$ENV_FILE" "${files[@]}" "$@"
 }
 GIT_SHA="${OB1_GIT_SHA:-$(git -C "$REPO" describe --always --dirty 2>/dev/null || echo unknown)}"
 
@@ -207,10 +241,19 @@ port_of() {
   # shellcheck disable=SC2016 # a Go template's variables, not the shell's
   "$RUNTIME" inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}}{{"\n"}}{{end}}{{end}}' "$1" | head -n 1
 }
+# The address to dial a container's published port at from this host: its
+# bound address, or loopback for one bound to every interface or to none.
+host_of() {
+  local ip
+  # shellcheck disable=SC2016 # a Go template's variables, not the shell's
+  ip="$("$RUNTIME" inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}{{"\n"}}{{end}}{{end}}' "$1" | head -n 1)"
+  case "$ip" in ""|0.0.0.0|::) printf '127.0.0.1' ;; *:*) printf '[%s]' "$ip" ;; *) printf '%s' "$ip" ;; esac
+}
 # The canary's published container in any state, or nothing: its proxy, the
-# one container of the project that publishes a port (SMD-1846) — or the
-# server of a canary stood up before the proxy, which published the port
-# itself until `up` recreates it, so that `up` and `down` know its port.
+# one container of the project that publishes a port when it has its own
+# (--port, or a canary from before SMD-2294) — or the server of a canary
+# stood up before the proxy (SMD-1846), which published the port itself until
+# `up` recreates it, so that `up` and `down` know its port.
 published_id() {
   local svc id
   for svc in proxy server; do
@@ -227,19 +270,24 @@ published_port() {
   [ -n "$id" ] || return 0
   port_of "$id"
 }
-# The ports the canary answers on: --port, and the one its proxy container is
-# bound to if that differs (a `down` given no --port for a canary stood up with one).
+# The ports a canary proxy of this project answers on: --port, and the one its
+# proxy container is bound to (a `down` given no --port for a canary stood up
+# with one). None for a canary on stable's origin.
 canary_ports() {
-  printf '%s\n' "$PORT"
+  [ -z "$PORT" ] || printf '%s\n' "$PORT"
   published_port
 }
 # A connector URL as printed: without its query, where the documented form
 # carries the key (`?key=`).
 shown() { case "$1" in *\?*) printf '%s?…' "${1%%\?*}" ;; *) printf '%s' "$1" ;; esac; }
-# Whether a connector URL is this canary's: http, this host, one of its ports,
-# any path or query (`?key=` is the documented form) after it.
+# Whether a connector URL is this canary's: http on this host, and either
+# /canary/mcp on any port — the canary's path on stable's origin, which no
+# other service answers — or one of a canary proxy's ports with any path; any
+# query (`?key=` is the documented form) after either.
+CANARY_PATH_URL='^http://(127\.0\.0\.1|localhost):[0-9]+/canary/mcp([/?].*)?$'
 ours() {
   local p
+  [[ "$1" =~ $CANARY_PATH_URL ]] && return 0
   for p in $(canary_ports); do
     case "$1" in "http://127.0.0.1:$p"|"http://127.0.0.1:$p/"*|"http://127.0.0.1:$p?"*|"http://localhost:$p"|"http://localhost:$p/"*|"http://localhost:$p?"*) return 0 ;; esac
   done
@@ -294,7 +342,7 @@ if [ "$CMD" = down ]; then
       else say "connector $NAME: \`claude mcp remove --scope user $NAME\` failed — remove it by hand"
       fi ;;
     other-scope) say "connector $NAME is in $CONN_SCOPE scope, not user — left as it is (claude mcp remove -s $CONN_SCOPE $NAME)" ;;
-    foreign) say "connector $NAME points at $(shown "${CONN_URL:-no URL (a stdio entry)}"), not this canary's port $PORT — left as it is (if it is this canary's, pass the --port it was stood up with)" ;;
+    foreign) say "connector $NAME points at $(shown "${CONN_URL:-no URL (a stdio entry)}"), not this canary's (/canary/mcp on a loopback origin${PORT:+, or port $PORT}) — left as it is (if it is a canary proxy's, pass the --port it was stood up with)" ;;
   esac
   if [ $VOLUMES = 0 ]; then say "canary down; $STABLE untouched"
   elif [ -n "$HAS_VOLUME" ]; then say "canary down, its database deleted; $STABLE untouched"
@@ -330,25 +378,47 @@ for k in ("OB1_LLM_BASE_URL", "OB1_CHAT_BASE_URL", "OB1_JEV_BASE_URL"):
 STABLE_PG="$(container_of "$STABLE" postgres)"
 [ -n "$STABLE_PG" ] || { echo "no running Postgres in compose project $STABLE — start the stack first, or name it with --stable-project." >&2; exit 2; }
 
-# The port is the canary's or free: a container of another project on it
-# would take the canary proxy's place.
-taken="$("$RUNTIME" ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}' \
-  | awk -F'|' -v p=":$PORT->" -v c="$CANARY" 'index($2, p) && $3 != c { print $1 }')"
-[ -z "$taken" ] || { echo "port $PORT is published by $taken, outside project $CANARY — pick another --port (or, if $taken is a canary stood up by hand, remove it: the new one is refreshed from stable)." >&2; exit 2; }
-# … or a process on the host, which no container list shows: a connection to
-# the port succeeds while the canary's own proxy does not publish it.
-# Its own proxy's port is read from the container while it runs or is still
-# stopping (podman finishes a stop a Ctrl-C interrupted, answering meanwhile).
-own=""
-own_id="$(published_id)"
-if [ -n "$own_id" ]; then
-  case "$("$RUNTIME" inspect -f '{{.State.Status}}' "$own_id" 2>/dev/null || true)" in
-    running|stopping|restarting) own="$(published_port)" ;;
-  esac
+# Where the canary answers (SMD-2294). On stable's origin when stable's
+# running proxy routes /canary/mcp — its route table, which it carries as a
+# label, names the canary's mesh name — and stable has a mesh to join; behind
+# its own proxy when --port says so. A stable whose proxy has no such route
+# runs a release from before SMD-2294.
+STABLE_PROXY="$(container_of "$STABLE" proxy)"
+STABLE_MESH="${STABLE}_mesh"
+if [ -n "$PORT" ]; then
+  MODE=port
+else
+  [ -n "$STABLE_PROXY" ] || { echo "no running proxy in compose project $STABLE, so the canary has no origin to answer at (/canary/mcp). Start the stack's proxy, or give the canary a proxy of its own with --port N." >&2; exit 2; }
+  routes="$("$RUNTIME" inspect -f '{{index .Config.Labels "ob1.proxy-routes"}}' "$STABLE_PROXY")"
+  grep -qF 'mcp.canary.ob1.internal' <<<"$routes" || { echo "$STABLE_PROXY routes no /canary/mcp: stable runs a release from before SMD-2294. Upgrade stable, or stand the canary behind its own proxy on a loopback port as before, with --port N (8011 was the default)." >&2; exit 2; }
+  "$RUNTIME" network inspect "$STABLE_MESH" >/dev/null 2>&1 || { echo "stable has no mesh network $STABLE_MESH for the canary's servers to join — recreate stable's proxy (compose up -d proxy), or pass --port N." >&2; exit 2; }
+  STABLE_PORT="$(port_of "$STABLE_PROXY")"
+  [ -n "$STABLE_PORT" ] || { echo "$STABLE_PROXY publishes no port, so /canary/mcp cannot be reached from this host. Pass --port N." >&2; exit 2; }
+  STABLE_HOST="$(host_of "$STABLE_PROXY")"
+  MODE=path
 fi
-if [ "$own" != "$PORT" ] && (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
-  echo "something on this host already listens on 127.0.0.1:$PORT — stop it, or pick another --port." >&2
-  exit 2
+
+if [ "$MODE" = port ]; then
+  # The port is the canary's or free: a container of another project on it
+  # would take the canary proxy's place.
+  taken="$("$RUNTIME" ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}' \
+    | awk -F'|' -v p=":$PORT->" -v c="$CANARY" 'index($2, p) && $3 != c { print $1 }')"
+  [ -z "$taken" ] || { echo "port $PORT is published by $taken, outside project $CANARY — pick another --port (or, if $taken is a canary stood up by hand, remove it: the new one is refreshed from stable)." >&2; exit 2; }
+  # … or a process on the host, which no container list shows: a connection to
+  # the port succeeds while the canary's own proxy does not publish it.
+  # Its own proxy's port is read from the container while it runs or is still
+  # stopping (podman finishes a stop a Ctrl-C interrupted, answering meanwhile).
+  own=""
+  own_id="$(published_id)"
+  if [ -n "$own_id" ]; then
+    case "$("$RUNTIME" inspect -f '{{.State.Status}}' "$own_id" 2>/dev/null || true)" in
+      running|stopping|restarting) own="$(published_port)" ;;
+    esac
+  fi
+  if [ "$own" != "$PORT" ] && (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+    echo "something on this host already listens on 127.0.0.1:$PORT — stop it, or pick another --port." >&2
+    exit 2
+  fi
 fi
 
 if [ $CONNECT = 1 ]; then
@@ -381,12 +451,10 @@ say "canary Postgres"
 canary_compose up -d --wait postgres
 CANARY_PG="$(container_of "$CANARY" postgres)"
 
-# A standing canary's server would serve the copy mid-restore (through the
+# A standing canary's servers would serve the copy mid-restore (through the
 # registered connector, stamped stable by the restore until the refresh
-# stamps it), and write rows the restore then collides with; it is recreated
-# below either way. So would a REST core (SMD-2284), which this script does
-# not start — one someone started in the canary's project is stopped with it
-# and recreated on the new image below.
+# stamps it), and write rows the restore then collides with; both are
+# recreated below either way.
 STOPPED_SERVER=""
 if [ -n "$(container_of "$CANARY" server)" ]; then
   say "canary server stopped for the refresh"
@@ -411,38 +479,48 @@ refresh_rc=0
 if [ "$refresh_rc" != 0 ]; then
   # tier.sh's own usage errors exit 2, which from here would read as "refused
   # before anything changed" — stable may be stamped by now, a server stopped.
-  [ -z "$STOPPED_SERVER" ] || echo "the canary's server is stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
-  # A re-run recreates what it finds running, so a REST core stopped here stays stopped.
-  [ -z "$STOPPED_API" ] || echo "the canary's REST core is stopped too, and a re-run leaves it so: after \`up\` succeeds, start it with compose -p $CANARY up -d --no-deps api (with this checkout's -f files)." >&2
+  [ -z "$STOPPED_SERVER$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
   echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it." >&2
   exit 1
 fi
 
-say "canary server at 127.0.0.1:$PORT/mcp (commit $GIT_SHA)"
+say "canary servers, MCP and REST core (commit $GIT_SHA)"
 canary_compose up -d --build --no-deps --force-recreate server
-# The REST core runs the server's image by name: recreated, it runs the build
-# just made, not the one it was stopped on.
-[ -z "$STOPPED_API" ] || canary_compose up -d --no-deps --force-recreate api
-# The proxy in front of it (SMD-1846), left running across a refresh: while
-# the server is stopped it answers 502, and the server's new container is the
-# same name on the network. Recreated only when its own configuration changed
-# (another --port).
-canary_compose up -d --no-deps proxy
-BASE="http://127.0.0.1:$PORT/mcp"
+# The REST core runs the server's image by name: recreated after it, it runs
+# the build just made, not the one it was stopped on.
+canary_compose up -d --no-deps --force-recreate api
+if [ "$MODE" = path ]; then
+  # Stable's proxy answers /canary/mcp; a canary proxy from before SMD-2294
+  # would go on publishing its own port, so it goes.
+  if [ -n "$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=proxy")" ]; then
+    canary_compose rm -sf proxy >/dev/null 2>&1
+    say "canary proxy removed: the canary answers on $STABLE's origin now"
+  fi
+  BASE="http://$STABLE_HOST:$STABLE_PORT/canary/mcp"
+else
+  # Its own proxy (SMD-1846), left running across a refresh: while the server
+  # is stopped it answers 502, and the server's new container is the same
+  # name on the network. Recreated only when its own configuration changed
+  # (another --port).
+  canary_compose up -d --no-deps proxy
+  BASE="http://127.0.0.1:$PORT/mcp"
+fi
+say "canary at $BASE"
 for _ in $(seq 1 60); do
   [ "$(curl -s --max-time 2 "$BASE/health" || true)" = ok ] && break
   sleep 2
 done
 if [ "$(curl -s --max-time 2 "$BASE/health" || true)" != ok ]; then
-  echo "the canary server did not answer $BASE/health in 60 tries (2 to 4 minutes). Its log, then its proxy's:" >&2
+  echo "the canary server did not answer $BASE/health in 60 tries (2 to 4 minutes). Its log, then the proxy's in front of it:" >&2
   canary_compose logs --no-color --tail 40 server >&2 || true
-  canary_compose logs --no-color --tail 10 proxy >&2 || true
+  if [ "$MODE" = path ]; then "$RUNTIME" logs --tail 10 "$STABLE_PROXY" >&2 || true
+  else canary_compose logs --no-color --tail 10 proxy >&2 || true
+  fi
   # restart: unless-stopped would otherwise restart it without end (hundreds
   # of times a minute under podman), and a registered connector points at it.
   # The REST core, recreated above on the same image and environment, would too.
-  canary_compose stop server >/dev/null 2>&1 || true
-  [ -z "$STOPPED_API" ] || canary_compose stop api >/dev/null 2>&1 || true
-  echo "the canary server is stopped${STOPPED_API:+, and its REST core}; fix the cause above and re-run up." >&2
+  canary_compose stop server api >/dev/null 2>&1 || true
+  echo "the canary's server and REST core are stopped; fix the cause above and re-run up." >&2
   exit 1
 fi
 

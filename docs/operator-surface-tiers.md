@@ -152,6 +152,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **Prose, `structuredContent`, refusal envelopes, SSE keepalive, notification handling and the scope-filtered `tools/list`** belong to the MCP server alone.
 - **Telemetry:** each server emits OTLP spans with the SMD-1849 allow-list. The MCP span is the parent of the REST span through `traceparent`. Grafana owns storage and presentation.
 - **Brain tiers** (stable / canary / working): one REST core per tier, with the MCP server and the GUI per tier behind `/canary/...`. The exact split is settled in SMD-2294.
+  - **As built (SMD-2294):** the canary stays a compose project of its own (`deploy/canary.sh`), with its own Postgres. `deploy/compose.canary.yaml` puts its MCP server and REST core on stable's mesh as `mcp.canary.ob1.internal` and `api.canary.ob1.internal`, under those names alone, and stable's proxy routes `/canary/mcp` to the first. That is also how it reaches `auth.ob1.internal` across projects: on stable's mesh it resolves stable's. Until a tier has OAuth of its own (SMD-2286) the canary runs with no compose profiles and advertises none. The GUI per tier waits on SMD-2280.
 
 ## Contributions and plugins
 
@@ -244,8 +245,7 @@ Read against the tree on 2026-09-27.
 
 - **The authorization server's remaining details**, each in its own ticket:
   - token lifetimes and refresh-token rotation (SMD-2286);
-  - the client-metadata fetch policy (resolve-and-refuse, or an allowlist) (SMD-2285). Whether `openbrain` revokes PUBLIC's CONNECT went with the `ob1_auth` role: the authorization server reaches no database (2026-10-01);
-  - how the canary tier reaches `auth.ob1.internal` across compose projects (SMD-2294).
+  - the client-metadata fetch policy (resolve-and-refuse, or an allowlist) (SMD-2285). Whether `openbrain` revokes PUBLIC's CONNECT went with the `ob1_auth` role: the authorization server reaches no database (2026-10-01).
 
   The survey behind decision 13 (eight candidates at the versions checked on 2026-09-28) is on SMD-2285.
 - **Which vendored integrations become plugins and which retire** (agent-memory-api, smart-ingest, the capture sources in SMD-2101). SMD-1931 gives the dispositions under decision 9. The GUI's agent-memory and kanban views follow from them.
