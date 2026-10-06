@@ -617,6 +617,17 @@ podman compose -f deploy/compose.yaml --profile board-sync up -d
 podman compose -f deploy/compose.yaml --profile board-sync logs -f board-sync
 ```
 
+Each pass stamps a heartbeat, `heartbeat:board-sync` in `ob1_config`
+(SMD-2261). Preflight's `workers` row, the keyed `/health` body and `brain_info`
+read it. The row warns at once when the loop says it stopped (`compose stop`),
+and once the heartbeat is older than three intervals — its restarts used up,
+or its container removed. It names `up -d --no-deps board-sync`, with the
+`-f` files and `-p` the stack was started with. Just after `up`, the server's
+preflight can read the row a `down` left before board-sync's first pass stamps
+it; such a warning in the start-up log clears on the next `bun preflight.ts`.
+`db/README.md`, "Long-running workers report their liveness", has the row's
+shape.
+
 Every `OB1_BOARD_SYNC_INTERVAL` seconds (300) it runs `bun db/sync-linear.ts`
 once: a few requests list every issue's identifier, last-updated time and names
 (a hundred a page), one query reads the brain's ticket rows, and the difference

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createAssert, RuntimeUrl } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, pendingSettled, requestHead, RuntimeUrl } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
 import { FORK_VERSION } from "../db/version.mjs";
@@ -830,7 +830,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
 console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read, a failed savepoint or COMMIT (SMD-2041)");
 {
-  const { boardSyncValue, brainInfo, formatBytes, ledgerStatus, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
+  const { ago, boardSyncValue, brainInfo, formatBytes, heartbeatState, ledgerStatus, parseHeartbeats, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
   type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;
   assert(ledgerStatus(52, 52) === "current" && ledgerStatus(51, 52) === "behind" && ledgerStatus(53, 52) === "ahead" && ledgerStatus(null, 52) === null,
     "the ledger's highest against the tree's last: current, behind, ahead, unjudged");
@@ -869,11 +869,13 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     }
     if (/pg_database_size/.test(text)) return [{ n: 10_779_671 }];
     if (/linear_updated_at/.test(text)) return [{ w: boardAnswer }];
+    if (/LIKE 'heartbeat:%'/.test(text)) return heartbeatRows;
     if (/FROM ob1_config/.test(text)) return [{ key: "schema_version", value: "1.1.0+upstream.9543c29" }];
     if (/count\(\*\)/.test(text)) return [{ n: 7 }];
     throw new Error(`unexpected statement: ${text.slice(0, 60)}`);
   };
   let boardAnswer: unknown = "2026-09-24T12:00:00.000Z";
+  let heartbeatRows: unknown[] = [];
   const slow = new Set<string>();
   const tag = (strings: TemplateStringsArray) => {
     const text = strings.join("?");
@@ -908,7 +910,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     "…and the reads that answered stand");
   statements.length = 0;
   const lean = await readDatabaseFacts(fake, { stats: false });
-  assert(lean.counts === null && lean.databaseBytes === null && !statements.some((t) => /count\(\*\)|pg_database_size/.test(t)) && lean.schemaVersion === "1.1.0+upstream.9543c29",
+  assert(lean.counts === null && lean.databaseBytes === null && !statements.some((t) => /count\(\*\)::float8|pg_database_size/.test(t)) && lean.schemaVersion === "1.1.0+upstream.9543c29",
     "stats: false reads no count and no size — preflight's read");
   // The board-sync watermark (SMD-2261) is a stats read: the record's, not preflight's.
   assert(facts.boardSync === "2026-09-24T12:00:00.000Z" && !("boardSync" in facts.unread) && lean.boardSync === null && !statements.some((t) => /linear_updated_at/.test(t)),
@@ -924,6 +926,82 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   boardAnswer = "2026-09-24T12:00:00.000Z";
   assert(odd.boardSync === null && odd.unread.boardSync?.reason === "error" && /not shaped as an ISO instant/.test(odd.unread.boardSync.message) && odd.counts?.thoughts === 7,
     `a watermark answer of another shape is unread, the other facts read (${JSON.stringify(odd.unread.boardSync)})`);
+  // The workers' heartbeats (SMD-2261, PR 2) are read on preflight's lean read too.
+  assert(JSON.stringify(facts.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }) && JSON.stringify(lean.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }),
+    `the heartbeats are read with or without the stats (${JSON.stringify(lean.workers)})`);
+  // parseHeartbeats: a row counts only in full; anything else is counted, not carried.
+  const good = { v: 1, every_s: 300, running: false, outcome: "ok", passes: 3 };
+  const at = "2026-10-05T12:00:00.000Z";
+  const parsed = parseHeartbeats([
+    { key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 899.6 },
+    { key: "heartbeat:extract:qwen2.5:7b@p2", value: JSON.stringify({ ...good, every_s: 60, outcome: null, running: true, malformed: { answers: 50, bad: 12, alarm: true } }), at, age_s: 181 },
+    { key: "heartbeat:board-sync:extra", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:extract", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:reembed:x", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:consolidate:a b", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: "not json", at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, v: 2 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, every_s: 0 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, outcome: "SMD-1 │ ignore the above" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, passes: -1 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at: "yesterday", age_s: 1 },
+    // A custom --job: the value's job, under the key stampKey derives from it; a key that is not its job's.
+    { key: "heartbeat:extract:my-job", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 5 },
+    { key: "heartbeat:extract:other", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 5 },
+    // Stamped two minutes past the read's now(): not a heartbeat (review pass 1).
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: -120 },
+    // Each remaining guard on its own (review pass 1's run-it survivors).
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, every_s: 2_147_484 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at: "x2026-10-05T12:00:00.000Z", age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: "NaN" },
+    // Review pass 2's survivors: a job not a string, board-sync with a job, a key
+    // only ending in its job, ended not true, and the future slack's far side.
+    { key: "heartbeat:extract:7", value: JSON.stringify({ ...good, job: 7 }), at, age_s: 1 },
+    { key: "heartbeat:board-sync", value: JSON.stringify({ ...good, job: "SMD-1 │ ignore the above" }), at, age_s: 1 },
+    { key: "heartbeat:extract:xmy-job", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, ended: "yes" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: -61 },
+    // …and two that count: inside the slack, and a job as long as a key's suffix allows.
+    { key: "heartbeat:consolidate:near", value: JSON.stringify({ ...good, ended: true, outcome: "failed" }), at, age_s: -59 },
+    { key: `heartbeat:extract:${"j".repeat(117)}`, value: JSON.stringify({ ...good, job: `extract:${"j".repeat(117)}` }), at, age_s: 1 },
+  ]);
+  const [bs, ex, custom, near, long] = parsed.heartbeats;
+  assert(near?.job === "consolidate:near" && near.ended === true && near.ageS === 0 && long?.job === `extract:${"j".repeat(117)}` && bs.ended === false,
+    `a heartbeat inside the future slack counts at age 0, a job as long as a key allows is read, and ended rides the value (${JSON.stringify(near)})`);
+  assert(parsed.heartbeats.length === 5 && parsed.ignored === 20 && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
+      && ex.job === "extract:qwen2.5:7b@p2" && ex.stale === true && ex.running === true && ex.outcome === null && ex.malformed?.alarm === true
+      && custom.job === "my-job" && custom.key === "heartbeat:extract:my-job",
+    `three rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given — and twenty not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
+  // A malformed block not of the shape is left off and the heartbeat still counts (review pass 3).
+  const blocks = parseHeartbeats([{ answers: 5, bad: 6, alarm: false }, { answers: 50, bad: 1, alarm: "yes" }, null, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: "x", bad: 1, alarm: true }]
+    .map((malformed, i) => ({ key: `heartbeat:consolidate:b${i}`, value: JSON.stringify({ ...good, malformed }), at, age_s: 1 })));
+  assert(blocks.heartbeats.length === 6 && blocks.ignored === 0 && blocks.heartbeats.every((h) => h.malformed === null),
+    `a heartbeat whose block is not of the shape counts, its block left off (${blocks.heartbeats.length}, ${blocks.ignored})`);
+  const capped = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 1, total: 53 }]);
+  assert(capped.heartbeats.length === 1 && capped.ignored === 52, `rows past the read's bound are counted as ignored (${capped.ignored})`);
+  assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
+      && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"
+      && heartbeatState({ ...bs, outcome: "stopped", ended: true }) === "stopped (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, outcome: "failed", ended: true }) === "ended on a failure (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, outcome: "failed", ended: true, stale: true }) === "ended on a failure (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, running: true, outcome: "failed" }) === "running a pass, its last pass failed (last stamped 15 min ago, every 300 s)",
+    `heartbeatState words alive, failed, stale, stopped (fresh or not) and the alarm (${heartbeatState(ex)})`);
+  assert([ago(45), ago(120), ago(5400), ago(200000)].join("|") === "45 s|2 min|2 h|2 d", `ago reads seconds, minutes, hours, days (${[ago(45), ago(120), ago(5400), ago(200000)].join("|")})`);
+  const server0 = () => ({ version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } });
+  heartbeatRows = [{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 10 }, { key: "heartbeat:x", value: "{}", at, age_s: 1 }];
+  const withBeats = renderBrainInfo(await brainInfo(server0(), async () => readDatabaseFacts(fake), 1000));
+  heartbeatRows = [];
+  assert(/^Workers: +board-sync alive \(last stamped 10 s ago, every 300 s\) \(1 heartbeat row\(s\) not of the shape, ignored\)$/m.test(withBeats),
+    `the table's Workers row names each heartbeat and the rows ignored (${withBeats.split("\n").find((l) => l.startsWith("Workers"))})`);
+  // The row's other states: none stamped (with what was ignored), and ob1_config not read.
+  heartbeatRows = [{ key: "heartbeat:x", value: "{}", at, age_s: 1 }];
+  const noneRow = renderBrainInfo(await brainInfo(server0(), async () => readDatabaseFacts(fake), 1000)).split("\n").find((l) => l.startsWith("Workers"));
+  heartbeatRows = [];
+  const lostRow = renderBrainInfo(await brainInfo(server0(), async () => ({ ...facts, workers: null, unread: { workers: { reason: "refused", message: "permission denied for table ob1_config" } } }), 1000)).split("\n").find((l) => l.startsWith("Workers"));
+  assert(/^Workers: +none stamped — no long-running worker has run here \(1 heartbeat row\(s\) not of the shape, ignored\)$/.test(noneRow ?? "") && /^Workers: +\? \(ob1_config not readable by this role\)$/.test(lostRow ?? ""),
+    `the Workers row reads none stamped, or ? when not read (${noneRow} / ${lostRow})`);
+
 
   const server = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
   const planted = (highest: number | null, over: Partial<Facts> = {}): Facts => ({ ...facts, ledger: { present: true, names: highest === null ? [] : [`${highest}_x.sql`] }, highestMigration: highest, unread: {}, ...over });
@@ -986,7 +1064,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   // `current` beside "schema_migrations not read").
   answerLedger = true;
   const tx2Facts = await (async () => {
-    // The first savepoint is ob1_config's; fail the second, the ledger's.
+    // The first savepoint is ob1_config's, the second the heartbeats'
+    // (SMD-2261); fail the third, the ledger's.
     // Fresh function objects: Object.assign onto `tag` would replace the
     // shared fake's own savepoint and begin.
     let n = 0;
@@ -994,7 +1073,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     const counting = Object.assign((strings: TemplateStringsArray) => run(strings), {
       savepoint: async <T>(fn: (sp: typeof run) => Promise<T>) => {
         const r = await fn(run);
-        if (++n === 2) throw pgError("server closed the connection unexpectedly", "08006");
+        if (++n === 3) throw pgError("server closed the connection unexpectedly", "08006");
         return r;
       },
     });
@@ -1929,6 +2008,37 @@ console.log("\n[16j] A supersession proposal's judge reason and review note are 
   }
 }
 
+console.log("\n[16k] A capture reply says what a re-capture does for the key that sent it: a capture-only key's leaves an existing row's tags, vector and windows (080, SMD-2539 — a row without a vector takes one), so its head-window note names the re-embed pass, its blurb note the model, and its tagging notes say text already captured keeps its tags");
+{
+  const { renderCapture } = await import("./render.ts");
+  const reply = (reader: boolean, headWindow: { fellBack: boolean; refused: boolean; error?: string } | null, contextFailures: number) =>
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000aa", reader, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 3, contextFailures, headWindow, recapture: null, ...(reader ? { existed: false } : {}) } } as never).content[0].text;
+  const fell = { fellBack: true, refused: false, error: "503 briefly unavailable" };
+  const writer = reply(true, fell, 0), hook = reply(false, fell, 0);
+  assert(/has its vector; re-capture, or a re-embed pass, gives it the whole-content vector/.test(writer) && /A new thought is stored with it and every search chunk's vector; text already captured keeps its own vector, or takes this one if it had none, and gets none of these chunks\. A re-embed pass gives a head window's vector the whole-content one/.test(hook) && !/The thought is stored/.test(hook) && !/re-capture/.test(hook),
+    `the head-window note: a reader is told re-capture or a re-embed pass, a capture-only key the re-embed pass alone (${hook.split("\n").filter((l) => /head window/.test(l)).join(" ").slice(0, 160)})`);
+  const writerBlurbs = reply(true, null, 2), hookBlurbs = reply(false, null, 2);
+  assert(/They are stored and searchable; re-capture to regenerate, or check the model at http:\/\/chat\./.test(writerBlurbs) && /A new thought stores them so, searchable; text already captured gets none of them\. Check the model at http:\/\/chat\./.test(hookBlurbs) && !/They are stored/.test(hookBlurbs) && !/re-capture/.test(hookBlurbs),
+    `the situating-context note: a reader is told to re-capture or check the model, a capture-only key to check the model (${hookBlurbs.split("\n").filter((l) => /situating/.test(l)).join(" ").slice(0, 160)})`);
+  // …and its refused-chat arm: the blurb calls were not made.
+  const refusedBlurbs = (reader: boolean) =>
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ac", reader, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: false, reason: "a rule refused it", base: "http://chat" }, chunks: 3, contextFailures: 3, headWindow: null, recapture: null } } as never).content[0].text;
+  assert(/the blurb calls were not made: a rule refused it\. They are stored and searchable\./.test(refusedBlurbs(true)) && /the blurb calls were not made: a rule refused it\. A new thought stores them so, searchable; text already captured gets none of them\./.test(refusedBlurbs(false)),
+    `the refused-chat blurb note: stored for a reader, a new thought's for a capture-only key (review pass 2) (${refusedBlurbs(false).split("\n").filter((l) => /blurb calls/.test(l)).join(" ").slice(0, 200)})`);
+  // The tagging notes: a capture key is not told whether the text was new,
+  // and its re-capture merges nothing — neither the refusal marker nor a
+  // failed extraction's placeholders (review pass 1).
+  const tagged = (reader: boolean, failed: string) =>
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ab", reader, tags: { metadata_extraction_failed: failed }, embeddings: { allowed: true, reason: "" }, chat: { allowed: failed !== "egress_denied", reason: failed === "egress_denied" ? "a rule refused it" : "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
+  const refusedHook = tagged(false, "egress_denied"), refusedPre035 = tagged(true, "egress_denied");
+  assert(/text already captured keeps its tags\.$/m.test(refusedHook) && !/merged in/.test(refusedHook) && /text already captured keeps its tags, with the refusal marker merged in\./.test(refusedPre035),
+    `the tagging-refused note: a capture-only key's text already captured keeps its tags, nothing merged; a reader on a database that does not say (before 035) still hears the marker merged in (${refusedHook.split("\n").filter((l) => /tagging call/.test(l)).join(" ").slice(0, 200)})`);
+  const failedHook = tagged(false, "timeout"), failedReader = tagged(true, "timeout");
+  assert(/Note: automatic tagging failed for this capture \(timeout\) — a new thought's topics and people are placeholders; text already captured keeps its tags\. Check the chat endpoint/.test(failedHook) && !/was saved/.test(failedHook)
+      && /Note: the thought was saved, but automatic tagging failed \(timeout\) — topics and people are placeholders\. Check the chat endpoint/.test(failedReader),
+    `the tagging-failed note: a capture-only key hears the placeholders are a new thought's, an existing one keeping its tags (${failedHook.split("\n").filter((l) => /tagging failed/.test(l)).join(" ").slice(0, 220)})`);
+}
+
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
   const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {
@@ -2146,25 +2256,10 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   // no Host (HTTP/1.0), userinfo or a path leave the bare request target, which Hono routed wrong (a 405 at /health). Raw sockets,
   // since fetch sends a Host of its own. The REST core is served beside the
   // MCP server through its own entry, api.ts; no row below reaches a store.
-  const { routable, REBUILD_ORIGIN } = await import("./root.ts");
+  const { routable, REBUILD_ORIGIN } = await import("./auth.ts");
   const rest = Bun.serve({ ...(await import("./api.ts")).default, port: 0 });
   const { connect } = await import("node:net");
-  const raw = (port: number, text: string) => new Promise<string>((resolve, reject) => {
-    const sock = connect(port, "127.0.0.1", () => sock.write(text));
-    let got = "";
-    sock.on("data", (d) => (got += d));
-    sock.on("close", () => resolve(got));
-    sock.on("error", reject);
-    setTimeout(() => sock.destroy(), 3_000);
-  });
-  /** The request line and Host: HTTP/1.0 with none for `null`, which HTTP/1.1 would make Bun's own 400. */
-  const headOf = (method: string, target: string, host: string | null) =>
-    [`${method} ${target} HTTP/${host === null ? "1.0" : "1.1"}`, ...(host === null ? [] : [`host: ${host}`])];
-  const ask = async (port: number, method: string, target: string, host: string | null, headers: string[] = [], body = "") => {
-    const head = [...headOf(method, target, host), ...headers, "connection: close", `content-length: ${Buffer.byteLength(body)}`];
-    const got = await raw(port, `${head.join("\r\n")}\r\n\r\n${body}`);
-    return { status: Number(got.split(" ")[1]), body: got.slice(got.indexOf("\r\n\r\n") + 4) };
-  };
+  const ask = askRaw;
   const J = ["content-type: application/json", "accept: application/json, text/event-stream"];
   const LIST = JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list" });
   for (const host of ["x:99999", "[::1", "brain.example.test:abc", null, "a@brain.example.test", "brain.example.test/x", "::1:8000"]) {
@@ -2195,13 +2290,6 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   // body throws as the request's own does, where a copy of the request never
   // settled and its handler waited forever (review pass 1). Keyless at the
   // MCP endpoint, keyed at the REST core's capture; localhost the control.
-  // Returns how many requests were pending as the client left: one, or the row would hold nothing (review pass 2).
-  const leave = (s: { port?: number; pendingRequests: number }, target: string, host: string | null, headers: string[]) => new Promise<number>((resolve) => {
-    const head = [...headOf("POST", target, host), "content-type: application/json", ...headers, "content-length: 1000"];
-    const sock = connect(s.port!, "127.0.0.1", () => { sock.write(`${head.join("\r\n")}\r\n\r\n{"jsonrpc":"2.0","id":1`); setTimeout(() => { const pending = s.pendingRequests; sock.destroy(); resolve(pending); }, 150); });
-    sock.on("error", () => resolve(-1));
-  });
-  const settled = async (s: { pendingRequests: number }) => { for (let i = 0; i < 40 && s.pendingRequests > 0; i++) await Bun.sleep(50); return s.pendingRequests; };
   // Each MCP hang-up is logged as abandoned; muted here, so the suite's output
   // stays its own (review pass 3). The row below checks that line.
   const realWarn = console.warn;
@@ -2209,10 +2297,10 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   try {
     for (const host of ["localhost", "x:99999", null]) {
       const at = host === null ? "no Host (HTTP/1.0)" : `Host ${host}`;
-      const mcpHeld = await leave(server, "/mcp", host, J.slice(1));
-      const mcpLeft = await settled(server);
-      const restHeld = await leave(rest, "/v1/thoughts", host, [`x-brain-key: ${KEY}`]);
-      const restLeft = await settled(rest);
+      const mcpHeld = await leaveMidUpload(server, "/mcp", host, J.slice(1), '{"jsonrpc":"2.0","id":1');
+      const mcpLeft = await pendingSettled(server);
+      const restHeld = await leaveMidUpload(rest, "/v1/thoughts", host, [`x-brain-key: ${KEY}`], '{"jsonrpc":"2.0","id":1');
+      const restLeft = await pendingSettled(rest);
       assert(mcpHeld === 1 && restHeld === 1 && mcpLeft === 0 && restLeft === 0,
         `${at}: a client that leaves mid-upload leaves no request pending (pending as it left: MCP ${mcpHeld}, REST ${restHeld}; after: MCP ${mcpLeft}, REST ${restLeft})`);
     }
@@ -2227,7 +2315,7 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   try {
     const call = JSON.stringify({ jsonrpc: "2.0", id: 52, method: "tools/call", params: { name: "search_thoughts", arguments: { query: "left at a bad Host" } } });
     await new Promise<void>((resolve) => {
-      const head = [...headOf("POST", "/mcp", "x:99999"), ...J, `x-brain-key: ${KEY}`, `content-length: ${Buffer.byteLength(call)}`];
+      const head = [...requestHead("POST", "/mcp", "x:99999"), ...J, `x-brain-key: ${KEY}`, `content-length: ${Buffer.byteLength(call)}`];
       const sock = connect(PORT, "127.0.0.1", () => { sock.write(`${head.join("\r\n")}\r\n\r\n${call}`); setTimeout(() => { sock.destroy(); resolve(); }, 500); });
       sock.on("error", () => resolve());
     });

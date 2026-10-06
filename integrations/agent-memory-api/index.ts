@@ -23,7 +23,7 @@
 
 import { Hono, type MiddlewareHandler } from "hono";
 import { createClient } from "../../compat/supabase-sql/index.ts";
-import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
+import { authenticateRequest, canWrite, requestAt, routable, type Principal } from "../_shared/auth.ts";
 import { z } from "zod";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -787,14 +787,17 @@ app.get("/recall-traces/:request_id", async (c) => {
   return c.json({ trace, items }, 200, corsHeaders);
 });
 
+// The prefix stripped from a URL that parses (routable), the request handed on
+// from its parts at the stripped URL (requestAt), never `new Request(url, req)` (SMD-2595).
 const handler = (req: Request) => {
-  const url = new URL(req.url);
+  const routed = routable(req);
+  const url = new URL(routed.url);
   if (url.pathname === "/agent-memory-api") {
     url.pathname = "/";
   } else if (url.pathname.startsWith("/agent-memory-api/")) {
     url.pathname = url.pathname.slice("/agent-memory-api".length);
   }
-  return app.fetch(new Request(url, req));
+  return app.fetch(requestAt(routed, url));
 };
 
 export default {
