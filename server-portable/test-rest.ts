@@ -11,7 +11,7 @@
  *   bun test-rest.ts
  */
 
-import { createAssert } from "../db/test-support.ts";
+import { createAssert, RuntimeUrl } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { TOOLS, TOOL_NAMES, READ_TOOL_NAMES, CAPTURE_TOOL_NAMES, type ToolName } from "./tools.ts";
 import { SPECS, type Core } from "./core/index.ts";
@@ -411,13 +411,8 @@ console.log("\n[8] One log line per request: method, route, status, time — no 
 console.log("\n[9] A request URL that will not parse — Bun builds it from the Host header unchecked — still has its query read: a refusal, not a 500 (SMD-2535)");
 {
   // api.ts rebuilds such a request before routing (root.ts routable); the
-  // app reads its query without parsing the URL all the same. A Request's own
-  // constructor refuses the URL, so the runtime's is stood in for, with a
-  // path Hono reads from the string as it would.
-  class RuntimeUrl extends Request {
-    constructor(private readonly given: string, init?: RequestInit) { super("http://stand-in.test/", init); }
-    override get url() { return this.given; }
-  }
+  // app reads its query without parsing the URL all the same, with a path
+  // Hono reads from the string as it would.
   for (const host of ["x:99999", "[::1", "brain.example.test:abc"]) {
     const r = await json(await app.fetch(new RuntimeUrl(`http://${host}/v1/thoughts?limit=x`, { headers: { "x-brain-key": "read-raw" } })));
     const issues = (r.body.issues ?? []) as { path: string }[];

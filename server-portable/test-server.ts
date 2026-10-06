@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createAssert } from "../db/test-support.ts";
+import { createAssert, RuntimeUrl } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
 import { FORK_VERSION } from "../db/version.mjs";
@@ -2239,10 +2239,6 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
 
   // routable's own rules: a request whose URL parses is passed as it came; one
   // that will not is rebuilt at an origin no client dials, all else kept.
-  class RuntimeUrl extends Request {
-    constructor(private readonly given: string, init?: RequestInit) { super("http://stand-in.test/", init); }
-    override get url() { return this.given; }
-  }
   const asCame = new Request("http://localhost/mcp?key=k");
   assert(routable(asCame) === asCame, "a URL that parses: the same request");
   const rebuilt = routable(new RuntimeUrl("http://x:99999/mcp?key=k", { method: "POST", headers: { "x-brain-key": "h", host: "x:99999" }, body: "the body" }));
