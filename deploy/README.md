@@ -855,6 +855,11 @@ share stable's `/mcp`, `/api` and `/auth`), and stable's proxy routes
 default network, so they cannot reach stable's database, or a service a
 compose profile runs there. With no profiles the canary advertises no OAuth;
 on stable's mesh it could otherwise find stable's authorization server.
+On stable's origin the canary is reached wherever stable is, with stable's
+keys: on the LAN when stable's `SERVER_BIND` opens it, and through any tunnel
+or TLS proxy in front of stable's port. It runs whatever the checkout that
+stood it up holds, so `up` says so when stable is bound past loopback or has
+a public origin; pass `--port N` for a canary on this host's loopback alone.
 While a canary is attached, stable's `compose down` leaves stable's mesh in
 place (it is in use), so take the canary down first; if stable's mesh is
 made again, re-run `up`.
@@ -943,9 +948,12 @@ stable is redeployed:
 
 `down` removes the canary's containers and its own networks; stable's mesh
 stays. It deregisters the connector only when `claude` has it at user scope
-and at a URL of the canary's: `/canary/mcp` on a loopback origin, which no
-other service answers, or a canary proxy's port with any path (and either
-with any `?key=`). A connector at stable's own `/mcp` is never the canary's.
+and at a URL of the canary's: `/canary/mcp`, which no other service answers,
+on loopback (`127.0.0.1`, `localhost`, `[::1]`) or on the address stable's
+proxy is bound to, or a canary proxy's port with any path (and either with
+any `?key=`). A connector at stable's own `/mcp` is never the canary's. An
+`up` that moves the canary between stable's origin and `--port` without
+`--connect` leaves the connector where it was, and says so.
 A canary proxy's port is read from its container, running or stopped (after
 a reboot podman leaves it stopped, and Docker restarts it but not its
 Postgres); once that is gone, pass the `--port` it was stood up with.

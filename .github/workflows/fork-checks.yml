@@ -1144,7 +1144,8 @@ jobs:
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-api-route"] == .configs["proxy-api-route"].content) and (.configs["proxy-api-route"].content | test("middlewares: \\[api-no-forwarder, api-strip\\]") and test("X-Brain-Forwarder: \"\"")) and ([.configs["proxy-api-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://api.ob1.internal.:8000"])'
           # The canary's overlay (SMD-2294), as canary.sh runs it: its server and
           # REST core join stable's mesh under the canary's names alone, the
-          # canary's own `mesh` stays its own, and it publishes nothing.
+          # canary's own `mesh` stays its own, and it adds no port (the one the
+          # config lists is the canary's own proxy, started only with --port).
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml config --format json \
             | jq -e '(.services.server.networks["stable-mesh"].aliases == ["mcp.canary.ob1.internal"]) and (.services.api.networks["stable-mesh"].aliases == ["api.canary.ob1.internal"]) and (.networks["stable-mesh"] | .external == true and .name == "open-brain_mesh") and (.networks.mesh.name == "open-brain-canary_mesh") and ([.services[] | select(.networks["stable-mesh"] != null)] | length == 2) and ([.services[].ports[]?] | length == 1)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
@@ -1598,6 +1599,8 @@ jobs:
       #   left stable's mesh, and /canary/mcp is the proxy's 404 again. The stub
       #   serves another model: the thought put on stable just before it
       #   reaches the canary, and the smoke fails on the 50% floor.
+      # - A third `up`, back on stable's origin: the canary's proxy is removed,
+      #   8011 is free, and a connector left at the old URL is named.
       # - Then teardown:
       #   - `down --volumes` is refused on a canary stamped working;
       #   - an empty canary is deleted;
@@ -1653,9 +1656,19 @@ jobs:
           grep -F 'canary server stopped for the refresh' /tmp/canary-wrong.out
           grep -F 'canary at http://127.0.0.1:8011/mcp' /tmp/canary-wrong.out
           [ "$(docker compose -p open-brain-canary -f compose.yaml port proxy 8000)" = 127.0.0.1:8011 ] || { echo "the canary's own proxy is not on loopback only" >&2; exit 1; }
-          [ -z "$(on_stable_mesh server)" ] || { echo "the canary behind its own proxy is still on stable's mesh" >&2; exit 1; }
+          [ -z "$(on_stable_mesh server)$(on_stable_mesh api)" ] || { echo "the canary behind its own proxy is still on stable's mesh" >&2; exit 1; }
           [ "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/canary/mcp/health)" = 404 ] || { echo "/canary/mcp still answers with the canary behind its own proxy" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
+          # Back on stable's origin, the way a canary stood up before SMD-2294
+          # moves over: its own proxy goes, its port is free, and a connector
+          # left at the old URL is named.
+          FAKE_URL='http://127.0.0.1:8011/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-back.out
+          grep -F 'canary proxy removed' /tmp/canary-back.out
+          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…' /tmp/canary-back.out
+          [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy)" ] || { echo "the canary's own proxy outlived the move to stable's origin" >&2; exit 1; }
+          if (exec 3<>/dev/tcp/127.0.0.1/8011) 2>/dev/null; then echo "port 8011 still answers after the canary's proxy went" >&2; exit 1; fi
+          grep -qw mcp.canary.ob1.internal <<<"$(on_stable_mesh server)" || { echo "the canary back on stable's origin is not on stable's mesh" >&2; exit 1; }
+          jq -e '.tier == "canary"' <<<"$(health /canary/mcp)" > /dev/null || { echo "/canary/mcp does not answer as the canary again" >&2; exit 1; }
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
           cq "ALTER DATABASE openbrain RESET ob1.refresh_target"
           refused 'refusing to delete its volume' down --volumes

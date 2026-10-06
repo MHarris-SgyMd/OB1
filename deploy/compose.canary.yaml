@@ -16,6 +16,13 @@
 # reach it, and its own `mesh`, which nothing else joins. It runs with
 # COMPOSE_PROFILES empty (canary.sh), so its server advertises no OAuth: on
 # stable's mesh it would otherwise find stable's authorization server.
+#
+# The rule for anything a canary dials: a rooted *.canary.ob1.internal name.
+# From the canary's containers mcp.ob1.internal, api.ob1.internal and
+# auth.ob1.internal each name its own container and stable's alike (measured on
+# podman), and a request sent by those names could reach stable's brain with
+# stable's keys. Today only the server's OAuth probe dials one
+# (auth.ob1.internal), and only under a profile, which the canary runs without.
 
 services:
   server:
