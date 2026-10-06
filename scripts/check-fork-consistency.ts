@@ -2187,9 +2187,10 @@ const PUBLISHES: Record<string, string[]> = {
   // the provisioning step and an AI client on this host.
   "compose.yaml": ["proxy", "n8n"],
   "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
-  // The three-brain pipeline (SMD-1806): each tier's server on its own loopback
-  // port; the three Postgres services and the shared Ollama publish nothing.
-  "compose.tiers.yaml": ["stable-server", "canary-server", "working-server"],
+  // The three-brain pipeline (SMD-1806): its proxy, where each tier is a path
+  // (SMD-2294); the tiers' servers, REST cores and Postgres services and the
+  // shared Ollama publish nothing.
+  "compose.tiers.yaml": ["proxy"],
 };
 const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
 

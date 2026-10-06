@@ -2976,10 +2976,11 @@ stamped as — a working server pointed at the stable database, the failure the
 one-writer rule exists to prevent.
 
 **Reaching it from a client.** The server speaks Streamable HTTP, so a client
-adds it as one remote MCP entry:
+adds it as one remote MCP entry, at `/mcp` on the stack's proxy (`SERVER_PORT`,
+8000 unless set; deploy/README.md, "One origin"):
 
 ```bash
-claude mcp add --transport http open-brain-stable http://127.0.0.1:8010/mcp
+claude mcp add --transport http open-brain-stable http://127.0.0.1:8000/mcp
 ```
 
 ## The canary and working tiers — refresh, replay, diff, promote (SMD-1806)
@@ -3082,13 +3083,21 @@ ranking that moved or a step that failed, 2 a usage error or a refusal (SMD-2182
 A side that does not answer is named with its host and port.
 
 The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
-services, one shared Ollama, three servers on three loopback ports — built from the
-checkout (the published stable image is SMD-1860, not yet cut). A client reaches the
-working tier as a second remote MCP entry a transcript can tell from stable's:
+services, one shared Ollama, each tier's MCP server and REST core, and one proxy
+where each tier is a path: `/mcp`, `/canary/mcp`, `/working/mcp` (SMD-2294) —
+built from the checkout (the published stable image is SMD-1860, not yet cut). A
+client reaches the working tier as a second remote MCP entry a transcript can
+tell from stable's:
 
 ```bash
-claude mcp add --transport http open-brain-working http://127.0.0.1:8012/mcp
+claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working/mcp
 ```
+
+A canary stood beside a running stack with `deploy/canary.sh` answers the same
+way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
+deploy/README.md), and `--compare` takes the two URLs as they are:
+`bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
+each labelled by host and path.
 
 **Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
 runs the refresh/replay/diff against the **published** images through the merge

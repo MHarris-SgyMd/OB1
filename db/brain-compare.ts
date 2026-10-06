@@ -2,8 +2,9 @@
 /**
  * brain-compare.ts — one "how do these two brains differ" call (SMD-2109).
  *
- * SMD-1806 runs the fork as three brains (stable :8010, canary :8011, working)
- * over one corpus. That only pays off if you can answer, in one step, "are these
+ * SMD-1806 runs the fork as three brains (stable, canary, working) over one
+ * corpus, each a path on one origin since SMD-2294 (/mcp, /canary/mcp,
+ * /working/mcp). That only pays off if you can answer, in one step, "are these
  * two telling me the same thing, and if not, why?" — version, migration, corpus
  * freshness, retrieval. The pieces existed and nothing composed them: brain_info
  * (SMD-2041) reports ONE brain; tier.ts --diff (slice 2) is the merge-time replay
@@ -15,7 +16,8 @@
  *   bun db/tier.ts --compare <a> <b> [--replay --queries-file <path>] [--json]
  *
  * A brain reference <a>/<b> is either an http(s):// base URL (its read key from
- * --a-key/--b-key, OB1_COMPARE_KEY, or the URL's own ?key=), or a Claude Code MCP
+ * --a-key/--b-key, OB1_COMPARE_KEY, or the URL's own ?key=; labelled by host and
+ * path, since two tiers share an origin), or a Claude Code MCP
  * connector NAME (open-brain, open-brain-canary) resolved through `claude mcp get`
  * — the same base URL and x-brain-key an operator already registered. Either way
  * the compare reaches each brain the way a client does: as ONE HTTP process by URL
@@ -114,10 +116,13 @@ export async function resolveBrain(ref: string, keyArg: string | undefined, envK
     // show only the part before any query string (review pass 2 — a key-safety tidy
     // in already-merged code, reachable via --a/--b too).
     if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref.split("?")[0])} is not a valid URL.`);
-    const host = new URL(ref).host;
+    // Host and path: two tiers on one origin (SMD-2294) differ only in the path,
+    // /mcp against /canary/mcp, and a host alone would label both alike.
+    const at = new URL(parsed.base);
+    const label = at.host + (at.pathname === "/" ? "" : at.pathname);
     const key = keyArg ?? parsed.urlKey ?? envKey;
-    if (!key) throw new Error(`--compare: no read key for ${host}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
-    return { label: host, base: parsed.base, key };
+    if (!key) throw new Error(`--compare: no read key for ${label}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
+    return { label, base: parsed.base, key };
   }
   // A connector name — resolve it the way canary.sh does, reading the URL and the
   // x-brain-key header out of `claude mcp get`, and echoing neither back.

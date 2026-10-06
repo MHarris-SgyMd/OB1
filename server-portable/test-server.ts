@@ -1352,14 +1352,17 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const graceFallbacks: string[] = [];
   for (const file of ["compose.yaml", "compose.tiers.yaml"]) {
     const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; stop_grace_period?: string }> };
+    const builds = (svc: { build?: { dockerfile?: string } }) => svc.build?.dockerfile === "server-portable/Dockerfile";
+    // The server's image, built here or (a REST core) run by a building service's name.
+    const serverImages = new Set(Object.values(doc.services).filter(builds).map((svc) => svc.image).filter(Boolean));
     for (const [name, svc] of Object.entries(doc.services)) {
-      // The server's image, built or (the REST core) run by the server's name.
-      if (svc.build?.dockerfile !== "server-portable/Dockerfile" && svc.image !== "${COMPOSE_PROJECT_NAME:-open-brain}-server") continue;
+      if (!builds(svc) && !serverImages.has(svc.image)) continue;
       graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
     }
   }
-  // Five: the server and the REST core (SMD-2284) in compose.yaml, three tier servers.
-  assert(graceFallbacks.length === 5 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+  // Eight: the server and the REST core (SMD-2284) in compose.yaml, and each
+  // tier's server and REST core in compose.tiers.yaml (SMD-2294).
+  assert(graceFallbacks.length === 8 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
     `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
 
   // Preflight refuses a value compose would render wrong, and reports one it reads.

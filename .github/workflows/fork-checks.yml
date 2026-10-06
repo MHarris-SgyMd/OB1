@@ -1148,6 +1148,12 @@ jobs:
           # config lists is the canary's own proxy, started only with --port).
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml config --format json \
             | jq -e '(.services.server.networks["stable-mesh"].aliases == ["mcp.canary.ob1.internal"]) and (.services.api.networks["stable-mesh"].aliases == ["api.canary.ob1.internal"]) and (.networks["stable-mesh"] | .external == true and .name == "open-brain_mesh") and (.networks.mesh.name == "open-brain-canary_mesh") and ([.services[] | select(.networks["stable-mesh"] != null)] | length == 2) and ([.services[].ports[]?] | length == 1)'
+          # The three-brain stack (SMD-2294) publishes its proxy alone, on
+          # loopback, on compose.yaml's pinned image, its route label its
+          # config, every backend a rooted mesh name, and each tier's REST core
+          # on its own server's image, tier and database.
+          docker compose -f compose.tiers.yaml --profile local-models config --format json \
+            | jq -e --arg img "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" '. as $c | ([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1")) and (.services.proxy.ports | length == 1) and (.services.proxy.image == $img) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["tier-routes"].content) and ([.configs["tier-routes"].content | scan("url: \"([^\"]*)\"")[]] == ["http://mcp.ob1.internal.:8000", "http://mcp.canary.ob1.internal.:8000", "http://mcp.working.ob1.internal.:8000"]) and ([("stable", "canary", "working") | . as $t | ($c.services["\($t)-api"].image == $c.services["\($t)-server"].image) and ($c.services["\($t)-api"].environment.OB1_TIER == $t) and ($c.services["\($t)-api"].environment.DATABASE_URL == $c.services["\($t)-server"].environment.DATABASE_URL)] | all) and .networks.mesh.internal == true'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \

@@ -352,6 +352,13 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
 {
   const withKey = await resolveBrain("http://localhost:9/mcp?key=SEKRIT", undefined, undefined);
   ok(withKey.base === "http://localhost:9/mcp" && withKey.key === "SEKRIT", "resolveBrain lifts ?key= off the base into the key");
+  // Two tiers on one origin (SMD-2294) are told apart by the path in the label.
+  const stableAt = await resolveBrain("http://127.0.0.1:8000/mcp", "k", undefined);
+  const canaryAt = await resolveBrain("http://127.0.0.1:8000/canary/mcp/?key=k", undefined, undefined);
+  const rootAt = await resolveBrain("http://localhost:9/", "k", undefined);
+  ok(stableAt.label === "127.0.0.1:8000/mcp" && canaryAt.label === "127.0.0.1:8000/canary/mcp" && rootAt.label === "localhost:9",
+    `resolveBrain labels a URL by host and path, so two tiers on one origin differ (${stableAt.label}, ${canaryAt.label}, ${rootAt.label})`);
+  ok(!canaryAt.label.includes("key"), "…and never by its ?key=");
   const argKey = await resolveBrain("http://localhost:9/", "argkey", "envkey");
   ok(argKey.key === "argkey", "resolveBrain: --a-key wins over the env");
   const envKey = await resolveBrain("http://localhost:9/", undefined, "envkey");
