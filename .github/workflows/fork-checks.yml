@@ -1677,16 +1677,19 @@ jobs:
           # left at the old URL is named.
           FAKE_URL='http://127.0.0.1:8011/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-back.out
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…, where this canary no longer answers: move it with claude mcp remove --scope user open-brain-canary, then up --connect' /tmp/canary-back.out
-          # The proxy went last, once the canary answered on stable's origin: a
-          # run that failed before then would have kept it, and the connector
-          # at its port the canary's.
-          answered=$(grep -nF 'canary at http://127.0.0.1:8010/canary/mcp' /tmp/canary-back.out | cut -d: -f1)
+          # The proxy went last, after the health wait and the connector step
+          # (whose note prints after both): a run that failed before then would
+          # have kept it, and the connector at its port the canary's.
+          noted=$(grep -nF 'connector open-brain-canary still points at' /tmp/canary-back.out | cut -d: -f1)
           removed=$(grep -nF 'canary proxy removed' /tmp/canary-back.out | cut -d: -f1)
-          if ! { [ -n "$answered" ] && [ -n "$removed" ] && [ "$answered" -lt "$removed" ]; }; then echo "the canary's own proxy was not removed after the canary answered on stable's origin (answered at line ${answered:-?}, removed at ${removed:-?})" >&2; exit 1; fi
+          if ! { [ -n "$noted" ] && [ -n "$removed" ] && [ "$noted" -lt "$removed" ]; }; then echo "the canary's own proxy was not removed after the connector step (noted at line ${noted:-?}, removed at ${removed:-?})" >&2; exit 1; fi
           [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy)" ] || { echo "the canary's own proxy outlived the move to stable's origin" >&2; exit 1; }
           if (exec 3<>/dev/tcp/127.0.0.1/8011) 2>/dev/null; then echo "port 8011 still answers after the canary's proxy went" >&2; exit 1; fi
           grep -qw mcp.canary.ob1.internal <<<"$(on_stable_mesh server)" || { echo "the canary back on stable's origin is not on stable's mesh" >&2; exit 1; }
-          jq -e '.tier == "canary"' <<<"$(health /canary/mcp)" > /dev/null || { echo "/canary/mcp does not answer as the canary again" >&2; exit 1; }
+          # The first keyed request to a server this --no-smoke run recreated:
+          # a cold key registry answers plain `ok` (smoke.sh warms it the same way).
+          for _ in 1 2 3 4 5; do jq -e '.tier == "canary"' <<<"$(health /canary/mcp)" > /dev/null 2>&1 && break; sleep 2; done
+          jq -e '.tier == "canary"' <<<"$(health /canary/mcp)" > /dev/null || { echo "/canary/mcp does not answer as the canary again: $(health /canary/mcp | head -c 120)" >&2; exit 1; }
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
           cq "ALTER DATABASE openbrain RESET ob1.refresh_target"
           refused 'refusing to delete its volume' down --volumes

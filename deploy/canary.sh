@@ -17,7 +17,8 @@
 # refuses unless --port names a loopback port for the canary's own proxy, the
 # way every canary was stood up before (8011 was the default). On stable's
 # origin the canary is reached wherever stable is — the LAN under stable's
-# SERVER_BIND, a tunnel to its origin — with stable's keys, and `up` says so;
+# SERVER_BIND, a tunnel to its origin — with stable's keys; `up` says so when
+# stable is bound past loopback or its env file names OB1_PUBLIC_ORIGIN.
 # --port keeps it on this host's loopback alone.
 #
 #   deploy/canary.sh --env-file ~/stack/deploy/.env up --connect
@@ -550,8 +551,9 @@ if [ "$MODE" = path ]; then
   # would go on publishing its own port, so it goes — last, once the canary
   # answers here and the connector has moved. A run that fails before then
   # keeps it, so a connector at its port is still the canary's and a re-run
-  # with --connect moves it; one that fails at the smoke leaves it serving the
-  # canary there too (a failed refresh or health wait stops the servers).
+  # with --connect moves it; one that fails after the health wait (the smoke,
+  # the connector) leaves it serving the canary there too (a failed refresh
+  # or health wait stops the servers).
   OLD_PROXY="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=proxy")"
   [ -z "$OLD_PROXY" ] || OLD_PORT="$(published_port)"
   BASE="http://$STABLE_HOST:$STABLE_PORT/canary/mcp"
@@ -710,7 +712,7 @@ else
 fi
 
 if [ -n "$OLD_PROXY" ]; then
-  canary_compose rm -sf proxy >/dev/null 2>&1 || { echo "could not remove the canary's own proxy, which may still publish port ${OLD_PORT:-?}; the canary answers at $BASE. Remove it with compose -p $CANARY rm -sf proxy (this checkout's -f files)." >&2; exit 1; }
+  removal="$(canary_compose rm -sf proxy 2>&1)" || { echo "could not remove the canary's own proxy, which may still publish port ${OLD_PORT:-?}; the canary answers at $BASE. Remove it with compose -p $CANARY rm -sf proxy (this checkout's -f files). Compose said: $(tail -n 3 <<<"$removal")" >&2; exit 1; }
   say "canary proxy removed: the canary answers on $STABLE's origin now"
 fi
 

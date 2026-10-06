@@ -960,7 +960,8 @@ longer the canary's, and the connector must be removed by hand first
 (`claude mcp remove --scope user open-brain-canary`). The proxy goes last,
 once the canary answers on stable's origin: an `up` that fails keeps it, so
 a connector at its port stays the canary's and a re-run with `--connect`
-moves it. Only a failure at the smoke leaves it answering meanwhile; a
+moves it. Only a failure after the health wait (at the smoke, or the
+connector) leaves it answering meanwhile; a
 failed refresh or health wait stops the canary's servers.
 A canary proxy's port is read from its container, running or stopped (after
 a reboot podman leaves it stopped, and Docker restarts it but not its
