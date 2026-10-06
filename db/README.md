@@ -2209,10 +2209,19 @@ would judge a capture before
 016's worker reached it and leave a terminal claim row behind. The gate cannot
 see the other side of a pair: a newer thought judged while an older neighbour
 is still unextracted is judged without it, and the pair is not revisited.
-Beside a follower of one extract worker that is safe for captures, queued one
-at a time and claimed in that order; a backlog — a first run, a
-`--switch-key` — is queued at one instant and claimed in no order, so run the pass after extraction has drained one (the `workers`
-compose profile, `deploy/README.md`, SMD-2424). k and the
+Since a candidate is at least a calendar day older, a pass beside an extract
+follower is safe for captures: their neighbours were extracted long before.
+What it misses is an older side that has no entities yet when the newer side
+is judged:
+- **A backlog.** A first run or a `--switch-key` pools every thought at one
+  instant, claimed in no order, so drain it before consolidating (the
+  `workers` compose profile, `deploy/README.md`, SMD-2424).
+- **A failed extraction.** `--retry-failed` extracts it, but the newer
+  thoughts already judged are not judged again.
+- **An import dated older than thoughts already judged.** Same: its pairs
+  with them are not judged.
+
+The last two hold however the pass is run. k and the
 floor were chosen by measurement (`evals/eval-consolidate.ts`;
 `evals/README.md` has the table) and are the worker's `--k` and `--min-sim`.
 

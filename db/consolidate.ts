@@ -52,11 +52,14 @@
  * that order. What the gate cannot see is the OTHER side of a pair: a newer
  * thought judged while an older neighbour is still unextracted is judged
  * without it, and since a pair is reached from its newer side only, that pair
- * is not revisited. Beside a follower of one extract worker that is safe for
- * captures, which are queued one at a time and claimed in that order; a
- * backlog is queued at one instant and claimed in no order (015), so run
- * consolidation after extraction has drained one (the `workers` compose
- * profile, SMD-2424, deploy/README.md). A thought's claim row is terminal once its pairs are judged, so
+ * is not revisited. A candidate is at least a calendar day older (029), so
+ * beside an extract follower a capture's neighbours were extracted long
+ * before it — unless one is still in a backlog (a first run or a
+ * --switch-key pools every thought at one instant, claimed in no order:
+ * drain it before consolidating), failed, or imported later with an older
+ * date; the last two miss their pairs whenever this runs (the `workers`
+ * compose profile, SMD-2424, deploy/README.md). A thought's claim row is
+ * terminal once its pairs are judged, so
  * an EDIT does not re-judge it (016's trigger does re-extract it); clear the
  * key's rows to start over, and a pair already proposed is skipped either way.
  *

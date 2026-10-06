@@ -785,11 +785,13 @@ services:
   # older schema (deploy/README.md). Two differences from board-sync. MCP_ACCESS_KEYS
   # stays: the worker names itself by OB1_WORKER_KEY's hash in that list
   # (db/worker-bootstrap.ts). And OB1_WORKER_KEY is required: the `sh -c`
-  # refuses to start without it, exit 2, rather than write mentions, edges and
-  # proposals with no agent id, as a run from a checkout would after a warning.
+  # refuses to start without it, exit 2, where a run from a checkout warns
+  # and writes mentions, edges and proposals with no agent id.
   # The knobs are forwarded, so `compose exec extract env` shows what the
-  # follower was started with, and read by the command line; `exec` hands the
-  # process to bun, so the stop signal reaches it.
+  # follower was started with, and read by the command line, which takes
+  # digits only — a value starting with a dash would otherwise reach the CLI
+  # as a flag (`--status` ran once and exited 0). `exec` hands the process to
+  # bun, so the stop signal reaches it.
   extract:
     image: oven/bun:1.4.0-alpine
     profiles: ["workers"]
@@ -806,7 +808,10 @@ services:
     command:
       - sh
       - -c
-      - '[ -n "$$OB1_WORKER_KEY" ] || { echo "extract: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }; exec bun db/extract-entities.ts --follow $${OB1_EXTRACT_FOLLOW:+"$$OB1_EXTRACT_FOLLOW"} --workers "$${OB1_EXTRACT_WORKERS:-1}"'
+      - |
+        [ -n "$$OB1_WORKER_KEY" ] || { echo "extract: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }
+        case "$$OB1_EXTRACT_FOLLOW$$OB1_EXTRACT_WORKERS" in *[!0-9]*) echo "extract: OB1_EXTRACT_FOLLOW ('$$OB1_EXTRACT_FOLLOW') and OB1_EXTRACT_WORKERS ('$$OB1_EXTRACT_WORKERS') take digits only" >&2; exit 2;; esac
+        exec bun db/extract-entities.ts --follow $${OB1_EXTRACT_FOLLOW:+"$$OB1_EXTRACT_FOLLOW"} --workers "$${OB1_EXTRACT_WORKERS:-1}"
     extra_hosts: *host-alias
     # The first SIGTERM stops each worker after the thought in hand — every
     # window of it — and returns the rest of its claims. On the stable brain
@@ -821,20 +826,22 @@ services:
       migrate:
         condition: service_completed_successfully
     # board-sync's rule: a refusal exits 2 — no key, a key MCP_ACCESS_KEYS
-    # does not hold, a bad knob, the egress gate — and a restart does not fix
-    # configuration. Three tries cover a database not yet answering. A
-    # follower stopped by a signal exits 0 and stays stopped.
+    # does not hold, a bad knob, the egress gate, a model or prompt version
+    # other than the recorded key's — and a restart does not fix
+    # configuration, so after three restarts the service stops and `ps`
+    # says so. podman restarts at once, with no backoff, and never resets the
+    # count. A follower stopped by a signal exits 0 and stays stopped.
     restart: on-failure:3
 
   # Proposals only: consolidation never applies one. Each waits for review
   # (`bun db/consolidate.ts --list`, then --accept or --reject; 029). Beside
-  # extraction: the pool holds only thoughts already extracted, and one
-  # extract worker takes captures in the order they were queued, so a new
-  # thought's older neighbours are extracted before it is judged. A backlog
-  # is queued at one instant and claimed in no order — a first run, a
-  # --switch-key — and a pair whose older side was still
-  # unextracted is not judged again: start `extract` alone on one, and this
-  # when `extract-entities.ts --status` shows nothing pending (deploy/README.md).
+  # extraction: the pool holds only thoughts already extracted, and a
+  # candidate is at least a calendar day older (029), so a capture's
+  # neighbours were extracted long before it is judged. A backlog is not —
+  # a first run or a --switch-key pools every thought at one instant,
+  # claimed in no order — and a pair whose older side was still unextracted
+  # is never judged: start `extract` alone on one, and this when
+  # `extract-entities.ts --status` shows nothing pending (deploy/README.md).
   consolidate:
     image: oven/bun:1.4.0-alpine
     profiles: ["workers"]
@@ -849,7 +856,10 @@ services:
     command:
       - sh
       - -c
-      - '[ -n "$$OB1_WORKER_KEY" ] || { echo "consolidate: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }; exec bun db/consolidate.ts --follow $${OB1_CONSOLIDATE_FOLLOW:+"$$OB1_CONSOLIDATE_FOLLOW"} --workers "$${OB1_CONSOLIDATE_WORKERS:-1}"'
+      - |
+        [ -n "$$OB1_WORKER_KEY" ] || { echo "consolidate: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }
+        case "$$OB1_CONSOLIDATE_FOLLOW$$OB1_CONSOLIDATE_WORKERS" in *[!0-9]*) echo "consolidate: OB1_CONSOLIDATE_FOLLOW ('$$OB1_CONSOLIDATE_FOLLOW') and OB1_CONSOLIDATE_WORKERS ('$$OB1_CONSOLIDATE_WORKERS') take digits only" >&2; exit 2;; esac
+        exec bun db/consolidate.ts --follow $${OB1_CONSOLIDATE_FOLLOW:+"$$OB1_CONSOLIDATE_FOLLOW"} --workers "$${OB1_CONSOLIDATE_WORKERS:-1}"
     extra_hosts: *host-alias
     # A thought is up to --k (3) judged pairs: 11 s at the median, 38 s at
     # the most on the stable brain (1,447 claims, 2026-10-05).
