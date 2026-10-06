@@ -99,9 +99,9 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #           (`tier-absent`), as auth-absent does for the authorization
 #           server. The tiers' protected-resource paths are not routed, so
 #           a tier is reached with keys (OAuth per tier is SMD-2286's);
-#   tier-off everything else under /canary or /working, in any case: a
-#           bare 404 (`not-served`), so a client handed a tier's prefix
-#           without its /mcp, with its case changed or its slash escaped,
+#   tier-off every other path that starts with /canary or /working, in
+#           any case and whatever follows: a bare 404 (`not-served`), so a
+#           client handed a tier's URL changed in any way after the prefix
 #           never reaches this stack's server by the legacy route (a typo of
 #           the prefix itself, `/canry/mcp`, still does until SMD-2532);
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
@@ -185,15 +185,16 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [not-legacy, tier-absent]
         service: working
-      # Under a tier's prefix, only its /mcp is served: the rest is a bare
-      # 404 rather than the legacy route's way into this stack's server. In
-      # any case (`/CANARY/mcp` too), and with the prefix ended by an escape
-      # Traefik leaves encoded (`/canary%2Fmcp`) or a `;`: a client handed a
-      # tier's URL so changed would otherwise write to this stack's brain
-      # with the same key. `\z` is the end of the path, in single quotes for
-      # the backslash; a `$` in this block is compose's to interpolate.
+      # Under a tier's prefix, only its /mcp is served: every other path that
+      # starts with /canary or /working, in any case, is a bare 404 rather
+      # than the legacy route's way into this stack's server, where a client
+      # handed a tier's URL with anything changed after the prefix (its
+      # case, an escaped slash, a pasted invisible space) would write with
+      # the same key. No boundary after the prefix: each one tried left some
+      # character through (review passes 2-4), and nothing this stack serves
+      # starts with either word.
       tier-off:
-        rule: 'PathRegexp(`(?i)^/(canary|working)(/|%|;|\z)`)'
+        rule: "PathRegexp(`(?i)^/(canary|working)`)"
         priority: 25
         entryPoints: [web]
         middlewares: [not-served]

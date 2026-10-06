@@ -1791,8 +1791,9 @@ jobs:
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
       # /canary/mcp and /working/mcp there. With no tier both are the proxy's
-      # bodiless 404, and so is everything else under either prefix, in any
-      # case or with its slash escaped, which never falls to the legacy route. A stand-in per tier on
+      # bodiless 404, and so is every other path starting with either word,
+      # in any case and whatever follows (an escaped slash, a `;`, a pasted
+      # zero-width space), which never falls to the legacy route. A stand-in per tier on
       # the mesh, under its tier's name and under `server` as a tier's
       # container is, answers its own route: the client's Host passed, the
       # legacy marker deleted, its own 4xx and 5xx untouched, headers and all
@@ -1812,7 +1813,7 @@ jobs:
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
           bare404 'GET /working/mcp/health with no working tier' "$B/working/mcp/health"
           offprefix() {
-            for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /working /working/ /working/x /working/mcpx /WORKING/mcp; do
+            for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
               bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
             done
           }
@@ -1853,8 +1854,10 @@ jobs:
           # next router (legacy), and a route file Traefik cannot read takes
           # every route with it, with nothing but this line to say so. Traefik
           # colours the level whatever --no-color asks, hence ERR.* and no space.
+          # An errors middleware's line about a Host it cannot parse is the
+          # client's, not the table's.
           PLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
-          if grep -E 'ERR.*(building configuration|routerName=|middlewareName=|serviceName=)' <<<"$PLOG"; then echo "the proxy logged a route-table error (above): the router it names was dropped" >&2; exit 1; fi
+          if grep -E 'ERR.*(building configuration|routerName=|middlewareName=|serviceName=)' <<<"$PLOG" | grep -v 'Unable to create error page request'; then echo "the proxy logged a route-table error (above): the router it names was dropped" >&2; exit 1; fi
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
