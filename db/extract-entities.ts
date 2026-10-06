@@ -877,12 +877,18 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let configError = null as string | null;
 
   /**
-   * --limit counts thoughts CLAIMED, reserved at claim time, so two workers
-   * cannot each take one on a limit of one. A claimed row is always processed.
+   * --limit counts the thoughts this run has TAKEN — claimed and not handed
+   * back unfinished — and the claims in flight, so two workers cannot each
+   * take one on a limit of one. A row a worker hands back unfinished as it
+   * ends (an outage, a stop) leaves `taken`, and counts again only if it is
+   * claimed again; a claim that never answered took nothing; a dead worker's
+   * leases are not this run's until a claim returns them (review pass 3: a
+   * reserved count patched at three sites, each with its own edge).
    */
-  let reserved = 0;
+  const taken = new Set<string>();
+  let claiming = 0;
   function limitReached(): boolean {
-    return LIMIT > 0 && reserved >= LIMIT;
+    return LIMIT > 0 && taken.size + claiming >= LIMIT;
   }
 
   /**
@@ -910,18 +916,18 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       while (!stopping && !limitReached()) {
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
-        /** Reserved for a claim that has not answered: a follower gives it back if the claim throws (review pass 2). */
-        let unclaimed = 0;
         try {
-          const room = LIMIT > 0 ? LIMIT - reserved : BATCH;
+          const room = LIMIT > 0 ? LIMIT - taken.size - claiming : BATCH;
           if (room <= 0) return;
           const want = Math.min(BATCH, room);
-          reserved += want;
-          unclaimed = want;
-          batch = (await sql`
-            SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${want}, ${TTL})`) as { thought_id: string; attempt: number }[];
-          unclaimed = 0;
-          reserved -= want - batch.length;
+          claiming += want;
+          try {
+            batch = (await sql`
+              SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${want}, ${TTL})`) as { thought_id: string; attempt: number }[];
+          } finally {
+            claiming -= want;
+          }
+          for (const b of batch) taken.add(b.thought_id);
           if (batch.length === 0) return;
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
@@ -930,9 +936,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {
-          // A follower outlasts the database, so a claim that never answered must
-          // not spend its --limit (review pass 2); a run without --follow ends here.
-          if (FOLLOW) reserved -= unclaimed;
+          // A follower outlasts the database going away; any other database
+          // error — a function missing, a grant revoked — ends the run, as the
+          // pass's own errors do (review pass 3: it stopped this worker only,
+          // and the follower polled into it for ever).
+          if (FOLLOW && !databaseUnavailable(e)) throw e;
           err(`  ${workerId}: ${(e as Error).message} — this worker stops`);
           return;
         }
@@ -1089,6 +1097,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     } finally {
       hb.stop();
       beats += hb.beats;
+      // Rows still held are handed back unfinished: out of --limit's count
+      // before the release goes out, so another worker's claim of one counts it.
+      for (const id of hb.held) taken.delete(id);
       let freed = 0;
       try {
         [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
@@ -1253,6 +1264,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     }
   }
 
+  // Leases a worker could not return as it ended, returned before the run
+  // ends where the database answers; else they expire within --ttl (review pass 3).
+  for (const w of unreturned) {
+    await sql`SELECT release_claims_for_worker(${JOB}, ${w})`.then(() => unreturned.delete(w), () => {});
+  }
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
   // How the runaways were handled: a penalised same-model retry, an escalation to
   // the larger model (SMD-2000), or both. A count is named only when it happened,

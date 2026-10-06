@@ -3764,32 +3764,60 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     }
   }
 
-  // A claim that throws spends none of a follower's --limit (review pass 2):
-  // claim_thoughts is renamed away for three polls, each worker's claim
-  // failing, then back, and a follower of --limit 1 still extracts its
-  // thought and ends there. Before, the first failed claim spent the limit
-  // and the follower ended with the thought pending.
+  // A permanent database error ends a follower, as the pass's own do: its
+  // claim fails on a function gone (42883), not on the database away, and the
+  // run rejects with it rather than polling into it for ever (review pass 3).
   {
     const lines: string[] = [];
     const ac = new AbortController();
     const target = await seed("Zed rotated the grafana keys while the claims failed.");
-    const signature = "claim_thoughts(text, text, int, int, int)";
-    let code = -1;
+    let outcome = "running";
     try {
-      await sql.unsafe(`ALTER FUNCTION ${signature} RENAME TO claim_thoughts_hidden`);
-      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; });
-      await Bun.sleep(3000);
-      await sql.unsafe(`ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts`);
-      const ended = await pollUntil(async () => code !== -1, 15_000);
+      await sql.unsafe("ALTER FUNCTION claim_thoughts(text, text, int, int, int) RENAME TO claim_thoughts_hidden");
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((c) => { outcome = `exit ${c}`; }, (e) => { outcome = `rejected: ${(e as Error).message}`; });
+      const ended = await pollUntil(async () => outcome !== "running", 10_000);
       ac.abort();
       await running;
-      assert(ended && (await extractedNow(target)) && lines.some((l) => /claim_thoughts\(.*does not exist — this worker stops/.test(l)),
-             `a follower of --limit 1 whose claims failed for three polls extracts its thought once they answer, and ends there (ended ${ended}, exit ${code}, extracted ${await extractedNow(target)})`);
+      assert(ended && /^rejected: .*claim_thoughts.*does not exist/.test(outcome),
+             `a follower whose claim meets a function gone ends with the error, not polling into it (${outcome.slice(0, 120)})`);
     } finally {
       ac.abort();
       const [{ hidden }] = await sql`SELECT to_regprocedure('claim_thoughts_hidden(text, text, int, int, int)') IS NOT NULL AS hidden`;
-      if (hidden) await sql.unsafe(`ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts`);
+      if (hidden) await sql.unsafe("ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
       await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
+    }
+  }
+
+  // A follower's --limit counts the thoughts it takes and does not hand back
+  // (review pass 3): a follower of --limit 1 whose thought a database cut
+  // hands back unfinished claims it again when the database answers,
+  // extracts it, and ends there.
+  {
+    const relay = await cuttableRelay(URL_!);
+    const lines: string[] = [];
+    const ac = new AbortController();
+    let code = -1;
+    let target = "";
+    try {
+      slowMs = 2500;
+      target = await seed("Ari tuned the grafana pager while the database was away.");
+      const running = runExtract({ url: relay.url, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; });
+      await pollUntil(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${target}::uuid AND work_type = ${KEY}`)[0]?.status === "claimed", 5000);
+      await relay.cut();
+      await Bun.sleep(4000);
+      await relay.restore();
+      slowMs = 0;
+      const ended = await pollUntil(async () => code !== -1, 25_000);
+      ac.abort();
+      await running;
+      assert(ended && (await extractedNow(target)) && lines.some((l) => new RegExp(`recording nothing for ${target}`).test(l)),
+             `a follower of --limit 1 whose thought a database cut handed back extracts it once the database answers, and ends (ended ${ended}, exit ${code}, extracted ${await extractedNow(target)})`);
+    } finally {
+      slowMs = 0;
+      ac.abort();
+      await relay.close();
+      if (target) await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
     }
   }
 
