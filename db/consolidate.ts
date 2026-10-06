@@ -57,6 +57,12 @@
  * an EDIT does not re-judge it (016's trigger does re-extract it); clear the
  * key's rows to start over, and a pair already proposed is skipped either way.
  *
+ * A --follow process outlasts the database going away (SMD-2599), as
+ * extract-entities.ts's does: an error that says it is not answering is said
+ * once and waited out on worker-bootstrap.ts's schedule (5 s, doubling, at
+ * most 5 min), the thought in hand recorded nothing and its lease returned
+ * when the database is back. A run without --follow still exits 1 on it.
+ *
  * ── The key ─────────────────────────────────────────────────────────────────
  * `consolidate:<model>@p<prompt version>`. A different model or prompt is a
  * different pool over the same pair table: the first pass to judge a pair
@@ -120,7 +126,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
 import {
   actorKindOf, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -1216,6 +1222,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 outcome = await processRow(row);
               } catch (e) {
                 if (e instanceof WriterThrow) throw e.error;
+                // The database went away under the pairs: not the thought's, so
+                // nothing is recorded; the worker ends, and the follower waits
+                // for the database before its next pass (SMD-2599).
+                if (FOLLOW && databaseUnavailable(e)) {
+                  err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
+                  return;
+                }
                 const kind = classifyError(e);
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
                 if (kind === "thought") {
@@ -1327,7 +1340,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       try {
         [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       } catch (e) {
-        err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s`);
+        // A follower returns them once the database answers again (SMD-2599).
+        if (FOLLOW) unreturned.add(workerId);
+        err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s${FOLLOW ? ", or return when the database answers again" : ""}`);
       }
       activeWorkers.delete(workerId);
       // Outside the release's try: a Writer's throw here is the Writer's, not a
@@ -1370,8 +1385,19 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
   opts.onPass?.(stop);
 
+  /**
+   * Workers whose leases could not be returned as they ended — the database
+   * was not answering — returned at the start of the next pass rather than
+   * left to expire a lease later (SMD-2599). A follower's only.
+   */
+  const unreturned = new Set<string>();
+
   let firstPass = true;
   async function pass(): Promise<Counts> {
+    for (const w of unreturned) {
+      await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
+      unreturned.delete(w);
+    }
     // The pool rule, every pass, from migration 029's consolidation_pool (one
     // definition for this, --status and preflight). No trigger feeds it (see
     // the header), so a --follow poll re-runs the query — a scan of thoughts
@@ -1406,12 +1432,32 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   out(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
 
-  let after = await pass();
+  /**
+   * A follower's pass, which a database outage does not end (SMD-2599), as
+   * extract-entities.ts's: said once, waited out until a SELECT 1 answers or
+   * a stop wakes the wait, and the pass's counts are null. Any other error
+   * ends the run, as before; a run without --follow is unchanged.
+   */
+  async function followedPass(): Promise<Counts | null> {
+    try {
+      return await pass();
+    } catch (e) {
+      if (!FOLLOW || !databaseUnavailable(e)) throw e;
+      const down = Date.now();
+      err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+      if (await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal })) {
+        out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+      }
+      return null;
+    }
+  }
+
+  let after = await followedPass();
   if (FOLLOW) {
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
-      after = await pass();
+      after = await followedPass();
     }
   }
 
@@ -1448,6 +1494,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         ].filter(Boolean).join("; ") + (FOLLOW ? " — distinct rows across the polls" : "")
       );
     }
+  }
+  if (after === null) {
+    // A follower that ended while the database was not answering: the counts
+    // cannot be read, and are not guessed (SMD-2599).
+    err(`\n  ended while the database was not answering: the pool's counts and the queue are not read — --status reads them once it answers`);
+    if (configError) err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}`);
+    return configError ? 2 : stopping ? (hardStopped ? 130 : 0) : 1;
   }
   printCounts(after, "after");
   await printQueue();

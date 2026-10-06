@@ -7,13 +7,14 @@
  * the bare refusal reason, the blanket-gate sentence (verb and knob as
  * parameters, one remedy tail), and the identity re-gate wording — with the
  * drop-the-gate mutant, that a remote endpoint under the default deny is
- * refused while a local one proceeds.
+ * refused while a local one proceeds. And the outage slice (SMD-2599): which
+ * database errors a follower waits out, and the wait's schedule.
  */
 
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, egressDescription, egressRefusal, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, outageWait, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -141,6 +142,38 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   // One digest listed twice, a forwarder first (preflight fails the config): the worker takes the caller's record, as the server does — not refused.
   const twice = await workerIdentity(UNUSED_URL, { OB1_WORKER_KEY: "raw", MCP_ACCESS_KEYS: `mcp-forwarder:forward:${hashKey("raw")},laptop:write:${hashKey("raw")}` }, { noKeyWarning: "unused", warn: () => {} });
   ok(twice.ok, `a digest listed as a forwarder and as a write key is the write key here, as the server picks it (${twice.ok ? "accepted" : twice.message.trim().slice(0, 60)})`);
+}
+
+// ---------------------------------------------------------------------------
+// databaseUnavailable, outageWait, waitOut — a follower waits a database
+// outage out (SMD-2599). The error shapes are Bun 1.4's, measured against a
+// restarted, stopped and unreachable Postgres.
+// ---------------------------------------------------------------------------
+{
+  const pg = (code: string, errno?: string) => ({ name: "PostgresError", code, ...(errno ? { errno } : {}), message: "m" });
+  ok(databaseUnavailable(pg("ERR_POSTGRES_CONNECTION_REFUSED")) && databaseUnavailable(pg("ERR_POSTGRES_CONNECTION_CLOSED")) && databaseUnavailable(pg("ERR_POSTGRES_CONNECTION_TIMEOUT")),
+    "a connection refused, closed or timed out is the database unavailable");
+  ok(databaseUnavailable(pg("ERR_POSTGRES_SERVER_ERROR", "57P03")) && databaseUnavailable(pg("ERR_POSTGRES_SERVER_ERROR", "57P01")) && databaseUnavailable(pg("ERR_POSTGRES_SERVER_ERROR", "08006")) && databaseUnavailable(pg("ERR_POSTGRES_SERVER_ERROR", "53300")),
+    "the server starting up or shutting down, a connection exception and too many connections are the database unavailable");
+  ok(!databaseUnavailable(pg("ERR_POSTGRES_SYNTAX_ERROR", "42601")) && !databaseUnavailable(pg("ERR_POSTGRES_SERVER_ERROR", "42883")) && !databaseUnavailable(pg("ERR_POSTGRES_SERVER_ERROR", "28P01")),
+    "a syntax error, a missing function and a password refused are not — the run still ends on them");
+  ok(!databaseUnavailable({ name: "Error", code: "ERR_POSTGRES_CONNECTION_REFUSED" }) && !databaseUnavailable(null) && !databaseUnavailable({ message: "connect ECONNREFUSED" }),
+    "nor is an error that is not the client's — a provider's dropped connection is classifyError's");
+  ok(outageWait(0) === 5_000 && outageWait(1) === 10_000 && outageWait(5) === 160_000 && outageWait(6) === 300_000 && outageWait(1e6) === 300_000,
+    "the wait between checks is 5 s, doubling, at most 5 min");
+
+  // The schedule without the wall clock: each sleep recorded, the check down twice, then up.
+  const slept: number[] = [];
+  const sleep = async (ms: number) => { slept.push(ms); };
+  let checks = 0;
+  const back = await waitOut({ check: async () => { if (++checks < 3) throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); }, outage: databaseUnavailable, wake: new AbortController().signal, sleep });
+  ok(back && checks === 3 && slept.join(",") === "5000,10000,20000", `waitOut checks after each wait until the check answers (${slept.join(",")}, ${checks} checks)`);
+  const woken = new AbortController();
+  const stopped = await waitOut({ check: async () => { throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); }, outage: databaseUnavailable, wake: woken.signal, sleep: async () => { woken.abort(); } });
+  ok(!stopped, "a stop during the wait ends it: false, no check made after it");
+  let thrown: unknown = null;
+  await waitOut({ check: async () => { throw pg("ERR_POSTGRES_SERVER_ERROR", "28P01"); }, outage: databaseUnavailable, wake: new AbortController().signal, sleep }).catch((e) => { thrown = e; });
+  ok((thrown as { errno?: string } | null)?.errno === "28P01", "a check that fails for another reason is thrown, not waited on for ever");
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);

@@ -34,7 +34,7 @@ import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MO
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { workerIdentity } from "./worker-bootstrap.ts";
@@ -3683,6 +3683,68 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(followCode === 0, `the follower exits 0 on SIGINT (exit ${followCode}; ${followOut.split("\n").filter(Boolean).slice(-2).join(" | ")})`);
   assert((await entityByName("Grafana")) !== undefined, "…and Grafana is in the graph");
 
+  // A follower outlasts its database going away (SMD-2599). It reaches
+  // Postgres through a relay this suite cuts: once while it polls, once while
+  // a thought's model call is in hand, so the write and the lease's return
+  // both fail. Each time it says so, waits, and resumes when the relay is
+  // back — the thought in hand recorded nothing, its lease returned at once
+  // rather than after --ttl (900 s, past this test), and extracted.
+  {
+    const target = new URL(URL_!);
+    const relay = await cuttableRelay(target.hostname, Number(target.port || 5432));
+    const relayed = new URL(URL_!);
+    relayed.hostname = "127.0.0.1";
+    relayed.port = String(relay.port);
+    const cutFollower = Bun.spawn(["bun", "--no-env-file", join(HERE, "extract-entities.ts"), "--url", relayed.href, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    const extractedNow = async (id: string) => (await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${id}::uuid`)[0].c > 0;
+    const waitFor = async (cond: () => Promise<boolean>, ms: number) => {
+      for (const until = Date.now() + ms; Date.now() < until;) {
+        if (await cond()) return true;
+        await Bun.sleep(250);
+      }
+      return cond();
+    };
+    // Deleted at the end, so the sections after count the thoughts they did.
+    let idle = "";
+    let inHand = "";
+    try {
+      await Bun.sleep(1500);
+      await relay.cut();
+      idle = await seed("Quinn moved the alert rules to grafana while the database was away.");
+      await Bun.sleep(2500);
+      const aliveIdle = cutFollower.exitCode === null;
+      await relay.restore();
+      const idleDone = await waitFor(() => extractedNow(idle), 15_000);
+      // The model answers slowly, and the relay is cut while the call is in hand.
+      slowMs = 2500;
+      inHand = await seed("Rosa tuned the grafana panels while the database was away.");
+      const claimed = await waitFor(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${inHand}::uuid AND work_type = ${KEY}`)[0]?.status === "claimed", 5000);
+      await relay.cut();
+      await Bun.sleep(4000);
+      const aliveInHand = cutFollower.exitCode === null;
+      await relay.restore();
+      const inHandDone = await waitFor(() => extractedNow(inHand), 20_000);
+      slowMs = 0;
+      cutFollower.kill("SIGINT");
+      const cutOut = (await new Response(cutFollower.stdout).text()) + (await new Response(cutFollower.stderr).text());
+      const cutCode = await cutFollower.exited;
+      const [claim] = await sql`SELECT status, attempt_count FROM thought_work_claims WHERE thought_id = ${inHand}::uuid AND work_type = ${KEY}`;
+      assert(aliveIdle && idleDone, `a follower whose database is cut while it polls keeps running, and extracts the thought captured meanwhile once it is back (alive ${aliveIdle}, extracted ${idleDone}; ${cutOut.split("\n").filter((l) => /not answering|answers again/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
+      assert(/the database is not answering \([^)]*\) — the follower waits for it, checking after 5 s and then twice as long each time, up to 5 min/.test(cutOut) && /the database answers again after \d+ s; polling resumes/.test(cutOut),
+             "…and says when the database stopped answering and when it answered again");
+      assert(claimed && aliveInHand && inHandDone && claim?.status === "succeeded" && claim?.attempt_count === 1,
+             `a cut while a thought's model call is in hand: the follower stays up, records nothing, returns the lease when the database is back, and extracts the thought (claimed ${claimed}, alive ${aliveInHand}, extracted ${inHandDone}, claim ${claim?.status}/attempt ${claim?.attempt_count})`);
+      assert(cutOut.includes(`recording nothing for ${inHand}`) && /could not return its leases \([^)]*\); they expire within 900 s, or return when the database answers again/.test(cutOut),
+             "…and names the thought it recorded nothing for, and the leases it returns when the database answers");
+      assert(cutCode === 0, `…and a signal still ends it with 0 (exit ${cutCode})`);
+    } finally {
+      slowMs = 0;
+      if (cutFollower.exitCode === null) cutFollower.kill("SIGKILL");
+      await relay.close();
+      for (const id of [idle, inHand]) if (id) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    }
+  }
+
   // Stopping a pass (SMD-2304). Four notes the stub answers with nothing, one
   // worker, slow answers: a stop lands while a thought is in hand.
   const notes: string[] = [];
@@ -5223,19 +5285,38 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     // waits on the first polls and is settled once the vector lands, and the
     // line says "1 settled" alone — anchored, so a "; 1 wait" suffix fails
     // (third review pass, mutant: bags for the sets survived every tooth).
+    // The follower reaches Postgres through a relay cut while the vector lands
+    // (SMD-2599): it outlasts the cut, as extract's does, and the poll after
+    // the relay is back settles the row.
     seen.length = 0;
-    const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
-    await Bun.sleep(2500);
-    assert((await proposalRow(cedar.id)).status === "stale" && seen.length === 0, "the follower's first polls leave the row waiting and call no judge");
-    await sql`UPDATE thoughts SET embedding = ${unit(11)}::vector WHERE id = ${cedarOld}::uuid`;
+    const target = new URL(URL_!);
+    const relay = await cuttableRelay(target.hostname, Number(target.port || 5432));
+    const relayed = new URL(URL_!);
+    relayed.hostname = "127.0.0.1";
+    relayed.port = String(relay.port);
+    const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", relayed.href, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
     let followSettled = false;
-    for (let i = 0; i < 40 && !followSettled; i++) {
-      await Bun.sleep(250);
-      followSettled = (await proposalRow(cedar.id)).status === "rejected";
+    let aliveCut = false;
+    try {
+      await Bun.sleep(2500);
+      assert((await proposalRow(cedar.id)).status === "stale" && seen.length === 0, "the follower's first polls leave the row waiting and call no judge");
+      await relay.cut();
+      await sql`UPDATE thoughts SET embedding = ${unit(11)}::vector WHERE id = ${cedarOld}::uuid`;
+      await Bun.sleep(2500);
+      aliveCut = follower.exitCode === null;
+      await relay.restore();
+      for (let i = 0; i < 80 && !followSettled; i++) {
+        await Bun.sleep(250);
+        followSettled = (await proposalRow(cedar.id)).status === "rejected";
+      }
+    } finally {
+      follower.kill("SIGINT");
     }
-    follower.kill("SIGINT");
     const followOut = (await new Response(follower.stdout).text()) + (await new Response(follower.stderr).text());
     const followCode = await follower.exited;
+    await relay.close();
+    assert(aliveCut && /the database is not answering \([^)]*\) — the follower waits for it/.test(followOut) && /the database answers again after \d+ s; polling resumes/.test(followOut),
+           `a consolidate follower whose database is cut keeps running, says so, and resumes when it is back (alive ${aliveCut}; ${followOut.split("\n").filter((l) => /not answering|answers again/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
     assert(followSettled && followCode === 0 && /\(1 more re-pooled for stale proposals\)/.test(followOut) && seen.length === 1,
            `the poll after the vector lands re-pools the thought and settles the row, one judge call in all (exit ${followCode}; ${followOut.split("\n").filter((l) => /pool:|stale proposals:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
     assert(/^\s*stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\) — distinct rows across the polls\s*$/m.test(followOut),

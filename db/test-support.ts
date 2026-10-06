@@ -16,6 +16,7 @@
 import { SQL } from "bun";
 import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_CURRENT_SIGNATURE, SEARCH_THOUGHTS_CURRENT_SIGNATURE_7, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
+import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, identityRefusal, reachedDatabaseRefusal, resetRefusal, socketRefusal } from "./connect.ts";
@@ -704,6 +705,48 @@ export class RuntimeUrl extends Request {
  */
 export function neverAnswers(): Promise<never> {
   return new Promise<never>(() => {});
+}
+
+/**
+ * A TCP relay on the loopback in front of `host:port`, which a suite cuts and
+ * restores to take a server away from one client while the suite's own
+ * connection stays up (SMD-2599: a --follow worker outlasting its database).
+ * `cut()` destroys every relayed connection and stops listening, so the
+ * client's next connect is refused, as a stopped Postgres refuses it;
+ * `restore()` listens again on the same port. Works where the suite cannot
+ * stop the server itself — CI's service container.
+ */
+export async function cuttableRelay(host: string, port: number): Promise<{ port: number; cut(): Promise<void>; restore(): Promise<void>; close(): Promise<void> }> {
+  const sockets = new Set<Socket>();
+  const server = createServer((client) => {
+    const upstream = connect(port, host);
+    for (const s of [client, upstream]) {
+      sockets.add(s);
+      s.on("close", () => sockets.delete(s));
+      s.on("error", () => { client.destroy(); upstream.destroy(); });
+    }
+    client.on("close", () => upstream.destroy());
+    upstream.on("close", () => client.destroy());
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  const listen = (at: number) => new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(at, "127.0.0.1", () => { server.off("error", reject); resolve(); });
+  });
+  await listen(0);
+  const bound = (server.address() as AddressInfo).port;
+  const cut = async () => {
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    for (const s of sockets) s.destroy();
+    await closed;
+  };
+  return {
+    port: bound,
+    cut,
+    restore: () => listen(bound),
+    close: async () => { if (server.listening) await cut(); },
+  };
 }
 
 /**

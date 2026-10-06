@@ -77,6 +77,13 @@
  * enqueues every new or edited thought, and either the next run or a `--follow`
  * process extracts it. To stop: delete that row and the trigger goes quiet.
  *
+ * A `--follow` process outlasts the database going away (SMD-2599): an error
+ * that says it is not answering — refused, closed, starting up — is said once
+ * and waited out, checking after 5 s and twice as long each time up to 5 min
+ * (worker-bootstrap.ts, waitOut), and polling resumes when it answers. A
+ * thought in hand is recorded nothing; its lease is returned when the
+ * database is back. A run without --follow still exits 1 on it.
+ *
  * ── Identity ────────────────────────────────────────────────────────────────
  * The worker authenticates like any client: OB1_WORKER_KEY holds a raw access
  * key whose hash is in MCP_ACCESS_KEYS, and the run resolves it through
@@ -128,7 +135,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
@@ -946,6 +953,13 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // The calls a thrown thought made — its fourth window timing out
                 // is four calls — count too (second review pass).
                 calls += callsMadeBy(e);
+                // The database went away under the write: not the thought's, so
+                // nothing is recorded; the worker ends, and the follower waits
+                // for the database before its next pass (SMD-2599).
+                if (FOLLOW && databaseUnavailable(e)) {
+                  err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
+                  return;
+                }
                 const kind = classifyError(e, { maxTokensFatal: true });
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
                 if (kind === "thought") {
@@ -1072,7 +1086,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       try {
         [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       } catch (e) {
-        err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s`);
+        // A follower returns them once the database answers again (SMD-2599).
+        if (FOLLOW) unreturned.add(workerId);
+        err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s${FOLLOW ? ", or return when the database answers again" : ""}`);
       }
       activeWorkers.delete(workerId);
       // Outside the release's try: a Writer's throw here is the Writer's, not a
@@ -1147,8 +1163,19 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       `${retries ? `; once the model is right, ${retries}, with --job ${JOB} if OB1_METADATA_MODEL changes` : ""}.`;
   }
 
+  /**
+   * Workers whose leases could not be returned as they ended — the database
+   * was not answering — returned at the start of the next pass rather than
+   * left to expire a lease later (SMD-2599). A follower's only.
+   */
+  const unreturned = new Set<string>();
+
   let firstPass = true;
   async function pass(): Promise<Counts> {
+    for (const w of unreturned) {
+      await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
+      unreturned.delete(w);
+    }
     // The backlog is pooled once. While following, the trigger enqueues every
     // new capture, so re-running enqueue_thoughts — a scan of every thought —
     // each poll would find nothing and cost the table.
@@ -1177,7 +1204,29 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   out(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
 
-  let after = await pass();
+  /**
+   * A follower's pass, which a database outage does not end (SMD-2599): an
+   * error that says the database is not answering is said once and waited
+   * out on outageWait's schedule, until a SELECT 1 answers or a stop wakes
+   * the wait, and the pass's counts are null. Bun's pool reconnects on the
+   * next query. Any other error ends the run, as before; a run without
+   * --follow is unchanged.
+   */
+  async function followedPass(): Promise<Counts | null> {
+    try {
+      return await pass();
+    } catch (e) {
+      if (!FOLLOW || !databaseUnavailable(e)) throw e;
+      const down = Date.now();
+      err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+      if (await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal })) {
+        out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+      }
+      return null;
+    }
+  }
+
+  let after = await followedPass();
   if (FOLLOW) {
     // Only a block it will poll after: the last pass's — the limit reached, or
     // stopped — is the final judgement's, which says the exit the run takes
@@ -1192,7 +1241,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
-      after = await pass();
+      after = await followedPass();
       say();
     }
   }
@@ -1225,6 +1274,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // The exit code is settled first, so the line says the one the run exits with
   // (review pass 1: a signal or the provider's refusal exits otherwise).
   const alarmLine = judge();
+  if (after === null) {
+    // A follower that ended while the database was not answering: the counts
+    // cannot be read, and are not guessed (SMD-2599).
+    if (alarmLine) err(alarmLine);
+    err(`\n  ended while the database was not answering: the pool's counts and the graph are not read — --status reads them once it answers`);
+    if (configError) err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}`);
+    return configError ? 2 : stopping ? (hardStopped ? 130 : 0) : 1;
+  }
   const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
   // The alarm before the failures: a model at fault explains them, and
   // --retry-failed under it would fail them again. Leased and pending rows keep
