@@ -101,8 +101,9 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #           a tier is reached with keys (OAuth per tier is SMD-2286's);
 #   tier-off everything else under /canary or /working, in any case: a
 #           bare 404 (`not-served`), so a client handed a tier's prefix
-#           without its /mcp, or with its case changed, never reaches this
-#           stack's server by the legacy route;
+#           without its /mcp, with its case changed or its slash escaped,
+#           never reaches this stack's server by the legacy route (a typo of
+#           the prefix itself, `/canry/mcp`, still does until SMD-2532);
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
 #           probe and a browser's CORS preflight;
 #   legacy  everything but /.well-known — what clients reach today at the root
@@ -186,12 +187,13 @@ x-proxy-routes: &proxy-routes |
         service: working
       # Under a tier's prefix, only its /mcp is served: the rest is a bare
       # 404 rather than the legacy route's way into this stack's server. In
-      # any case (`/CANARY/mcp` too): a client handed a tier's URL mistyped
-      # would otherwise write to this stack's brain with the same key. Single
-      # quotes, for the backslash: `\z` is the end of the path, and compose
-      # would read a `$` as one of its own.
+      # any case (`/CANARY/mcp` too), and with the prefix ended by an escape
+      # Traefik leaves encoded (`/canary%2Fmcp`) or a `;`: a client handed a
+      # tier's URL so changed would otherwise write to this stack's brain
+      # with the same key. `\z` is the end of the path, in single quotes for
+      # the backslash; a `$` in this block is compose's to interpolate.
       tier-off:
-        rule: 'PathRegexp(`(?i)^/(canary|working)(/|\z)`)'
+        rule: 'PathRegexp(`(?i)^/(canary|working)(/|%|;|\z)`)'
         priority: 25
         entryPoints: [web]
         middlewares: [not-served]
