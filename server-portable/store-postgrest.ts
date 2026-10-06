@@ -357,6 +357,7 @@ export class PostgrestStore implements ThoughtStore {
     supersedes?: string;
     lineage?: Lineage;
     event?: WriteEvent;
+    recapture?: "keep";
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
     // cannot leave a committed row with a NULL embedding — stored but invisible
@@ -373,8 +374,9 @@ export class PostgrestStore implements ThoughtStore {
     // the row's label unknown.
     // 025: derived_from / supersedes ride it too, validated by upsert_thought.
     // 061: and the lineage envelope, recorded with the write.
+    // 080: and the recapture word, "keep" for a key that cannot read.
     const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel,
-      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage, opts.event);
+      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage, opts.event, opts.recapture);
 
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,
