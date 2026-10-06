@@ -185,11 +185,14 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     let v: Record<string, unknown> | null = null;
     try { v = typeof r.value === "string" ? JSON.parse(r.value) : null; } catch { v = null; }
     const ageS = typeof r.age_s === "number" ? r.age_s : Number(r.age_s);
+    // A block not of the shape is left off, not a reason to refuse the row: the
+    // heartbeat still says whether the worker is alive (review pass 3: a block
+    // the merge kept, of the right JSON types but bad > answers, hid a live
+    // follower for good).
     const m = v?.malformed as Record<string, unknown> | undefined;
-    const malformed = m === undefined ? null
-      : m !== null && typeof m === "object" && count(m.answers) && count(m.bad, m.answers as number) && typeof m.alarm === "boolean"
-        ? { answers: m.answers as number, bad: m.bad as number, alarm: m.alarm }
-        : undefined;
+    const malformed = m !== null && typeof m === "object" && count(m.answers) && count(m.bad, m.answers as number) && typeof m.alarm === "boolean"
+      ? { answers: m.answers as number, bad: m.bad as number, alarm: m.alarm }
+      : null;
     // The job the worker works is the value's; its key must be the one
     // db/pass-stamp.ts's stampKey derives from it (a custom --job prefixed).
     const job = v?.job === undefined ? (suffix === undefined ? null : `${worker}:${suffix}`) : v.job;
@@ -202,7 +205,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       && typeof v.running === "boolean"
       && (v.outcome === null || v.outcome === "ok" || v.outcome === "failed" || v.outcome === "stopped")
       && (v.ended === undefined || v.ended === true)
-      && count(v.passes) && malformed !== undefined
+      && count(v.passes)
       && typeof r.at === "string" && UTC_INSTANT.test(r.at) && Number.isFinite(ageS) && ageS > -FUTURE_SLACK_S;
     if (!ok) {
       ignored++;
@@ -221,7 +224,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       outcome: v!.outcome as WorkerHeartbeat["outcome"],
       ended: v!.ended === true || v!.outcome === "stopped",
       passes: v!.passes as number,
-      malformed: malformed ?? null,
+      malformed,
     });
   }
   return { heartbeats, ignored };
@@ -639,7 +642,9 @@ export function heartbeatState(h: WorkerHeartbeat): string {
   // read "alive"); one that ended on a failure says so (review pass 2).
   if (h.ended) return `${h.outcome === "failed" ? "ended on a failure" : "stopped"} (${when})`;
   if (h.stale) return `stale (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
-  return `${h.running ? "running a pass" : h.outcome === "failed" ? "alive, its last pass failed" : "alive"} (${when})`;
+  // Running says so, and a failed last pass still shows: a follower against a
+  // down provider spends most of each pass in its pauses (review pass 3).
+  return `${h.running ? "running a pass" : "alive"}${h.outcome === "failed" ? ", its last pass failed" : ""} (${when})`;
 }
 
 /** The Workers row: each heartbeat's state, none, or why it was not read. */

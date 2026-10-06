@@ -693,12 +693,12 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 635 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape and the heartbeats' parsing
+bun test-server.ts        # 637 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape and the heartbeats' parsing
 bun test-auth.ts          # 141 — scoped, hashed, named keys
 bun test-rest.ts          # 268 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 170 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
-bun run test:e2e          # 469 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 470 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 149 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```

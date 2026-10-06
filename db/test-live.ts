@@ -53,6 +53,7 @@ import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, rec
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
+import { parseHeartbeats } from "../server-portable/brain-info.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -3817,6 +3818,13 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const refusedBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
   assert(refusedFollow.code === 2 && refusedBeat.outcome === "failed" && refusedBeat.ended === true, `a follower ended by the provider's refusal stamps its end, failed (exit ${refusedFollow.code}, ${JSON.stringify(refusedBeat)})`);
   await sql`SELECT delete_thought(${refusedNote}::uuid, NULL::jsonb)`;
+  // A following pass that throws (here its Writer, on the pass's own counts
+  // line) ends the run, and its heartbeat says so as the worker's end (review pass 3).
+  const thrownNote = await seed("A note whose pass throws while followed.");
+  const thrownFollow = await runExtract({ url: URL_!, env, workers: 1, follow: 30, writer: { out: (l) => { if (l.startsWith("  before:")) throw new Error("writer boom"); }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+  const thrownBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+  assert(thrownFollow === "writer boom" && thrownBeat.outcome === "failed" && thrownBeat.ended === true, `a following pass that throws stamps the worker's end, failed (${thrownFollow}, ${JSON.stringify(thrownBeat)})`);
+  await sql`SELECT delete_thought(${thrownNote}::uuid, NULL::jsonb)`;
 
   // A caller's signal aborted during start-up stops the run before its next
   // write, and the failed row stays failed rather than returned to a pool
@@ -5567,20 +5575,35 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     // pass 2); once the judge is back, a pass with work reads ok.
     {
       const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+      // One thought back in the pool, one with a candidate the judge is asked
+      // about at the worker's defaults, every other pooled thought settled, so
+      // the polls after its failed pass are idle.
       await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+      const [{ id: one }] = await sql`SELECT p AS id FROM unnest(ARRAY(SELECT consolidation_pool(${KEY}))) p
+                                       WHERE EXISTS (SELECT 1 FROM consolidation_candidates(p, 3, 0.6::float)) ORDER BY p LIMIT 1`;
+      await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, finished_at)
+                SELECT p, ${KEY}, 'succeeded', now() FROM unnest(ARRAY(SELECT consolidation_pool(${KEY}))) p WHERE p <> ${one}::uuid`;
       judgeUnavailable = 1_000;
       const ac2 = new AbortController();
       const down = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, signal: ac2.signal, writer: { out: () => {}, err: () => {} } });
       let downBeat = await beatOf();
       for (let i = 0; i < 400 && downBeat.outcome !== "failed"; i++) { await Bun.sleep(250); downBeat = await beatOf(); }
+      // Idle polls keep the word while nothing has work (review pass 3: only extract held it).
+      await Bun.sleep(2500);
+      const heldBeat = await beatOf();
       judgeUnavailable = 0;
-      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[]) AND status <> 'claimed'`;
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${one}::uuid AND status <> 'claimed'`;
       let backBeat = downBeat;
       for (let i = 0; i < 80 && backBeat.outcome !== "ok"; i++) { await Bun.sleep(250); backBeat = await beatOf(); }
       ac2.abort();
       await down;
-      assert(downBeat.outcome === "failed" && backBeat.outcome === "ok",
-        `a consolidation follower whose judge stays down stamps failed, and ok once a pass after it is back has work (${JSON.stringify([downBeat.outcome, backBeat.outcome])})`);
+      assert(downBeat.outcome === "failed" && heldBeat.outcome === "failed" && heldBeat.passes > downBeat.passes && backBeat.outcome === "ok",
+        `a consolidation follower whose judge stays down stamps failed, its idle polls keep it, and ok once a pass after it is back has work (${JSON.stringify([downBeat.outcome, heldBeat.outcome, backBeat.outcome])}, passes ${downBeat.passes} → ${heldBeat.passes})`);
+      // A following pass that throws ends the run as the worker's end, failed.
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+      const thrown = await runConsolidate({ url: URL_!, env, workers: 1, follow: 30, writer: { out: (l) => { if (l.startsWith("  before:")) throw new Error("writer boom"); }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+      const thrownBeat = await beatOf();
+      assert(thrown === "writer boom" && thrownBeat.outcome === "failed" && thrownBeat.ended === true, `a following consolidation pass that throws stamps the worker's end, failed (${thrown}, ${JSON.stringify(thrownBeat)})`);
     }
     await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
     judgeUnavailable = 100;
@@ -9499,6 +9522,18 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
       keptFrom.push(got !== null && !("malformed" in got) && got.outcome === "ok");
     }
     assert(keptFrom.every(Boolean), `an old block not of the shape, or an old value not JSON, is replaced by the stamp whole (${keptFrom.join(",")})`);
+    // Blocks of the right JSON types but numbers the reader refuses, or a
+    // field missing or mistyped alone: whatever the merge keeps, the worker is
+    // still read, its block left off (review pass 3: such a block hid it).
+    const stillRead = [];
+    for (const m of [{ answers: 10, bad: 20, alarm: true }, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: 1, bad: "x", alarm: true }, { answers: 1, bad: 0, alarm: "yes" }]) {
+      await hsql`INSERT INTO ob1_config (key, value) VALUES (${shapeKey}, ${JSON.stringify({ v: 1, malformed: m })}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+      await shapeStamper.stamp("ok");
+      const rows = await hsql`SELECT key, value, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at, extract(epoch FROM now() - updated_at)::float8 AS age_s FROM ob1_config WHERE key = ${shapeKey}`;
+      const read = parseHeartbeats(rows as never);
+      stillRead.push(read.heartbeats.length === 1 && read.heartbeats[0].malformed === null && read.ignored === 0);
+    }
+    assert(stillRead.every(Boolean), `a kept block the reader refuses never hides the worker (${stillRead.join(",")})`);
     // A pass is stamped running as it starts, before the timer's first tick.
     const starting = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:start@p3", intervalS: 15 });
     let atStart: { running?: boolean } | null = null;

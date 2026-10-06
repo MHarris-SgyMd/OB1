@@ -3137,12 +3137,15 @@ malformed answers and whether they passed SMD-2266's alarm. The time is the
 row's `updated_at`, the database's `now()`.
 
 - **`ok`:** the pass ran, whatever its rows came to — a document the model
-  cannot read is a failed row and the malformed alarm's business, not the
-  worker's.
+  cannot read is a failed row and the malformed alarm's business, and rows
+  failing for another reason (a role not re-granted) are `--status`'s to list,
+  not the heartbeat's.
 - **`failed`:** a worker of the pass stopped because the provider kept failing
   after its pauses (5, 15, 45 s), board-sync's pass reported errors, or a pass
   threw. A poll with nothing to do keeps the last pass's word, so a down
-  provider reads failed until a pass with work runs again.
+  provider reads failed until a pass with work runs again. One document that
+  draws a repeatable 5xx stops its worker the same way, so it too reads failed
+  until the next pass with work, whatever another worker finished.
 - **`ended`:** the worker's process is gone — `stopped` on a signal or a
   follower's `--limit`, `failed` when the provider refused the request itself or
   a pass threw. Its row says so at once rather than "alive" until it goes stale.
@@ -3156,13 +3159,15 @@ clears when the follower judges 48 healthy answers, or at once by deleting the
 row. There is one row per job, not per process: two followers of one job share
 it, the last to stamp written. A tier refresh deletes the source's rows
 (`tier.ts`), so a canary never reports stable's workers; a `pg_dump` restored
-onto another host carries them too, and they read stopped or stale until
-deleted.
+onto another host carries them too — alive for up to three intervals, then
+stopped or stale — until deleted. A block the reader cannot trust is left off
+the record; the heartbeat still counts.
 
 **Who reads it.** Keyed `/health`, `brain_info` (a `Workers` row) and
 `GET /v1/brain` carry every heartbeat as `database.workers`. Preflight's
-`workers` row warns, naming the command that starts the worker again:
-- when a heartbeat is older than three of its intervals, or its worker ended;
+`workers` row warns, with a remedy for each:
+- when a heartbeat is older than three of its intervals, or its worker ended
+  (the remedy names the command that starts it again);
 - when a fresh one's last pass failed;
 - when its last block passed the malformed alarm, which a follower otherwise
   says only on stderr.
@@ -3383,7 +3388,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2429 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1097 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1100 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
