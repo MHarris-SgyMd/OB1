@@ -71,6 +71,8 @@ async function run(env: Record<string, string | undefined>, ...args: string[]) {
 
 /** The report row named `name` — glyph, name, detail — or "" when none printed. Fix lines start with →, so they never match. */
 const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
+/** `row` under a name no block shadows (some blocks bind a `row` of their own). */
+const rowNamed = (out: string, name: string) => row(out, name);
 /** The → fix line under the row named `name`, or "" when the row has none. */
 const fix = (out: string, name: string) => { const ls = out.split("\n"); const i = ls.findIndex((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)); return i >= 0 && /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1] : ""; };
 
@@ -1365,6 +1367,10 @@ else {
   const leased = await run(SQL_ENV);
   assert(/6 thoughts — 5 succeeded \(1 with a caveat\), 0 failed, 1 in flight, 0 pending, 0 not yet in the pool/.test(leased.out),
          "a row another process holds is unfinished work, counted in flight");
+  // …held by a live lease, the pass is running: an ok row with no remedy that
+  // would start a second worker (SMD-2423).
+  assert(/✓\s+re-embed pass\s+\S+: 6 thoughts — .* — a pass under this key is running: 1 in flight \(leases live until \d\d:\d\d UTC\), 0 pending$/m.test(leased.out) && !/Finish it/.test(fix(leased.out, "re-embed pass")),
+         `a live lease reads running, ok, with no remedy (${rowNamed(leased.out, "re-embed pass")})`);
   await claims`SELECT release_thought(${leasedId}::uuid, ${KEY}, 'preflight-test', 'succeeded')`;
 
   const CTX = `${KEY}:ctx`;
@@ -1375,6 +1381,15 @@ else {
   assert(other.out.includes(`--job ${CTX}`), "…with the flag that resumes it");
   assert(!/the pass to .* has not finished/.test(other.out), "…while the finished pass to the configured model is not reported");
   assert(!/--switch-model/.test(other.out), "…and, with the record and the configuration agreeing, no --switch-model in the remedy");
+  // A worker that died holding the backfill's row: its lease expired, none is
+  // live — said so, the reclaim named, then today's remedy (SMD-2423).
+  await claims`SELECT claim_thoughts(${CTX}, 'preflight-dead', 1)`;
+  await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CTX} AND status = 'claimed'`;
+  const died = await run(SQL_ENV);
+  assert(/!\s+re-embed pass\s+\S+:ctx: 6 thoughts — 0 succeeded, 0 failed, 1 in flight, 0 pending, 5 not yet in the pool — a worker died holding 1 claim\(s\), their leases expired, and none is live$/m.test(died.out)
+      && /^\s*→ The next pass reclaims the expired claims; the release_stale_leases tool returns them now\. Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --job \S+:ctx/m.test(fix(died.out, "re-embed pass")),
+         `an expired lease reads as a worker that died holding it, with the reclaim and the remedy (${rowNamed(died.out, "re-embed pass")})`);
+  await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CTX}`;
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: refused this text' WHERE work_type = ${CTX}`;
   const otherFailed = await run(SQL_ENV);
   assert(otherFailed.out.includes(`--job ${CTX} --accept-failed <thought-id…>`),
@@ -1512,6 +1527,33 @@ else {
   assert(!/OB1_METADATA_MODEL=other-judge/.test(consMid.out), "…and not by moving the metadata model");
   const consJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(consJson.ok === true && consJson.checks.some((c) => c.name === "consolidate pass" && c.status === "warn"), "--json carries it as a warning, under ok:true");
+  // A worker holding the pending row's live lease: running, ok, no remedy, the
+  // queue still said; its lease expired: a worker that died holding it (SMD-2423).
+  await claims`SELECT claim_thoughts(${CONS}, 'preflight-live', 1)`;
+  const consLive = await run(SQL_ENV);
+  assert(/✓\s+consolidate pass\s+\S+: 3 thoughts with entities — 1 succeeded, 0 failed, 1 in flight, 0 pending, 1 not yet in the pool — a pass under this key is running: 1 in flight \(leases live until \d\d:\d\d UTC\), 0 pending; 1 proposal\(s\) pending review/.test(consLive.out) && !/Finish it/.test(fix(consLive.out, "consolidate pass")),
+         `a live lease on a consolidation pass reads running, ok, with the queue and no remedy (${rowNamed(consLive.out, "consolidate pass")})`);
+  await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
+  const consDied = await run(SQL_ENV);
+  assert(/!\s+consolidate pass\s+\S+: .* — a worker died holding 1 claim\(s\), their leases expired, and none is live; 1 proposal/.test(consDied.out) && /^\s*→ The next pass reclaims the expired claims; the release_stale_leases tool returns them now\. Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts/m.test(fix(consDied.out, "consolidate pass")),
+         `an expired lease reads as a worker that died holding it (${rowNamed(consDied.out, "consolidate pass")})`);
+  await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
+  // A follower between its polls holds no lease: its fresh heartbeat for the
+  // key reads running; a stale or ended one does not (SMD-2261 item 7).
+  const followerBeat = (agoS: number, extra: object = {}) =>
+    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${CONS}`}, ${JSON.stringify({ v: 1, job: CONS, every_s: 60, running: false, outcome: "ok", passes: 3, ...extra })}, now() - make_interval(secs => ${agoS}))
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  await followerBeat(20);
+  const consFollowed = await run(SQL_ENV);
+  assert(/✓\s+consolidate pass\s+\S+: .* — a follower is running this key \(stamped 20 s ago\): 1 pending between its polls; 1 proposal/.test(consFollowed.out),
+         `a fresh follower heartbeat for the key reads running between polls (${rowNamed(consFollowed.out, "consolidate pass")})`);
+  await followerBeat(600);
+  const consBeatStale = await run(SQL_ENV);
+  await followerBeat(20, { outcome: "stopped", ended: true });
+  const consEnded = await run(SQL_ENV);
+  await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${CONS}`}`;
+  assert([consBeatStale, consEnded].every((r) => /!\s+consolidate pass\s+\S+: .* — a consolidation pass under this key stopped before it finished/.test(r.out)),
+         "a stale or ended follower heartbeat is no running pass: the row reads stopped");
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
   const consFailed = await run(SQL_ENV);
   assert(/consolidate pass\s+[^\n]* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool/.test(consFailed.out) && /\(--retry-failed for the 1 failed row\(s\) once their cause is fixed\)/.test(consFailed.out),
