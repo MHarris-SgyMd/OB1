@@ -14,7 +14,7 @@
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, probeChat, probeUntilUp, ProviderOutage, regateMessage, SUSPECT_WINDOW_MS, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, missingModelIs, probeChat, probeUntil, ProviderOutage, regateMessage, SUSPECT_WINDOW_MS, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -182,7 +182,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
 }
 
 // ---------------------------------------------------------------------------
-// modelMissing, probeChat, probeUntilUp, ProviderOutage — a follower waits a
+// modelMissing, probeChat, probeUntil, ProviderOutage — a follower waits a
 // provider outage out (SMD-2599). A stub on the loopback answers the probe
 // the way each provider does.
 // ---------------------------------------------------------------------------
@@ -219,19 +219,32 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     answer = () => new Response(new ReadableStream({ start() {} }), { status: 200 });
     const hung = await probeChat({ ...at }, "m", 300);
     ok(isOut(hung), `a provider that does not answer within the deadline is out (${JSON.stringify(hung)})`);
+    // A 200 whose body starts and then stalls: hung mid-answer, not up (review pass 2).
+    answer = () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"choices":')); } }), { status: 200 });
+    const stalled = await probeChat({ ...at }, "m", 500);
+    ok(stalled.state === "out", `a 200 whose answer never arrives is out, not up (${JSON.stringify(stalled)})`);
   } finally {
     stub.stop(true);
   }
   const gone = await probeChat({ base: `http://127.0.0.1:${stub.port}/v1`, headers: {} }, "m", 2000);
   ok(gone.state === "out", `nothing listening is out (${JSON.stringify(gone).slice(0, 100)})`);
 
-  // probeUntilUp on the schedule, without the wall clock.
+  // probeUntil on the schedule, without the wall clock.
   const slept: number[] = [];
   const states: Probe[] = [{ state: "out", why: "503" }, { state: "missing", why: "pulling" }, { state: "up" }];
-  const back = await probeUntilUp(async () => states.shift() as Probe, new AbortController().signal, async (ms) => { slept.push(ms); });
-  ok(back && slept.join(",") === "5000,10000,20000", `probeUntilUp waits through out and missing until up (${slept.join(",")})`);
-  const refusedEnds = await probeUntilUp(async () => ({ state: "refused", why: "401" }), new AbortController().signal, async () => {});
-  ok(refusedEnds, "a refused probe ends the wait too: the next real call meets the refusal and ends the run");
+  const back = await probeUntil(async () => states.shift() as Probe, new AbortController().signal, (p) => !isOut(p), async (ms: number) => { slept.push(ms); });
+  ok(back?.state === "up" && slept.join(",") === "5000,10000,20000", `an outage's wait goes through out and missing until up (${slept.join(",")})`);
+  const refusedEnds = await probeUntil(async () => ({ state: "refused", why: "401" }), new AbortController().signal, (p) => !isOut(p), async () => {});
+  ok(refusedEnds?.state === "refused", "a refused probe ends an outage's wait too: the next real call meets the refusal and ends the run");
+  // The start's wait settles on anything but out: a model unserved once the provider answers ends it, for the refusal (review pass 2).
+  const startStates: Probe[] = [{ state: "out", why: "ECONNREFUSED" }, { state: "missing", why: "404 model not found" }];
+  const startEnds = await probeUntil(async () => startStates.shift() as Probe, new AbortController().signal, (p) => p.state !== "out", async () => {});
+  ok(startEnds?.state === "missing", `the start's wait ends on a missing model, not waiting on it for ever (${JSON.stringify(startEnds)})`);
+  const woken = new AbortController();
+  ok((await probeUntil(async () => ({ state: "out", why: "x" }), woken.signal, (p) => !isOut(p), async () => { woken.abort(); })) === null, "a stop during the wait is null");
+  ok(missingModelIs(Object.assign(new Error('Extraction request to http://h/v1 failed: 404 {"error":{"message":"model \\"big-model\\" not found"}}'), { status: 404 }), "big-model")
+     && !missingModelIs(Object.assign(new Error('Extraction request to http://h/v1 failed: 404 {"error":{"message":"model \\"big-model\\" not found"}}'), { status: 404 }), "small-model"),
+     "missingModelIs names which model a 404 was for");
 
   // The outage's rule: back to the pool, unless the same thought fails again right after a probe answered.
   const o = new ProviderOutage();

@@ -150,7 +150,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntilUp, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, missingModelIs, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
@@ -467,46 +467,60 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * included: a model the provider does not serve — the escalation model too,
    * when one is set — a key it refuses or a base URL that is no API is a
    * refusal at start, exit 2, as preflight's would be; once the models have
-   * answered, one going missing (Ollama pulling it again) is an outage. An
-   * unreachable provider at start is waited for.
+   * answered, one going missing (Ollama pulling it again) is an outage. A
+   * provider that does not answer at start is waited for as the run's last
+   * step before it writes the pool, so a refusal of the key or the
+   * configuration is not held behind the wait (review pass 2), and what it
+   * answers then is held to the same refusals.
    */
   const probe = (ms = Math.min(TIMEOUT_S, 60) * 1000, wake?: AbortSignal, model = cfg.metadataModel) => probeChat(cfg.chat, model, ms, wake);
   const outage = new ProviderOutage();
+  /** The model an outage probes: the metadata model, or the escalation model when its 404 began the outage (review pass 2). */
+  let outageModel = cfg.metadataModel;
   /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const down = Date.now();
-    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.metadataModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
-    if (await probeUntilUp(() => probe(undefined, wake), wake)) {
+    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${outageModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    if (await probeUntil(() => probe(undefined, wake, outageModel), wake, (p) => !isOut(p))) {
       outage.end();
+      outageModel = cfg.metadataModel;
       out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
     }
   }
+  /** The start's refusal of what a probe found — a model unserved, or the endpoint refusing — or null. */
+  function startRefusal(p: Probe, model: string, knob: string): string | null {
+    if (p.state === "missing") {
+      return `\n  ${cfg.chat.base} does not serve ${model}, ${knob}, at start (${p.why.slice(0, 300)}).\n` +
+        `  A --follow worker refuses this before it claims anything (SMD-2599): pull the model, or set ${knob} to one the provider serves${knob === "OB1_EXTRACT_ESCALATE_MODEL" ? ", or unset it for the penalised retry" : ""}. Once running, a model that goes missing is waited for.`;
+    }
+    if (p.state === "refused") {
+      return `\n  ${cfg.chat.base} refuses a one-token call at start (${p.why.slice(0, 300)}).\n` +
+        "  A --follow worker refuses this before it claims anything (SMD-2599): check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1).";
+    }
+    return null;
+  }
+  /**
+   * The escalation model's refusal, or null. Asked at start only: probing it
+   * on every check of an outage would load the larger model each time
+   * (review pass 1: unprobed, a missing one failed every runaway thought,
+   * where the run had exited 2 naming it).
+   */
+  async function escalationRefusal(wake?: AbortSignal): Promise<string | null> {
+    if (!WINDOWING.escalateModel || wake?.aborted) return null;
+    const p = await probe(undefined, wake, WINDOWING.escalateModel);
+    return p.state === "missing" ? startRefusal(p, WINDOWING.escalateModel, "OB1_EXTRACT_ESCALATE_MODEL") : null;
+  }
+  /** Why the provider did not answer at start, when it did not: waited for below, before the pool. */
+  let startOut: string | null = null;
   if (FOLLOW && !STATUS_ONLY && !DRY_RUN) {
     if (stoppedEarly()) return 130;
-    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
-    const wake = opts.signal ?? new AbortController().signal;
-    const first = await probe(undefined, wake);
-    if (first.state === "missing" || first.state === "refused") {
-      err(`\n  ${cfg.chat.base} ${first.state === "missing" ? `does not serve ${cfg.metadataModel}` : "refuses a one-token call"} at start (${first.why.slice(0, 300)}).\n` +
-        `  A --follow worker refuses this before it claims anything (SMD-2599): ${first.state === "missing" ? `pull the model, or set OB1_METADATA_MODEL to one the provider serves` : "check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1)"}. Once running, a model that goes missing is waited for.`);
+    const first = await probe(undefined, opts.signal);
+    const refusal = startRefusal(first, cfg.metadataModel, "OB1_METADATA_MODEL") ?? (first.state === "out" ? null : await escalationRefusal(opts.signal));
+    if (refusal) {
+      err(refusal);
       return 2;
     }
-    if (first.state === "out") {
-      outage.begin(first.why);
-      await waitForProvider(wake);
-    }
-    // The escalation model is asked once, here only: probing it on every
-    // check of an outage would load the larger model each time (review pass 1:
-    // unprobed, a missing one failed every runaway thought, where the run had
-    // exited 2 naming it).
-    if (WINDOWING.escalateModel && !wake.aborted) {
-      const escalation = await probe(undefined, wake, WINDOWING.escalateModel);
-      if (escalation.state === "missing") {
-        err(`\n  ${cfg.chat.base} does not serve ${WINDOWING.escalateModel}, OB1_EXTRACT_ESCALATE_MODEL, at start (${escalation.why.slice(0, 300)}).\n` +
-          `  A --follow worker refuses this before it claims anything (SMD-2599): pull the model, set OB1_EXTRACT_ESCALATE_MODEL to one the provider serves, or unset it for the penalised retry.`);
-        return 2;
-      }
-    }
+    if (first.state === "out") startOut = first.why;
   }
 
   // ── Identity ────────────────────────────────────────────────────────────────
@@ -703,6 +717,21 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   // ── The run ─────────────────────────────────────────────────────────────────
 
+  if (startOut !== null) {
+    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
+    const wake = opts.signal ?? new AbortController().signal;
+    const down = Date.now();
+    err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — the follower claims nothing until it does; it calls ${cfg.metadataModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    const answered = await probeUntil(() => probe(undefined, wake), wake, (p) => p.state !== "out");
+    if (answered) {
+      const refusal = startRefusal(answered, cfg.metadataModel, "OB1_METADATA_MODEL") ?? (await escalationRefusal(wake));
+      if (refusal) {
+        err(refusal);
+        return 2;
+      }
+      out(`  the provider answers after ${Math.round((Date.now() - down) / 1000)} s`);
+    }
+  }
   if (stoppedEarly()) return 130;
   if (recordedKey !== JOB) {
     await sql`
@@ -1067,7 +1096,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 if (down) {
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
+                  const begins = outage.reason === null;
                   if (outage.begin(msg, b.thought_id) === "outage") {
+                    // The escalation model gone since the start: the outage probes it (review pass 2).
+                    if (begins && WINDOWING.escalateModel && missingModelIs(e, WINDOWING.escalateModel) && !missingModelIs(e, cfg.metadataModel)) outageModel = WINDOWING.escalateModel;
                     halt.abort();
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
                     return;

@@ -136,7 +136,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntilUp, ProviderDown, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderDown, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import {
   actorKindOf, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -495,9 +495,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * As extract-entities.ts's: a follower probes the judge model with a
    * one-token call before it writes anything, the worker key's registration
    * included — a model the provider does not serve, a key it refuses or a
-   * wrong base URL exits 2 there, an unreachable provider is waited for — and
-   * while it waits an outage out. After a pair's timeout the probe has the
-   * call's whole timeout, and the pass's stop ends it.
+   * wrong base URL exits 2 there — and while it waits an outage out. A
+   * provider that does not answer at start is waited for as the run's last
+   * step before it writes the pool, held to the same refusals when it
+   * answers (review pass 2). After a pair's timeout the probe has the call's
+   * whole timeout, and the pass's stop ends it.
    */
   const probe = (ms = Math.min(TIMEOUT_S, 60) * 1000, wake?: AbortSignal) => probeChat(cfg.chat, cfg.judgeModel, ms, wake);
   const outage = new ProviderOutage();
@@ -505,25 +507,34 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const down = Date.now();
     err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
-    if (await probeUntilUp(() => probe(undefined, wake), wake)) {
+    if (await probeUntil(() => probe(undefined, wake), wake, (p) => !isOut(p))) {
       outage.end();
       out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
     }
   }
+  /** The start's refusal of what a probe found — the judge model unserved, or the endpoint refusing — or null. */
+  function startRefusal(p: Probe): string | null {
+    if (p.state === "missing") {
+      return `\n  ${cfg.chat.base} does not serve ${cfg.judgeModel} at start (${p.why.slice(0, 300)}).\n` +
+        "  A --follow worker refuses this before it claims anything (SMD-2599): pull the model, or set OB1_JUDGE_MODEL (else OB1_METADATA_MODEL) to one the provider serves. Once running, a model that goes missing is waited for.";
+    }
+    if (p.state === "refused") {
+      return `\n  ${cfg.chat.base} refuses a one-token call at start (${p.why.slice(0, 300)}).\n` +
+        "  A --follow worker refuses this before it claims anything (SMD-2599): check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1).";
+    }
+    return null;
+  }
+  /** Why the provider did not answer at start, when it did not: waited for below, before the pool. */
+  let startOut: string | null = null;
   if (FOLLOW && !REVIEW_ONLY && !STATUS_ONLY && !DRY_RUN) {
     if (stoppedEarly()) return 130;
-    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
-    const wake = opts.signal ?? new AbortController().signal;
-    const first = await probe(undefined, wake);
-    if (first.state === "missing" || first.state === "refused") {
-      err(`\n  ${cfg.chat.base} ${first.state === "missing" ? `does not serve ${cfg.judgeModel}` : "refuses a one-token call"} at start (${first.why.slice(0, 300)}).\n` +
-        `  A --follow worker refuses this before it claims anything (SMD-2599): ${first.state === "missing" ? "pull the model, or set OB1_JUDGE_MODEL (else OB1_METADATA_MODEL) to one the provider serves" : "check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1)"}. Once running, a model that goes missing is waited for.`);
+    const first = await probe(undefined, opts.signal);
+    const refusal = startRefusal(first);
+    if (refusal) {
+      err(refusal);
       return 2;
     }
-    if (first.state === "out") {
-      outage.begin(first.why);
-      await waitForProvider(wake);
-    }
+    if (first.state === "out") startOut = first.why;
   }
 
   // ── Identity ────────────────────────────────────────────────────────────────
@@ -905,6 +916,21 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   // ── The run ─────────────────────────────────────────────────────────────────
 
+  if (startOut !== null) {
+    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
+    const wake = opts.signal ?? new AbortController().signal;
+    const down = Date.now();
+    err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — the follower claims nothing until it does; it calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    const answered = await probeUntil(() => probe(undefined, wake), wake, (p) => p.state !== "out");
+    if (answered) {
+      const refusal = startRefusal(answered);
+      if (refusal) {
+        err(refusal);
+        return 2;
+      }
+      out(`  the provider answers after ${Math.round((Date.now() - down) / 1000)} s`);
+    }
+  }
   if (stoppedEarly()) return 130;
   if (RETRY_FAILED) {
     const [{ n }] = await sql`

@@ -283,6 +283,15 @@ export function modelMissing(e: unknown): boolean {
   return /model_not_found|\bmodel\b[^\n]{0,160}?\b(not found|does not exist)/i.test(providerWords(e));
 }
 
+/**
+ * Whether a provider error is modelMissing's and its words name `model` — the
+ * model an outage then probes, where the escalation model went missing
+ * after the start (review pass 2).
+ */
+export function missingModelIs(e: unknown, model: string): boolean {
+  return modelMissing(e) && providerWords(e).includes(model);
+}
+
 /** Whether a provider error is a call's deadline passing — classifyError's "thought" for a timeout. */
 export function timedOut(e: unknown): boolean {
   return (e as Error).name === "TimeoutError" || /timed out/i.test((e as Error).message ?? "");
@@ -327,9 +336,17 @@ export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "heade
     if (wake?.aborted) return { state: "out", why: "the probe was stopped" };
     return { state: "out", why: timedOut(e) ? `no answer to a one-token call in ${timeoutMs / 1000} s` : (e as Error).message };
   }
-  const words = (await r.text().catch(() => "")).slice(0, 300);
+  let words = "";
+  let unread = false;
+  try {
+    words = (await r.text()).slice(0, 300);
+  } catch {
+    unread = true;
+  }
   const why = `${r.status} ${words}`.trimEnd();
-  if (r.ok) return { state: "up" };
+  // A 200 whose body never arrived is a provider hung mid-answer, not one
+  // that answered (review pass 2).
+  if (r.ok) return unread ? { state: "out", why: `${r.status}, and the answer did not arrive` } : { state: "up" };
   if (r.status === 429 || r.status >= 500) return { state: "out", why };
   if (modelMissing({ status: r.status, body: words })) return { state: "missing", why };
   if (r.status === 404 || r.status === 401 || r.status === 402 || r.status === 403) return { state: "refused", why };
@@ -354,20 +371,25 @@ export function isOut(p: Probe): p is Extract<Probe, { why: string }> {
 class StillOut extends Error {}
 
 /**
- * Probe until the provider answers (SMD-2599), on waitOut's schedule: true
- * when a probe found it `up` — or `refused`, which the next real call meets
- * and turns into the run's refusal — and false when `wake` aborted first.
+ * Probe on waitOut's schedule until a probe `settles` (SMD-2599), and return
+ * that probe — null when `wake` aborted first. An outage settles on anything
+ * but out or missing (`isOut`): up, or refused, which the next real call
+ * meets and turns into the run's refusal. The start's wait settles on
+ * anything but out, so a model the provider turns out not to serve, once it
+ * answers, is refused there rather than waited on for ever (review pass 2).
  */
-export function probeUntilUp(probe: () => Promise<Probe>, wake: AbortSignal, sleep?: (ms: number, wake: AbortSignal) => Promise<void>): Promise<boolean> {
-  return waitOut({
+export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep?: (ms: number, wake: AbortSignal) => Promise<void>): Promise<Probe | null> {
+  let last: Probe | null = null;
+  const settled = await waitOut({
     check: async () => {
-      const p = await probe();
-      if (isOut(p)) throw new StillOut(p.why);
+      last = await probe();
+      if (!settles(last)) throw new StillOut(isOut(last) ? last.why : last.state);
     },
     outage: (e) => e instanceof StillOut,
     wake,
     sleep,
   });
+  return settled ? last : null;
 }
 
 /**

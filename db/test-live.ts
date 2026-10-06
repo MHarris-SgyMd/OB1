@@ -3960,7 +3960,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       const refusedCode = await runExtract({ url: URL_!, env: refusedEnv, job: KEY, workers: 1, follow: 1, signal: stopRefused.signal, writer: { out: (l) => refusedOut.push(l), err: (l) => refusedOut.push(l) } });
       clearTimeout(guard);
       const registered = (await sql`SELECT count(*)::int AS n FROM ob1_agent_keys WHERE key_hash = ${hashKey(freshKey)}`)[0].n;
-      assert(refusedCode === 2 && refusedOut.some((l) => /does not serve absent-model at start \(404 [^)]*not found/.test(l)) && refusedOut.some((l) => /pull the model, or set OB1_METADATA_MODEL to one the provider serves/.test(l)) && registered === 0,
+      assert(refusedCode === 2 && refusedOut.some((l) => /does not serve absent-model, OB1_METADATA_MODEL, at start \(404 [^)]*not found/.test(l)) && refusedOut.some((l) => /pull the model, or set OB1_METADATA_MODEL to one the provider serves/.test(l)) && registered === 0,
              `a follower whose model the provider does not serve at start is refused, exit 2, its key not yet registered (exit ${refusedCode}, ${registered} key row(s): ${refusedOut.find((l) => /at start/.test(l))?.trim().slice(0, 140)})`);
       // …and so is one whose escalation model the provider does not serve (review pass 1).
       const escOut: string[] = [];
@@ -3970,6 +3970,37 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       clearTimeout(escGuard);
       assert(escCode === 2 && escOut.some((l) => /does not serve absent-model, OB1_EXTRACT_ESCALATE_MODEL, at start \(404 /.test(l)),
              `a follower whose escalation model the provider does not serve at start is refused, exit 2 (exit ${escCode}: ${escOut.find((l) => /at start|refuses/.test(l))?.trim().slice(0, 140)})`);
+
+      // A start that finds the provider down waits for it after every other
+      // refusal (review pass 2): a key other than the recorded one is refused
+      // at once, not held behind the wait…
+      {
+        down = "503";
+        downUntil = Date.now() + 60_000;
+        const mismatchOut: string[] = [];
+        const stopMismatch = new AbortController();
+        const mismatchGuard = setTimeout(() => stopMismatch.abort(), 15_000);
+        const t0 = Date.now();
+        const mismatchCode = await runExtract({ url: URL_!, env: { ...env, OB1_METADATA_MODEL: "other-model" }, workers: 1, follow: 1, signal: stopMismatch.signal, writer: { out: (l) => mismatchOut.push(l), err: (l) => mismatchOut.push(l) } });
+        clearTimeout(mismatchGuard);
+        downUntil = 0;
+        assert(mismatchCode === 2 && Date.now() - t0 < 10_000 && mismatchOut.some((l) => /Refusing to extract under a key other than the one ob1_config records without --switch-key/.test(l)) && !mismatchOut.some((l) => /not answering at start/.test(l)),
+               `a follower started with the provider down and another model's key is refused at once, not after the wait (exit ${mismatchCode} after ${Date.now() - t0} ms)`);
+      }
+      // …and a model the provider turns out not to serve, once it answers, is
+      // refused there rather than waited on for ever (review pass 2).
+      {
+        down = "503";
+        downUntil = Date.now() + 3000;
+        const lateOut: string[] = [];
+        const stopLate = new AbortController();
+        const lateGuard = setTimeout(() => stopLate.abort(), 20_000);
+        const lateCode = await runExtract({ url: URL_!, env: { ...env, OB1_METADATA_MODEL: "absent-model" }, job: KEY, workers: 1, follow: 1, signal: stopLate.signal, writer: { out: (l) => lateOut.push(l), err: (l) => lateOut.push(l) } });
+        clearTimeout(lateGuard);
+        downUntil = 0;
+        assert(lateCode === 2 && lateOut.some((l) => /the provider is not answering at start \(503 [^)]*\) — the follower claims nothing until it does/.test(l)) && lateOut.some((l) => /does not serve absent-model, OB1_METADATA_MODEL, at start \(404 /.test(l)),
+               `a follower whose provider was down at start and then answers that it does not serve the model is refused, exit 2 (exit ${lateCode}: ${lateOut.filter((l) => /at start/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
+      }
 
       // A follower's --limit counts the thoughts it finishes: one an outage
       // returned is claimed again, and the follower of --limit 1 ends once it
