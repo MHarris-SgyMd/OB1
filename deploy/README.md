@@ -680,7 +680,8 @@ bun db/tier.ts --compare open-brain open-brain-canary --replay \
 
 It reads each brain as a client — the keyed `GET /health` record (version,
 commit, tier, the tree's latest migration against the ledger's highest, schema
-version, embedding, counts); the **exact id-set difference** (which thoughts one
+version, embedding, counts, and the **board-sync watermark**: the newest Linear
+`updatedAt` any thought reflects, SMD-2261); the **exact id-set difference** (which thoughts one
 brain holds and the other does not, via `list_thought_ids`, SMD-2244); and, with
 `--replay`, the two search tools over a query set that is either supplied
 (`--query`/`--queries-file`) or drawn from a brain's own `query_log`
@@ -690,11 +691,28 @@ prints a key and prints a one-line verdict ("current with each other" / "canary
 is 1 migration behind; 407 vs 597 thoughts"), and exits non-zero when anything
 differs. The default compare writes nothing; `--replay` issues real searches,
 which a brain running `OB1_QUERY_LOG=on` records in `query_log` (telemetry,
-migration 034, never the thoughts corpus), as any client search does. The one
-signal still out of reach over HTTP is the board-sync watermark (max
-`metadata.linear_updated_at`); a DB-backed mode can add it. Until SMD-2037 lands,
-a refreshed brain runs at pgvector's default HNSW settings, so a hybrid-arm
-difference can be GUC-induced — the retrieval section says so.
+migration 034, never the thoughts corpus), as any client search does. Until
+SMD-2037 lands, a refreshed brain runs at pgvector's default HNSW settings, so a
+hybrid-arm difference can be GUC-induced — the retrieval section says so.
+
+The board-sync watermark is the one freshness signal a missed day of board moves
+changes: a status move rewrites a ticket's thought, so the count, the newest
+capture and the ledger all stay the same. The Freshness section prints
+`board sync: a=…  b=…`, and watermarks half a day or more apart, or one brain
+holding no usable one, are a delta the verdict names ("open-brain-canary's
+board-sync watermark is 1 day older") and the exit code counts. A brain older
+than SMD-2261 reads `unread` there and is not called older. A brain that has the
+field but did not read it (a read that timed out or failed — it is the last the
+keyed `/health` deadline reaches), or sent a malformed value, makes a verdict with no other delta "not
+certain" rather than "current", exit 0 as for any unread axis, and the line says
+why. A value more than an hour past the brain's database clock is passed over:
+if that clock runs more than an hour slow, a fresh board move is passed over and
+the watermark lags until the clock catches up. The gap is between the newest board
+move each brain reflects, not how long one has been stale: a canary refreshed
+after a quiet week reads a week older the hour the board next moves, and a pass
+that synced one stale ticket of fifty moves the watermark as far as all fifty
+would. It moves when the board does, so it says nothing of whether a sync is
+alive.
 
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as

@@ -82,3 +82,14 @@ what reaches it. `SETUP.md` gains no per-client connection notes yet; the ticket
 names them as a follow-on once a connector has been seen to work.
 
 Upstream status: #340 open; the fix cannot land in their server. **Unfiled.**
+
+**Since then (SMD-2382, 2026-10-05).** The fork serves real protected-resource
+metadata, at `/.well-known/oauth-protected-resource/mcp`, and only when three
+things hold: the stack is configured (`COMPOSE_PROFILES` names `auth`), the
+request's `Host` is the public origin's, and the authorization server answers
+(`server-portable/oauth-edge.ts`). Everywhere else this change's 404 stands,
+including every loopback client, the root URL, and a stack without the profile.
+The one reversal is at the public `/mcp` of a configured stack. There, a
+claude.ai connector, `?key=` ones included, finds the document and is asked to
+sign in first (deploy/README.md, "Moving a client to /mcp"), a preview until
+SMD-2286 accepts the token.

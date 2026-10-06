@@ -966,12 +966,18 @@ Deliberate. Recorded so nobody assumes they were missed.
   what a leak is worth: a read-scoped key cannot write, and `capture_thought` is
   not even registered for it. Upstream
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216) and
-  [PR #238](https://github.com/NateBJones-Projects/OB1/pull/238) (OAuth 2.1) remain
-  the real fix. Change 42 is adjacent, not a substitute: it makes the claude.ai
+  [PR #238](https://github.com/NateBJones-Projects/OB1/pull/238) (OAuth 2.1) were
+  the upstream answer; the fork has its own OAuth path now. The `auth` profile runs
+  an authorization server (SMD-2285), and on a stack configured with a stable
+  public origin the MCP server advertises it at that origin (SMD-2382). It is a
+  preview until the MCP server accepts the token it issues (SMD-2286), and keys
+  keep working beside it (a claude.ai connector at that origin is asked to sign
+  in first). Change 42 is adjacent, not a substitute: it makes the claude.ai
   connector *reach* the key path at all (upstream
   [#340](https://github.com/NateBJones-Projects/OB1/issues/340)) by answering
-  OAuth discovery with 404; it does not change what the key is. **Still treat a
-  connection URL as a credential**, and give URL-embedded clients read scope.
+  OAuth discovery with 404 wherever OAuth is not advertised; it does not change
+  what the key is. **Still treat a connection URL as a credential**, and give
+  URL-embedded clients read scope.
 - **The upstream PR gate can be bypassed with a title.** A PR titled `[docs] …`
   (or touching no contribution directory) exits before the credential scan runs.
   Only matters if we start accepting PRs into this fork.

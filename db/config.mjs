@@ -411,8 +411,9 @@ export const EXTRACT_RETRY_RUNAWAY = true;
 /**
  * Whether an extraction call's answer is streamed and aborted the moment it
  * is a runaway — RUNAWAY_REPEATS copies of one item (server-portable/entities.ts,
- * RunawayDetector) — rather than read whole once it has run to its budget
- * (SMD-1960). The budget stays the bound and this is the early exit: a call
+ * RunawayDetector; SMD-1960), or an answer ending in TOKEN_REPEATS copies of
+ * one unit (repeatedTail; SMD-2449) — rather than read whole once it has run
+ * to its budget. The budget stays the bound and this is the early exit: a call
  * aborted so is a runaway, and is retried as a cut one is. On, and not a knob,
  * as the retry is not: measured in evals/README.md.
  */

@@ -129,7 +129,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
-import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
+import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
@@ -254,6 +254,37 @@ function numbers(opts: ExtractOptions): Numbers | string {
   const follow = read("--follow", opts.follow, 0);
   if (typeof follow === "string") return follow;
   return { workers, batch, ttl, heartbeat, timeout, limit, follow };
+}
+
+/**
+ * What a failed row's error adds about a runaway aborted on the stream, or ""
+ * when no malformed window's first call was. A runaway aborted on the stream
+ * is named in the failed row's error, so an operator sorting the failed rows —
+ * for SMD-2000's larger model, say — can tell a loop the retry did not rescue
+ * from an answer that was never JSON. The MALFORMED window's own abort, not the
+ * thought's longest (one the retry may have rescued), and "the retry did not
+ * converge" only when a retry was made (review passes one to four of SMD-1960).
+ * Only a first call is ever aborted — the retry is read whole — so the note
+ * names it. "No retry was made" is reachable only with EXTRACT_RETRY_RUNAWAY
+ * off and the stream abort on — a constant flipped — and stays for that truth.
+ */
+export function abortedNote(extraction: Extraction): string {
+  const abortedParts: { abortedMs?: number; abortedBy?: AbortedBy; retried?: true; escalated?: string }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.malformed && extraction.abortedMs !== undefined ? [extraction] : [];
+  if (abortedParts.length === 0) return "";
+  const abortedMs = Math.max(...abortedParts.map((p) => p.abortedMs as number));
+  // What the runaway was, by each aborted window's own reason (SMD-2449): a
+  // third copy of one item, or one short unit repeated — the loop Ollama's
+  // repeat limit cuts, which read as a closed socket before.
+  const why = [...new Set(abortedParts.map((p) => p.abortedBy === "token" ? "the answer repeated one short unit (a word, a number, punctuation, an emoji or whitespace) over and over" : "the answer went on past a third copy of one item"))].join(", or ");
+  // When the second call was an escalation (SMD-2000), name the model that
+  // still could not answer — the operator sorting the failed rows for a larger
+  // model is told the larger model already ran.
+  const escalatedTo = abortedParts.map((p) => p.escalated).find(Boolean);
+  const secondNote = escalatedTo ? `and the escalation to ${escalatedTo}, read whole, did not converge either` : "and the penalised retry, read whole, did not converge either";
+  // A token runaway may have been ended by the provider (Ollama's repeat
+  // limit) rather than by this reader; an item runaway is always ours.
+  const ended = abortedParts.some((p) => p.abortedBy === "token") ? "was aborted, or cut by the provider's repeat limit," : "was aborted";
+  return `; the first call ${ended} on the stream ${(abortedMs / 1000).toFixed(1)} s in — ${why} — ${abortedParts.some((p) => p.retried) ? secondNote : "and no retry was made"}`;
 }
 
 /**
@@ -764,25 +795,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (extraction.malformed) {
       malformed++;
       const where = extraction.parts ? ` (window ${windowList(extraction.parts.filter((p) => p.malformed).map((p) => p.index))} of ${extraction.windows}${extraction.coverage ? ` sent, a prefix of ${extraction.coverage.of}` : ""})` : "";
-      // "No retry was made" is reachable only with EXTRACT_RETRY_RUNAWAY off and
-      // the stream abort on — a constant flipped — and stays for that truth.
-      // A runaway aborted on the stream is named in the failed row's error, so
-      // an operator sorting the failed rows — for SMD-2000's larger model, say —
-      // can tell a loop the retry did not rescue from an answer that was never
-      // JSON. The MALFORMED window's own abort, not the thought's longest (one
-      // the retry may have rescued), and "the retry did not converge" only when
-      // a retry was made (review passes one to four). Only a first call is ever
-      // aborted — the retry is read whole — so the note names it.
-      const abortedParts: { abortedMs?: number; retried?: true; escalated?: string }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.abortedMs !== undefined ? [extraction] : [];
-      const abortedMs = Math.max(...abortedParts.map((p) => p.abortedMs as number));
-      const retriedToo = abortedParts.some((p) => p.retried);
-      // When the second call was an escalation (SMD-2000), name the model that
-      // still could not answer — the operator sorting the failed rows for a
-      // larger model is told the larger model already ran.
-      const escalatedTo = abortedParts.map((p) => p.escalated).find(Boolean);
-      const secondNote = escalatedTo ? `and the escalation to ${escalatedTo}, read whole, did not converge either` : "and the penalised retry, read whole, did not converge either";
-      const abortedNote = abortedParts.length ? `; the first call was aborted on the stream ${(abortedMs / 1000).toFixed(1)} s in — the answer went on past a third copy of one item — ${retriedToo ? secondNote : "and no retry was made"}` : "";
-      return { outcome: "failed", error: `the model's answer was not JSON of the expected shape${where}${abortedNote}` };
+      return { outcome: "failed", error: `the model's answer was not JSON of the expected shape${where}${abortedNote(extraction)}` };
     }
     if (DUMP) {
       // The model's answer as parsed, before the database applies the rule —
@@ -793,7 +806,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // true` where it took the penalised same-model retry — the derivation
       // record of which model produced the answer (SMD-2000), the pass key on the
       // row itself staying the first model's.
-      appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.escalated ? { escalated: extraction.escalated } : extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.coverage ? { coverage: extraction.coverage } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
+      appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.escalated ? { escalated: extraction.escalated } : extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs, ...(extraction.abortedBy ? { abortedBy: extraction.abortedBy } : {}) } : {}), ...(extraction.coverage ? { coverage: extraction.coverage } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
     }
     // SMD-2321: the hybrid mode re-types the 7B's entities with the decider —
     // identifier shapes carved by rule, the rest validity-gated and typed, p_true

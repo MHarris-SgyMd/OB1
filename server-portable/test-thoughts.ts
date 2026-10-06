@@ -397,6 +397,11 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   const works = merged.relations.filter((r) => r.relation === "works_on");
   assert(works.length === 1 && works[0].confidence === 0.9, "a relation stated in two windows is one edge at the higher confidence, whatever the case of the names");
   assert(merged.relations.length === 2, "…and the relation only the third window saw is kept");
+  // The thought's abort is its longest window's, with that window's reason (SMD-2449).
+  const tokenThenItem = mergeExtractions([{ ...part(0, []), abortedMs: 100, abortedBy: "token" }, { ...part(1, []), abortedMs: 200, abortedBy: "item" }, part(2, [])]);
+  const itemThenToken = mergeExtractions([{ ...part(0, []), abortedMs: 200, abortedBy: "item" }, { ...part(1, []), abortedMs: 100, abortedBy: "token" }]);
+  assert(tokenThenItem.abortedMs === 200 && tokenThenItem.abortedBy === "item" && itemThenToken.abortedMs === 200 && itemThenToken.abortedBy === "item" && tokenThenItem.parts?.[0].abortedBy === "token",
+         `the merged abort is the longest window's, carrying that window's reason, wherever it sits; each window keeps its own (${tokenThenItem.abortedBy}/${itemThenToken.abortedBy})`);
   const half = mergeExtractions([part(0, [{ name: "Anita", type: "person", confidence: 0.9 }]), part(1, [], [], true)]);
   assert(!half.malformed && half.entities.length === 1 && half.windows === 2 && half.parts?.[1].malformed === true, "one malformed window beside a parsed one leaves the answer the parsed window's, not malformed (SMD-2260) — the malformed window still in the record");
   const none = mergeExtractions([part(0, [], [], true), part(1, [], [], true)]);
@@ -514,7 +519,7 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   // aborted call to.
   const plain = resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b" });
   assert(windowingFor(plain).streamAbort === true, "the shipped windowing streams the answer and aborts a runaway on it (EXTRACT_STREAM_ABORT)");
-  assert(describeExtractWindow(plain).includes("; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0.5 frequency penalty, read whole"), `…and the banner/preflight sentence names the abort, the retry and that the retry is read whole (${describeExtractWindow(plain)})`);
+  assert(describeExtractWindow(plain).includes("; the answer is streamed and a call is aborted once it holds 3 copies of one item or ends in 24 copies of one short word, number or phrase, and a call aborted so or run to its answer budget is made once more with a 0.5 frequency penalty, read whole"), `…and the banner/preflight sentence names the abort, the retry and that the retry is read whole (${describeExtractWindow(plain)})`);
   assert(windowingFor(resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_METADATA_REASONING: "medium" })).streamAbort === false, "with OB1_METADATA_REASONING on the answer is read whole: no budget, no retry, no abort");
   // SMD-2269: the measurement hooks are never on the worker's windowing — only an
   // eval passes budgetTimes/observe explicitly, so the shipped call is unchanged.
