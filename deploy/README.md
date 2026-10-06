@@ -953,7 +953,13 @@ on loopback (`127.0.0.1`, `localhost`, `[::1]`) or on the address stable's
 proxy is bound to, or a canary proxy's port with any path (and either with
 any `?key=`). A connector at stable's own `/mcp` is never the canary's. An
 `up` that moves the canary between stable's origin and `--port` without
-`--connect` leaves the connector where it was, and says so.
+`--connect` leaves the connector where it was, and says so. Moving off
+`--port`, pass `--connect` in that same `up`, which moves the connector
+before the canary's proxy goes; afterwards its old port is no longer the
+canary's, and the connector must be removed by hand first (`claude mcp
+remove --scope user open-brain-canary`). The proxy goes last, once the canary
+answers on stable's origin, so an `up` that fails leaves the old URL
+working.
 A canary proxy's port is read from its container, running or stopped (after
 a reboot podman leaves it stopped, and Docker restarts it but not its
 Postgres); once that is gone, pass the `--port` it was stood up with.
@@ -972,18 +978,22 @@ is started to find out. Neither touches stable: `down` acts on the project
 
 On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing
-started, stamped or registered (an old stable by its proxy's route label). The
-second is the canary's life:
+started, stamped or registered: an old stable by its proxy's route label, a
+stable proxy off its mesh, an empty `--port` and a `--stable-project` no
+project could be named among them. The second is the canary's life, in three
+`up`s:
 - `up --connect` over a stable carrying the protective mark `stable`. The
   canary must answer at `/canary/mcp` with tier `canary` and OAuth not
-  configured, run no proxy, and hold only its tier's names on stable's mesh;
-  its probe must pass on a thought whose text holds literals, searched for
-  without them;
+  configured, run no proxy, hold only its tier's names on stable's mesh, and
+  say that stable's public origin reaches it; its probe must pass on a
+  thought whose text holds literals, searched for without them;
 - a second `up`, with `--port 8011` under `SERVER_BIND=0.0.0.0`, against a
   provider stub serving another model. The canary's proxy must be on
   loopback, its servers off stable's mesh, `/canary/mcp` the proxy's 404
   again; the thought put on stable just before it must reach the canary, and
   the smoke must fail on the floor;
+- a third `up`, back on stable's origin: the canary's proxy removed, 8011
+  free, and a connector left at 8011 named;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope
   connector left alone);

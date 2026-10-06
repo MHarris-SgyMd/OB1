@@ -15,10 +15,10 @@
 # routes /canary/mcp to the first. That route is in stable's compose.yaml from
 # SMD-2294 on; a stable running an older release has none, and then `up`
 # refuses unless --port names a loopback port for the canary's own proxy, the
-# way every canary was stood up before (8011 was the default). There the
-# canary is reached wherever stable is — the LAN under stable's SERVER_BIND,
-# a tunnel to its origin — with stable's keys, and `up` says so; --port keeps
-# it on this host's loopback alone.
+# way every canary was stood up before (8011 was the default). On stable's
+# origin the canary is reached wherever stable is — the LAN under stable's
+# SERVER_BIND, a tunnel to its origin — with stable's keys, and `up` says so;
+# --port keeps it on this host's loopback alone.
 #
 #   deploy/canary.sh --env-file ~/stack/deploy/.env up --connect
 #   deploy/canary.sh --env-file ~/stack/deploy/.env down --volumes
@@ -65,10 +65,11 @@
 # scope and at a URL of the canary's (/canary/mcp on loopback or on the address
 # stable's proxy is bound to, or the port of a canary proxy), and says so when
 # one by that name is anything else, leaving it alone. An `up` that moves the
-# canary between the two without --connect names a connector left behind. --volumes also deletes the canary's database: when it is
-# stamped canary, marked by a refresh, or holds nothing (a first refresh that
-# died before its mark); a refusal puts its Postgres back as it was. With no
-# canary volume there is nothing to delete, and nothing is created to find out.
+# canary between the two without --connect names a connector left behind.
+# --volumes also deletes the canary's database: when it is stamped canary,
+# marked by a refresh, or holds nothing (a first refresh that died before its
+# mark); a refusal puts its Postgres back as it was. With no canary volume
+# there is nothing to delete, and nothing is created to find out.
 # A canary proxy's port is read from its container, running or stopped; once
 # that is gone, only --port says it.
 #
@@ -124,7 +125,7 @@ VOLUMES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --env-file|--runtime|--stable-project|--port|--name)
-      [ $# -ge 2 ] && [ -n "$2" ] && [ "${2#--}" = "$2" ] || { echo "$1 takes a value." >&2; exit 2; }
+      [ $# -ge 2 ] && [ -n "${2//[[:space:]]/}" ] && [ "${2#--}" = "$2" ] || { echo "$1 takes a value." >&2; exit 2; }
       case "$1" in
         --env-file) ENV_FILE="$2" ;;
         --runtime) RUNTIME="$2" ;;
@@ -146,6 +147,9 @@ if [ -n "$PORT" ]; then
   case "$PORT" in *[!0-9]*|0*) echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2 ;; esac
   [ "$PORT" -le 65535 ] || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
 fi
+# A compose project's name, as compose allows one: anything else would reach the
+# runtime's label filter, where a blank value matches every project's containers.
+[[ "$STABLE" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "--stable-project takes a compose project name (lower-case letters, digits, - and _): '$STABLE'" >&2; exit 2; }
 [ "$STABLE" != "$CANARY" ] || { echo "--stable-project names the canary's own project." >&2; exit 2; }
 [ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ]; } || { echo "--connect and --no-smoke go with up." >&2; exit 2; }
 [ "$CMD" = down ] || [ $VOLUMES = 0 ] || { echo "--volumes goes with down." >&2; exit 2; }
@@ -171,7 +175,7 @@ MODE=""
 # address, the tier, an empty profile list and stable's mesh are set for these
 # calls alone, where the shell wins over the env file; tier.sh, run between
 # them, reads the env file without them. A canary proxy (--port) is on
-# loopback whatever SERVER_BIND says for stable: a canary is for this host. With
+# loopback whatever SERVER_BIND says for stable. With
 # no --port that proxy is never started, and SERVER_PORT is only what compose
 # reads; the canary is then reached wherever stable's origin is, which `up`
 # says when that is more than this host's loopback.
@@ -289,6 +293,13 @@ canary_ports() {
 # A connector URL as printed: without its query, where the documented form
 # carries the key (`?key=`).
 shown() { case "$1" in *\?*) printf '%s?…' "${1%%\?*}" ;; *) printf '%s' "$1" ;; esac; }
+# A URL's port and path, its query and a trailing slash dropped: where it
+# reaches, whichever spelling of the host it uses.
+ENDPOINT_URL='^http://(\[[^]]*\]|[^:/]+):([0-9]+)(/.*)?$'
+endpoint_of() {
+  local u="${1%%\?*}"
+  if [[ "$u" =~ $ENDPOINT_URL ]]; then printf '%s %s' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]%/}"; else printf '%s' "$u"; fi
+}
 # The hosts a connector at /canary/mcp counts as this canary's on: loopback in
 # its three spellings, and the address stable's proxy is bound to (a LAN or
 # tailnet address under SERVER_BIND), which `up` registers the connector at,
@@ -427,12 +438,8 @@ else
   [ -n "$STABLE_PORT" ] || { echo "$STABLE_PROXY publishes no port, so /canary/mcp cannot be reached from this host. Pass --port N." >&2; exit 2; }
   STABLE_HOST="$(host_of "$STABLE_PROXY")"
   MODE=path
-  # On stable's origin the canary is reached wherever stable is, with stable's
-  # keys, and it runs this checkout. Said when that is more than loopback.
   # shellcheck disable=SC2016 # a Go template's variables, not the shell's
-  bound="$("$RUNTIME" inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}{{"\n"}}{{end}}{{end}}' "$STABLE_PROXY" | head -n 1)"
-  case "$bound" in 127.*|::1|localhost) ;; *) say "note: stable's proxy listens on ${bound:-every interface}, so this canary — this checkout's build, taking stable's keys — answers at /canary/mcp there too; pass --port N for one on loopback alone" ;; esac
-  [ -z "$PUBLIC_ORIGIN" ] || say "note: stable has a public origin ($PUBLIC_ORIGIN): whatever carries it to stable's port carries /canary/mcp to this canary too; pass --port N for one on loopback alone"
+  STABLE_BOUND="$("$RUNTIME" inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}{{"\n"}}{{end}}{{end}}' "$STABLE_PROXY" | head -n 1)"
 fi
 
 if [ "$MODE" = port ]; then
@@ -484,6 +491,14 @@ if [ -n "$stable_server" ] && ! "$RUNTIME" inspect -f '{{range .Config.Env}}{{pr
   say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the servers (up -d server api), so its query log says which tier answered"
 fi
 
+# On stable's origin the canary is reached wherever stable is, with stable's
+# keys, and it runs this checkout. Said when that is more than loopback, once
+# nothing is left to refuse.
+if [ "$MODE" = path ]; then
+  case "$STABLE_BOUND" in 127.*|::1|localhost) ;; *) say "note: stable's proxy listens on ${STABLE_BOUND:-every interface}, so this canary — this checkout's build, taking stable's keys — answers at /canary/mcp there too; pass --port N for one on loopback alone" ;; esac
+  [ -z "$PUBLIC_ORIGIN" ] || say "note: stable has a public origin ($PUBLIC_ORIGIN): whatever carries it to stable's port carries /canary/mcp to this canary too; pass --port N for one on loopback alone"
+fi
+
 say "canary Postgres"
 canary_compose up -d --wait postgres
 CANARY_PG="$(container_of "$CANARY" postgres)"
@@ -527,13 +542,13 @@ canary_compose up -d --build --no-deps --force-recreate server
 # the build just made, not the one it was stopped on.
 canary_compose up -d --no-deps --force-recreate api
 if [ "$MODE" = path ]; then
-  # Stable's proxy answers /canary/mcp; a canary proxy from before SMD-2294
-  # would go on publishing its own port, so it goes.
-  if [ -n "$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=proxy")" ]; then
-    OLD_PORT="$(published_port)"
-    canary_compose rm -sf proxy >/dev/null || { echo "could not remove the canary's own proxy, which may still publish its old port; its servers are up on $STABLE's origin. Remove it with compose -p $CANARY rm -sf proxy (this checkout's -f files) and re-run up." >&2; exit 1; }
-    say "canary proxy removed: the canary answers on $STABLE's origin now"
-  fi
+  # Stable's proxy answers /canary/mcp. A canary proxy from before SMD-2294
+  # would go on publishing its own port, so it goes — last, once the canary
+  # answers here and the connector has moved: until then it still serves the
+  # canary at its old URL, so a run that fails leaves that working, and the
+  # connector there is still the canary's.
+  OLD_PROXY="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=proxy")"
+  [ -z "$OLD_PROXY" ] || OLD_PORT="$(published_port)"
   BASE="http://$STABLE_HOST:$STABLE_PORT/canary/mcp"
 else
   # Its own proxy (SMD-1846), left running across a refresh: while the server
@@ -677,11 +692,18 @@ if [ $CONNECT = 1 ]; then
   say "connector $NAME → $BASE (user scope; a new Claude Code session sees its tools)"
 else
   # Without --connect a connector from the other mode is left as it was, at a
-  # URL this canary no longer answers on.
+  # URL this canary no longer answers on: by port and path, so another
+  # spelling of this host (localhost) is no move. Once the old proxy is gone
+  # its port is no longer the canary's to replace, hence the remove first.
   read_connector
-  if [ -n "$CONN_URL" ] && ours "$CONN_URL" && [ "${CONN_URL%%\?*}" != "$BASE" ] && [ "${CONN_URL%%\?*}" != "$BASE/" ]; then
-    say "connector $NAME still points at $(shown "$CONN_URL"), where this canary no longer answers: re-run with --connect to move it to $BASE"
+  if [ -n "$CONN_URL" ] && ours "$CONN_URL" && [ "$(endpoint_of "$CONN_URL")" != "$(endpoint_of "$BASE")" ]; then
+    say "connector $NAME still points at $(shown "$CONN_URL"), where this canary no longer answers: move it with claude mcp remove --scope user $NAME, then up --connect"
   fi
+fi
+
+if [ -n "${OLD_PROXY:-}" ]; then
+  canary_compose rm -sf proxy >/dev/null || { echo "could not remove the canary's own proxy, which may still publish port ${OLD_PORT:-?}; the canary answers at $BASE. Remove it with compose -p $CANARY rm -sf proxy (this checkout's -f files)." >&2; exit 1; }
+  say "canary proxy removed: the canary answers on $STABLE's origin now"
 fi
 
 say "canary up: $BASE, tier canary, refreshed from $STABLE_PG"

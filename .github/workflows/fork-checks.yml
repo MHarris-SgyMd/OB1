@@ -1526,7 +1526,10 @@ jobs:
       # it down again; this step is its refusals, each with exit 2 and nothing
       # started, stamped or registered:
       # - a stable whose proxy routes no /canary/mcp (a release from before
-      #   SMD-2294, made here by recreating the proxy with that label);
+      #   SMD-2294, made here by recreating the proxy with that label), and
+      #   one whose proxy is off its mesh;
+      # - an empty --port, and a --stable-project no compose project could
+      #   be named (a blank one would match every project's containers);
       # - with --port, a port a container holds and one a host process
       #   listens on;
       # - a stable stamped or marked as a copy;
@@ -1561,6 +1564,12 @@ jobs:
           docker compose -f compose.yaml -f /tmp/old-stable.yaml up -d --wait --wait-timeout 120 proxy
           refused 'routes no /canary/mcp' up
           docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy
+          # A stable proxy off its own mesh could not reach a canary there.
+          docker network disconnect open-brain_mesh "$(docker compose -f compose.yaml ps -q proxy)"
+          refused 'is not on open-brain_mesh' up
+          docker compose -f compose.yaml up -d --force-recreate --wait --wait-timeout 120 proxy
+          refused 'takes a value' up --port ''
+          refused 'takes a compose project name' up --stable-project 'Open Brain'
           # The image the stack already pulled holds the port as well as any.
           docker run -d --name ob1-port-squat -p 127.0.0.1:8011:5432 -e POSTGRES_PASSWORD=squat pgvector/pgvector:0.8.6-pg16
           refused 'port 8011 is published by ob1-port-squat' up --port 8011
@@ -1582,7 +1591,7 @@ jobs:
           [ -z "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" ] || { echo "a refusal stamped stable" >&2; exit 1; }
           [ ! -s /tmp/fake-claude.log ] || { cat /tmp/fake-claude.log >&2; echo "a refusal touched the connector" >&2; exit 1; }
 
-      # SMD-2038, SMD-2294. The canary's life beside this stack, in two `up`s.
+      # SMD-2038, SMD-2294. The canary's life beside this stack, in three `up`s.
       # canary.sh runs compose.yaml again as the project open-brain-canary:
       # its Postgres, a refresh from this stack's through tier.sh on both
       # networks, its server and REST core built from this checkout, then the
@@ -1635,6 +1644,9 @@ jobs:
           ./canary.sh up --connect | tee /tmp/canary-up.out
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
+          # The auth step left OB1_PUBLIC_ORIGIN in .env: the canary on stable's
+          # origin is reached wherever that origin is, and says so.
+          grep -F 'note: stable has a public origin (https://brain.example.test)' /tmp/canary-up.out
           grep -F "returns it first: $LITERAL_ID at" /tmp/canary-up.out
           grep -F 'mcp add --transport http --scope user open-brain-canary http://127.0.0.1:8010/canary/mcp -H' /tmp/fake-claude.log
           [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy)" ] || { echo "a canary on stable's origin runs a proxy of its own" >&2; exit 1; }
