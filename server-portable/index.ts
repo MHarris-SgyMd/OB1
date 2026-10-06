@@ -11,7 +11,7 @@ import type { ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
 import { labelPart, withSseKeepalive } from "./sse.ts";
-import { authReachability, challengeHeader, edgeSettings, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
+import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
 // core or the renderer it belongs to (SMD-2283).
@@ -533,9 +533,10 @@ app.options("*", (c) => {
 // auth, OB1_PUBLIC_ORIGIN is sound), the request's Host is the origin's and the
 // authorization server answers (oauth-edge.ts). Anything else falls through to
 // the 404 — at any Host but the origin's, on a stack not configured or with an
-// unsound origin, and while the authorization server is down. Asked without a key, as claude.ai asks it, so
-// once the proxy routes it a `?key=` connector at /mcp signs in instead (the
-// auth profile is a preview until SMD-2286 accepts the token).
+// unsound origin, and while the authorization server is down. Asked without a
+// key, as claude.ai asks it, so a `?key=` connector at /mcp of a configured
+// stack is asked to sign in; its key still authenticates first (auth.ts), so
+// it is served once it has (the auth profile is a preview until SMD-2286).
 // A `Host` the URL cannot parse falls through too (oauth-edge.ts atOrigin).
 app.get(PRM_PATH, async (c, next) => {
   const { origin } = edgeHere();
@@ -584,8 +585,9 @@ function noteLegacyRoute(req: Request, name: string): void {
 // is serving and nothing else — no key, a wrong key, a capture-only key and a
 // revoked one all get the literal `ok`, so nothing about the deployment reaches
 // an unauthenticated probe. With a read or a write key it answers what the
-// brain is, as JSON — brain_info's record (SMD-2041), for deploy/smoke.sh and an
-// operator's curl — still a 200, since the process is serving: a database that
+// brain is, as JSON — brain_info's record (SMD-2041), and beside it `oauth`,
+// the edge's own view (SMD-2382), for deploy/smoke.sh and an operator's curl —
+// still a 200, since the process is serving: a database that
 // refuses at once is the record's `database.error`; one that never answers
 // leaves the registry check unanswered too, and the body is then `ok` (below).
 // Readiness — is the database reachable —
@@ -632,6 +634,10 @@ app.get("*", async (c, next) => {
   // lookup's retries answers `busy` for the same reason (agents.ts), and so is
   // `ok` here too.
   const info = core.brainInfo("health");
+  // Beside the record, the edge's own view (SMD-2382; oauth-edge.ts edgeView),
+  // started with the read: its probe, at most 2 s and once per 30 s, ends
+  // inside the read's deadline.
+  const oauth = edgeView(edgeHere(), () => authReachability().reachable());
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([
     agents().resolve(db(), principal), // one lookup in flight per key (agents.ts)
@@ -640,7 +646,7 @@ app.get("*", async (c, next) => {
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
   noteLegacyRoute(c.req.raw, principal.name);
-  return c.json(await info, 200, corsHeaders);
+  return c.json({ ...(await info), oauth: await oauth }, 200, corsHeaders);
 });
 
 // The worker-queue status as a keyed GET (SMD-2131) — the REST mirror of the

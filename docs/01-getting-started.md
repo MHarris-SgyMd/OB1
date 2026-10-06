@@ -265,7 +265,9 @@ Those connectors dial your server from the vendor's side, so they need a public 
 cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
-It prints a `https://….trycloudflare.com` URL. That plus `/mcp?key=your-access-key` is your **Public HTTPS URL** — save it. The quick tunnel changes its name each time it starts, so for something permanent use a named Cloudflare tunnel, [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) (`tailscale funnel 8000`), or a reverse proxy such as caddy on a machine you own; all of them dial `127.0.0.1:8000` themselves, and the proxy keeps listening on the loopback ([`deploy/README.md`](../deploy/README.md), "What is reachable from where").
+It prints a `https://….trycloudflare.com` URL. That plus `/mcp?key=your-access-key` is your **Public HTTPS URL** — save it. The quick tunnel changes its name each time it starts, so for something permanent use a named Cloudflare tunnel, [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) (`tailscale funnel 8000`), or a reverse proxy such as caddy on a machine you own; all of them dial `127.0.0.1:8000` themselves, and the proxy keeps listening on the loopback ([`deploy/README.md`](../deploy/README.md), "What is reachable from where"). claude.ai connects only to a name with a public IPv4 (`A`) address, and refuses one that resolves to a private or CGNAT address ([its troubleshooting page](https://claude.com/docs/connectors/building/troubleshooting#hostname-resolves-to-a-private-ip)). So `tailscale serve`, which publishes only on your tailnet, never works for it; Funnel does.
+
+Each of these tunnels works with a key in the URL, the quick one included. OAuth sign-in is different. The optional `auth` profile ([`deploy/README.md`](../deploy/README.md), "Authorization server"; a preview for now) binds everything it issues to one origin, set as `OB1_PUBLIC_ORIGIN`. So it needs a name that stays put: a named Cloudflare tunnel, Tailscale Funnel, or your own domain. The quick tunnel, whose name changes on each start, stays key-only. The tunnel must also pass on the `Host` a client sends, because the server advertises OAuth only at its origin's name. Funnel and a named Cloudflare tunnel do so by default, so don't override it (cloudflared's `httpHostHeader`, say). Once the profile is on, `./deploy/smoke.sh https://<your-origin>/mcp your-access-key` checks it (its check 2).
 
 > [!WARNING]
 > Anyone with that URL and your key can read and write your brain. Give the URL a `read`-scoped key where you can (Step 3.3), keep the tunnel running only while you use it, and rotate the key by replacing its line in `deploy/.env` and running Step 4's command again with `-d`: that recreates the server and the REST core, which both read the keys (a `restart` keeps the old ones).
@@ -390,7 +392,7 @@ Every MCP client handles remote servers slightly differently. The server accepts
 }
 ```
 
-**Option C: mcp-remote bridge (alternative).** `mcp-remote` also works. Set a generous startup timeout (30+ seconds) in clients that support it — `npx` fetches the bridge on first use — and pass the key in the URL — newer `mcp-remote` versions attempt OAuth client registration before sending custom headers, so `--header` fails against the server's key check.
+**Option C: mcp-remote bridge (alternative).** `mcp-remote` also works. Set a generous startup timeout (30+ seconds) in clients that support it — `npx` fetches the bridge on first use — and pass the key in the URL, the simplest form and the one every `mcp-remote` version sends on each request. The server never answers a request that carries a key with the OAuth challenge. A stack with the `auth` profile on does answer a keyless request at its public `/mcp` with the challenge, which starts a sign-in in the bridge.
 
 ```json
 {
