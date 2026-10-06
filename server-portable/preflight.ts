@@ -137,16 +137,20 @@ function leasesByKey(rows: ({ work_type: string } & LeaseRow)[]): Map<string, Le
 const runningWords = (l: Leases, c: PassCounts) =>
   `a pass under this key is running: ${l.live} in flight${l.liveUntil ? ` (leases live until ${l.liveUntil} UTC)` : ""}, ${c.pending} pending${l.expired ? `, ${l.expired} left by a worker that died, which a pass reclaims` : ""}`;
 /** A pass whose only claimed rows' leases expired: its worker died holding them. */
-const diedWords = (l: Leases) => `a worker died holding ${l.expired} claim(s), their leases expired, and none is live`;
+const diedWords = (l: Leases) => `a worker died holding ${l.expired} claim(s), their leases expired`;
 const RECLAIM = "The next pass reclaims the expired claims (a row on its third expiry is marked failed); the release_stale_leases tool returns them now. ";
 /**
  * A running pass's failed rows: a worker never retries them on its own (a
  * follower's --retry-failed runs once, before it follows), so a running row
  * with failed rows warns, names them, and says how they go back — or a
- * follower would hide them for as long as it ran (review pass 1).
+ * follower would hide them for as long as it ran (review pass 1). The way back
+ * is the retry_failed tool for the key: it puts them back to pending and the
+ * running worker takes them, any key, no second worker — a CLI --retry-failed
+ * was refused under a key naming another model, and runs a pass of its own
+ * (review pass 2).
  */
 const failedBeside = (c: PassCounts) => `; ${c.failed} failed row(s) the running pass will not retry`;
-const RETRY_BESIDE = (retry: string) => `Once their cause is fixed, ${retry} puts the failed rows back: a one-shot run beside the worker, or the follower restarted with it.`;
+const retryBeside = (key: string) => `Once their cause is fixed, the retry_failed tool (work_type ${key}) puts the failed rows back to pending, and the running worker takes them: no second worker.`;
 
 // Every check the direct-connection block owns, in the order the SQL path reports them.
 // A throw anywhere in that block lands in one catch, and a check that prints
@@ -3792,8 +3796,10 @@ if (configFailed) {
               // worker (SMD-2423).
               const l = leases.get(key) ?? NO_LEASES;
               if (l.live > 0) {
-                if (c.failed > 0) add("re-embed pass", "warn", `${key}: ${formatPassCounts(c)} — ${runningWords(l, c)}${failedBeside(c)}`, RETRY_BESIDE(`cd db && bun reembed.ts --url $DATABASE_URL --job ${key} --retry-failed`));
-                else add("re-embed pass", "ok", `${key}: ${formatPassCounts(c)} — ${runningWords(l, c)}`);
+                // The configured key's pass still leaves two models side by side until it ends.
+                const mixed = key === configuredKey ? "; until it finishes, the rows it has not reached carry what they had before it" : "";
+                if (c.failed > 0) add("re-embed pass", "warn", `${key}: ${formatPassCounts(c)} — ${runningWords(l, c)}${mixed}${failedBeside(c)}`, retryBeside(key));
+                else add("re-embed pass", "ok", `${key}: ${formatPassCounts(c)} — ${runningWords(l, c)}${mixed}`);
                 continue;
               }
               const named = parseReembedKey(key);
@@ -3830,7 +3836,7 @@ if (configFailed) {
                     `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${named.model} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, ${retire}`);
               } else if (key === configuredKey) {
                 add("re-embed pass", "warn",
-                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — ${l.expired > 0 ? `${diedWords(l)}; ` : ""}until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
+                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two${l.expired > 0 ? `; ${diedWords(l)}` : ""}`,
                     `${l.expired > 0 ? RECLAIM : ""}${finishIt("", "", c, recordDiffers)}`);
               } else if (otherWidth) {
                 // The same model at another width. Migration 006 keeps the
@@ -3932,13 +3938,21 @@ if (configFailed) {
               const follower = facts.workers?.heartbeats.find((h) => h.worker === "consolidate" && h.job === key && !h.stale && !h.ended);
               if (l.live > 0 || follower) {
                 const words = `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : `a follower is running this key (stamped ${ago(follower!.ageS)} ago): ${c.pending} pending between its polls${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`}`;
-                if (c.failed > 0) add("consolidate pass", "warn", `${words}${failedBeside(c)}${queue ? `; ${queue}` : ""}`, RETRY_BESIDE(`cd db && ${envPrefix}bun consolidate.ts --url $DATABASE_URL --retry-failed`));
+                if (c.failed > 0) add("consolidate pass", "warn", `${words}${failedBeside(c)}${queue ? `; ${queue}` : ""}`, retryBeside(key));
                 else add("consolidate pass", "ok", `${words}${queue ? `; ${queue}` : ""}`);
                 continue;
               }
+              // A follower of this key that stopped or went stale: the workers
+              // row names its restart, which finishes the pass — a one-shot run
+              // here as well would be a second remedy, and a second worker
+              // (review pass 2).
+              const stoppedFollower = facts.workers?.heartbeats.some((h) => h.worker === "consolidate" && h.job === key);
+              const failedNote = c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : "";
               add("consolidate pass", "warn",
                   `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : "a consolidation pass under this key stopped before it finished"}${queue ? `; ${queue}` : ""}`,
-                  `${l.expired > 0 ? RECLAIM : ""}Finish it: cd db && ${envPrefix}bun consolidate.ts --url $DATABASE_URL${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : ""}; ${envPrefix}bun consolidate.ts --url $DATABASE_URL --status shows where it stands.`);
+                  `${l.expired > 0 ? RECLAIM : ""}${stoppedFollower
+                    ? `Its follower is not running: start it again as the workers row says${failedNote}; it finishes the pass.`
+                    : `Finish it: cd db && ${envPrefix}bun consolidate.ts --url $DATABASE_URL${failedNote}; ${envPrefix}bun consolidate.ts --url $DATABASE_URL --status shows where it stands.`}`);
             }
             if (unfinished === 0) add("consolidate pass", "ok", `none unfinished${queue ? `; ${queue}` : ""}`);
           }

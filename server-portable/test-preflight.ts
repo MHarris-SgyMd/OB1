@@ -1356,6 +1356,9 @@ else {
   const during = await run(SQL_ENV);
   assert(/6 thoughts — 2 succeeded \(1 with a caveat\), 1 failed, 0 in flight, 2 pending, 1 not yet in the pool/.test(during.out),
          "a thought captured during the pass is counted as not yet in the pool");
+  // The configured key's pass stopped with no lease held: no dead worker, no reclaim (review pass 2).
+  assert(/the pass to \S+ @ \d+ has not finished/.test(during.out) && !/a worker died|reclaims the expired/.test(during.out.split("\n").filter((l) => /re-embed pass|→/.test(l)).join("\n")),
+         "a configured key's pass with no claimed row names no dead worker and no reclaim");
 
   await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${KEY} AND status IN ('pending', 'failed')`;
   const finished = await run(SQL_ENV);
@@ -1369,14 +1372,14 @@ else {
          "a row another process holds is unfinished work, counted in flight");
   // …held by a live lease, the pass is running: an ok row with no remedy that
   // would start a second worker (SMD-2423).
-  assert(/✓\s+re-embed pass\s+\S+: 6 thoughts — .* — a pass under this key is running: 1 in flight \(leases live until \d\d:\d\d UTC\), 0 pending$/m.test(leased.out) && !/Finish it/.test(fix(leased.out, "re-embed pass")),
+  assert(/✓\s+re-embed pass\s+\S+: 6 thoughts — .* — a pass under this key is running: 1 in flight \(leases live until \d\d:\d\d UTC\), 0 pending; until it finishes, the rows it has not reached carry what they had before it$/m.test(leased.out) && !/Finish it/.test(fix(leased.out, "re-embed pass")),
          `a live lease reads running, ok, with no remedy (${rowNamed(leased.out, "re-embed pass")})`);
   assert((leased.out.match(/^\s*[✓✗!·]\s+re-embed pass\s/gm) ?? []).length === 1 && !/none unfinished|stopped before it finished|has not finished/.test(leased.out.split("\n").filter((l) => /re-embed pass/.test(l)).join("\n")),
          "…one row for the key and no other: neither a stopped row beside the running one nor none unfinished (review pass 1)");
   // The configured key's lease run out: its own words, the dead worker named and the reclaim (review pass 1).
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${KEY} AND thought_id = ${leasedId}::uuid`;
   const leaseLapsed = await run(SQL_ENV);
-  assert(/!\s+re-embed pass\s+the pass to \S+ @ \d+ has not finished: .* — a worker died holding 1 claim\(s\), their leases expired, and none is live; until it does/.test(leaseLapsed.out)
+  assert(/!\s+re-embed pass\s+the pass to \S+ @ \d+ has not finished: .* — until it does, .* and searches rank across the two; a worker died holding 1 claim\(s\), their leases expired$/m.test(leaseLapsed.out)
       && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool returns them now\. Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL/m.test(leaseLapsed.out),
          `the configured key's expired lease reads as a worker that died, under the key's own words (${rowNamed(leaseLapsed.out, "re-embed pass")})`);
   await claims`SELECT release_thought(${leasedId}::uuid, ${KEY}, 'preflight-test', 'succeeded')`;
@@ -1394,7 +1397,7 @@ else {
   await claims`SELECT claim_thoughts(${CTX}, 'preflight-dead', 1)`;
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CTX} AND status = 'claimed'`;
   const died = await run(SQL_ENV);
-  assert(/!\s+re-embed pass\s+\S+:ctx: 6 thoughts — 0 succeeded, 0 failed, 1 in flight, 0 pending, 5 not yet in the pool — a worker died holding 1 claim\(s\), their leases expired, and none is live$/m.test(died.out)
+  assert(/!\s+re-embed pass\s+\S+:ctx: 6 thoughts — 0 succeeded, 0 failed, 1 in flight, 0 pending, 5 not yet in the pool — a worker died holding 1 claim\(s\), their leases expired$/m.test(died.out)
       && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool returns them now\. Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --job \S+:ctx/m.test(fix(died.out, "re-embed pass")),
          `an expired lease reads as a worker that died holding it, with the reclaim and the remedy (${rowNamed(died.out, "re-embed pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CTX}`;
@@ -1410,10 +1413,10 @@ else {
   const mixLeases = await run(SQL_ENV);
   assert(/✓\s+re-embed pass\s+\S+:mix: 6 thoughts — 0 succeeded, 0 failed, 2 in flight, 2 pending, \d+ not yet in the pool — a pass under this key is running: 1 in flight \(leases live until \d\d:\d\d UTC\), 2 pending, 1 left by a worker that died, which a pass reclaims$/m.test(mixLeases.out),
          `a live lease beside an expired one reads running, the dead claim and the pending rows said (${mixLeases.out.split("\n").find((l) => l.includes(":mix:"))?.trim()})`);
-  await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL, last_error = 'stub: refused this text' WHERE work_type = ${MIX} AND thought_id = (SELECT thought_id FROM thought_work_claims WHERE work_type = ${MIX} AND status = 'pending' ORDER BY thought_id LIMIT 1)`;
+  await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL, last_error = 'stub: refused this text' WHERE work_type = ${MIX} AND status = 'pending'`;
   const mixedFailed = await run(SQL_ENV);
-  assert(/!\s+re-embed pass\s+\S+:mix: .* 1 failed, .* — a pass under this key is running: .*; 1 failed row\(s\) the running pass will not retry$/m.test(mixedFailed.out)
-      && /^\s*→ Once their cause is fixed, cd db && bun reembed\.ts --url \$DATABASE_URL --job \S+:mix --retry-failed puts the failed rows back/m.test(mixedFailed.out),
+  assert(/!\s+re-embed pass\s+\S+:mix: .* 2 failed, .* — a pass under this key is running: .*; 2 failed row\(s\) the running pass will not retry$/m.test(mixedFailed.out)
+      && /^\s*→ Once their cause is fixed, the retry_failed tool \(work_type \S+:mix\) puts the failed rows back to pending, and the running worker takes them: no second worker\.$/m.test(mixedFailed.out),
          `a running pass with a failed row warns, naming it and how it goes back (${mixedFailed.out.split("\n").find((l) => l.includes(":mix:"))?.trim()} | ${mixedFailed.out.split("\n").find((l) => l.includes(":mix --retry-failed"))?.trim()})`);
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${MIX}`;
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: refused this text' WHERE work_type = ${CTX}`;
@@ -1569,7 +1572,7 @@ else {
          "…one row for the key: no stopped row beside it, no none unfinished (review pass 1)");
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
   const consDied = await run(SQL_ENV);
-  assert(/!\s+consolidate pass\s+\S+: .* — a worker died holding 1 claim\(s\), their leases expired, and none is live; 1 proposal/.test(consDied.out) && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool returns them now\. Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts/m.test(fix(consDied.out, "consolidate pass")),
+  assert(/!\s+consolidate pass\s+\S+: .* — a worker died holding 1 claim\(s\), their leases expired; 1 proposal/.test(consDied.out) && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool returns them now\. Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts/m.test(fix(consDied.out, "consolidate pass")),
          `an expired lease reads as a worker that died holding it (${rowNamed(consDied.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   // A follower between its polls holds no lease: its fresh heartbeat for the
@@ -1588,6 +1591,12 @@ else {
   assert(/stopped before it finished/.test(rowNamed((await run(SQL_ENV)).out, "consolidate pass")), "a fresh heartbeat under another key leaves this one stopped");
   await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:someone-else@p3'`;
   await followerBeat(20);
+  // …and beside a dead worker's claim, the follower's words name it (review pass 2).
+  await claims`SELECT claim_thoughts(${CONS}, 'preflight-dead', 1)`;
+  await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
+  assert(/a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls, 1 left by a worker that died, which its next poll reclaims/.test(rowNamed((await run(SQL_ENV)).out, "consolidate pass")),
+         "a follower beside an expired claim names the dead claim");
+  await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   const consFollowed = await run(SQL_ENV);
   assert(/✓\s+consolidate pass\s+\S+: .* — a follower is running this key \(stamped 20 s ago\): 1 pending between its polls; 1 proposal/.test(consFollowed.out),
          `a fresh follower heartbeat for the key reads running between polls (${rowNamed(consFollowed.out, "consolidate pass")})`);
@@ -1596,7 +1605,7 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND status = 'pending'`;
   const consFollowFailed = await run(SQL_ENV);
   assert(/!\s+consolidate pass\s+\S+: .* 1 failed, .* — a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls; 1 failed row\(s\) the running pass will not retry; 1 proposal/.test(consFollowFailed.out)
-      && /Once their cause is fixed, cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL --retry-failed puts the failed rows back/.test(fix(consFollowFailed.out, "consolidate pass")),
+      && /Once their cause is fixed, the retry_failed tool \(work_type consolidate:other-judge@p1\) puts the failed rows back to pending, and the running worker takes them: no second worker\./.test(fix(consFollowFailed.out, "consolidate pass")),
          `a follower beside a failed row warns, naming it and the retry (${rowNamed(consFollowFailed.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL, last_error = NULL WHERE work_type = ${CONS} AND last_error = 'stub: not JSON'`;
   await followerBeat(600);
@@ -1604,8 +1613,9 @@ else {
   await followerBeat(20, { outcome: "stopped", ended: true });
   const consEnded = await run(SQL_ENV);
   await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${CONS}`}`;
-  assert([consBeatStale, consEnded].every((r) => /!\s+consolidate pass\s+\S+: .* — a consolidation pass under this key stopped before it finished/.test(r.out)),
-         "a stale or ended follower heartbeat is no running pass: the row reads stopped");
+  assert([consBeatStale, consEnded].every((r) => /!\s+consolidate pass\s+\S+: .* — a consolidation pass under this key stopped before it finished/.test(r.out)
+      && /^\s*→ Its follower is not running: start it again as the workers row says; it finishes the pass\.$/m.test(r.out) && !/Finish it: cd db && OB1_JUDGE_MODEL/.test(r.out)),
+         "a stale or ended follower heartbeat is no running pass: the row reads stopped, and points to the workers row's restart rather than a second remedy");
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
   const consFailed = await run(SQL_ENV);
   assert(/consolidate pass\s+[^\n]* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool/.test(consFailed.out) && /\(--retry-failed for the 1 failed row\(s\) once their cause is fixed\)/.test(consFailed.out),
