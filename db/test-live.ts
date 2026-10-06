@@ -37,7 +37,7 @@ import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
-import { workerIdentity } from "./worker-bootstrap.ts";
+import { PROBE_PROMPT, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
@@ -3445,14 +3445,36 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   let unavailableCalls = 0;
   /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
   let unavailableMs = 0;
+  /**
+   * Until this time every request — a follower's probe too — answers `down`
+   * (SMD-2599): a 503, a 404 for the model, or no answer at all ("hang").
+   * `probes` counts the follower's one-token probes, answered apart from the
+   * calls so a follower's start costs no counted call.
+   */
+  let downUntil = 0;
+  let down: "503" | "404" | "hang" = "503";
+  let probes = 0;
   const model = Bun.serve({
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      if (Date.now() < downUntil) {
+        if (down === "hang") return neverAnswers();
+        return down === "404"
+          ? new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 })
+          : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      }
+      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        probes++;
+        if (body.model === "absent-model") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       calls++;
       modelsAsked.push(body.model ?? "");
       // The thought is the user message; the rules are the system message.
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      // A thought that draws a 500 every time, whatever the provider's state (SMD-2599).
+      if (prompt.includes("poison-500")) return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
       if (refuseCalls > 0) {
         refuseCalls--;
         // A beat late, so another worker's call is in hand by then.
@@ -3855,6 +3877,99 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       await relay.close();
       if (target) await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
     }
+  }
+
+  // A follower outlasts its provider going away (SMD-2599), in this process
+  // with the pauses before an outage cut to 100 ms (the worker reads the
+  // exported array as it runs; restored after). One follower, four events:
+  // a 503 past the pauses, the model missing, a hung provider (the call
+  // times out and the probe gets no answer either), and a thought that
+  // draws a 500 every time. The first three end extracted with nothing
+  // failed and the follower still running; the fourth ends failed, once a
+  // probe has answered. Then a start that finds the model unserved is
+  // refused with exit 2, and a run without --follow records the failure as
+  // before.
+  {
+    const saved = [...TRANSIENT_PAUSES_MS];
+    TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
+    const claimRow = async (id: string) => (await sql`SELECT status, attempt_count, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; attempt_count: number; last_error: string | null } | undefined;
+    const created: string[] = [];
+    const lines: string[] = [];
+    const ac = new AbortController();
+    let settled = false;
+    let followCode = -1;
+    // Deadlines past the waits: a 503 for 8 s is probed at 5 s and 15 s.
+    const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 2, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+      .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
+    try {
+      await Bun.sleep(1000);
+      const startProbes = probes;
+      // A 503 past the pauses.
+      down = "503";
+      downUntil = Date.now() + 8000;
+      const busy = await seed("Tess wired the outage pager into grafana.");
+      created.push(busy);
+      const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Extraction request to [^)]*503/.test(l)) && (await claimRow(busy))?.status === "pending", 6000);
+      const during = await claimRow(busy);
+      const busyDone = await pollUntil(() => extractedNow(busy), 25_000);
+      assert(startProbes >= 1 && pooled && during?.attempt_count === 0 && during.last_error === null && busyDone && (await claimRow(busy))?.status === "succeeded" && !settled,
+             `a 503 past the pauses: the thought goes back to the pool (pending, attempt ${during?.attempt_count}, no error), the follower waits, and extracts it when the provider answers — still running (pooled ${pooled}, extracted ${busyDone}, ${probes - startProbes} probe(s) answered)`);
+      assert(lines.some((l) => /the follower calls stub-meta at http:\/\/127\.0\.0\.1:\d+\/v1 for one token after 5 s and then twice as long each time, up to 5 min/.test(l)) && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
+             "…and says when the provider stopped answering, how it waits, and when it answered again");
+      // The model missing, as while Ollama pulls it: no pauses, an outage at once.
+      down = "404";
+      downUntil = Date.now() + 3000;
+      const pulled = await seed("Uma rebuilt the grafana alerts after the model was pulled again.");
+      created.push(pulled);
+      const pulledDone = await pollUntil(() => extractedNow(pulled), 20_000);
+      assert(pulledDone && (await claimRow(pulled))?.status === "succeeded" && !settled && lines.some((l) => /the provider is not answering \([^)]*404 \{"error":\{"message":"model \\"stub-meta\\" not found/.test(l)),
+             `the model missing mid-run is an outage, not the provider's refusal: no exit, and the thought is extracted once the model answers (extracted ${pulledDone}, settled ${settled})`);
+      // A hung provider: the call times out at 2 s, and the probe gets no answer either.
+      down = "hang";
+      downUntil = Date.now() + 6000;
+      const hung = await seed("Vic moved the grafana panels while the provider hung.");
+      created.push(hung);
+      const hungDone = await pollUntil(() => extractedNow(hung), 25_000);
+      assert(hungDone && (await claimRow(hung))?.status === "succeeded" && !settled && lines.some((l) => /the provider is not answering \([^)]*timed out/.test(l)),
+             `a timeout the probe cannot get past either is an outage: the thought is extracted once the provider answers, not failed (extracted ${hungDone}, claim ${(await claimRow(hung))?.status})`);
+      // A thought that draws a 500 every time, the provider otherwise up.
+      const poisoned = await seed("The poison-500 note.");
+      created.push(poisoned);
+      const poisonFailed = await pollUntil(async () => (await claimRow(poisoned))?.status === "failed", 25_000);
+      const poisonRow = await claimRow(poisoned);
+      assert(poisonFailed && /^provider error again right after the provider answered a probe, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonRow?.last_error ?? "") && !settled,
+             `a thought that draws the error again right after a probe answered is its own: recorded failed, the follower still running (${poisonRow?.status}: ${poisonRow?.last_error?.slice(0, 120)})`);
+      const failedOthers = (await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed' AND thought_id = ANY(${sql.array([busy, pulled, hung], "TEXT")}::uuid[])`)[0].n;
+      assert(failedOthers === 0, `…and none of the outages' thoughts is failed (${failedOthers})`);
+    } finally {
+      downUntil = 0;
+      ac.abort();
+      await running;
+    }
+    assert(followCode === 0, `a follower stopped after the outages exits 0 (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
+
+    // A start that finds the model unserved: a refusal, before anything is written.
+    const refusedOut: string[] = [];
+    const stopRefused = new AbortController();
+    const guard = setTimeout(() => stopRefused.abort(), 15_000);
+    const refusedCode = await runExtract({ url: URL_!, env: { ...env, OB1_METADATA_MODEL: "absent-model" }, job: KEY, workers: 1, follow: 1, signal: stopRefused.signal, writer: { out: (l) => refusedOut.push(l), err: (l) => refusedOut.push(l) } });
+    clearTimeout(guard);
+    assert(refusedCode === 2 && refusedOut.some((l) => /does not serve absent-model at start \(404 [^)]*not found/.test(l)) && refusedOut.some((l) => /pull the model, or set OB1_METADATA_MODEL to one the provider serves/.test(l)),
+           `a follower whose model the provider does not serve at start is refused, exit 2 (exit ${refusedCode}: ${refusedOut.find((l) => /at start/.test(l))?.trim().slice(0, 140)})`);
+
+    // A run without --follow keeps the pauses, then records the thought failed and stops, as before.
+    down = "503";
+    downUntil = Date.now() + 30_000;
+    const oneShot = await seed("Wren checked the grafana pager without a follower.");
+    created.push(oneShot);
+    const oneShotOut: string[] = [];
+    const oneShotCode = await runExtract({ url: URL_!, env, workers: 1, writer: { out: (l) => oneShotOut.push(l), err: (l) => oneShotOut.push(l) } });
+    downUntil = 0;
+    const oneShotRow = await claimRow(oneShot);
+    assert(oneShotCode === 1 && oneShotRow?.status === "failed" && /^provider error after 3 retries: /.test(oneShotRow.last_error ?? "") && !oneShotOut.some((l) => /not answering/.test(l)),
+           `a run without --follow still records the thought failed after the pauses and exits 1 (exit ${oneShotCode}: ${oneShotRow?.status}, ${oneShotRow?.last_error?.slice(0, 60)})`);
+    TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved);
+    for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   // Stopping a pass (SMD-2304). Four notes the stub answers with nothing, one
@@ -4855,10 +4970,17 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   let judgeUnavailable = 0;
   /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
   let judgeUnavailableMs = 0;
+  /** Until this time the judge, and a follower's probe, answer `judgeDown`: a 503, or nothing at all (SMD-2599). */
+  let judgeDownUntil = 0;
+  let judgeDown: "503" | "hang" = "503";
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      // Until judgeDownUntil every request, a follower's probe too, answers judgeDown (SMD-2599).
+      if (Date.now() < judgeDownUntil) return judgeDown === "hang" ? neverAnswers() : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      // A follower's one-token probe, answered apart: no judge call counted.
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
       calls++;
       modelsSeen.add(String(body.model));
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
@@ -5798,6 +5920,49 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const [settled] = await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${staleT}::uuid`;
     assert(settleRun.code === 0 && settled.status === "rejected" && /no longer a candidate pair — two tickets Linear links — each its own record \(079's rule\)/.test(String(settled.review_note)),
       `a stale proposal on two linked tickets is settled by the pass, the note naming 079's rule (${settled.status}: ${settled.review_note})`);
+  }
+
+  // A consolidate follower outlasts its provider going away (SMD-2599), as
+  // extract's does in [10]: in this process, the pauses cut to 100 ms, the
+  // judge answering 503 for 8 s while a newer thought of a pair is judged,
+  // then hanging for 6 s past a 2 s --timeout while another is.
+  {
+    const saved = [...TRANSIENT_PAUSES_MS];
+    TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
+    const lines: string[] = [];
+    const ac = new AbortController();
+    let settled = false;
+    let followCode = -1;
+    const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 2, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+      .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
+    const claimOf = async (id: string) => (await sql`SELECT status, attempt_count, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; attempt_count: number; last_error: string | null } | undefined;
+    try {
+      await Bun.sleep(1000);
+      judgeDownUntil = Date.now() + 8000;
+      await seed("The outage runbook pages the on-call by phone.", 9, 3, ["outage-runbook"]);
+      const newer = await seed("The outage runbook pages the on-call by chat now.", 9, 0, ["outage-runbook"]);
+      const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Judge request to [^)]*503/.test(l)) && (await claimOf(newer))?.status === "pending", 8000);
+      const during = await claimOf(newer);
+      const judgedAfter = await pollUntil(async () => (await claimOf(newer))?.status === "succeeded", 25_000);
+      assert(pooled && during?.attempt_count === 0 && during.last_error === null && judgedAfter && !settled && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
+             `a consolidate follower: a 503 past the pauses returns the thought to the pool unrecorded, and it is judged once the judge answers — the follower still running (pooled ${pooled}, judged ${judgedAfter})`);
+      // A hung judge: the pair's call times out, and the probe gets no answer either.
+      judgeDown = "hang";
+      judgeDownUntil = Date.now() + 6000;
+      await seed("The status page lists the outage runbook's owner.", 10, 3, ["status-page"]);
+      const hungNewer = await seed("The status page lists the outage runbook's new owner.", 10, 0, ["status-page"]);
+      const hungJudged = await pollUntil(async () => (await claimOf(hungNewer))?.status === "succeeded", 25_000);
+      const hungRow = await claimOf(hungNewer);
+      assert(hungJudged && !settled && lines.some((l) => /the provider is not answering \(the judge call timed out after 2 s, and a one-token call got no answer either\)/.test(l)),
+             `a consolidate follower: a pair's timeout the probe cannot get past either is an outage, and the thought is judged once the judge answers, not failed (${hungRow?.status}: ${hungRow?.last_error?.slice(0, 80)})`);
+    } finally {
+      judgeDown = "503";
+      judgeDownUntil = 0;
+      ac.abort();
+      await running;
+      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved);
+    }
+    assert(followCode === 0, `…and exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
   }
 
   judge.stop(true);
