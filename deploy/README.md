@@ -670,11 +670,12 @@ has removed.
   A worker holds one model call at a time, so the two counts, with
   `board-sync`'s calls and the captures', share the provider's parallel slots
   (`OLLAMA_NUM_PARALLEL`): one each leaves a slot free for captures on a
-  provider with three. Digits only: anything else is refused naming the
-  variable, and a number the CLI then refuses (`0`, more digits than it reads
-  exactly) is refused naming its flag, `--follow` or `--workers`. Everything
-  else is the server's environment: the model, the endpoints, the egress
-  policy, the extraction window and the escalation model.
+  provider with three while `board-sync` is idle. Digits only: anything else
+  is refused naming the variable, and a number the CLI then refuses (`0`,
+  more digits than it reads exactly) is refused naming its flag, `--follow`
+  or `--workers`. Everything else is the server's environment: the model, the
+  endpoints, the egress policy, the extraction window and the escalation
+  model.
 - **Code.** The services run this checkout's `db/` and `server-portable/`,
   mounted read-only as for `board-sync`; neither release image carries the
   workers (SMD-2601). So the profile needs a checkout, and the checkout should
@@ -709,15 +710,23 @@ reaches them:
   the old model's entities, and never judges the new ones.
 
 With `COMPOSE_PROFILES=workers`, a plain `up -d` after the change starts both,
-so stop them before you pull or edit. Then run the switch once — a backlog —
-and bring both back, with the server, whose capture-time tagging reads the
-same `OB1_METADATA_MODEL`:
+so stop them before you pull or edit. Then run the switch once — a backlog,
+so it ends as the first start does:
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
 # now edit deploy/.env, or move the checkout
 podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --switch-key --workers 1
-podman compose -f deploy/compose.yaml --profile workers up -d server extract consolidate
+```
+
+Check that it exited 0, read `--status` until the done line, and retry any
+`N failed` (the first start's two commands, above) before consolidation
+comes back. Then bring the followers back with the two servers, whose
+capture-time tagging reads the same `OB1_METADATA_MODEL` (`server` for MCP,
+`api` for REST):
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers up -d server api extract consolidate
 ```
 
 The switch re-extracts every thought that has no row under the new key — all
@@ -755,9 +764,11 @@ supersede which"):
 - an import dated older than thoughts already judged.
 
 **Consolidation only proposes.** Nothing it finds is applied: each proposal
-waits for a person, except one whose text moved under it (a stale row), which
-the next pass settles itself (067). `--list` shows the queue. `--accept <id>`
-or `--reject <id>` decides one, with `--note` giving your reason. When the
+waits for a person. One whose text moved under it (a stale row) is judged
+again by the next pass, which settles it unless the conflict still stands,
+when it waits for a person again (067). `--list` shows the queue.
+`--accept <id>` or `--reject <id>` decides one, with `--note` giving your
+reason. When the
 listing says the judge did not state which thought is current, an accept
 needs `--direction newer` or `--direction older`.
 
@@ -766,14 +777,21 @@ podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps conso
 ```
 
 An accept is audited under the agent of the key in `OB1_WORKER_KEY`, which in
-this container is the workers' key. To have it recorded as yours, pass your
-own key, one `MCP_ACCESS_KEYS` holds, from your shell's environment: a bare
-`-e NAME` takes its value from there, so the key is not on the command line
-(export it from a file or a password manager first):
+this container is the workers' key. To have it recorded as yours, give your
+own key, one `MCP_ACCESS_KEYS` holds, to that one command: set before it on
+the same line, it reaches neither your shell nor the next command, and the
+bare `-e` passes it into the container without putting it on the command
+line:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps -e OB1_WORKER_KEY consolidate bun db/consolidate.ts --accept <id> --note "…"
+OB1_WORKER_KEY="$(cat ~/.config/ob1/my-key)" podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps -e OB1_WORKER_KEY consolidate bun db/consolidate.ts --accept <id> --note "…"
 ```
+
+The run prints `agent: <name>` first; check it names your key. Do not
+`export OB1_WORKER_KEY`: compose reads the shell before `deploy/.env`, so
+every later compose command in that shell — an `up -d` included — would
+start the followers under your key. Without the prefix, the decision is the
+workers' key's.
 
 A reject records no reviewer whichever key runs it (SMD-2608). Accepting
 unattended waits on a judge that can tell conflicts apart (SMD-1873).

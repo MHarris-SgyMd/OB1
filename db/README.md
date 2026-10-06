@@ -2227,7 +2227,8 @@ yet when the newer side is judged:
   with them are not judged.
 
 The last three hold however the pass is run, once the newer thoughts have
-been judged; retried or re-embedded before that, nothing is missed. k and the
+been judged; a failed extraction or embedding repaired before that misses
+nothing. k and the
 floor were chosen by measurement (`evals/eval-consolidate.ts`;
 `evals/README.md` has the table) and are the worker's `--k` and `--min-sim`.
 

@@ -851,8 +851,9 @@ services:
   # order — and a pair whose older side was still unextracted is never
   # judged: start `extract` alone on one, and this when
   # `extract-entities.ts --status` shows 0 in flight, 0 pending and 0 not
-  # yet in the pool. A failed extraction or embedding, and an import dated
-  # older than thoughts already judged, miss their pairs however this runs
+  # yet in the pool (retrying any failed first). Once newer thoughts are
+  # judged, a failed extraction or embedding, and an import dated older than
+  # thoughts already judged, miss their pairs however this runs
   # (deploy/README.md).
   consolidate:
     image: oven/bun:1.4.0-alpine
