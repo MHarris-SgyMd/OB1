@@ -2208,8 +2208,11 @@ first, then consolidation, made structural rather than left to a trigger that
 would judge a capture before
 016's worker reached it and leave a terminal claim row behind. The gate cannot
 see the other side of a pair: a newer thought judged while an older neighbour
-is still unextracted is judged without it, and the pair is not revisited, so
-run the pass after extraction has finished rather than beside it. k and the
+is still unextracted is judged without it, and the pair is not revisited.
+Beside a follower of one extract worker that is safe for captures, queued one
+at a time and claimed in that order; a backlog — a first run, a
+`--switch-key` — is queued at one instant and claimed in no order, so run the pass after extraction has drained one (the `workers`
+compose profile, `deploy/README.md`, SMD-2424). k and the
 floor were chosen by measurement (`evals/eval-consolidate.ts`;
 `evals/README.md` has the table) and are the worker's `--k` and `--min-sim`.
 

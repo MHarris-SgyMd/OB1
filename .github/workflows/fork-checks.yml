@@ -1151,6 +1151,13 @@ jobs:
           # Postgres credential, no plain password and not the POC's switch.
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
+          # SMD-2424: the workers profile's two followers publish nothing,
+          # keep the key list the worker names itself by (board-sync blanks
+          # it), are handed the worker key, mount the checkout read-only, run
+          # their worker's --follow through `exec`, and stop after three
+          # refusals rather than loop.
+          docker compose -f compose.yaml --profile workers config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3") and (.services.extract.command[2] | test("exec bun db/extract-entities\\.ts --follow ")) and (.services.consolidate.command[2] | test("exec bun db/consolidate\\.ts --follow "))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'

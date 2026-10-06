@@ -160,6 +160,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
+| `extract`, `consolidate` (`--profile workers`) | Listen on nothing; dial `postgres:5432` and the model provider | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2294), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
@@ -601,6 +602,84 @@ is the lockstep census alone; `db/README.md`, "The board in the brain"). The
 scheduled form is the one built here; a Linear webhook is exact and immediate
 but needs an inbound route — a router on the proxy (SMD-1846) and a public
 origin a vendor can reach (SMD-2382) — and the handler's shape (signature, replay window, loop guard) is SMD-1862's.
+
+## Extraction and consolidation as services
+
+A capture is enqueued for entity extraction as it lands, and an extracted
+thought joins consolidation's pool, but nothing does the work until a worker
+runs. The `workers` profile runs both workers as services:
+`db/extract-entities.ts --follow` as `extract` and `db/consolidate.ts
+--follow` as `consolidate`. Each drains its pool, then polls for new work.
+
+**The cost comes first.** Extraction makes a model call per thought (per
+window of a long one), and consolidation up to three, one per judged pair. On
+a local model that is GPU time: the dogfood brain takes 50 to 90 thoughts a
+day, and one worker on `qwen2.5:7b` extracts one in 37 s at the median, so a
+follower is idle most of the day. On a hosted provider it is money per call,
+and each thought's text goes to the provider under the egress policy. Decide
+before you enable it.
+
+```bash
+# deploy/.env: OB1_WORKER_KEY=<the raw key>, with its line in MCP_ACCESS_KEYS
+#   cd server-portable && bun keygen.ts --name workers --scope capture
+podman compose -f deploy/compose.yaml --profile workers up -d extract consolidate
+podman compose -f deploy/compose.yaml --profile workers logs -f extract consolidate
+```
+
+**What each one is:**
+- **Identity.** Both need a worker key, and refuse to start without one (exit
+  2), so every mention, edge and proposal they write carries its agent id.
+- **Settings.** `OB1_EXTRACT_FOLLOW` and `OB1_CONSOLIDATE_FOLLOW` set the poll
+  interval in seconds (unset, 15). `OB1_EXTRACT_WORKERS` and
+  `OB1_CONSOLIDATE_WORKERS` set the worker count (unset, 1, not the CLI's 2,
+  so a model slot stays free for captures). Everything else is the server's
+  environment: the model, the endpoints, the egress policy, the extraction
+  window and the escalation model.
+- **Code.** The services run this checkout's `db/` and `server-portable/`,
+  mounted read-only as for `board-sync`; neither release image carries the
+  workers. So the profile needs a checkout, and the checkout should be at the
+  release the stack runs: a newer one runs newer worker code against an older
+  schema, and the workers do not check the schema's version. A changed
+  checkout reaches a follower when it is restarted.
+- **Stopping.** `stop` lets each worker finish the thought it holds. The grace
+  period is 120 s for `extract` (a thought's extraction took 121 s at p90 on
+  the stable brain) and 60 s for `consolidate`. A thought still held when the
+  container is killed is not lost: its lease lapses after 900 s and the next
+  run takes it. A follower stopped this way exits 0 and stays stopped.
+- **Refusals.** A configuration refusal exits 2: no key, a key
+  `MCP_ACCESS_KEYS` does not hold, a bad setting, or an egress policy that
+  would refuse every call (`OB1_LLM_LOCAL` unset against a host Ollama). The
+  service is tried three times, then stops, and `ps` shows it exited, as
+  `board-sync` does.
+
+**Start `extract` alone on a backlog.** A consolidated pair is judged from its
+newer side once. If the older thought was still unextracted then, the pair is
+never judged. Captures are queued one at a time and one extract worker takes
+them in order, so in steady state a new thought's older neighbours are
+extracted before it is judged. A backlog is queued at one instant and taken
+in no order: a first run, or a model change (`--switch-key`). With one
+waiting, bring up `extract` alone, then add
+`consolidate` when nothing is pending:
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --status
+```
+
+**Consolidation only proposes.** Nothing it finds is applied. Each proposal
+waits for review: `--list` shows the queue, then `--accept <id>` or
+`--reject <id>` decides one (`db/README.md`, "Consolidation: proposing which
+thoughts supersede which"). With OB1_WORKER_KEY in the environment, the
+decision is audited under the worker's agent; give `--note` your reason.
+Accepting unattended waits on a judge that can tell conflicts apart
+(SMD-1873).
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps consolidate bun db/consolidate.ts --list
+```
+
+This is the baseline for the sleep scheduler (SMD-1794): always on, at low
+concurrency. The scheduler will run these passes when the logs go quiet, under
+a budget, and yield to live traffic.
 
 ## Refreshing a tier
 
@@ -1630,16 +1709,15 @@ so the profile builds from a checkout.
   this stack's database only with `-f deploy/compose.host-ports.yaml` ("What is
   reachable from where", above); the same goes for the two workers below.
 - **Entity extraction.** `db/extract-entities.ts --follow` is a long-running
-  worker with a per-thought model cost; it is not a service here. Run it from a
-  checkout, with `OB1_WORKER_KEY` set to a key whose hash is in
-  `MCP_ACCESS_KEYS`, when you have decided to pay that cost. A follower exits 0
-  when stopped, so watch its stderr: it says there when the model looks at
-  fault, after each pass drains the pool — a follower started on a backlog says
-  nothing until the backlog is done, so try a new model with `--limit 48` first
-  (SMD-2266, `db/README.md`). The same goes for
-  `db/consolidate.ts`, the pass that proposes supersessions from the entities
-  that worker extracts (a per-pair cost; `db/README.md`), and for reviewing
-  what it proposes.
+  worker with a per-thought model cost, so it runs as a service only when asked:
+  the `workers` profile runs it and `db/consolidate.ts --follow`, the pass that
+  proposes supersessions from the entities it extracts ("Extraction and
+  consolidation as services", above). Decide on the cost before you ask for it.
+  A follower exits 0 when stopped, so watch its log: it says there when the
+  model looks at fault, after each pass drains the pool. A follower started on
+  a backlog says nothing until the backlog is done, so try a new model with
+  `--limit 48` first (SMD-2266, `db/README.md`). Reviewing what consolidation
+  proposes stays a person's job.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
   The `auth` profile's authorization server runs behind the proxy's `/auth`,
