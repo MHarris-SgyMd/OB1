@@ -2143,7 +2143,7 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   // no Host (HTTP/1.0), userinfo or a path leave the bare request target, which Hono routed wrong (a 405 at /health). Raw sockets,
   // since fetch sends a Host of its own. The REST core is served beside the
   // MCP server through its own entry, api.ts; no row below reaches a store.
-  const { routable, REBUILD_ORIGIN } = await import("./root.ts");
+  const { routable, REBUILD_ORIGIN } = await import("./auth.ts");
   const rest = Bun.serve({ ...(await import("./api.ts")).default, port: 0 });
   const { connect } = await import("node:net");
   const raw = (port: number, text: string) => new Promise<string>((resolve, reject) => {
