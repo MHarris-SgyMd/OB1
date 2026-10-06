@@ -1569,6 +1569,7 @@ jobs:
           refused 'is not on open-brain_mesh' up
           docker compose -f compose.yaml up -d --force-recreate --wait --wait-timeout 120 proxy
           refused 'takes a value' up --port ''
+          refused 'takes a value' up --name ' '
           refused 'takes a compose project name' up --stable-project 'Open Brain'
           # The image the stack already pulled holds the port as well as any.
           docker run -d --name ob1-port-squat -p 127.0.0.1:8011:5432 -e POSTGRES_PASSWORD=squat pgvector/pgvector:0.8.6-pg16
@@ -1675,8 +1676,13 @@ jobs:
           # moves over: its own proxy goes, its port is free, and a connector
           # left at the old URL is named.
           FAKE_URL='http://127.0.0.1:8011/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-back.out
-          grep -F 'canary proxy removed' /tmp/canary-back.out
-          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…' /tmp/canary-back.out
+          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…, where this canary no longer answers: move it with claude mcp remove --scope user open-brain-canary, then up --connect' /tmp/canary-back.out
+          # The proxy went last, once the canary answered on stable's origin: a
+          # run that failed before then would have kept it, and the connector
+          # at its port the canary's.
+          answered=$(grep -nF 'canary at http://127.0.0.1:8010/canary/mcp' /tmp/canary-back.out | cut -d: -f1)
+          removed=$(grep -nF 'canary proxy removed' /tmp/canary-back.out | cut -d: -f1)
+          if ! { [ -n "$answered" ] && [ -n "$removed" ] && [ "$answered" -lt "$removed" ]; }; then echo "the canary's own proxy was not removed after the canary answered on stable's origin (answered at line ${answered:-?}, removed at ${removed:-?})" >&2; exit 1; fi
           [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy)" ] || { echo "the canary's own proxy outlived the move to stable's origin" >&2; exit 1; }
           if (exec 3<>/dev/tcp/127.0.0.1/8011) 2>/dev/null; then echo "port 8011 still answers after the canary's proxy went" >&2; exit 1; fi
           grep -qw mcp.canary.ob1.internal <<<"$(on_stable_mesh server)" || { echo "the canary back on stable's origin is not on stable's mesh" >&2; exit 1; }

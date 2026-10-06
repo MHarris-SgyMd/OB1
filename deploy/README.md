@@ -228,7 +228,7 @@ paths today:
 | `/auth` and everything under it, `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, the bare `/.well-known/oauth-authorization-server` | `auth` (`--profile auth`), as `auth.ob1.internal` on the `mesh` network — the issuer, sign-in, registration and the three discovery documents outside the issuer's path (the bare one is the only one Claude Code reads). Only while it answers: with the profile off, the server stopped or still starting, the proxy's own bodiless 404, so an origin without it says "no OAuth here" as before. Its own answers pass through untouched, the registration cap's 503 and `Retry-After` included |
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
-| `/canary/mcp`, `/working/mcp` and everything under each | that tier's MCP server, as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the `mesh` network: a tier run as a compose project of its own joins this stack's mesh under that name and none of this stack's (`deploy/canary.sh` does, from SMD-2294's next cut). One that brought this stack's own names along (`mcp.ob1.internal`, `api.ob1.internal` and, with `--profile auth`, `auth.ob1.internal`, which `compose.yaml` gives its services on the `mesh` key) would share this stack's traffic with it, sign-ins included. `GET /canary/mcp/health` is its liveness and, with a read key, its record. With no such tier, or one stopped or still starting, the proxy's bodiless 404. A tier's protected-resource path is not routed, so a tier is reached with keys |
+| `/canary/mcp`, `/working/mcp` and everything under each | that tier's MCP server, as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the `mesh` network: a tier run as a compose project of its own joins this stack's mesh under that name and none of this stack's (`deploy/canary.sh` does, SMD-2294). One that brought this stack's own names along (`mcp.ob1.internal`, `api.ob1.internal` and, with `--profile auth`, `auth.ob1.internal`, which `compose.yaml` gives its services on the `mesh` key) would share this stack's traffic with it, sign-ins included. `GET /canary/mcp/health` is its liveness and, with a read key, its record. With no such tier, or one stopped or still starting, the proxy's bodiless 404. A tier's protected-resource path is not routed, so a tier is reached with keys |
 | any other path starting with `/canary` or `/working`, in any letter case | the proxy's bodiless 404, so a client given a tier's URL with anything changed after the prefix (`/canary`, `/CANARY/mcp`, `/canary%2Fmcp`, an invisible space pasted after `canary`) never reaches this stack's server by the legacy route, where the same key would write to this brain. A typo of the prefix itself (`/canry/mcp`) still does, until SMD-2532 closes the legacy route |
 | `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
 | `/.well-known/oauth-protected-resource/mcp` | `server` — the MCP server's protected-resource document while it advertises OAuth: the `auth` profile on, the request at the origin's `Host`, and the authorization server answering the server's probe on the mesh. Otherwise the server's 404, and a server that is down is the proxy's 404, never a 502 (SMD-2382). A claude.ai connector at `https://host/mcp` asks this at the origin root before it uses its key, and proceeds on the key only on a 404 (SMD-1246) |
@@ -953,13 +953,15 @@ on loopback (`127.0.0.1`, `localhost`, `[::1]`) or on the address stable's
 proxy is bound to, or a canary proxy's port with any path (and either with
 any `?key=`). A connector at stable's own `/mcp` is never the canary's. An
 `up` that moves the canary between stable's origin and `--port` without
-`--connect` leaves the connector where it was, and says so. Moving off
-`--port`, pass `--connect` in that same `up`, which moves the connector
-before the canary's proxy goes; afterwards its old port is no longer the
-canary's, and the connector must be removed by hand first (`claude mcp
-remove --scope user open-brain-canary`). The proxy goes last, once the canary
-answers on stable's origin, so an `up` that fails leaves the old URL
-working.
+`--connect` leaves the connector where it was, and says how to move it.
+Moving off `--port`, pass `--connect` in that same `up`, which moves the
+connector before the canary's proxy goes; afterwards its old port is no
+longer the canary's, and the connector must be removed by hand first
+(`claude mcp remove --scope user open-brain-canary`). The proxy goes last,
+once the canary answers on stable's origin: an `up` that fails keeps it, so
+a connector at its port stays the canary's and a re-run with `--connect`
+moves it. Only a failure at the smoke leaves it answering meanwhile; a
+failed refresh or health wait stops the canary's servers.
 A canary proxy's port is read from its container, running or stopped (after
 a reboot podman leaves it stopped, and Docker restarts it but not its
 Postgres); once that is gone, pass the `--port` it was stood up with.

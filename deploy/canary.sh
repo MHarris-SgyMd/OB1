@@ -45,9 +45,8 @@
 #   4. builds the server from this checkout and (re)creates it and the REST
 #      core, which runs the server's image, so their pools open on the
 #      refreshed database. Standing servers are stopped before the refresh, so
-#      nothing serves or writes a half-restored copy. On stable's origin a
-#      canary proxy from before SMD-2294 is removed; with --port the canary's
-#      own proxy is (re)started;
+#      nothing serves or writes a half-restored copy. With --port the
+#      canary's own proxy is (re)started;
 #   5. smoke-tests it with OB1_SMOKE_KEY, a raw write key whose hash is in the
 #      env file's MCP_ACCESS_KEYS (the canary accepts stable's keys; smoke.sh
 #      checks the whole tool surface, which a read key does not see). The keyed
@@ -58,7 +57,11 @@
 #      candidates. A canary with no thought to probe is not checked, unless
 #      stable had one: then its vectors were emptied, and the smoke fails;
 #   6. with --connect, registers the Claude Code connector (user scope) under
-#      the same key, at the canary's URL.
+#      the same key, at the canary's URL; without it, names a connector left at
+#      the other mode's URL;
+#   7. on stable's origin, removes a canary proxy of its own (from --port, or
+#      from before SMD-2294) — last, so a run that fails before this keeps it,
+#      and a connector at its port stays the canary's to move.
 #
 # `down` removes the canary's containers and its own networks; stable's mesh is
 # stable's, and stays. It deregisters the connector when `claude` has it at user
@@ -285,6 +288,7 @@ published_port() {
 # with one), and the one `up` just removed its proxy from. None for a canary
 # on stable's origin.
 OLD_PORT=""
+OLD_PROXY=""
 canary_ports() {
   [ -z "$PORT" ] || printf '%s\n' "$PORT"
   [ -z "$OLD_PORT" ] || printf '%s\n' "$OLD_PORT"
@@ -544,9 +548,10 @@ canary_compose up -d --no-deps --force-recreate api
 if [ "$MODE" = path ]; then
   # Stable's proxy answers /canary/mcp. A canary proxy from before SMD-2294
   # would go on publishing its own port, so it goes — last, once the canary
-  # answers here and the connector has moved: until then it still serves the
-  # canary at its old URL, so a run that fails leaves that working, and the
-  # connector there is still the canary's.
+  # answers here and the connector has moved. A run that fails before then
+  # keeps it, so a connector at its port is still the canary's and a re-run
+  # with --connect moves it; one that fails at the smoke leaves it serving the
+  # canary there too (a failed refresh or health wait stops the servers).
   OLD_PROXY="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=proxy")"
   [ -z "$OLD_PROXY" ] || OLD_PORT="$(published_port)"
   BASE="http://$STABLE_HOST:$STABLE_PORT/canary/mcp"
@@ -697,12 +702,15 @@ else
   # its port is no longer the canary's to replace, hence the remove first.
   read_connector
   if [ -n "$CONN_URL" ] && ours "$CONN_URL" && [ "$(endpoint_of "$CONN_URL")" != "$(endpoint_of "$BASE")" ]; then
-    say "connector $NAME still points at $(shown "$CONN_URL"), where this canary no longer answers: move it with claude mcp remove --scope user $NAME, then up --connect"
+    if [ "$MODE" = port ]; then advice="re-run with --port $PORT --connect"
+    else advice="move it with claude mcp remove --scope user $NAME, then up --connect"
+    fi
+    say "connector $NAME still points at $(shown "$CONN_URL"), where this canary no longer answers: $advice"
   fi
 fi
 
-if [ -n "${OLD_PROXY:-}" ]; then
-  canary_compose rm -sf proxy >/dev/null || { echo "could not remove the canary's own proxy, which may still publish port ${OLD_PORT:-?}; the canary answers at $BASE. Remove it with compose -p $CANARY rm -sf proxy (this checkout's -f files)." >&2; exit 1; }
+if [ -n "$OLD_PROXY" ]; then
+  canary_compose rm -sf proxy >/dev/null 2>&1 || { echo "could not remove the canary's own proxy, which may still publish port ${OLD_PORT:-?}; the canary answers at $BASE. Remove it with compose -p $CANARY rm -sf proxy (this checkout's -f files)." >&2; exit 1; }
   say "canary proxy removed: the canary answers on $STABLE's origin now"
 fi
 
