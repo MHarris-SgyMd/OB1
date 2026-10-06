@@ -150,7 +150,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, missingModelIs, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
@@ -500,15 +500,19 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     return null;
   }
   /**
-   * The escalation model's refusal, or null. Asked at start only: probing it
-   * on every check of an outage would load the larger model each time
-   * (review pass 1: unprobed, a missing one failed every runaway thought,
-   * where the run had exited 2 naming it).
+   * The escalation model's refusal, or null. Asked at start only (review
+   * pass 1: unasked, a missing one failed every runaway thought, where the
+   * run had exited 2 naming it), and by GET /models, which loads nothing: a
+   * one-token call to it loaded the larger model at every start and evicted
+   * the model the first call needs (review pass 3). A provider whose list
+   * does not answer, or is of another shape, refuses nothing here; the
+   * model's first 404 is then the outage's, probing it by name.
    */
   async function escalationRefusal(wake?: AbortSignal): Promise<string | null> {
     if (!WINDOWING.escalateModel || wake?.aborted) return null;
-    const p = await probe(undefined, wake, WINDOWING.escalateModel);
-    return p.state === "missing" ? startRefusal(p, WINDOWING.escalateModel, "OB1_EXTRACT_ESCALATE_MODEL") : null;
+    if ((await modelListed(cfg.chat, WINDOWING.escalateModel, Math.min(TIMEOUT_S, 60) * 1000, wake)) !== "unlisted") return null;
+    return `\n  ${cfg.chat.base} does not serve ${WINDOWING.escalateModel}, OB1_EXTRACT_ESCALATE_MODEL, at start: GET /models does not list it.\n` +
+      "  A --follow worker refuses this before it claims anything (SMD-2599): pull the model, set OB1_EXTRACT_ESCALATE_MODEL to one the provider serves, or unset it for the penalised retry. Once running, a model that goes missing is waited for.";
   }
   /** Why the provider did not answer at start, when it did not: waited for below, before the pool. */
   let startOut: string | null = null;
@@ -1154,6 +1158,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 const rows = (await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`) as { ok: boolean }[];
                 recorded = rows[0]?.ok === true;
               } catch (e) {
+                // The database went away under the failure's record: nothing is
+                // recorded, the row is this worker's again for the finally to
+                // return, and it is not counted lost (review pass 3).
+                if (FOLLOW && databaseUnavailable(e)) {
+                  hb.held.add(b.thought_id);
+                  err(`  ${workerId}: the database is not answering (${(e as Error).message}) — recording nothing for ${b.thought_id}; it returns to the pool when the database answers`);
+                  return;
+                }
                 err(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
               }
               if (recorded) failed++;

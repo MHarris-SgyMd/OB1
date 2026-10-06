@@ -14,7 +14,7 @@
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, missingModelIs, probeChat, probeUntil, ProviderOutage, regateMessage, SUSPECT_WINDOW_MS, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -283,6 +283,38 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     ok(stopped.state === "out" && Date.now() - t0 < 2000, `a stop ends a probe in flight at once, as out (${JSON.stringify(stopped)} after ${Date.now() - t0} ms)`);
   } finally {
     hang.stop(true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Review pass 3: model names compared whole, the escalation model's existence
+// read from GET /models without loading it, and an unreadable 404 out.
+// ---------------------------------------------------------------------------
+{
+  const ollama404 = (name: string) => Object.assign(new Error(`Extraction request to http://h/v1 failed: 404 {"error":{"message":"model \\"${name}\\" not found, try pulling it first"}}`), { status: 404 });
+  ok(missingModelIs(ollama404("qwen3:32b"), "qwen3:32b") && !missingModelIs(ollama404("qwen3:32b"), "qwen3"),
+    "a 404 for qwen3:32b names qwen3:32b, not qwen3 — compared whole, not as a substring");
+  ok(missingModelIs(ollama404("qwen3:latest"), "qwen3") && missingModelIs(ollama404("qwen3"), "qwen3:latest"), "Ollama's implied :latest tag is the same model");
+  ok(missingModelIs(Object.assign(new Error("Judge request to http://h/v1 failed: 404 {\"error\":{\"message\":\"The model `gpt-x` does not exist or you do not have access to it.\",\"code\":\"model_not_found\"}}"), { status: 404 }), "gpt-x"),
+    "OpenAI's backticked name is read too");
+  ok(sameModel("a", "a") && sameModel("a", "a:latest") && !sameModel("a", "a:7b") && !sameModel("a:7b", "a:14b"), "sameModel: equal, or the :latest tag, nothing else");
+
+  let listing: () => Response = () => Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "big:latest" }] });
+  let chats = 0;
+  const lister = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(req) { if (req.method !== "GET") chats++; return listing(); } });
+  const at = { base: `http://127.0.0.1:${lister.port}/v1`, headers: {} };
+  try {
+    ok((await modelListed(at, "big", 2000)) === "listed" && (await modelListed(at, "absent", 2000)) === "unlisted" && chats === 0,
+      "GET /models: a listed model (its :latest tag implied) is listed, another unlisted, and no model was called");
+    listing = () => new Response("404 page not found", { status: 404 });
+    ok((await modelListed(at, "absent", 2000)) === "unknown", "a provider with no /models is unknown, refusing nothing");
+    listing = () => Response.json({ models: ["absent"] });
+    ok((await modelListed(at, "absent", 2000)) === "unknown", "a list of another shape is unknown");
+    listing = () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"error":')); } }), { status: 404 });
+    const unread = await probeChat(at, "m", 500);
+    ok(unread.state === "out", `a 404 whose body never arrives is out, not refused (${JSON.stringify(unread)})`);
+  } finally {
+    lister.stop(true);
   }
 }
 

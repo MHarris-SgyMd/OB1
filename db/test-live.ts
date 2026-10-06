@@ -3454,10 +3454,15 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   let downUntil = 0;
   let down: "503" | "404" | "hang" = "503";
   let probes = 0;
+  /** The models a probe or a call named, whatever the answer: the escalation model's start check must load nothing (review pass 3). */
+  const modelsNamed: string[] = [];
   const model = Bun.serve({
     port: 0,
     async fetch(req) {
+      // GET /models, the escalation model's start check: what an Ollama lists (review pass 3).
+      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "stub-escalate:latest" }] });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      modelsNamed.push(body.model ?? "");
       if (Date.now() < downUntil) {
         if (down === "hang") return neverAnswers();
         return down === "404"
@@ -3966,10 +3971,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       const escOut: string[] = [];
       const stopEsc = new AbortController();
       const escGuard = setTimeout(() => stopEsc.abort(), 15_000);
+      const namedBefore = modelsNamed.length;
       const escCode = await runExtract({ url: URL_!, env: { ...env, OB1_EXTRACT_ESCALATE_MODEL: "absent-model" }, workers: 1, follow: 1, signal: stopEsc.signal, writer: { out: (l) => escOut.push(l), err: (l) => escOut.push(l) } });
       clearTimeout(escGuard);
-      assert(escCode === 2 && escOut.some((l) => /does not serve absent-model, OB1_EXTRACT_ESCALATE_MODEL, at start \(404 /.test(l)),
-             `a follower whose escalation model the provider does not serve at start is refused, exit 2 (exit ${escCode}: ${escOut.find((l) => /at start|refuses/.test(l))?.trim().slice(0, 140)})`);
+      assert(escCode === 2 && escOut.some((l) => /does not serve absent-model, OB1_EXTRACT_ESCALATE_MODEL, at start: GET \/models does not list it/.test(l)) && !modelsNamed.slice(namedBefore).includes("absent-model"),
+             `a follower whose escalation model the provider does not list at start is refused, exit 2, and the model was never called (exit ${escCode}: ${escOut.find((l) => /at start|refuses/.test(l))?.trim().slice(0, 140)})`);
 
       // A start that finds the provider down waits for it after every other
       // refusal (review pass 2): a key other than the recorded one is refused

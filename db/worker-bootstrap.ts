@@ -289,7 +289,34 @@ export function modelMissing(e: unknown): boolean {
  * after the start (review pass 2).
  */
 export function missingModelIs(e: unknown, model: string): boolean {
-  return modelMissing(e) && providerWords(e).includes(model);
+  return modelMissing(e) && quotedNames(providerWords(e)).some((name) => sameModel(name, model));
+}
+
+/**
+ * Whether two model names are one model: equal, or one the other with
+ * Ollama's implied `:latest` tag. Compared whole — `qwen3` is not
+ * `qwen3:32b`, which a substring test read as one (review pass 3).
+ */
+export function sameModel(a: string, b: string): boolean {
+  return a === b || a === `${b}:latest` || b === `${a}:latest`;
+}
+
+/**
+ * The names a provider's words quote — `model "x" not found`, "The model
+ * `x` does not exist" — read from the error message of a JSON body when it
+ * is one, so the body's own JSON quoting is not read as names.
+ */
+function quotedNames(words: string): string[] {
+  let text = words;
+  try {
+    const body = JSON.parse(words) as { error?: unknown; message?: unknown };
+    const err = body?.error as { message?: unknown } | string | undefined;
+    const message = typeof err === "string" ? err : typeof err?.message === "string" ? err.message : typeof body?.message === "string" ? body.message : undefined;
+    if (typeof message === "string") text = message;
+  } catch {
+    // Not JSON: the words as they came.
+  }
+  return [...text.matchAll(/["'`\u201c\u201d]([^"'`\u201c\u201d\s]+)["'`\u201c\u201d]/g)].map((m) => m[1]);
 }
 
 /** Whether a provider error is a call's deadline passing — classifyError's "thought" for a timeout. */
@@ -344,9 +371,12 @@ export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "heade
     unread = true;
   }
   const why = `${r.status} ${words}`.trimEnd();
-  // A 200 whose body never arrived is a provider hung mid-answer, not one
-  // that answered (review pass 2).
-  if (r.ok) return unread ? { state: "out", why: `${r.status}, and the answer did not arrive` } : { state: "up" };
+  // An answer whose body never arrived is a provider hung mid-answer, not
+  // one that answered (review pass 2) — whatever its status: an unread 404
+  // cannot be told from a wrong URL, nor an unread 401 from a key refused
+  // (review pass 3).
+  if (unread) return { state: "out", why: `${r.status}, and the answer did not arrive` };
+  if (r.ok) return { state: "up" };
   if (r.status === 429 || r.status >= 500) return { state: "out", why };
   if (modelMissing({ status: r.status, body: words })) return { state: "missing", why };
   if (r.status === 404 || r.status === 401 || r.status === 402 || r.status === 403) return { state: "refused", why };
@@ -360,6 +390,33 @@ export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "heade
  */
 export class ProviderDown extends Error {
   override name = "ProviderDown";
+}
+
+/**
+ * Whether the provider lists `model` (SMD-2599, review pass 3): GET /models,
+ * read only for an answer of `unlisted` — a 200 whose `data` lists models,
+ * none of them this one (`sameModel`). Anything else — another status, a
+ * body of another shape, no answer — is `unknown`, and refuses nothing. It
+ * loads no model, where a chat probe of a large escalation model loaded it
+ * at every start and evicted the model the first call needs.
+ */
+export async function modelListed(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<"listed" | "unlisted" | "unknown"> {
+  try {
+    const r = await fetch(`${endpoint.base}/models`, {
+      method: "GET",
+      headers: endpoint.headers,
+      signal: wake ? AbortSignal.any([AbortSignal.timeout(timeoutMs), wake]) : AbortSignal.timeout(timeoutMs),
+      timeout: false,
+    });
+    if (!r.ok) return "unknown";
+    const body = (await r.json()) as { data?: unknown };
+    if (!Array.isArray(body?.data) || body.data.length === 0) return "unknown";
+    const ids = body.data.map((m) => (m as { id?: unknown })?.id).filter((id): id is string => typeof id === "string");
+    if (ids.length === 0) return "unknown";
+    return ids.some((id) => sameModel(id, model)) ? "listed" : "unlisted";
+  } catch {
+    return "unknown";
+  }
 }
 
 /** Whether a probe found the provider still out: no answer, or the model missing. */
@@ -415,26 +472,24 @@ export const SUSPECT_WINDOW_MS = 15 * 60_000;
  */
 export class ProviderOutage {
   reason: string | null = null;
-  private count = 0;
   private endedAt = 0;
-  /** Thoughts in hand at outage `count`: an entry from an earlier outage is no longer "right after". */
-  private suspects = new Map<string, number>();
+  /** Thoughts in hand at the latest outage; a new outage clears them, so an earlier one's are no longer "right after". */
+  private suspects = new Set<string>();
 
   /** `now` is the clock; the suite's own, to run the window without the wall clock. */
   constructor(private readonly now: () => number = Date.now) {}
 
   /** Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". */
   begin(reason: string, thoughtId?: string): "outage" | "thought" {
-    if (thoughtId !== undefined && this.reason === null && this.suspects.get(thoughtId) === this.count && this.now() - this.endedAt <= SUSPECT_WINDOW_MS) {
+    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= SUSPECT_WINDOW_MS) {
       this.suspects.delete(thoughtId);
       return "thought";
     }
     if (this.reason === null) {
-      this.count++;
       this.suspects.clear();
       this.reason = reason;
     }
-    if (thoughtId !== undefined) this.suspects.set(thoughtId, this.count);
+    if (thoughtId !== undefined) this.suspects.add(thoughtId);
     return "outage";
   }
 

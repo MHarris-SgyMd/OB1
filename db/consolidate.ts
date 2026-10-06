@@ -1394,6 +1394,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 const rows = (await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`) as { ok: boolean }[];
                 recorded = rows[0]?.ok === true;
               } catch (e) {
+                // The database went away under the failure's record: nothing is
+                // recorded, the row is this worker's again for the finally to
+                // return, and it is not counted lost (review pass 3).
+                if (FOLLOW && databaseUnavailable(e)) {
+                  hb.held.add(b.thought_id);
+                  err(`  ${workerId}: the database is not answering (${(e as Error).message}) — recording nothing for ${b.thought_id}; it returns to the pool when the database answers`);
+                  return;
+                }
                 err(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
               }
               if (recorded) failed++;
