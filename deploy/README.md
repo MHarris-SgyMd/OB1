@@ -153,23 +153,26 @@ the repo root, with whatever `-f` files the stack was started with:
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `proxy` | `proxy:8000`, which nothing in the stack dials; it dials `server:8000` and, on the `mesh` network, `auth.ob1.internal:3000` and — with `compose.api-public.yaml` named — `api.ob1.internal:8000` (resolved with no search domains) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
-| `server` | `server:8000` — the proxy, and n8n; `mcp.ob1.internal` on `mesh`, from where it probes the authorization server's `/healthz` (SMD-2382) | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
-| `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on the default one, which every container there can reach until the network move (SMD-2294) — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
+| `proxy` | `proxy:8000`, which nothing in the stack dials; it dials every backend on the `mesh` network, by a name resolved with no search domains: the server as `mcp.ob1.internal:8000`, `auth.ob1.internal:3000`, a canary or working tier's server as `mcp.canary.ob1.internal:8000` or `mcp.working.ob1.internal:8000` while one has joined the mesh (SMD-2294), and — with `compose.api-public.yaml` named — `api.ob1.internal:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `server` | `server:8000` — n8n; `mcp.ob1.internal` on `mesh` — the proxy, and from where it probes the authorization server's `/healthz` (SMD-2382) | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
+| `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on the default one, which every container there can reach until the network move (SMD-2583) — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` and `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2294), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
+| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2583), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
 shared Ollama publish nothing, exactly as above. A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own network,
-its proxy on `127.0.0.1:8011` (`--port`), its server at `/mcp` there. The tier
+less the proxy, its server and REST core also on this stack's `mesh` as
+`mcp.canary.ob1.internal` and `api.canary.ob1.internal`, and reached at
+`/canary/mcp` on this stack's port (SMD-2294). Beside a stable from before
+that, `--port` gives it its own proxy on loopback, as before. The tier
 file's servers still publish a port each; SMD-2294 moves them onto proxy paths.
 
 | Service | On the compose network | On the host | From another machine |
@@ -225,11 +228,25 @@ paths today:
 | `/auth` and everything under it, `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, the bare `/.well-known/oauth-authorization-server` | `auth` (`--profile auth`), as `auth.ob1.internal` on the `mesh` network — the issuer, sign-in, registration and the three discovery documents outside the issuer's path (the bare one is the only one Claude Code reads). Only while it answers: with the profile off, the server stopped or still starting, the proxy's own bodiless 404, so an origin without it says "no OAuth here" as before. Its own answers pass through untouched, the registration cap's 503 and `Retry-After` included |
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
+| `/canary/mcp`, `/working/mcp` and everything under each | that tier's MCP server, as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the `mesh` network: a tier run as a compose project of its own joins this stack's mesh under that name and none of this stack's (`deploy/canary.sh` does, SMD-2294). One that brought this stack's own names along (`mcp.ob1.internal`, `api.ob1.internal` and, with `--profile auth`, `auth.ob1.internal`, which `compose.yaml` gives its services on the `mesh` key) would share this stack's traffic with it, sign-ins included. `GET /canary/mcp/health` is its liveness and, with a read key, its record. With no such tier, or one stopped or still starting, the proxy's bodiless 404. A tier's protected-resource path is not routed, so a tier is reached with keys |
+| any other path starting with `/canary` or `/working`, in any letter case | the proxy's bodiless 404, so a client given a tier's URL with anything changed after the prefix (`/canary`, `/CANARY/mcp`, `/canary%2Fmcp`, an invisible space pasted after `canary`) never reaches this stack's server by the legacy route, where the same key would write to this brain. A typo of the prefix itself (`/canry/mcp`) still does, until SMD-2532 closes the legacy route |
 | `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
 | `/.well-known/oauth-protected-resource/mcp` | `server` — the MCP server's protected-resource document while it advertises OAuth: the `auth` profile on, the request at the origin's `Host`, and the authorization server answering the server's probe on the mesh. Otherwise the server's 404, and a server that is down is the proxy's 404, never a 502 (SMD-2382). A claude.ai connector at `https://host/mcp` asks this at the origin root before it uses its key, and proceeds on the key only on a 404 (SMD-1246) |
 | `/register`, `/authorize`, `/token` | the proxy's bodiless 404: where an MCP client that found the document but no authorization-server metadata would register and sign in, at the issuer's root. Kept off the legacy route, which would hand the POST to the MCP server (SMD-2382). The authorization server's own are under `/auth` |
 | `/.well-known` and everything else under it | the proxy: a 404. It carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
 | anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>`. It keeps every client configured before SMD-1846 working until v2.0.0, and every answer says so: a `Deprecation` header and a `Link` to "Moving a client to /mcp" below, where the server's line naming each key still on it is too (SMD-2306). SMD-2532 removes it, and `/` becomes the proxy's 404 |
+
+Every backend is dialled by its name on the `mesh` network — the server as
+`mcp.ob1.internal`, never `server`, because compose gives every container its
+service name on each network it joins, and a tier's container on this mesh is
+a `server` too (SMD-2294). A name nothing on the networks holds — a tier that
+is not up, the authorization server with its profile off, this stack's own
+server while it is stopped or recreated — is forwarded to the host's
+resolvers, since the proxy is on the default network too:
+a resolver that answers `*.ob1.internal` itself (a split-horizon DNS serving
+`.internal`, a hostile network's) would be sent that route's requests, keys
+included. Putting the proxy on internal networks alone closes it; that is the
+network move's (SMD-2583).
 
 The path reaches the server as it came, prefix and all: the server answers POST
 at every path and `/health` under any prefix, so `/mcp` needs no setting there.
@@ -335,7 +352,7 @@ with the server's environment and its preflight
 (`server-portable/README.md`, "The REST core"). It publishes no port. On the
 `mesh` network it is `api.ob1.internal:8000`, for a client in the stack (the
 operator GUI, n8n, a worker); it is on the default network too, where Postgres
-and the model providers are, until the stack's network move (SMD-2294).
+and the model providers are, until the stack's network move (SMD-2583).
 It has no build of its own: an `up` that names it without `server` on a stack
 that never built the server's image stops at "no such image" — name `server`
 too, or build it first.
@@ -569,7 +586,8 @@ with a key it does not show that record to, the pass line says this could not
 be judged. A URL spelled otherwise than the server's origin (`:443`, upper
 case), or a document naming another origin (`http` in front of an `https`
 tunnel), fails with the URL to use instead. A URL under another
-path (a tier at `/canary/mcp`, SMD-2294's) is asked at its own path form and
+path (a tier at `/canary/mcp`, reached with keys until SMD-2286 gives tiers
+OAuth) is asked at its own path form and
 the root form only. A server whose authorization server flips between up and
 down inside one run (its probe's 30 s) can fail it once; run it again.
 
@@ -827,19 +845,42 @@ deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
 ```
 
 The canary is `compose.yaml` again under the project `open-brain-canary`, with
-its own Postgres, volume, network and images, and `OB1_TIER=canary`. It needs
-Docker Compose v2 (`config --format json`, `up --wait`), which is what
-`docker compose` is and what `podman compose` runs when it is installed; the
-Python podman-compose is not enough. Its proxy listens on `127.0.0.1:8011`
-(`--port`), on loopback whatever `SERVER_BIND` says for stable, with its server
-at `/mcp` there. It reads the stack's env file, so the canary's
-server gets stable's knobs and none is copied. Four things are the canary's
-own: the port, the address, the tier, and the compose profiles (none). Each
-tier has its own Postgres server, never a second database on stable's: a
-canary exists to absorb the risky migration, reembed or index rebuild, and a
-shared server would share its memory, its WAL and its crashes with the
-record. The canary's server is not on stable's network, so it cannot reach
-stable's database, or a service a compose profile runs there.
+its own Postgres, volume, network and images, `OB1_TIER=canary`, and two
+servers: the MCP server and the REST core. It needs Docker Compose v2
+(`config --format json`, `up --wait`), which is what `docker compose` is and
+what `podman compose` runs when it is installed; the Python podman-compose is
+not enough. It reads the stack's env file, so the canary's servers get
+stable's knobs and none is copied. The tier and the compose profiles (none)
+are the canary's own. Each tier has its own Postgres server, never a second
+database on stable's: a canary exists to absorb the risky migration, reembed
+or index rebuild, and a shared server would share its memory, its WAL and its
+crashes with the record.
+
+It answers at `/canary/mcp` on stable's own origin (SMD-2294): the URL is
+stable's with `/canary` in front of `/mcp`, on stable's `SERVER_PORT`.
+`deploy/compose.canary.yaml` puts its two servers on
+stable's `mesh` network as `mcp.canary.ob1.internal` and
+`api.canary.ob1.internal` (only those: the canary's own `mesh` names would
+share stable's `/mcp`, `/api` and `/auth`), and stable's proxy routes
+`/canary/mcp` to the first ("One origin", above). They stay off stable's
+default network, so they cannot reach stable's database, or a service a
+compose profile runs there. With no profiles the canary advertises no OAuth;
+on stable's mesh it could otherwise find stable's authorization server.
+On stable's origin the canary is reached wherever stable is, with stable's
+keys: on the LAN when stable's `SERVER_BIND` opens it, and through any tunnel
+or TLS proxy in front of stable's port. It runs whatever the checkout that
+stood it up holds, so `up` says so when stable is bound past loopback or has
+a public origin; pass `--port N` for a canary on this host's loopback alone.
+While a canary is attached, stable's `compose down` leaves stable's mesh in
+place (it is in use), so take the canary down first; if stable's mesh is
+made again, re-run `up`.
+
+A stable from before SMD-2294 has no `/canary` route, and `up` refuses there
+unless `--port N` names a loopback port for the canary's own proxy, the way
+every canary was stood up before (8011 was the default): its server at
+`/mcp` on `127.0.0.1:N`, whatever `SERVER_BIND` says for stable, and its
+servers off stable's mesh. Re-run `up` without `--port` once stable is
+upgraded, and the canary's proxy is removed.
 
 `up` can be re-run, and re-running it is how the canary catches up after
 stable is redeployed:
@@ -858,10 +899,13 @@ stable is redeployed:
      needs `OB1_LLM_LOCAL=` cleared there, or the egress gate takes it for
      local. A stack whose only model server is the `local-models` profile
      needs an Ollama on the host for its canary;
-   - its port is taken. For another container's, pass another `--port`; if
-     that container is a canary stood up by hand, remove it instead, since
-     the new canary is refreshed from stable and nothing is lost that stable
-     does not hold. A process on the host listening there is refused too;
+   - stable's running proxy routes no `/canary/mcp`, or stable has no `mesh`
+     network, and no `--port` was given;
+   - with `--port`, its port is taken. For another container's, pass another
+     `--port`; if that container is a canary stood up by hand, remove it
+     instead, since the new canary is refreshed from stable and nothing is
+     lost that stable does not hold. A process on the host listening there is
+     refused too;
    - `--connect` finds another connector under the name (below);
    - stable's Postgres, found by its compose labels (`--stable-project`,
      default `open-brain`), is stamped `canary` or `working`, or carries a
@@ -874,11 +918,12 @@ stable is redeployed:
 2. It starts the canary's Postgres, and refreshes it from stable through
    `tier.sh` on both networks: the dump, the settings, a migration with this
    checkout, the stamp and the mark ("Refreshing a tier", above).
-3. It builds the server from this checkout and recreates it, so the pool
-   opens on the refreshed database. A standing canary's server is stopped
-   before the refresh, so nothing serves the copy mid-restore through the
-   connector, or writes rows the restore then collides with. `OB1_GIT_SHA` is
-   the checkout's `git describe`, unless the shell sets it.
+3. It builds the server from this checkout and recreates it and the REST
+   core, which runs the server's image, so their pools open on the refreshed
+   database. Standing servers are stopped before the refresh, so nothing
+   serves the copy mid-restore through the connector, or writes rows the
+   restore then collides with. `OB1_GIT_SHA` is the checkout's
+   `git describe`, unless the shell sets it.
 4. It smoke-tests the canary with `OB1_SMOKE_KEY`. The keyed `/health` must
    say `tier` `canary`, and `smoke.sh` must pass. Then the vector arm, which
    `smoke.sh` leaves out and a `--diff` replays only with a provider
@@ -909,15 +954,30 @@ stable is redeployed:
    `--no-smoke` skips the smoke and needs no key.
 5. With `--connect` it registers the Claude Code connector
    `open-brain-canary` (`--name`) at user scope, under the same key; a new
-   session sees its tools. The URL is `http://127.0.0.1:8011/mcp`, the
-   canary's own proxy; SMD-2294 moves it to `/canary/mcp` on stable's origin.
+   session sees its tools. The URL is the canary's: `/canary/mcp` on
+   stable's origin, or `/mcp` on `--port`.
 
-`down` removes the canary's containers and network. It deregisters the
-connector only when `claude` has it at user scope and at the canary's port
-(any path or `?key=` after it). The port is read from the canary's proxy
-container, running or stopped (after a reboot podman leaves it stopped, and
-Docker restarts it but not its Postgres); once that is gone, pass the
-`--port` it was stood up with. `claude mcp get` shows the
+`down` removes the canary's containers and its own networks; stable's mesh
+stays. It deregisters the connector only when `claude` has it at user scope
+and at a URL of the canary's: `/canary/mcp`, which no other service answers,
+on loopback (`127.0.0.1`, `localhost`, `[::1]`) or on the address stable's
+proxy is bound to, or a canary proxy's port with any path (and either with
+any `?key=`). A connector at stable's own `/mcp` is never the canary's. An
+`up` that moves the canary between stable's origin and `--port` without
+`--connect` leaves the connector where it was, and says how to move it.
+Moving off `--port`, pass `--connect` in that same `up`, which moves the
+connector before the canary's proxy goes; afterwards its old port is no
+longer the canary's, and the connector must be removed by hand first
+(`claude mcp remove --scope user open-brain-canary`). The proxy goes last,
+once the canary answers on stable's origin: an `up` that fails keeps it, so
+a connector at its port stays the canary's and a re-run with `--connect`
+moves it. Only a failure after the health wait (at the smoke, or the
+connector) leaves it answering meanwhile; a
+failed refresh or health wait stops the canary's servers.
+A canary proxy's port is read from its container, running or stopped (after
+a reboot podman leaves it stopped, and Docker restarts it but not its
+Postgres); once that is gone, pass the `--port` it was stood up with.
+`claude mcp get` shows the
 entry that wins for the current directory, so a local entry by the name
 hides a user one behind it. One by that name anywhere else, or in local or
 project scope, is left alone with a line saying so, and `up --connect`
@@ -932,19 +992,29 @@ is started to find out. Neither touches stable: `down` acts on the project
 
 On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing
-started, stamped or registered. The second is the canary's life:
-- `up --connect` over a stable carrying the protective mark `stable`, under
-  `SERVER_BIND=0.0.0.0`. The canary must stay on loopback, and its probe must
-  pass on a thought whose text holds literals, searched for without them;
-- a second `up` against a provider stub serving another model. The thought
-  put on stable just before it must reach the canary, and the smoke must
-  fail on the floor;
+started, stamped or registered: an old stable by its proxy's route label, a
+stable proxy off its mesh, an empty `--port` and a `--stable-project` no
+project could be named among them. The second is the canary's life, in three
+`up`s:
+- `up --connect` over a stable carrying the protective mark `stable`. The
+  canary must answer at `/canary/mcp` with tier `canary` and OAuth not
+  configured, run no proxy, hold only its tier's names on stable's mesh, and
+  say that stable's public origin reaches it; its probe must pass on a
+  thought whose text holds literals, searched for without them;
+- a second `up`, with `--port 8011` under `SERVER_BIND=0.0.0.0`, against a
+  provider stub serving another model. The canary's proxy must be on
+  loopback, its servers off stable's mesh, `/canary/mcp` the proxy's 404
+  again; the thought put on stable just before it must reach the canary, and
+  the smoke must fail on the floor;
+- a third `up`, back on stable's origin: the canary's proxy removed, 8011
+  free, and a connector left at 8011 named;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope
   connector left alone);
 - a volume by the canary's name that compose did not make, holding a table,
   refused with nothing left running;
-- a last `down` that removes its own connector.
+- a connector at stable's own `/mcp` left alone, and a last `down` that
+  removes the canary's.
 
 Afterwards the stack's Postgres container, its thoughts and its server are
 checked unchanged. A stand-in `claude` on PATH answers `mcp get` there. The
@@ -1463,7 +1533,7 @@ pass a variable it does not name: `provision.ts` says which line.
 clients — is one SQLite file in the `auth-data` volume, so a restart keeps
 it, and so does an upgrade, which rebuilds and recreates the container. The server holds
 no Postgres credential, and until the network move puts the stack on the mesh
-(SMD-2294) it shares no network with Postgres either. On a stop it finishes
+(SMD-2583) it shares no network with Postgres either. On a stop it finishes
 what is in flight, closes the store and exits. The library's in-memory store,
 which the proof of concept first ran on, forgot all of it at every restart.
 

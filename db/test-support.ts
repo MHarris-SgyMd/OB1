@@ -684,6 +684,17 @@ export function createAssert(): {
 }
 
 /**
+ * A Request whose `url` is the string given, as Bun hands a handler one built
+ * from a `Host` it never checked (`http://x:99999/mcp`, or the bare `/mcp`).
+ * Request's own constructor refuses such a URL, so it is stood in for
+ * (SMD-2535).
+ */
+export class RuntimeUrl extends Request {
+  constructor(private readonly given: string, init?: RequestInit) { super("http://stand-in.test/", init); }
+  override get url() { return this.given; }
+}
+
+/**
  * A stub provider's answer that never comes: the request stays open until the
  * client's own deadline (OB1_LLM_TIMEOUT) abandons it. Two things follow for
  * the test: the stub decides WHICH request hangs from its body, since a

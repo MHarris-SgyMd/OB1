@@ -74,7 +74,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   | `/api` | REST core (SMD-2284), off by default |
   | `/health` | MCP server: keyed BrainInfo JSON read from the REST core, plain `ok` without a key (today's contract) |
   | `/hooks/<name>` | a plugin's inbound webhook, served by the REST core. Off by default and turned on per plugin, like `/api` (decision 9). There is no `/ext/<name>`: extensions are plugins, not servers |
-  | `/canary/...` | the canary tier's equivalents (SMD-2294) |
+  | `/canary/...` | the canary tier's equivalents (SMD-2294). As built: `/canary/mcp` and `/working/mcp` reach that tier's MCP server as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the mesh, a 404 while it is absent; the rest under either prefix, in any letter case, is a 404 |
 
 - **Two networks.**
   - **Mesh network.** Internal names are network aliases on a compose network with `internal: true`: `api.ob1.internal`, `mcp.ob1.internal`, `app.ob1.internal`, `auth.ob1.internal`. Postgres and every service join it. Calls between services still authenticate; being on the network is not trust.
@@ -128,7 +128,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   - The MCP authorization spec forbids passing the received token upstream; exchange is how the hop keeps both the subject and the delegating service.
 - **Access-key MCP clients** (the hook, `?key=` connectors) are **forwarded** (decision 7, SMD-2286 step 4). The MCP server passes the key to the REST core with its own forwarder key. The REST core checks both, and records the key's name as the subject and the MCP service as the actor.
   - The forwarder is a key with a `forward` scope that grants nothing by itself. The REST core refuses any other key in the forwarder's place, so a client holding two keys cannot stamp one as the other's actor (SMD-2284).
-  - **As built (SMD-2284):** the slot is the `x-brain-forwarder` header, read only inside the stack — the mesh, and the default network until SMD-2294 — since the public `/api` route deletes it; inside, what guards it is the forwarder key, which nothing sends until SMD-2286's step 4. The audit row records the subject as ever (`actor_name`, `canonical_agent_id`) and the carrier in `thought_audit.actor_context.act` as `{name, agent_id}`. `act.name` follows `actor_name`'s convention above: a key's bare name, and for a token-exchanged request (SMD-2286) `oauth:<client_id>` from the exchanged token's `act.sub` — one shape on the audit row, which is append-only, whichever way the request was carried.
+  - **As built (SMD-2284):** the slot is the `x-brain-forwarder` header, read only inside the stack — the mesh, and the default network until the network move (SMD-2583) — since the public `/api` route deletes it; inside, what guards it is the forwarder key, which nothing sends until SMD-2286's step 4. The audit row records the subject as ever (`actor_name`, `canonical_agent_id`) and the carrier in `thought_audit.actor_context.act` as `{name, agent_id}`. `act.name` follows `actor_name`'s convention above: a key's bare name, and for a token-exchanged request (SMD-2286) `oauth:<client_id>` from the exchanged token's `act.sub` — one shape on the audit row, which is append-only, whichever way the request was carried.
   - This is not the token passthrough the spec forbids. That rule covers OAuth tokens issued for the MCP server, and a brain key is the REST core's own credential, checked there.
   - Forwarding works in every state and needs no authorization server. Keys therefore survive its outage, the capture hook included.
 - **GUI:**
@@ -152,6 +152,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **Prose, `structuredContent`, refusal envelopes, SSE keepalive, notification handling and the scope-filtered `tools/list`** belong to the MCP server alone.
 - **Telemetry:** each server emits OTLP spans with the SMD-1849 allow-list. The MCP span is the parent of the REST span through `traceparent`. Grafana owns storage and presentation.
 - **Brain tiers** (stable / canary / working): one REST core per tier, with the MCP server and the GUI per tier behind `/canary/...`. The exact split is settled in SMD-2294.
+  - **As built (SMD-2294):** the canary stays a compose project of its own (`deploy/canary.sh`), with its own Postgres. `deploy/compose.canary.yaml` puts its MCP server and REST core on stable's mesh as `mcp.canary.ob1.internal` and `api.canary.ob1.internal`, under those names alone, and stable's proxy routes `/canary/mcp` to the first. On stable's mesh it would also resolve stable's `auth.ob1.internal`, which settles how a tier reaches the one authorization server across projects; until a tier has OAuth of its own (SMD-2286) the canary runs with no compose profiles, advertises none and dials no `*.ob1.internal` name of stable's. The GUI per tier waits on SMD-2280.
 
 ## Contributions and plugins
 
@@ -244,8 +245,7 @@ Read against the tree on 2026-09-27.
 
 - **The authorization server's remaining details**, each in its own ticket:
   - token lifetimes and refresh-token rotation (SMD-2286);
-  - the client-metadata fetch policy (resolve-and-refuse, or an allowlist) (SMD-2285). Whether `openbrain` revokes PUBLIC's CONNECT went with the `ob1_auth` role: the authorization server reaches no database (2026-10-01);
-  - how the canary tier reaches `auth.ob1.internal` across compose projects (SMD-2294).
+  - the client-metadata fetch policy (resolve-and-refuse, or an allowlist) (SMD-2285). Whether `openbrain` revokes PUBLIC's CONNECT went with the `ob1_auth` role: the authorization server reaches no database (2026-10-01).
 
   The survey behind decision 13 (eight candidates at the versions checked on 2026-09-28) is on SMD-2285.
 - **Which vendored integrations become plugins and which retire** (agent-memory-api, smart-ingest, the capture sources in SMD-2101). SMD-1931 gives the dispositions under decision 9. The GUI's agent-memory and kanban views follow from them.
