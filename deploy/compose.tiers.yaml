@@ -408,7 +408,7 @@ services:
 
   # ── the proxy ────────────────────────────────────────────────────────────
   # The stack's one published port, and compose.yaml's proxy in every setting
-  # but its route table: the same pinned image (CI holds the two equal), the
+  # but its route table and its waiting (check 27 holds the rest equal): the same pinned image (CI holds the two equal), the
   # same unprivileged user, access log without query or header, and ping
   # entrypoint. It does no authentication; each server checks the key.
   proxy:

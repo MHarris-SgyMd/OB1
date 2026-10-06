@@ -288,12 +288,14 @@
  *      generated from the tier list byte for byte (an extra router, a
  *      duplicate key, a changed rule or backend is a difference), and its
  *      services, parsed, put each tier's server and REST core on that tier's
- *      Postgres, OB1_TIER and mesh names, the REST core on the server's image
- *      and environment as `api.ts`, the migrator on the server's database,
- *      and the proxy on compose.yaml's pinned image, waiting on nothing
+ *      Postgres, volume, OB1_TIER and mesh names (no other *.ob1.internal name
+ *      anywhere), the tiers' environments alike, the REST core on the
+ *      server's image and environment as `api.ts`, the migrator on the
+ *      server's database, and the proxy as compose.yaml's in all but its
+ *      routes, mounting the table alone and waiting on nothing
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20 and 23 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23 and 27 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -5625,16 +5627,20 @@ checkCaptureTrust();
 //     change edits both, deliberately, as check 13's PUBLISHES does;
 //   - the services, parsed: each tier's server builds the server's image under
 //     its tier's name, on its own Postgres and OB1_TIER, answering on `mesh` to
-//     the name its backend dials; its REST core runs that image as `api.ts`
-//     with the server's environment in full, under its own mesh name; its
-//     migrator writes the server's database; both servers wait on their own
-//     tier's migrator and Postgres alone, carry compose.yaml's host alias and
-//     its stop grace; the REST core has its health check. The proxy is
-//     compose.yaml's pinned image, publishes once, waits on nothing (a tier's
-//     failed migration left a waiting proxy unstarted, review pass 2), joins
-//     the default network and the mesh with no search domains, and carries the
-//     table as its config and its label. Only the proxy, the servers and the
-//     REST cores are on the mesh.
+//     the name its backend dials, its environment the other tiers' but for
+//     those two; its REST core runs that image as `api.ts` with the server's
+//     environment in full, under its own mesh name, with compose.yaml's REST
+//     core health check; its migrator writes the server's database, with the
+//     other tiers' environment and its own Postgres healthy first; its Postgres
+//     keeps its own volume; both servers wait on their tier's Postgres healthy
+//     and migrator done, carry compose.yaml's host alias and its stop grace.
+//     The proxy is compose.yaml's in image, port, environment, user,
+//     capabilities and health check, mounts the table alone as its one config
+//     and carries it as its label, waits on nothing (a tier's failed migration
+//     left a waiting proxy unstarted, review pass 2), and joins the default
+//     network and the mesh with no search domains. Only the proxy, the servers
+//     and the REST cores are on the mesh, and the six mesh names are the only
+//     *.ob1.internal names any service answers to, on any network.
 const TIERS = ["stable", "canary", "working"] as const;
 /** A tier's name on the mesh: compose.yaml's own for stable, the tier's under it for the others. */
 const tierMeshName = (kind: "mcp" | "api", tier: string) => tier === "stable" ? `${kind}.ob1.internal` : `${kind}.${tier}.ob1.internal`;
@@ -5658,21 +5664,25 @@ const stripYamlComments = (text: string) => text.split("\n").filter((l) => !/^\s
 type ComposeService = {
   image?: string; build?: { dockerfile?: string }; command?: string[]; environment?: Record<string, string>;
   networks?: Record<string, { aliases?: string[] } | null> | string[]; depends_on?: Record<string, unknown> | string[];
-  extra_hosts?: string[]; healthcheck?: { test?: string[] }; stop_grace_period?: string; ports?: unknown[];
+  extra_hosts?: string[]; healthcheck?: unknown; stop_grace_period?: string; ports?: unknown[];
   dns_search?: string[]; configs?: { source?: string; target?: string }[]; labels?: Record<string, string>;
+  user?: string; cap_drop?: string[]; security_opt?: string[]; volumes?: unknown[]; container_name?: string; hostname?: string;
 };
+/** A value as JSON with every object's keys sorted, so two parses compare by content, not key order. */
+const canonJson = (v: unknown): string => JSON.stringify(v, (_k, x) => x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, (x as Record<string, unknown>)[k]])) : x);
 /** Every way compose.tiers.yaml's text strays from check 27's two rules, as messages; none when it holds. */
 function tierStackProblems(tiersText: string, composeText: string): string[] {
   const out: string[] = [];
   let doc: { services?: Record<string, ComposeService>; configs?: Record<string, { content?: string }>; networks?: Record<string, { internal?: boolean }> };
   let compose: { services?: Record<string, ComposeService> };
   try {
-    doc = Bun.YAML.parse(tiersText) as typeof doc;
-    compose = Bun.YAML.parse(composeText) as typeof compose;
+    doc = (Bun.YAML.parse(tiersText) ?? {}) as typeof doc;
+    compose = (Bun.YAML.parse(composeText) ?? {}) as typeof compose;
   } catch (e) {
     return [`does not parse as YAML: ${(e as Error).message}`];
   }
   const svcs = doc.services ?? {};
+  if (Object.keys(svcs).length === 0) return ["holds no services"];
   const table = doc.configs?.["tier-routes"]?.content ?? "";
   if (stripYamlComments(table) !== TIER_ROUTE_TABLE) {
     const want = TIER_ROUTE_TABLE.split("\n"), got = stripYamlComments(table).split("\n");
@@ -5681,35 +5691,53 @@ function tierStackProblems(tiersText: string, composeText: string): string[] {
   }
   const keys = (v: unknown) => (Array.isArray(v) ? [...v] : Object.keys(v ?? {})).map(String).sort().join(",");
   const proxy = svcs.proxy ?? {};
-  if (proxy.image !== compose.services?.proxy?.image) out.push(`proxy runs ${JSON.stringify(proxy.image)}, not compose.yaml's pinned ${JSON.stringify(compose.services?.proxy?.image)}`);
-  if ((proxy.ports ?? []).length !== 1) out.push(`proxy publishes ${(proxy.ports ?? []).length} mappings, not 1`);
+  const theirs = compose.services?.proxy ?? {};
+  if (!theirs.image) out.push("compose.yaml has no proxy to compare the tiers' proxy with");
+  for (const k of ["image", "ports", "environment", "user", "cap_drop", "security_opt", "healthcheck"] as const) {
+    if (canonJson(proxy[k]) !== canonJson(theirs[k])) out.push(`proxy's ${k} is not compose.yaml's proxy's (${JSON.stringify(proxy[k])?.slice(0, 120)}) — this stack's proxy is compose.yaml's in everything but its routes and its waiting`);
+  }
   if (proxy.depends_on !== undefined) out.push(`proxy waits on ${keys(proxy.depends_on)} — a tier whose migration fails leaves a waiting proxy unstarted, the origin down (review pass 2); it waits on nothing`);
   if (keys(proxy.networks) !== "default,mesh") out.push(`proxy is on ${keys(proxy.networks)}, not default and mesh`);
   if (JSON.stringify(proxy.dns_search) !== JSON.stringify(["."])) out.push(`proxy's dns_search is ${JSON.stringify(proxy.dns_search)}, not ["."] — an absent tier's name would be looked for under the host's search domains`);
-  if (!(proxy.configs ?? []).some((c) => c.source === "tier-routes" && c.target === "/etc/traefik/dynamic/routes.yaml")) out.push("proxy does not mount configs.tier-routes as /etc/traefik/dynamic/routes.yaml");
+  if (canonJson(proxy.configs) !== canonJson([{ source: "tier-routes", target: "/etc/traefik/dynamic/routes.yaml" }]) || proxy.volumes !== undefined) out.push("proxy mounts something besides configs.tier-routes as /etc/traefik/dynamic/routes.yaml — a second file there adds routes outside the table");
   if (proxy.labels?.["ob1.proxy-routes"] !== table) out.push("proxy's ob1.proxy-routes label is not its route table, so a changed route would not recreate it");
   if (doc.networks?.mesh?.internal !== true) out.push("networks.mesh is not internal");
-  const onMesh = Object.entries(svcs).filter(([, s]) => keys(s.networks).split(",").includes("mesh")).map(([n]) => n).sort().join(",");
+  const onMesh = Object.entries(svcs).filter(([, s]) => keys(s?.networks).split(",").includes("mesh")).map(([n]) => n).sort().join(",");
   const meshWant = ["proxy", ...TIERS.flatMap((t) => [`${t}-api`, `${t}-server`])].sort().join(",");
   if (onMesh !== meshWant) out.push(`the mesh holds ${onMesh}, not ${meshWant}`);
+  // The six mesh names, and no other *.ob1.internal name on any service or network.
+  const internalNames: string[] = [];
+  for (const [name, svc] of Object.entries(svcs)) {
+    for (const v of [svc?.container_name, svc?.hostname]) if (v && /ob1\.internal/i.test(v)) internalNames.push(`${name}=${v}`);
+    if (svc?.networks && !Array.isArray(svc.networks)) for (const [net, cfg] of Object.entries(svc.networks)) for (const al of cfg?.aliases ?? []) internalNames.push(`${name}/${net}:${al}`);
+  }
+  const namesWant = TIERS.flatMap((t) => [`${t}-server/mesh:${tierMeshName("mcp", t)}`, `${t}-api/mesh:${tierMeshName("api", t)}`]).sort().join(" ");
+  if ([...internalNames].sort().join(" ") !== namesWant) out.push(`the stack's network names are ${[...internalNames].sort().join(" ") || "none"}, not the six mesh names alone — another container answering to a tier's name would share its traffic`);
+  const sansTier = (env: Record<string, string> | undefined, drop: string[]) => Object.fromEntries(Object.entries(env ?? {}).filter(([k]) => !drop.includes(k)));
+  const stableServerEnv = canonJson(sansTier(svcs["stable-server"]?.environment, ["DATABASE_URL", "OB1_TIER"]));
+  const stableMigrateEnv = canonJson(sansTier(svcs["stable-migrate"]?.environment, ["DATABASE_URL"]));
   for (const t of TIERS) {
-    const s = svcs[`${t}-server`], a = svcs[`${t}-api`], m = svcs[`${t}-migrate`];
-    if (!s || !a || !m) { out.push(`${t} has no ${!s ? "server" : !a ? "api" : "migrate"} service`); continue; }
+    const s = svcs[`${t}-server`], a = svcs[`${t}-api`], m = svcs[`${t}-migrate`], pg = svcs[`${t}-postgres`];
+    if (!s || !a || !m || !pg) { out.push(`${t} has no ${!s ? "server" : !a ? "api" : !m ? "migrate" : "postgres"} service`); continue; }
     const db = `postgres://postgres:\${POSTGRES_PASSWORD}@${t}-postgres:5432/openbrain`;
     const aliases = (svc: ComposeService) => JSON.stringify((svc.networks as Record<string, { aliases?: string[] } | null>)?.mesh?.aliases ?? null);
     if (s.build?.dockerfile !== "server-portable/Dockerfile") out.push(`${t}-server does not build server-portable/Dockerfile`);
     if (s.image !== `\${COMPOSE_PROJECT_NAME:-open-brain-tiers}-${t}-server`) out.push(`${t}-server's image is ${JSON.stringify(s.image)}, not its tier's name`);
     if (s.environment?.DATABASE_URL !== db) out.push(`${t}-server's DATABASE_URL is ${JSON.stringify(s.environment?.DATABASE_URL)}, not ${t}-postgres's`);
     if (s.environment?.OB1_TIER !== `\${OB1_TIER:-${t}}`) out.push(`${t}-server's OB1_TIER is ${JSON.stringify(s.environment?.OB1_TIER)}, not ${t}`);
+    if (canonJson(sansTier(s.environment, ["DATABASE_URL", "OB1_TIER"])) !== stableServerEnv) out.push(`${t}-server's environment differs from stable-server's beyond DATABASE_URL and OB1_TIER — the tiers would embed, gate or log differently, and a replay compare unlike things`);
     if (aliases(s) !== JSON.stringify([tierMeshName("mcp", t)])) out.push(`${t}-server answers on the mesh as ${aliases(s)}, not ["${tierMeshName("mcp", t)}"], the name its backend dials`);
     if (a.image !== s.image || a.build) out.push(`${t}-api does not run ${t}-server's image by name`);
     if (JSON.stringify(a.command) !== JSON.stringify(["api.ts"])) out.push(`${t}-api's command is ${JSON.stringify(a.command)}, not ["api.ts"]`);
-    if (JSON.stringify(a.environment) !== JSON.stringify(s.environment)) out.push(`${t}-api's environment is not ${t}-server's`);
+    if (canonJson(a.environment) !== canonJson(s.environment)) out.push(`${t}-api's environment is not ${t}-server's`);
     if (aliases(a) !== JSON.stringify([tierMeshName("api", t)])) out.push(`${t}-api answers on the mesh as ${aliases(a)}, not ["${tierMeshName("api", t)}"]`);
-    if (!/\/health\b/.test((a.healthcheck?.test ?? []).join(" "))) out.push(`${t}-api has no health check of its /health`);
+    if (canonJson(a.healthcheck) !== canonJson(compose.services?.api?.healthcheck)) out.push(`${t}-api's health check is not compose.yaml's REST core's`);
     if (m.environment?.DATABASE_URL !== db) out.push(`${t}-migrate writes ${JSON.stringify(m.environment?.DATABASE_URL)}, not ${t}-server's database`);
+    if (canonJson(sansTier(m.environment, ["DATABASE_URL"])) !== stableMigrateEnv) out.push(`${t}-migrate's environment differs from stable-migrate's beyond DATABASE_URL — the tiers' schemas would be built under different contracts`);
+    if (canonJson(m.depends_on) !== canonJson({ [`${t}-postgres`]: { condition: "service_healthy" } })) out.push(`${t}-migrate does not wait on ${t}-postgres healthy alone`);
+    if (canonJson(pg.volumes) !== canonJson([`${t}-pgdata:/var/lib/postgresql/data`])) out.push(`${t}-postgres keeps ${JSON.stringify(pg.volumes)}, not its own ${t}-pgdata`);
     for (const [name, svc] of [[`${t}-server`, s], [`${t}-api`, a]] as const) {
-      if (keys(svc.depends_on) !== `${t}-migrate,${t}-postgres`) out.push(`${name} waits on ${keys(svc.depends_on)}, not ${t}-migrate and ${t}-postgres alone`);
+      if (canonJson(svc.depends_on) !== canonJson({ [`${t}-postgres`]: { condition: "service_healthy" }, [`${t}-migrate`]: { condition: "service_completed_successfully" } })) out.push(`${name} does not wait on ${t}-postgres healthy and ${t}-migrate done, alone (${JSON.stringify(svc.depends_on)})`);
       if (JSON.stringify(svc.extra_hosts) !== JSON.stringify(["host.docker.internal:host-gateway"])) out.push(`${name} lacks compose.yaml's host alias (host.docker.internal:host-gateway)`);
       if (svc.stop_grace_period !== "${OB1_STOP_GRACE:-10}s") out.push(`${name}'s stop_grace_period is ${JSON.stringify(svc.stop_grace_period)}`);
       if (keys(svc.networks) !== "default,mesh") out.push(`${name} is on ${keys(svc.networks)}, not default and mesh`);
@@ -5720,17 +5748,23 @@ function tierStackProblems(tiersText: string, composeText: string): string[] {
 /** [what the probe changes, the text it replaces in compose.tiers.yaml, its replacement] — each must turn check 27 false. */
 const TIER_STACK_PROBES: [string, string, string][] = [
   ["a duplicate canary router, after health", "      service: stable\n    middlewares:", "      service: stable\n      canary:\n        rule: \"Path(`/canary/mcp`)\"\n        priority: 30\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: stable\n    middlewares:"],
-  ["the canary and working services swapped, URLs in order", "      canary:\n        loadBalancer:", "      canary-x:\n        loadBalancer:"],
+  ["canary's backend renamed in the route table", "      canary:\n        loadBalancer:", "      canary-x:\n        loadBalancer:"],
   ["an extra catch-all router", "    routers:\n", "    routers:\n      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: working\n"],
   ["tier-absent rewriting to 200", "          statusRewrites:\n            \"502\": 404", "          statusRewrites:\n            \"502\": 200"],
   ["canary's environment on stable's database", "@canary-postgres:5432/openbrain\n      OB1_TIER: ${OB1_TIER:-canary}", "@stable-postgres:5432/openbrain\n      OB1_TIER: ${OB1_TIER:-canary}"],
   ["working's migrator on stable's database", "      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@working-postgres:5432/openbrain\n    depends_on:\n      working-postgres:\n        condition: service_healthy\n\n", "      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@stable-postgres:5432/openbrain\n    depends_on:\n      working-postgres:\n        condition: service_healthy\n\n"],
   ["canary's server under working's mesh name", "        aliases: [mcp.canary.ob1.internal]", "        aliases: [mcp.working.ob1.internal]"],
   ["the proxy waiting on stable", "    restart: unless-stopped\n\n  # ── the shared model provider", "    depends_on:\n      stable-server:\n        condition: service_started\n    restart: unless-stopped\n\n  # ── the shared model provider"],
+  ["the proxy's file provider pointed elsewhere", "      TRAEFIK_PROVIDERS_FILE_DIRECTORY: /etc/traefik/dynamic", "      TRAEFIK_PROVIDERS_FILE_DIRECTORY: /etc/traefik/other"],
+  ["canary's server not waiting for its migrator to finish", "      canary-migrate:\n        condition: service_completed_successfully\n    restart: unless-stopped\n    stop_grace_period: ${OB1_STOP_GRACE:-10}s\n    extra_hosts: *host-alias\n    networks:\n      default: {}\n      mesh:\n        aliases: [mcp.canary.ob1.internal]", "      canary-migrate:\n        condition: service_started\n    restart: unless-stopped\n    stop_grace_period: ${OB1_STOP_GRACE:-10}s\n    extra_hosts: *host-alias\n    networks:\n      default: {}\n      mesh:\n        aliases: [mcp.canary.ob1.internal]"],
+  ["canary's Postgres on stable's volume", "      - canary-pgdata:/var/lib/postgresql/data", "      - stable-pgdata:/var/lib/postgresql/data"],
+  ["a canary name on working's default network", "      default: {}\n      mesh:\n        aliases: [mcp.working.ob1.internal]", "      default:\n        aliases: [mcp.canary.ob1.internal]\n      mesh:\n        aliases: [mcp.working.ob1.internal]"],
+  ["working's servers on another embedding model", "      OB1_TIER: ${OB1_TIER:-working}", "      OB1_TIER: ${OB1_TIER:-working}\n      OB1_EMBEDDING_MODEL: another-model"],
 ];
 function checkTierStack() {
   const tiersPath = join(ROOT, "deploy", "compose.tiers.yaml");
   const composePath = join(ROOT, "deploy", "compose.yaml");
+  if (!existsSync(tiersPath) || !existsSync(composePath)) { fail(existsSync(tiersPath) ? "deploy/compose.yaml" : "deploy/compose.tiers.yaml", "missing — check 27 reads the three-brain stack beside compose.yaml (SMD-2294)"); return; }
   const tiersText = readFileSync(tiersPath, "utf8");
   const composeText = readFileSync(composePath, "utf8");
   for (const [what, from, to] of TIER_STACK_PROBES) {

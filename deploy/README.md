@@ -177,6 +177,7 @@ by side set `SERVER_PORT` in the shell for one of them, which wins over
 `deploy/.env`. Its proxy waits on no tier and starts in compose's first wave,
 so a canary or working tier whose migration fails is a 404 at its path while
 stable and the origin serve; `up` still exits 1 and names the failed migrator.
+`up proxy` alone therefore brings no tier: name the services, or none.
 A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own network,
