@@ -521,8 +521,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // stored, SMD-2267), 073 (the content's trust on the row, SMD-1724), 074
   // (min_trust on match_thoughts and the keyword arm, SMD-1724), 075
   // (min_trust on the hybrid and the current read, SMD-1724), 077 (the
-  // current read by the tickets a thought names, SMD-2271) and 079 (two
-  // tickets Linear links never paired for judgement, SMD-2448) stay recorded
+  // current read by the tickets a thought names, SMD-2271), 079 (two
+  // tickets Linear links never paired for judgement, SMD-2448) and 080 (a
+  // capture-only key's re-capture leaves the row, SMD-2539) stay recorded
   // and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -619,12 +620,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // without 068 or 075 ([20aa]); 078 adds a column to 069's jobs, refusing by
   // name without 069 ([20ab]); 079 redefines 066's consolidation_candidates
   // on its own body and adds a predicate and a count beside it, refusing by
-  // name without 025, 029, 053 or 063 ([20ac]) — all recorded by the
+  // name without 025, 029, 053 or 063 ([20ac]); 080 redefines the three
+  // upsert_thought forms on 073's and 061's bodies, refusing by name without
+  // 060, 061 or 073 ([20ad]) — all recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 50, `030 is among the last fifty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 51, `030 is among the last fifty-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3476,6 +3479,129 @@ console.log("\n[20ac] Migration 079: refused by name without 025, 029, 053 or 06
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the079 });
   const [{ n: again }] = await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname IN ('consolidation_candidates', 'consolidation_linked_ticket_pairs_left_out', 'consolidation_tickets_linked')`;
   assert(Number(again) === 3 && (await cands()) === [t1, t4, note].sort().join(), "a re-apply of 079 is a no-op: one of each, the same answers");
+  await sql.close();
+}
+
+console.log("\n[20ad] Migration 080: refused by name without 073; onto a populated brain at the file before it — the three upsert_thought forms redefined with 'keep', an operator's REVOKE kept, no row and no audit row moved; a capture-only key's re-capture of a windowed thought through the 4-argument form leaves its vector, windows and lineage row, while a write key's still replaces them; a re-apply a no-op (SMD-2539)");
+{
+  const the080 = MIGRATIONS.find((f) => f.endsWith("_recapture_keep.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "073" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the080 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 080 needs 060, 061 and 073 (ob1_refresh_thought_vector, ob1_record_derivation, ob1_declared_trust, ob1_actor_stamp); this schema lacks it",
+    `080 on a schema stopped before 073 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the080 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const WRITER = { name: "writer-key", via: "open-brain" }, HOOK = { name: "hook-key", via: "open-brain" };
+  const FOUR = "upsert_thought(text, jsonb, vector, jsonb)";
+  const windows = (n: number, axis: number) => Array.from({ length: n }, (_, i) => ({ content: `window ${i}`, embedding: vec(axis), context: null }));
+  const cap4 = async (content: string, payload: Record<string, unknown>, axis: number, chunks: unknown[]) =>
+    (await sql`SELECT upsert_thought(${content}::text, ${payload}::jsonb, ${vec(axis)}::vector, ${chunks}::jsonb) AS r`)[0].r as { id: string; existed: boolean; chunks: number };
+  // A brain at 079: a long thought the writer key captured with two windows,
+  // and the 4-argument form's grant revoked from PUBLIC by its operator.
+  const long = "upgrade 080: the writer's long thought, captured in windows";
+  const w = await cap4(long, { metadata: { source: "mcp", topic: "billing" }, actor: WRITER, embedding_model: OPTS.model, lineage: { chunks: { deterministic: true } } }, 0, windows(2, 1));
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${FOUR} FROM PUBLIC`);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, embedding::text AS e, embedding_model AS m, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const windowsOf = async () => JSON.stringify(await sql`SELECT chunk_index, content, embedding::text AS e FROM thought_chunks WHERE thought_id = ${w.id}::uuid ORDER BY chunk_index`);
+  const lineageOf = async () => JSON.stringify(await sql`SELECT recipe, produced_at::text AS p FROM derivations WHERE artifact_kind = 'chunks' AND artifact_id = ${w.id}::uuid`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), windowsBefore = await windowsOf(), lineageBefore = await lineageOf(), auditBefore = await audits();
+  assert(JSON.parse(windowsBefore).length === 2 && JSON.parse(lineageBefore).length === 1, "[20ad] setup: the writer's thought holds two windows and their lineage row");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the080 });
+  const forms = await sql`SELECT p.oid::regprocedure::text AS sig, p.prosrc LIKE '%ob1:recapture-keep-leaves-the-row%' AS keeps, p.proacl::text AS acl FROM pg_proc p WHERE p.proname = 'upsert_thought' ORDER BY 1`;
+  const fourAcl = (forms as { sig: string; acl: string | null }[]).find((f) => f.sig.startsWith("upsert_thought(text,jsonb,vector,jsonb)"))?.acl ?? null;
+  assert(forms.length === 3 && (forms as { keeps: boolean }[]).every((f) => f.keeps) && fourAcl !== null && !/(^|[{,])=X/.test(fourAcl),
+    `three upsert_thought forms, each carrying 'keep', and the operator's REVOKE on the 4-argument form standing (${JSON.stringify(forms.map((f: { sig: string; keeps: boolean; acl: string | null }) => [f.sig, f.keeps, f.acl]))})`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${FOUR} TO PUBLIC`);
+  assert((await rows()) === before && (await windowsOf()) === windowsBefore && (await lineageOf()) === lineageBefore && (await audits()) === auditBefore,
+    "…no row, no window, no lineage row and no audit row moved");
+  // The capture key re-sends the long text with its own windows and a vector
+  // at another model: the row, its windows and their lineage row stand.
+  const kept = await cap4(long, { metadata: { source: "codex", probe_note: "relabelled" }, actor: HOOK, embedding_model: "other-model", recapture: "keep", lineage: { chunks: { deterministic: true } } }, 2, windows(3, 3));
+  assert(kept.id === w.id && kept.existed === true && kept.chunks === 0, `a 'keep' re-capture through the 4-argument form returns the row's id, existed, chunks 0 (${JSON.stringify(kept)})`);
+  assert((await rows()) === before && (await windowsOf()) === windowsBefore && (await lineageOf()) === lineageBefore && (await audits()) === auditBefore,
+    "…and leaves the row, its two windows and their lineage row as they were, with no audit row");
+  // A write key's re-capture is the merge, as before: its windows replace the row's.
+  const merged = await cap4(long, { metadata: { source: "mcp", note: "the writer again" }, actor: WRITER, embedding_model: OPTS.model, lineage: { chunks: { deterministic: true } } }, 0, windows(3, 4));
+  assert(merged.id === w.id && merged.chunks === 3 && JSON.parse(await windowsOf()).length === 3 && JSON.parse((await rows()))[0].metadata.note === "the writer again",
+    "a write key's re-capture still merges and replaces the windows with its own");
+  // …and so does one that says 'merge' outright (review pass 2: a 4-argument
+  // form reading any word as 'keep' was held by a regex on its source alone).
+  const mergedWord = await cap4(long, { metadata: { source: "mcp", note: "the writer, saying merge" }, actor: WRITER, embedding_model: OPTS.model, recapture: "merge", lineage: { chunks: { deterministic: true } } }, 0, windows(2, 5));
+  const [{ note: mergedNote }] = await sql`SELECT metadata->>'note' AS note FROM thoughts WHERE id = ${w.id}::uuid`;
+  assert(mergedWord.id === w.id && mergedWord.chunks === 2 && JSON.parse(await windowsOf()).length === 2 && mergedNote === "the writer, saying merge",
+    `…and so does one saying 'merge' outright: its windows replace the row's (${JSON.stringify({ chunks: mergedWord.chunks, note: mergedNote })})`);
+  // A capture key's FRESH long text is captured with its windows, as any
+  // fresh text — 'keep' reads only on a row that was there (review pass 1:
+  // an early return on every 'keep' passed every suite).
+  const freshLong = await cap4("upgrade 080: a capture key's fresh long summary", { metadata: { source: "codex" }, actor: HOOK, embedding_model: OPTS.model, recapture: "keep", lineage: { chunks: { deterministic: true } } }, 5, windows(2, 6));
+  const [{ n: freshWindows }] = await sql`SELECT count(*)::int AS n FROM thought_chunks WHERE thought_id = ${freshLong.id}::uuid`;
+  assert(freshLong.existed === false && freshLong.chunks === 2 && Number(freshWindows) === 2, `a capture key's fresh long text lands with its two windows (${JSON.stringify(freshLong)}, ${freshWindows} rows)`);
+  // A vectorless row holding a window (a raw writer's): the vector a 'keep'
+  // re-capture attaches drops it by 022's rule unless the row's label is the
+  // arriving vector's, and writes none of the caller's (review pass 1: a
+  // guard keeping every window under 'keep' passed every suite).
+  for (const [label, left] of [[null, 0], [OPTS.model, 1]] as const) {
+    const text = `upgrade 080: a vectorless thought holding a window, labelled ${label ?? "nothing"}`;
+    const [{ id: bare }] = await sql`INSERT INTO thoughts (content, content_fingerprint, metadata, embedding_model) VALUES (${text}, content_fingerprint_of(${text}), '{"source": "mcp"}'::jsonb, ${label}) RETURNING id::text AS id`;
+    await sql`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding, context) VALUES (${bare}::uuid, 0, 'the raw window', ${vec(7)}::vector, NULL)`;
+    const r = await cap4(text, { metadata: { source: "codex" }, actor: HOOK, embedding_model: OPTS.model, recapture: "keep" }, 3, windows(3, 4));
+    const [after] = await sql`SELECT embedding IS NOT NULL AS v, metadata->>'source' AS s, (SELECT count(*)::int FROM thought_chunks c WHERE c.thought_id = t.id) AS n FROM thoughts t WHERE id = ${bare}::uuid`;
+    assert(r.id === bare && r.chunks === 0 && after.v === true && after.s === "mcp" && Number(after.n) === left,
+      `a vectorless row labelled ${label ?? "nothing"} takes the vector under 'keep', keeps its metadata, and holds ${left} window(s) after — none of the caller's (${JSON.stringify(after)})`);
+  }
+  // The rolled-back fresh path: a raw writer, holding no fingerprint lock,
+  // commits the text while a 'keep' capture of it waits on the unique index
+  // in its projection; the capture lands on the raw row through the
+  // unique_violation fallback. It writes nothing there — not even the tags'
+  // lineage row its recipe names, which the rolled-back capture diff once
+  // let through (review pass 1, two reviewers' repro) — through the
+  // 3-argument form and through the 2-argument one, whose fallback is its
+  // own (review pass 2: a 2-argument fallback dropping 'keep' passed).
+  for (const form of ["three", "two"] as const) {
+    const rawText = `upgrade 080: a raw writer's text that lands mid-capture (${form}-argument form)`;
+    const racer = new SQL({ url: URL_, max: 1 }), watch = new SQL({ url: URL_, max: 1 });
+    let release!: () => void, inserted!: () => void;
+    const gate = new Promise<void>((r) => { release = r; }), rawIn = new Promise<void>((r) => { inserted = r; });
+    let rawId = "";
+    const raw = racer.begin(async (tx) => {
+      // With a vector of its own: a vectorless row would take the capture's
+      // vector, whose diff hides the leftover one (mutant, review pass 1).
+      [{ id: rawId }] = await tx`INSERT INTO thoughts (content, content_fingerprint, metadata, embedding, embedding_model) VALUES (${rawText}, content_fingerprint_of(${rawText}), '{"source": "import"}'::jsonb, ${vec(1)}::vector, ${OPTS.model}) RETURNING id::text AS id`;
+      inserted();
+      await gate;
+    });
+    await rawIn;
+    const payload = { metadata: { source: "codex", probe_note: "raced" }, actor: HOOK, embedding_model: OPTS.model, recapture: "keep", lineage: { metadata: { deterministic: false, model: "probe-model" } } };
+    const capture = (form === "three"
+      ? sql`SELECT upsert_thought(${rawText}::text, ${payload}::jsonb, ${vec(2)}::vector) AS r`
+      : sql`SELECT upsert_thought(${rawText}::text, ${payload}::jsonb) AS r`).execute();  // sent now, not at the await
+    // Wait until the capture is blocked on the raw row's index entry — its
+    // fresh path taken — before the raw writer commits.
+    let blocked = false;
+    for (let i = 0; i < 100 && !blocked; i++) {
+      [{ blocked }] = await watch`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%upsert_thought%' AND pid <> pg_backend_pid()) AS blocked`;
+      if (!blocked) await Bun.sleep(50);
+    }
+    release();
+    await raw;
+    const [{ r: raced }] = await capture;
+    const [landed] = await sql`SELECT metadata, (SELECT count(*)::int FROM derivations d WHERE d.artifact_id = t.id AND d.artifact_kind = 'metadata') AS meta_lineage,
+        (SELECT count(*)::int FROM thought_audit a WHERE a.thought_id = t.id) AS events FROM thoughts t WHERE id = ${rawId}::uuid`;
+    assert(blocked && raced.id === rawId && (form === "two" || raced.existed === true) && JSON.stringify(landed.metadata) === JSON.stringify({ source: "import" }) && Number(landed.meta_lineage) === 0 && Number(landed.events) === 1,
+      `a 'keep' capture through the ${form}-argument form that meets a raw writer's row through the fallback leaves it: its metadata, no event past the raw write's, no tags' lineage row (blocked ${blocked}; ${JSON.stringify({ id: raced.id === rawId, existed: raced.existed, metadata: landed.metadata, lineage: landed.meta_lineage, events: landed.events })})`);
+    await racer.close();
+    await watch.close();
+  }
+  // A re-apply moves nothing: the forms, the rows, the windows.
+  const rowsBeforeReapply = await rows(), windowsBeforeReapply = await windowsOf();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the080 });
+  const [{ n: again }] = await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'upsert_thought' AND prosrc LIKE '%ob1:recapture-keep-leaves-the-row%'`;
+  assert(Number(again) === 3 && (await rows()) === rowsBeforeReapply && (await windowsOf()) === windowsBeforeReapply, "a re-apply of 080 is a no-op: three forms, each carrying 'keep', and no row or window moved");
   await sql.close();
 }
 

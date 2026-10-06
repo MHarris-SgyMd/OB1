@@ -1926,6 +1926,37 @@ console.log("\n[16j] A supersession proposal's judge reason and review note are 
   }
 }
 
+console.log("\n[16k] A capture reply says what a re-capture does for the key that sent it: a capture-only key's leaves an existing row's tags, vector and windows (080, SMD-2539 — a row without a vector takes one), so its head-window note names the re-embed pass, its blurb note the model, and its tagging notes say text already captured keeps its tags");
+{
+  const { renderCapture } = await import("./render.ts");
+  const reply = (reader: boolean, headWindow: { fellBack: boolean; refused: boolean; error?: string } | null, contextFailures: number) =>
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000aa", reader, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 3, contextFailures, headWindow, recapture: null, ...(reader ? { existed: false } : {}) } } as never).content[0].text;
+  const fell = { fellBack: true, refused: false, error: "503 briefly unavailable" };
+  const writer = reply(true, fell, 0), hook = reply(false, fell, 0);
+  assert(/has its vector; re-capture, or a re-embed pass, gives it the whole-content vector/.test(writer) && /A new thought is stored with it and every search chunk's vector; text already captured keeps its own vector, or takes this one if it had none, and gets none of these chunks\. A re-embed pass gives a head window's vector the whole-content one/.test(hook) && !/The thought is stored/.test(hook) && !/re-capture/.test(hook),
+    `the head-window note: a reader is told re-capture or a re-embed pass, a capture-only key the re-embed pass alone (${hook.split("\n").filter((l) => /head window/.test(l)).join(" ").slice(0, 160)})`);
+  const writerBlurbs = reply(true, null, 2), hookBlurbs = reply(false, null, 2);
+  assert(/They are stored and searchable; re-capture to regenerate, or check the model at http:\/\/chat\./.test(writerBlurbs) && /A new thought stores them so, searchable; text already captured gets none of them\. Check the model at http:\/\/chat\./.test(hookBlurbs) && !/They are stored/.test(hookBlurbs) && !/re-capture/.test(hookBlurbs),
+    `the situating-context note: a reader is told to re-capture or check the model, a capture-only key to check the model (${hookBlurbs.split("\n").filter((l) => /situating/.test(l)).join(" ").slice(0, 160)})`);
+  // …and its refused-chat arm: the blurb calls were not made.
+  const refusedBlurbs = (reader: boolean) =>
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ac", reader, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: false, reason: "a rule refused it", base: "http://chat" }, chunks: 3, contextFailures: 3, headWindow: null, recapture: null } } as never).content[0].text;
+  assert(/the blurb calls were not made: a rule refused it\. They are stored and searchable\./.test(refusedBlurbs(true)) && /the blurb calls were not made: a rule refused it\. A new thought stores them so, searchable; text already captured gets none of them\./.test(refusedBlurbs(false)),
+    `the refused-chat blurb note: stored for a reader, a new thought's for a capture-only key (review pass 2) (${refusedBlurbs(false).split("\n").filter((l) => /blurb calls/.test(l)).join(" ").slice(0, 200)})`);
+  // The tagging notes: a capture key is not told whether the text was new,
+  // and its re-capture merges nothing — neither the refusal marker nor a
+  // failed extraction's placeholders (review pass 1).
+  const tagged = (reader: boolean, failed: string) =>
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ab", reader, tags: { metadata_extraction_failed: failed }, embeddings: { allowed: true, reason: "" }, chat: { allowed: failed !== "egress_denied", reason: failed === "egress_denied" ? "a rule refused it" : "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
+  const refusedHook = tagged(false, "egress_denied"), refusedPre035 = tagged(true, "egress_denied");
+  assert(/text already captured keeps its tags\.$/m.test(refusedHook) && !/merged in/.test(refusedHook) && /text already captured keeps its tags, with the refusal marker merged in\./.test(refusedPre035),
+    `the tagging-refused note: a capture-only key's text already captured keeps its tags, nothing merged; a reader on a database that does not say (before 035) still hears the marker merged in (${refusedHook.split("\n").filter((l) => /tagging call/.test(l)).join(" ").slice(0, 200)})`);
+  const failedHook = tagged(false, "timeout"), failedReader = tagged(true, "timeout");
+  assert(/Note: automatic tagging failed for this capture \(timeout\) — a new thought's topics and people are placeholders; text already captured keeps its tags\. Check the chat endpoint/.test(failedHook) && !/was saved/.test(failedHook)
+      && /Note: the thought was saved, but automatic tagging failed \(timeout\) — topics and people are placeholders\. Check the chat endpoint/.test(failedReader),
+    `the tagging-failed note: a capture-only key hears the placeholders are a new thought's, an existing one keeping its tags (${failedHook.split("\n").filter((l) => /tagging failed/.test(l)).join(" ").slice(0, 220)})`);
+}
+
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
   const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {

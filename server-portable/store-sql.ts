@@ -582,6 +582,7 @@ export class SqlStore implements ThoughtStore {
     supersedes?: string;
     lineage?: Lineage;
     event?: WriteEvent;
+    recapture?: "keep";
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
@@ -612,8 +613,9 @@ export class SqlStore implements ThoughtStore {
     // derived_from and refuses a bad one — see store.ts's captureEnvelope.
     // 061: the lineage envelope — the windows' and the tags' recipes — rides
     // the same way, and upsert_thought records them with the write.
+    // 080: and the recapture word, "keep" for a key that cannot read.
     const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel,
-      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage, opts.event);
+      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage, opts.event, opts.recapture);
 
     const rows = chunks.length
       ? await this.sql`

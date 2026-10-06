@@ -28,7 +28,8 @@ import { gatePeople } from "./entity-gate.ts";
  * and NO topics and NO type — the call never happened, so it produced none,
  * and "observation" or the "uncategorized" placeholder would be a tag set
  * dressed as an extraction. Nothing here but the marker, also because
- * upsert_thought MERGES a re-capture's metadata over the row's (035): a
+ * upsert_thought MERGES a write key's re-capture's metadata over the row's
+ * (035; a capture-only key's merges nothing since 080, SMD-2539): a
  * placeholder topic would have replaced an existing thought's real tags on
  * every re-capture under a refusing policy (first review pass). The capture
  * path writes this without calling extractMetadata; extractMetadata returns
