@@ -65,7 +65,8 @@ the reply says so and names the rule, and the decision is recorded on the
 thought's audit row (`thought_audit.actor_context.egress`); a refused tagging
 call lands it untagged — no topics, no type — with `metadata_extraction_failed:
 egress_denied`, and a re-capture of a tagged thought keeps its tags and vector
-(only the marker merges in — and stays: the merge cannot remove a key, so a
+(a write key's merges only the marker in, and a capture-only key's nothing —
+080, SMD-2539; the marker stays: the merge cannot remove a key, so a
 `metadata_extraction_failed` marker on a thought that carries real tags is
 informational and may be stale, as for the other failure reasons). An edit is
 judged on the row's own metadata; a capture is judged before the write, on
@@ -693,12 +694,12 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 694 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, and a `Host` the URL parser refuses, or none
+bun test-server.ts        # 699 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, and a `Host` the URL parser refuses, or none
 bun test-auth.ts          # 165 — scoped, hashed, named keys
 bun test-rest.ts          # 271 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 193 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
-bun run test:e2e          # 470 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 476 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 149 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```

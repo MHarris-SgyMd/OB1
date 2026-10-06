@@ -1799,6 +1799,52 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   const writerAgain = await call("capture_thought", { content: "eta thought the session retrieved from the brain", derived_from: [id] });
   assert(/already captured as/.test(writerAgain), "…the writer key is told, as before");
 
+  // [13c] A capture key's re-capture alters nothing (SMD-2539): the
+  // writer's text sent again with the capture key's own metadata, source and
+  // trust leaves the writer's row byte for byte as it was — metadata (source
+  // too), updated_at, vector, label, no audit row — and the reply is a fresh
+  // capture's, ids masked; a write key's re-capture still merges. The one
+  // write is a vector onto a row that has none.
+  {
+    const UUID_G = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+    const seen = (e: Awaited<ReturnType<typeof rpc>>) => JSON.stringify({ error: e.error ?? null, isError: e.result?.isError === true, text: textOf(e), sc: sc(e) ?? null }).replace(UUID_G, "<id>");
+    const rowOf = async (target: string) => JSON.stringify((await sql`SELECT metadata, updated_at::text AS u, embedding::text AS e, embedding_model AS m, supersedes,
+        (SELECT count(*)::int FROM thought_audit a WHERE a.thought_id = t.id) AS events FROM thoughts t WHERE id = ${target}::uuid`)[0] ?? null);
+    const text = "[13c] the writer's thought a capture key sends again with its own label";
+    const wid = idIn(await call("capture_thought", { content: text, metadata: { topic_hint: "billing" } }));
+    const before = await rowOf(wid!);
+    const relabel = { source: "codex", metadata: { probe_note: "relabelled" }, trust: "ingested" };
+    const again13c = await rpc("tools/call", { name: "capture_thought", arguments: { content: text, ...relabel } });
+    assert(idIn(textOf(again13c)) === wid && (await rowOf(wid!)) === before,
+      `a capture key's re-capture of the writer's text leaves the writer's row byte for byte — metadata, source, updated_at, vector, label, no audit row (${await rowOf(wid!)})`);
+    // …and one naming supersedes — the session hook's own call shape, its
+    // earlier summary as the pointer — leaves it too (review pass 1: a word
+    // sent only without a pointer passed every suite).
+    const pointed13c = await rpc("tools/call", { name: "capture_thought", arguments: { content: text, ...relabel, supersedes: id } });
+    assert(idIn(textOf(pointed13c)) === wid && (await rowOf(wid!)) === before, `…and so does one naming supersedes, the hook's call shape: no pointer, no merge (${await rowOf(wid!)})`);
+    const fresh13c = await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13c] a text no key has sent before", ...relabel } });
+    assert(seen(again13c) === seen(fresh13c), `…and its reply is a fresh capture's, ids masked (${seen(again13c).slice(0, 120)} vs ${seen(fresh13c).slice(0, 120)})`);
+    const [freshRow] = await sql`SELECT metadata->>'source' AS s, metadata->>'probe_note' AS p FROM thoughts WHERE id = ${idIn(textOf(fresh13c))}::uuid`;
+    assert(freshRow?.s === "codex" && freshRow?.p === "relabelled", "…while the fresh text is written with the capture key's label and keys, as before");
+    // The writer re-sending its own text still merges (the write key holds update_thought anyway).
+    await call("capture_thought", { content: text, metadata: { probe_note: "the writer's own" } });
+    const [merged13c] = await sql`SELECT metadata->>'probe_note' AS p FROM thoughts WHERE id = ${wid}::uuid`;
+    assert(merged13c?.p === "the writer's own", `a write key's re-capture still merges its metadata (${merged13c?.p})`);
+    // A row without a vector — the gate refused the call when it was written
+    // — takes the one a capture key's re-capture carries: one update event
+    // carrying the vector's presence alone, the metadata untouched.
+    const bare = "[13c] the writer's thought stored without a vector";
+    const bid = idIn(await call("capture_thought", { content: bare }));
+    await sql`UPDATE thoughts SET embedding = NULL, embedding_model = NULL WHERE id = ${bid}::uuid`;
+    const [bareBefore] = await sql`SELECT metadata, (SELECT count(*)::int FROM thought_audit a WHERE a.thought_id = t.id) AS events FROM thoughts t WHERE id = ${bid}::uuid`;
+    const attached = await rpc("tools/call", { name: "capture_thought", arguments: { content: bare, ...relabel } });
+    const [bareAfter] = await sql`SELECT metadata, embedding IS NOT NULL AS v, (SELECT count(*)::int FROM thought_audit a WHERE a.thought_id = t.id) AS events FROM thoughts t WHERE id = ${bid}::uuid`;
+    const [lastEvent] = await sql`SELECT action, diff, actor_name FROM thought_audit WHERE thought_id = ${bid}::uuid ORDER BY seq DESC LIMIT 1`;
+    assert(idIn(textOf(attached)) === bid && bareAfter?.v === true && JSON.stringify(bareAfter?.metadata) === JSON.stringify(bareBefore?.metadata) && bareAfter?.events === bareBefore?.events + 1
+        && lastEvent?.action === "update" && JSON.stringify(Object.keys(lastEvent?.diff ?? {})) === JSON.stringify(["embedding_present"]) && lastEvent?.actor_name === "session-hook",
+      `a vectorless row takes the capture key's vector as one update event carrying its presence alone, in the key's name, its metadata untouched (${JSON.stringify(lastEvent)})`);
+  }
+
   // A derived_from that names a ghost: the positions that name no thought are
   // named, so a caller drops exactly those; the ids beside them only to a key
   // that can read (second review pass).

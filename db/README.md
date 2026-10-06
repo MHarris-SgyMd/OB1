@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2429 assertions: 2429 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventy-nine (79) migrations applied, and
+`bun test-schema.ts` prints `2465 assertions: 2465 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty (80) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1083,6 +1083,31 @@ reports the rule and preflight's `lineage` check reads to warn naming 079 when
 063 or 066 is re-applied by hand over it. Not taken: matching a ticket id in
 free text — on the 128 it would leave out 11 more pairs, one of them accepted.
 test-schema [70], test-live [16], test-upgrade [20ac].
+
+Migration 080 has a capture-only key's re-capture leave the row it lands on
+(SMD-2539). Text that is already a thought lands on the row holding it, and
+before 080 that path merged the payload's metadata over the row's — the
+caller's keys and `metadata.source` — appended an update event in the caller's
+name and moved `updated_at`: a capture key that could guess another key's text
+could relabel that thought — the label a `source:` egress term gates the passes
+on (SMD-1941). All three `upsert_thought` forms now read `p_payload.recapture`.
+`'keep'`, which the server sends for a key that cannot read (the capture
+scope), leaves an existing row as it is: no metadata merge, no event, no
+`updated_at`, no vector refresh, no window written or dropped. The one write is
+a vector onto a row that has none — an update event carrying the vector's
+presence alone, the row's metadata on both sides and nothing declared — so
+`updated_at` moves and the audit row names the capture key; no windows are
+written, and windows such a row holds go by 022's rule unless its label is the
+vector's. Absent, a JSON null or `'merge'` is the merge as before, which a write
+key keeps (it holds `update_thought` anyway); any other value is refused. A
+fresh text is captured as before, and the return keeps its keys, so the
+session hook still gets the id it supersedes its own summary with. 080 carries
+073's 2- and 3-argument bodies and 061's 4-argument one, each with
+`ob1:recapture-keep-leaves-the-row`, which preflight's `atomic capture` check
+reads to warn naming 080 when 073 or an earlier file is re-applied by hand over
+it. It refuses to apply without 060, 061 or 073. The fix needs this file and a
+server that sends the word: either alone, a capture key's re-capture merges.
+test-schema [71], test-upgrade [20ad], test-e2e-sql [13c].
 
 ## What changed relative to the guide
 
@@ -3387,7 +3412,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2429 assertions, PGlite, no container
+bun test-schema.ts                          # 2465 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1100 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
