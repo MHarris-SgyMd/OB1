@@ -2221,10 +2221,13 @@ yet when the newer side is judged:
   `workers` compose profile, `deploy/README.md`, SMD-2424).
 - **A failed extraction.** `--retry-failed` extracts it, but the newer
   thoughts already judged are not judged again.
+- **A failed embedding.** A candidate needs a vector; `reembed.ts` gives it
+  one, and the same holds.
 - **An import dated older than thoughts already judged.** Same: its pairs
   with them are not judged.
 
-The last two hold however the pass is run. k and the
+The last three hold however the pass is run, once the newer thoughts have
+been judged; retried or re-embedded before that, nothing is missed. k and the
 floor were chosen by measurement (`evals/eval-consolidate.ts`;
 `evals/README.md` has the table) and are the worker's `--k` and `--min-sim`.
 

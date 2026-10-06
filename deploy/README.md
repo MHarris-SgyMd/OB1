@@ -605,27 +605,29 @@ origin a vendor can reach (SMD-2382) — and the handler's shape (signature, rep
 
 ## Extraction and consolidation as services
 
-A capture is enqueued for entity extraction as it lands, and an extracted
-thought joins consolidation's pool, but nothing does the work until a worker
-runs. The `workers` profile runs both workers as services:
-`db/extract-entities.ts --follow` as `extract` and `db/consolidate.ts
---follow` as `consolidate`. Each drains its pool, then polls for new work.
+Once extraction has run on a brain, each capture is queued for it as it
+lands, and an extracted thought joins consolidation's pool, but nothing does
+the work until a worker runs. The `workers` profile runs both workers as
+services: `db/extract-entities.ts --follow` as `extract` and
+`db/consolidate.ts --follow` as `consolidate`. Each drains its pool, then
+polls for new work.
 
 **The cost comes first.** Extraction makes a model call per thought (per
 window of a long one), and consolidation up to three, one per judged pair. On
 a local model that is GPU time: the dogfood brain takes 50 to 90 thoughts a
-day, and one worker on `qwen2.5:7b` extracts one in 37 s at the median, so a
-follower is idle most of the day. On a hosted provider it is money per call,
-and each thought's text goes to the provider under the egress policy. Decide
-before you enable it.
+day, and on `qwen2.5:7b` a thought's extraction took 37 s at the median (two
+workers), so a follower is idle most of the day. On a hosted provider it is
+money per call, and each thought's text goes to the provider under the egress
+policy. Decide before you enable it.
 
 The first start drains a backlog — every thought already in the brain — so
 it runs `extract` alone, and adds `consolidate` once the backlog is done
-("Start `extract` alone on a backlog", below). Start extraction:
+("Start `extract` alone on a backlog", below). Mint the worker key, append
+the line keygen prints to `MCP_ACCESS_KEYS` (comma-separated), set the raw key
+as `OB1_WORKER_KEY` in `deploy/.env`, and start extraction:
 
 ```bash
-# deploy/.env: OB1_WORKER_KEY=<the raw key>, with its line in MCP_ACCESS_KEYS
-#   cd server-portable && bun keygen.ts --name workers --scope capture
+(cd server-portable && bun keygen.ts --name workers --scope capture)
 podman compose -f deploy/compose.yaml --profile workers up -d extract
 ```
 
@@ -637,8 +639,16 @@ podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extra
 
 Its `status:` line counts the pool. The backlog is done when it reads `0 in
 flight, 0 pending, 0 not yet in the pool`. "0 pending" alone is not enough:
-the last thought is still in flight, and before the follower's first pass
-the backlog is all "not yet in the pool". Then add consolidation:
+the last thought may still be in flight, and until the follower's first pass
+the backlog is "not yet in the pool". If it also reads `N failed`, retry
+those now, while no newer thought has been judged without them, and wait for
+the line again:
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --retry-failed --workers 1
+```
+
+Then add consolidation:
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers up -d consolidate
@@ -652,89 +662,121 @@ has removed.
 
 **What each one is:**
 - **Identity.** Both need a worker key, and refuse to start without one (exit
-  2), so what they write carries its agent id; a key the database cannot
+  2), so what they write carries its agent id. A key the database cannot
   resolve at start is a warning, as for a run from a checkout.
 - **Settings.** `OB1_EXTRACT_FOLLOW` and `OB1_CONSOLIDATE_FOLLOW` set the poll
   interval in seconds (unset, 15). `OB1_EXTRACT_WORKERS` and
-  `OB1_CONSOLIDATE_WORKERS` set the worker count (unset, 1, not the CLI's 2,
-  so a model slot stays free for captures). Digits only: anything else is
-  refused naming the variable, and a number the CLI then refuses (`0`, more
-  digits than it reads exactly) is refused naming its flag, `--follow` or
-  `--workers`. Everything else is the server's environment: the model, the
-  endpoints, the egress policy, the extraction window and the escalation
-  model.
+  `OB1_CONSOLIDATE_WORKERS` set the worker count (unset, 1, not the CLI's 2).
+  A worker holds one model call at a time, so the two counts, with
+  `board-sync`'s calls and the captures', share the provider's parallel slots
+  (`OLLAMA_NUM_PARALLEL`): one each leaves a slot free for captures on a
+  provider with three. Digits only: anything else is refused naming the
+  variable, and a number the CLI then refuses (`0`, more digits than it reads
+  exactly) is refused naming its flag, `--follow` or `--workers`. Everything
+  else is the server's environment: the model, the endpoints, the egress
+  policy, the extraction window and the escalation model.
 - **Code.** The services run this checkout's `db/` and `server-portable/`,
   mounted read-only as for `board-sync`; neither release image carries the
-  workers. So the profile needs a checkout, and the checkout should be at the
-  release the stack runs: a newer one runs newer worker code against an older
-  schema, and the workers do not check the schema's version. The mount is
-  the checkout compose was run from, so run it from one that stays (not a
-  worktree you will remove). A changed checkout reaches a follower when it is
-  restarted.
+  workers (SMD-2601). So the profile needs a checkout, and the checkout should
+  be at the release the stack runs: a newer one runs newer worker code
+  against an older schema, and the workers do not check the schema's version.
+  The mount is the checkout compose was run from, so run it from one that
+  stays (not a worktree you will remove). A changed checkout reaches a
+  follower when it is restarted — any restart, on-failure included.
 - **Stopping.** `stop` lets each worker finish the thought it holds. The grace
   period is 120 s for `extract` (a thought's extraction took 121 s at p90 on
-  the stable brain) and 60 s for `consolidate`. A thought still held when the
-  container is killed is not lost: its lease lapses after 900 s and the next
-  run takes it. A follower stopped this way exits 0 and stays stopped.
+  the stable brain) and 60 s for `consolidate`. Inside it the follower exits
+  0; past it the container is killed (137). Either way it stays stopped, and
+  a thought still held is not lost: its lease lapses after 900 s and the next
+  run takes it (a thought whose lease lapses three times is recorded failed).
 - **Refusals.** A configuration refusal exits 2: no key, a key
-  `MCP_ACCESS_KEYS` does not hold, a setting that is not a number the CLI
-  takes, an egress policy that would refuse every call (`OB1_LLM_LOCAL` unset
-  against a host Ollama), or (`extract`) a model or prompt version other than
-  the one the brain's extraction key records. The service is restarted three
-  times — four runs — then stops, and `ps` shows it exited, as `board-sync`
-  does.
+  `MCP_ACCESS_KEYS` does not hold, a revoked key or one whose scope grants
+  nothing (`forward`), a setting that is not a number the CLI takes, an egress
+  policy that would refuse every call (`OB1_LLM_LOCAL` unset against a host
+  Ollama), or (`extract`) a model or prompt version other than the one the
+  brain's extraction key records. So does a provider that refuses the
+  request itself (a 401, 403 or a model it does not have; SMD-2599). The
+  service is restarted three times — four runs — then stops, and `ps` shows
+  it exited, as `board-sync` does.
 
 **Changing the model.** A new `OB1_METADATA_MODEL`, or a checkout whose
-extraction prompt version moved, is a new extraction key, and `extract`
-refuses it until told. Stop both followers BEFORE the change reaches them:
+extraction prompt version moved (after a pull), is a new extraction key, and
+`extract` refuses it until told. Stop both followers BEFORE the change
+reaches them:
 - a running `extract` keeps extracting under the old key, over what the
   switch writes;
 - a `consolidate` recreated under the new key judges every thought against
   the old model's entities, and never judges the new ones.
 
-So stop both, change `deploy/.env` (or the checkout), run the switch once —
-it re-extracts every thought, a backlog — and bring both back:
+With `COMPOSE_PROFILES=workers`, a plain `up -d` after the change starts both,
+so stop them before you pull or edit. Then run the switch once — a backlog —
+and bring both back, with the server, whose capture-time tagging reads the
+same `OB1_METADATA_MODEL`:
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
 # now edit deploy/.env, or move the checkout
 podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --switch-key --workers 1
-podman compose -f deploy/compose.yaml --profile workers up -d extract consolidate
+podman compose -f deploy/compose.yaml --profile workers up -d server extract consolidate
 ```
+
+The switch re-extracts every thought that has no row under the new key — all
+of them, for a key the brain has never used. **Going back to a model or
+prompt version used before re-extracts nothing**: every thought still has
+its finished row under that key, so the graph stays the other model's while
+`--status` reads done (SMD-2607 fixes this). Until then, judge a new model on
+a working copy (`db/tier.ts`) rather than switching the brain to it and back.
 
 Consolidation's key follows its judge model (`OB1_JUDGE_MODEL`, else the
 metadata model) and prompt version, with no switch to refuse: a new one is a
 new pool. The follower takes every thought with entities again and judges
 each pair not already proposed — up to three calls a thought, unattended.
-Decide on that before changing either.
+With `OB1_JUDGE_MODEL` set, a new metadata model leaves consolidation's key
+as it was, so thoughts already judged are not judged again against the new
+entities.
 
 **Start `extract` alone on a backlog.** A pair is judged once, from its newer
-side, against older thoughts that share an entity and were captured on an
-earlier UTC date. If the older one had no entities yet, the pair is never
-judged. For captures beside a running `extract` that almost never happens:
-their neighbours were extracted long before. The exception is two captures
-either side of 00:00 UTC with the earlier still being extracted. One extract
-worker finishes it first, since it claims in queue order; with
-`OB1_EXTRACT_WORKERS` above 1 it can still be held. A backlog is different:
-a first run or a `--switch-key` queues every thought at one instant, and they
-are taken in no order, so a thought can be judged before an older neighbour
-is extracted. Hence the first-start order above. Two cases miss pairs however
-the passes are run: a thought whose extraction failed (`--retry-failed`
-extracts it, but the newer thoughts already judged are not judged again),
-and an import dated older than thoughts already judged (`db/README.md`,
-"Consolidation: proposing which thoughts supersede which").
+side, against older thoughts that share an entity, have a vector and were
+captured on an earlier UTC date. If the older one had no entities or no
+vector yet, the pair is never judged. For captures beside a running `extract`
+that almost never happens: their neighbours were extracted long before. The
+exception is two captures either side of 00:00 UTC with the earlier still
+being extracted. One extract worker finishes it first, since it claims in
+queue order; with `OB1_EXTRACT_WORKERS` above 1 it can still be held. A
+backlog is different: a first run or a `--switch-key` queues every thought at
+one instant, and they are taken in no order, so a thought can be judged
+before an older neighbour is extracted. Hence the first-start order above.
+Once newer thoughts have been judged, three cases miss their pairs however
+the passes are run (`db/README.md`, "Consolidation: proposing which thoughts
+supersede which"):
+- an older thought whose extraction failed (`--retry-failed` extracts it);
+- an older thought whose embedding failed (`db/reembed.ts` embeds it; no
+  service runs it);
+- an import dated older than thoughts already judged.
 
-**Consolidation only proposes.** Nothing it finds is applied. Each proposal
-waits for review: `--list` shows the queue, then `--accept <id>` or
-`--reject <id>` decides one, with `--note` giving your reason. A decision run
-in this container is audited under the agent of the key in `OB1_WORKER_KEY` —
-the workers' key, unless you pass your own with `-e OB1_WORKER_KEY=…` so the
-audit trail tells a person's decision from a machine's. Accepting unattended
-waits on a judge that can tell conflicts apart (SMD-1873).
+**Consolidation only proposes.** Nothing it finds is applied: each proposal
+waits for a person, except one whose text moved under it (a stale row), which
+the next pass settles itself (067). `--list` shows the queue. `--accept <id>`
+or `--reject <id>` decides one, with `--note` giving your reason. When the
+listing says the judge did not state which thought is current, an accept
+needs `--direction newer` or `--direction older`.
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps consolidate bun db/consolidate.ts --list
 ```
+
+An accept is audited under the agent of the key in `OB1_WORKER_KEY`, which in
+this container is the workers' key. To have it recorded as yours, pass your
+own key, one `MCP_ACCESS_KEYS` holds, from your shell's environment: a bare
+`-e NAME` takes its value from there, so the key is not on the command line
+(export it from a file or a password manager first):
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps -e OB1_WORKER_KEY consolidate bun db/consolidate.ts --accept <id> --note "…"
+```
+
+A reject records no reviewer whichever key runs it (SMD-2608). Accepting
+unattended waits on a judge that can tell conflicts apart (SMD-1873).
 
 This is the baseline for the sleep scheduler (SMD-1794): always on, at low
 concurrency. The scheduler will run these passes when the logs go quiet, under
@@ -1774,9 +1816,10 @@ so the profile builds from a checkout.
   consolidation as services", above). Decide on the cost before you ask for it.
   A follower exits 0 when stopped, so watch its log: it says there when the
   model looks at fault, after each pass drains the pool. A follower started on
-  a backlog says nothing until the backlog is done, so try a new model with
-  `--limit 48` first (SMD-2266, `db/README.md`). Reviewing what consolidation
-  proposes stays a person's job.
+  a backlog says nothing until the backlog is done, so try a new model on a
+  working copy with `--limit 48` first (SMD-2266, `db/README.md`; on the brain
+  itself a new model is a new key, "Changing the model" above). Reviewing
+  what consolidation proposes stays a person's job.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
   The `auth` profile's authorization server runs behind the proxy's `/auth`,

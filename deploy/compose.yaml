@@ -775,8 +775,10 @@ services:
   # OB1_CONSOLIDATE_FOLLOW seconds (unset, the CLI's 15). One worker each
   # unless OB1_EXTRACT_WORKERS / OB1_CONSOLIDATE_WORKERS says more — not the
   # CLI's 2, so a model slot stays free for captures (the dogfood's 7B serves
-  # three at once). Claims are leased (015, 031), so a follower that dies loses
-  # nothing: its thought goes back to the pool when the lease lapses.
+  # three at once; the two counts, board-sync and captures share the slots).
+  # Claims are leased (015, 031), so a follower that dies loses nothing: its
+  # thought goes back to the pool when the lease lapses (and is recorded
+  # failed at the third lapse).
   #
   # board-sync's shape — the same image, the same two read-only mounts, the
   # server's environment by anchor — so, as board-sync does, it runs this
@@ -826,25 +828,32 @@ services:
       migrate:
         condition: service_completed_successfully
     # board-sync's rule: a refusal exits 2 — no key, a key MCP_ACCESS_KEYS
-    # does not hold, a bad knob, the egress gate, a model or prompt version
-    # other than the recorded key's — and a restart does not fix
+    # does not hold (or revoked, or of a scope that grants nothing), a bad
+    # knob, the egress gate, (this service) a model or prompt version other
+    # than the recorded key's, a provider refusing the request itself
+    # (SMD-2599) — and a restart does not fix
     # configuration, so after three restarts the service stops and `ps`
     # says so. podman restarts at once, with no backoff, and never resets the
-    # count. A follower stopped by a signal exits 0 and stays stopped.
+    # count. A follower stopped by a signal exits 0 (137 if killed past the
+    # grace period) and stays stopped.
     restart: on-failure:3
 
   # Proposals only: consolidation never applies one. Each waits for review
-  # (`bun db/consolidate.ts --list`, then --accept or --reject; 029). Beside
-  # extraction: the pool holds only thoughts already extracted, and a
-  # candidate was captured on an earlier UTC date (029), so a capture's
-  # neighbours were almost always extracted long before it is judged (one
+  # (`bun db/consolidate.ts --list`, then --accept or --reject; 029), but for
+  # a stale one the next pass settles (067). Beside extraction: the pool holds
+  # only thoughts with entities and a vector, and a candidate shares an
+  # entity, has a vector and was captured on an earlier UTC date (029), so a
+  # capture's neighbours were almost always extracted long before it is
+  # judged (one
   # extract worker claims in queue order; with more, a neighbour captured
   # just before 00:00 UTC can still be in hand). A backlog is not — a first
   # run or a --switch-key pools every thought at one instant, claimed in no
   # order — and a pair whose older side was still unextracted is never
   # judged: start `extract` alone on one, and this when
   # `extract-entities.ts --status` shows 0 in flight, 0 pending and 0 not
-  # yet in the pool (deploy/README.md).
+  # yet in the pool. A failed extraction or embedding, and an import dated
+  # older than thoughts already judged, miss their pairs however this runs
+  # (deploy/README.md).
   consolidate:
     image: oven/bun:1.4.0-alpine
     profiles: ["workers"]
