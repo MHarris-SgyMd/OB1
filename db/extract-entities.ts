@@ -1207,22 +1207,22 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   /**
    * A follower's pass, which a database outage does not end (SMD-2599): an
    * error that says the database is not answering is said once and waited
-   * out on outageWait's schedule, until a SELECT 1 answers or a stop wakes
-   * the wait, and the pass's counts are null. Bun's pool reconnects on the
-   * next query. Any other error ends the run, as before; a run without
-   * --follow is unchanged.
+   * out on outageWait's schedule, until a SELECT 1 answers — and the pass
+   * runs again at once, so its counts are read — or a stop wakes the wait,
+   * and the counts are null. Bun's pool reconnects on the next query. Any
+   * other error ends the run, as before; a run without --follow is unchanged.
    */
   async function followedPass(): Promise<Counts | null> {
-    try {
-      return await pass();
-    } catch (e) {
-      if (!FOLLOW || !databaseUnavailable(e)) throw e;
-      const down = Date.now();
-      err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
-      if (await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal })) {
+    for (;;) {
+      try {
+        return await pass();
+      } catch (e) {
+        if (!FOLLOW || !databaseUnavailable(e)) throw e;
+        const down = Date.now();
+        err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+        if (!(await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal }))) return null;
         out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
       }
-      return null;
     }
   }
 
@@ -1275,12 +1275,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // (review pass 1: a signal or the provider's refusal exits otherwise).
   const alarmLine = judge();
   if (after === null) {
-    // A follower that ended while the database was not answering: the counts
+    // A follower stopped while it waited for the database: the counts
     // cannot be read, and are not guessed (SMD-2599).
     if (alarmLine) err(alarmLine);
-    err(`\n  ended while the database was not answering: the pool's counts and the graph are not read — --status reads them once it answers`);
+    err(`\n  stopped while the database was not answering: the pool's counts and the graph are not read — --status reads them once it answers`);
     if (configError) err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}`);
-    return configError ? 2 : stopping ? (hardStopped ? 130 : 0) : 1;
+    return configError ? 2 : hardStopped ? 130 : 0;
   }
   const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
   // The alarm before the failures: a model at fault explains them, and

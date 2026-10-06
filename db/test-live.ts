@@ -34,7 +34,7 @@ import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MO
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { workerIdentity } from "./worker-bootstrap.ts";
@@ -3690,20 +3690,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // back — the thought in hand recorded nothing, its lease returned at once
   // rather than after --ttl (900 s, past this test), and extracted.
   {
-    const target = new URL(URL_!);
-    const relay = await cuttableRelay(target.hostname, Number(target.port || 5432));
-    const relayed = new URL(URL_!);
-    relayed.hostname = "127.0.0.1";
-    relayed.port = String(relay.port);
-    const cutFollower = Bun.spawn(["bun", "--no-env-file", join(HERE, "extract-entities.ts"), "--url", relayed.href, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    const relay = await cuttableRelay(URL_!);
+    const cutFollower = Bun.spawn(["bun", "--no-env-file", join(HERE, "extract-entities.ts"), "--url", relay.url, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
     const extractedNow = async (id: string) => (await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${id}::uuid`)[0].c > 0;
-    const waitFor = async (cond: () => Promise<boolean>, ms: number) => {
-      for (const until = Date.now() + ms; Date.now() < until;) {
-        if (await cond()) return true;
-        await Bun.sleep(250);
-      }
-      return cond();
-    };
     // Deleted at the end, so the sections after count the thoughts they did.
     let idle = "";
     let inHand = "";
@@ -3714,16 +3703,16 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       await Bun.sleep(2500);
       const aliveIdle = cutFollower.exitCode === null;
       await relay.restore();
-      const idleDone = await waitFor(() => extractedNow(idle), 15_000);
+      const idleDone = await pollUntil(() => extractedNow(idle), 15_000);
       // The model answers slowly, and the relay is cut while the call is in hand.
       slowMs = 2500;
       inHand = await seed("Rosa tuned the grafana panels while the database was away.");
-      const claimed = await waitFor(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${inHand}::uuid AND work_type = ${KEY}`)[0]?.status === "claimed", 5000);
+      const claimed = await pollUntil(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${inHand}::uuid AND work_type = ${KEY}`)[0]?.status === "claimed", 5000);
       await relay.cut();
       await Bun.sleep(4000);
       const aliveInHand = cutFollower.exitCode === null;
       await relay.restore();
-      const inHandDone = await waitFor(() => extractedNow(inHand), 20_000);
+      const inHandDone = await pollUntil(() => extractedNow(inHand), 20_000);
       slowMs = 0;
       cutFollower.kill("SIGINT");
       const cutOut = (await new Response(cutFollower.stdout).text()) + (await new Response(cutFollower.stderr).text());
@@ -3742,6 +3731,35 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       if (cutFollower.exitCode === null) cutFollower.kill("SIGKILL");
       await relay.close();
       for (const id of [idle, inHand]) if (id) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    }
+  }
+
+  // A stop just after the database answers again ends the run with the counts
+  // read, not "stopped while the database was not answering" (review pass 1):
+  // the pass runs again at once. In this process, the relay cut during the
+  // poll sleep and restored after the first check; the stop sent as the
+  // "answers again" line is written.
+  {
+    const relay = await cuttableRelay(URL_!);
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const write = (l: string) => {
+      lines.push(l);
+      if (/the database answers again/.test(l)) ac.abort();
+    };
+    const running = runExtract({ url: relay.url, env, workers: 1, follow: 2, signal: ac.signal, writer: { out: write, err: write } });
+    try {
+      await Bun.sleep(1000);
+      await relay.cut();
+      await Bun.sleep(4000);
+      await relay.restore();
+      const code = await running;
+      assert(code === 0 && lines.some((l) => /the database answers again/.test(l)) && !lines.some((l) => /stopped while the database was not answering/.test(l)) && lines.some((l) => /^  after: \d+ thoughts/.test(l)),
+             `a follower stopped just after the database answers again reads its counts and exits 0 (exit ${code}; ${lines.filter((l) => /answers again|stopped while|after:/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
+    } finally {
+      ac.abort();
+      await running.catch(() => 0);
+      await relay.close();
     }
   }
 
@@ -5289,12 +5307,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     // (SMD-2599): it outlasts the cut, as extract's does, and the poll after
     // the relay is back settles the row.
     seen.length = 0;
-    const target = new URL(URL_!);
-    const relay = await cuttableRelay(target.hostname, Number(target.port || 5432));
-    const relayed = new URL(URL_!);
-    relayed.hostname = "127.0.0.1";
-    relayed.port = String(relay.port);
-    const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", relayed.href, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    const relay = await cuttableRelay(URL_!);
+    const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", relay.url, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
     let followSettled = false;
     let aliveCut = false;
     try {

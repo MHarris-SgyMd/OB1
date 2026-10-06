@@ -707,16 +707,29 @@ export function neverAnswers(): Promise<never> {
   return new Promise<never>(() => {});
 }
 
+/** Poll `cond` every 250 ms for up to `ms`: true as soon as it holds, else its last answer. */
+export async function pollUntil(cond: () => Promise<boolean>, ms: number): Promise<boolean> {
+  for (const until = Date.now() + ms; Date.now() < until;) {
+    if (await cond()) return true;
+    await Bun.sleep(250);
+  }
+  return cond();
+}
+
 /**
- * A TCP relay on the loopback in front of `host:port`, which a suite cuts and
+ * A TCP relay on the loopback in front of a database URL's server, which a suite cuts and
  * restores to take a server away from one client while the suite's own
  * connection stays up (SMD-2599: a --follow worker outlasting its database).
  * `cut()` destroys every relayed connection and stops listening, so the
  * client's next connect is refused, as a stopped Postgres refuses it;
  * `restore()` listens again on the same port. Works where the suite cannot
- * stop the server itself — CI's service container.
+ * stop the server itself — CI's service container. `url` is the given
+ * database URL with its host and port the relay's.
  */
-export async function cuttableRelay(host: string, port: number): Promise<{ port: number; cut(): Promise<void>; restore(): Promise<void>; close(): Promise<void> }> {
+export async function cuttableRelay(databaseUrl: string): Promise<{ url: string; cut(): Promise<void>; restore(): Promise<void>; close(): Promise<void> }> {
+  const target = new URL(databaseUrl);
+  const host = target.hostname;
+  const port = Number(target.port || 5432);
   const sockets = new Set<Socket>();
   const server = createServer((client) => {
     const upstream = connect(port, host);
@@ -741,8 +754,11 @@ export async function cuttableRelay(host: string, port: number): Promise<{ port:
     for (const s of sockets) s.destroy();
     await closed;
   };
+  const relayed = new URL(databaseUrl);
+  relayed.hostname = "127.0.0.1";
+  relayed.port = String(bound);
   return {
-    port: bound,
+    url: relayed.href,
     cut,
     restore: () => listen(bound),
     close: async () => { if (server.listening) await cut(); },

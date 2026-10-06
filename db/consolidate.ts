@@ -1434,21 +1434,22 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   /**
    * A follower's pass, which a database outage does not end (SMD-2599), as
-   * extract-entities.ts's: said once, waited out until a SELECT 1 answers or
-   * a stop wakes the wait, and the pass's counts are null. Any other error
-   * ends the run, as before; a run without --follow is unchanged.
+   * extract-entities.ts's: said once, waited out until a SELECT 1 answers —
+   * and the pass runs again at once, so its counts are read — or a stop wakes
+   * the wait, and the counts are null. Any other error ends the run, as
+   * before; a run without --follow is unchanged.
    */
   async function followedPass(): Promise<Counts | null> {
-    try {
-      return await pass();
-    } catch (e) {
-      if (!FOLLOW || !databaseUnavailable(e)) throw e;
-      const down = Date.now();
-      err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
-      if (await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal })) {
+    for (;;) {
+      try {
+        return await pass();
+      } catch (e) {
+        if (!FOLLOW || !databaseUnavailable(e)) throw e;
+        const down = Date.now();
+        err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+        if (!(await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal }))) return null;
         out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
       }
-      return null;
     }
   }
 
@@ -1496,11 +1497,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     }
   }
   if (after === null) {
-    // A follower that ended while the database was not answering: the counts
+    // A follower stopped while it waited for the database: the counts
     // cannot be read, and are not guessed (SMD-2599).
-    err(`\n  ended while the database was not answering: the pool's counts and the queue are not read — --status reads them once it answers`);
+    err(`\n  stopped while the database was not answering: the pool's counts and the queue are not read — --status reads them once it answers`);
     if (configError) err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}`);
-    return configError ? 2 : stopping ? (hardStopped ? 130 : 0) : 1;
+    return configError ? 2 : hardStopped ? 130 : 0;
   }
   printCounts(after, "after");
   await printQueue();
