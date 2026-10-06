@@ -2209,10 +2209,13 @@ would judge a capture before
 016's worker reached it and leave a terminal claim row behind. The gate cannot
 see the other side of a pair: a newer thought judged while an older neighbour
 is still unextracted is judged without it, and the pair is not revisited.
-Since a candidate is at least a calendar day older, a pass beside an extract
-follower is safe for captures: their neighbours were extracted long before.
-What it misses is an older side that has no entities yet when the newer side
-is judged:
+Since a candidate was captured on an earlier UTC date, a pass beside an
+extract follower is safe for captures: their neighbours were almost always
+extracted long before. What it misses is an older side that has no entities
+yet when the newer side is judged:
+- **Two captures either side of 00:00 UTC**, the earlier still in hand. One
+  extract worker claims in queue order and finishes the earlier first; with
+  two or more, the earlier can still be held.
 - **A backlog.** A first run or a `--switch-key` pools every thought at one
   instant, claimed in no order, so drain it before consolidating (the
   `workers` compose profile, `deploy/README.md`, SMD-2424).

@@ -1125,6 +1125,9 @@ jobs:
       - name: The workers profile refuses before it starts a follower
         working-directory: deploy
         run: |
+          # Nothing else in this stack runs the workers' image: pull it first,
+          # so the bound below times the command, not Docker Hub.
+          docker compose -f compose.yaml --profile workers pull --quiet extract consolidate
           # Bounded: a refusal that regressed starts a follower, which never exits.
           worker() { local svc=$1; shift; set +e; timeout 120 docker compose -f compose.yaml --profile workers run --rm --no-deps -T "$@" "$svc" > /tmp/worker.out 2>&1; CODE=$?; set -e; }
           hold() { if ! grep -qF -- "$1" /tmp/worker.out || [ "$CODE" -ne 2 ]; then echo "--- expected exit 2 and \"$1\"; got $CODE: ---" >&2; cat /tmp/worker.out >&2; exit 1; fi; }

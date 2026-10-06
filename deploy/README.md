@@ -620,14 +620,27 @@ and each thought's text goes to the provider under the egress policy. Decide
 before you enable it.
 
 The first start drains a backlog — every thought already in the brain — so
-it runs `extract` alone, and adds `consolidate` once nothing is pending
-("Start `extract` alone on a backlog", below):
+it runs `extract` alone, and adds `consolidate` once the backlog is done
+("Start `extract` alone on a backlog", below). Start extraction:
 
 ```bash
 # deploy/.env: OB1_WORKER_KEY=<the raw key>, with its line in MCP_ACCESS_KEYS
 #   cd server-portable && bun keygen.ts --name workers --scope capture
 podman compose -f deploy/compose.yaml --profile workers up -d extract
-podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --status   # until it says 0 pending
+```
+
+Then read where it stands, as often as you like:
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --status
+```
+
+Its `status:` line counts the pool. The backlog is done when it reads `0 in
+flight, 0 pending, 0 not yet in the pool`. "0 pending" alone is not enough:
+the last thought is still in flight, and before the follower's first pass
+the backlog is all "not yet in the pool". Then add consolidation:
+
+```bash
 podman compose -f deploy/compose.yaml --profile workers up -d consolidate
 podman compose -f deploy/compose.yaml --profile workers logs -f extract consolidate
 ```
@@ -644,9 +657,12 @@ has removed.
 - **Settings.** `OB1_EXTRACT_FOLLOW` and `OB1_CONSOLIDATE_FOLLOW` set the poll
   interval in seconds (unset, 15). `OB1_EXTRACT_WORKERS` and
   `OB1_CONSOLIDATE_WORKERS` set the worker count (unset, 1, not the CLI's 2,
-  so a model slot stays free for captures). Digits only. Everything else is
-  the server's environment: the model, the endpoints, the egress policy, the
-  extraction window and the escalation model.
+  so a model slot stays free for captures). Digits only: anything else is
+  refused naming the variable, and a number the CLI then refuses (`0`, more
+  digits than it reads exactly) is refused naming its flag, `--follow` or
+  `--workers`. Everything else is the server's environment: the model, the
+  endpoints, the egress policy, the extraction window and the escalation
+  model.
 - **Code.** The services run this checkout's `db/` and `server-portable/`,
   mounted read-only as for `board-sync`; neither release image carries the
   workers. So the profile needs a checkout, and the checkout should be at the
@@ -670,25 +686,36 @@ has removed.
 
 **Changing the model.** A new `OB1_METADATA_MODEL`, or a checkout whose
 extraction prompt version moved, is a new extraction key, and `extract`
-refuses it until told: run the switch once, which re-extracts every thought
-(a backlog, so stop `consolidate` first), then bring both back:
+refuses it until told. Stop both followers BEFORE the change reaches them:
+- a running `extract` keeps extracting under the old key, over what the
+  switch writes;
+- a `consolidate` recreated under the new key judges every thought against
+  the old model's entities, and never judges the new ones.
+
+So stop both, change `deploy/.env` (or the checkout), run the switch once —
+it re-extracts every thought, a backlog — and bring both back:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers stop consolidate
+podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
+# now edit deploy/.env, or move the checkout
 podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --switch-key --workers 1
 podman compose -f deploy/compose.yaml --profile workers up -d extract consolidate
 ```
 
 Consolidation's key follows its judge model (`OB1_JUDGE_MODEL`, else the
 metadata model) and prompt version, with no switch to refuse: a new one is a
-new pool, and the follower judges every thought with entities again — up to
-three calls each, unattended. Decide on that before changing either.
+new pool. The follower takes every thought with entities again and judges
+each pair not already proposed — up to three calls a thought, unattended.
+Decide on that before changing either.
 
 **Start `extract` alone on a backlog.** A pair is judged once, from its newer
-side, against older thoughts that share an entity and were captured at least
-a calendar day earlier. If the older one had no entities yet, the pair is
-never judged. For captures beside a running `extract` that cannot happen:
-their day-old neighbours were extracted long before. A backlog is different:
+side, against older thoughts that share an entity and were captured on an
+earlier UTC date. If the older one had no entities yet, the pair is never
+judged. For captures beside a running `extract` that almost never happens:
+their neighbours were extracted long before. The exception is two captures
+either side of 00:00 UTC with the earlier still being extracted. One extract
+worker finishes it first, since it claims in queue order; with
+`OB1_EXTRACT_WORKERS` above 1 it can still be held. A backlog is different:
 a first run or a `--switch-key` queues every thought at one instant, and they
 are taken in no order, so a thought can be judged before an older neighbour
 is extracted. Hence the first-start order above. Two cases miss pairs however

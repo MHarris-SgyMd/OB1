@@ -836,12 +836,15 @@ services:
   # Proposals only: consolidation never applies one. Each waits for review
   # (`bun db/consolidate.ts --list`, then --accept or --reject; 029). Beside
   # extraction: the pool holds only thoughts already extracted, and a
-  # candidate is at least a calendar day older (029), so a capture's
-  # neighbours were extracted long before it is judged. A backlog is not —
-  # a first run or a --switch-key pools every thought at one instant,
-  # claimed in no order — and a pair whose older side was still unextracted
-  # is never judged: start `extract` alone on one, and this when
-  # `extract-entities.ts --status` shows nothing pending (deploy/README.md).
+  # candidate was captured on an earlier UTC date (029), so a capture's
+  # neighbours were almost always extracted long before it is judged (one
+  # extract worker claims in queue order; with more, a neighbour captured
+  # just before 00:00 UTC can still be in hand). A backlog is not — a first
+  # run or a --switch-key pools every thought at one instant, claimed in no
+  # order — and a pair whose older side was still unextracted is never
+  # judged: start `extract` alone on one, and this when
+  # `extract-entities.ts --status` shows 0 in flight, 0 pending and 0 not
+  # yet in the pool (deploy/README.md).
   consolidate:
     image: oven/bun:1.4.0-alpine
     profiles: ["workers"]
