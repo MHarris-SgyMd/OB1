@@ -408,4 +408,21 @@ console.log("\n[8] One log line per request: method, route, status, time — no 
   assert(/^api GET - 404 /.test(lines[3] ?? ""), `an unrouted request is logged without its path (${lines[3]})`);
 }
 
+console.log("\n[9] A request URL that will not parse — Bun builds it from the Host header unchecked — still has its query read: a refusal, not a 500 (SMD-2535)");
+{
+  // api.ts rebuilds such a request before routing (root.ts routable); the
+  // app reads its query without parsing the URL all the same. A Request's own
+  // constructor refuses the URL, so the runtime's is stood in for, with a
+  // path Hono reads from the string as it would.
+  class RuntimeUrl extends Request {
+    constructor(private readonly given: string, init?: RequestInit) { super("http://stand-in.test/", init); }
+    override get url() { return this.given; }
+  }
+  for (const host of ["x:99999", "[::1", "brain.example.test:abc"]) {
+    const r = await json(await app.fetch(new RuntimeUrl(`http://${host}/v1/thoughts?limit=x`, { headers: { "x-brain-key": "read-raw" } })));
+    const issues = (r.body.issues ?? []) as { path: string }[];
+    assert(r.status === 400 && r.body.code === "REFUSED_INPUT" && issues[0]?.path === "limit", `Host ${host}: GET /v1/thoughts?limit=x → 400 naming limit (${r.status} ${JSON.stringify(r.body).slice(0, 80)})`);
+  }
+}
+
 report();

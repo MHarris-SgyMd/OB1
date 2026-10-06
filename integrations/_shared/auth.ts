@@ -284,6 +284,20 @@ export function canCapture(p: Principal): boolean {
 }
 
 /**
+ * A request URL's query string, read without parsing the rest of the URL,
+ * which Bun builds from the `Host` header unchecked: a `Host` the URL parser
+ * refuses would make `new URL(req.url)` throw (SMD-2535). The text from the
+ * first `?` before any `#` is handed over with that `?`, which the parser
+ * drops as `URL` does (`??key=` is a `?key` parameter), so for any URL Bun
+ * builds the parameters are its `searchParams`.
+ */
+export function queryOf(url: string): URLSearchParams {
+  const beforeHash = url.split("#", 1)[0];
+  const start = beforeHash.indexOf("?");
+  return new URLSearchParams(start === -1 ? "" : beforeHash.slice(start));
+}
+
+/**
  * Every key a request presents, wherever a client can put one: the `x-brain-key`
  * header (the core server's), `x-access-key` (the extensions'), `?key=` — the
  * URL form Claude Desktop's connectors need, kept for the reason the header of
@@ -298,7 +312,7 @@ export function canCapture(p: Principal): boolean {
 export function presentedKeys(req: Request): string[] {
   const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
   const forms = [req.headers.get("x-brain-key"), req.headers.get("x-access-key"),
-    new URL(req.url).searchParams.get("key"), bearer];
+    queryOf(req.url).get("key"), bearer];
   return [...new Set(forms.filter((k): k is string => Boolean(k)))];
 }
 
