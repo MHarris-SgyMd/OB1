@@ -338,6 +338,21 @@ console.log("\n[6] test-auth's cases against REST: a read key cannot write, a ca
   r = await rest("POST", "/v1/thoughts", { content: "eta: a capture key's thought" }, KEYS.hook);
   assert(r.status === 201 && r.body.embeddingAttached === true, `a capture key captures (${r.status})`);
   assert(r.body.existed === undefined, "…and is not told whether the text was already a thought (the existence-oracle rule)");
+  // A ticket's lifecycle key is refused a capture key at this door too, the
+  // key named in the value (SMD-2617); a write key states it.
+  const forged = await rest("POST", "/v1/thoughts", { content: "eta: a capture key's ticket claim", metadata: { status_type: "completed" } }, KEYS.hook);
+  assert(forged.status === 400 && forged.body.code === "REFUSED_METADATA_SHAPE" && forged.body.problem === "ticket_key" && forged.body.key === "status_type",
+    `a capture key's ticket key is a 400 naming the rule and the key (${forged.status} ${JSON.stringify(forged.body)})`);
+  const stated = await rest("POST", "/v1/thoughts", { content: "eta: a write key's ticket row", metadata: { issue: "TKT-2617", status_type: "started" } }, KEYS.writer);
+  assert(stated.status === 201, `…and a write key's is a creation (${stated.status})`);
+  // The key is in the value only when it is one of the server's own names: a
+  // reserved key's is, a badly shaped key (the caller's raw input) is not.
+  const reserved = await rest("POST", "/v1/thoughts", { content: "eta: a reserved key", metadata: { type: "task" } }, KEYS.writer);
+  const badKey = await rest("POST", "/v1/thoughts", { content: "eta: a badly shaped key", metadata: { "Bad Key": 1 } }, KEYS.writer);
+  const longValue = await rest("POST", "/v1/thoughts", { content: "eta: an over-long value", metadata: { long_note: "x".repeat(201) } }, KEYS.writer);
+  assert(reserved.status === 400 && reserved.body.problem === "reserved_key" && reserved.body.key === "type" && badKey.status === 400 && badKey.body.problem === "bad_key" && !("key" in badKey.body)
+      && longValue.status === 400 && longValue.body.problem === "value_too_long" && !("key" in longValue.body),
+    `a reserved key's refusal names it; a bad key's, and an over-long value's, carry the rule alone (${JSON.stringify(reserved.body)} | ${JSON.stringify(badKey.body)} | ${JSON.stringify(longValue.body)})`);
   const hm = await mcp("capture_thought", { content: "theta: a capture key's thought" }, KEYS.hook);
   const { text: _t, ...hookFacts } = hm.sc;
   const { embeddingAttached: _a, ...hookRest } = r.body;
@@ -376,6 +391,10 @@ console.log("\n[6b] Forwarded through REST: the client's key is the subject, the
 
   const cap = await forwarded("POST", "/v1/thoughts", KEYS.hook, KEYS.forwarder, { content: "iota: a hook's thought, carried by the MCP server" });
   assert(cap.status === 201 && typeof cap.body.id === "string", `a capture key forwarded captures (${cap.status} ${JSON.stringify(cap.body).slice(0, 80)})`);
+  // …as the capture key it is: refused a ticket's lifecycle keys (SMD-2617).
+  const capTicket = await forwarded("POST", "/v1/thoughts", KEYS.hook, KEYS.forwarder, { content: "iota: a forwarded ticket claim", metadata: { status_type: "completed" } });
+  assert(capTicket.status === 400 && capTicket.body.problem === "ticket_key" && capTicket.body.key === "status_type",
+    `…and is refused a ticket key, as the capture key it carries (${capTicket.status} ${JSON.stringify(capTicket.body)})`);
   const fwdId = await agentOf("mcp-forwarder");
   const capRow = await auditOf(String(cap.body.id), "capture");
   assert(capRow?.actor_name === "hook" && capRow?.canonical_agent_id === (await agentOf("hook")) && capRow?.origin === "open-brain-api",

@@ -8,6 +8,7 @@
 import { z } from "zod";
 import type { ToolName } from "../tools.ts";
 import { SAID_BY, TRUST } from "./filter.ts";
+import { META_KEYS_MAX, TICKET_META_KEYS } from "./refusal.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
 export type ToolSpec = {
@@ -312,7 +313,7 @@ export const SPECS = {
       // and a per-source weight (SMD-1297) can tell a model summary from the
       // derived one.
       metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
-        .describe("Extra metadata keys to store on the thought (e.g. `{\"summary_model\": \"llama3.1:8b\"}`). Lower-case keys, string/number/boolean values; at most 8 keys. Keys the server owns — `source` (use the `source` argument), `type`, `topics`, `people` and the like — are refused. Returned to readers alongside the server's own metadata."),
+        .describe(`Extra metadata keys to store on the thought (e.g. \`{"summary_model": "llama3.1:8b"}\`). Lower-case keys, string/number/boolean values; at most ${META_KEYS_MAX} keys. Keys the server owns — \`source\` (use the \`source\` argument), \`type\`, \`topics\`, \`people\` and the like — are refused, and so, for a capture-only key, are a ticket's lifecycle keys (${TICKET_META_KEYS.map((k) => `\`${k}\``).join(", ")}). Returned to readers alongside the server's own metadata.`),
     },
   },
   update_thought: {
