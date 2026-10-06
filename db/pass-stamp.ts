@@ -13,20 +13,21 @@
  *
  * The row. Key `heartbeat:<worker>[:<job>]` — `heartbeat:board-sync`,
  * `heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3` —
- * and a JSON value: the version, `every_s` (the longest the worker lets pass
- * between two stamps), `running` (a pass is under way), the last pass's
- * `outcome` (ok, failed, or stopped — PassOutcome below), `passes` this process has
- * finished, and for extraction the last judged block's malformed answers
- * (SMD-2266's alarm, which a follower otherwise says only on stderr). The time
+ * and a JSON value: the version, the claim `job` as given, `every_s` (the
+ * longest the worker lets pass between two stamps), `running` (a pass is under
+ * way), the last pass's `outcome` (PassOutcome below), `ended` once the
+ * worker's process is gone, the `passes` it finished, and for extraction the
+ * last judged block's malformed answers (SMD-2266's alarm, which a follower
+ * otherwise says only on stderr). The time
  * is the row's updated_at — now() on the database, so a worker's clock is not
  * read. ob1_config is key/value, so no migration: the `worker` grant group
  * already holds INSERT and UPDATE on it (db/config.mjs ROLE_GRANTS), and a
  * role without them is told once and the pass goes on — a heartbeat is
  * reporting, never a reason to stop the work.
  *
- * When. At the end of every pass, and on a timer while a pass runs, every
- * `every_s`: a follower's first pass over a backlog can run for an hour, far
- * past three of its 15-second polls. The timer says the process is alive, as
+ * When. As a pass starts, every `every_s` while it runs, and at its end; and
+ * once more, `ended`, when the worker ends. A follower's first pass over a
+ * backlog can run for an hour, far past three of its 15-second polls. The timer says the process is alive, as
  * lease renewal does (lease.ts); a model call hung inside a live process is
  * not what it catches. Only the long-running modes stamp — sync-linear.ts
  * --loop and the --follow of extract-entities.ts and consolidate.ts — so a
