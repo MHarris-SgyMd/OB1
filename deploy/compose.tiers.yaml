@@ -447,15 +447,14 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # Stable's servers alone: a canary or working tier whose migration fails
-    # never starts, and its path is the route table's 404 meanwhile, so one
-    # broken tier does not keep the origin, and stable, down. `up` with no
-    # service named still starts every tier.
-    depends_on:
-      stable-server:
-        condition: service_started
-      stable-api:
-        condition: service_started
+    # No depends_on: the proxy starts in compose's first wave, before any
+    # migrator finishes, so every `up` brings the origin up. Compose stops
+    # scheduling once a dependency fails, and a proxy waiting on any tier —
+    # stable's alone, even — stayed created and never started when a tier's
+    # migration failed fast (review pass 2, 4 of 4 runs). A tier that never
+    # starts is its route's 404, and stable's /mcp answers 502 until its server
+    # is up, as compose.yaml's does while it starts. Name the services to
+    # start part of the stack: `up proxy` alone brings no tier.
     restart: unless-stopped
 
   # ── the shared model provider ────────────────────────────────────────────

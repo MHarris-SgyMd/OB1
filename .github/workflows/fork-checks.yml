@@ -1149,33 +1149,11 @@ jobs:
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml config --format json \
             | jq -e '(.services.server.networks["stable-mesh"].aliases == ["mcp.canary.ob1.internal"]) and (.services.api.networks["stable-mesh"].aliases == ["api.canary.ob1.internal"]) and (.networks["stable-mesh"] | .external == true and .name == "open-brain_mesh") and (.networks.mesh.name == "open-brain-canary_mesh") and ([.services[] | select(.networks["stable-mesh"] != null)] | length == 2) and ([.services[].ports[]?] | length == 1)'
           # The three-brain stack (SMD-2294) publishes its proxy alone, on
-          # loopback, on compose.yaml's pinned image, its route label its
-          # config. Each router is held to its rule, middlewares and service,
-          # and each backend to a rooted mesh name the matching server answers
-          # to. Each tier's server is held to its own database and tier, and its
-          # REST core to the server's image, environment and `api.ts`, under its
-          # own mesh name. No runtime test brings this stack up in CI; this
-          # rendering is what holds it.
+          # loopback, on compose.yaml's pinned image, as compose renders it.
+          # Its routes and each tier's wiring are check-fork-consistency's
+          # check 27, which reads the file itself.
           docker compose -f compose.tiers.yaml --profile local-models config --format json \
-            | jq -e --arg img "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" '
-                def name($kind; $t): if $t == "stable" then "\($kind).ob1.internal" else "\($kind).\($t).ob1.internal" end;
-                def router($n; $rule; $mw; $svc; $prio): "    \($n):\n      rule: \"\($rule)\"\n      priority: \($prio)\n      entryPoints: [web]\n      middlewares: [\($mw)]\n      service: \($svc)\n";
-                . as $c | .configs["tier-routes"].content as $r
-                | ([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1")) and (.services.proxy.ports | length == 1)
-                  and ([.services[] | select(.network_mode != null)] | length == 0)
-                  and (.services.proxy.image == $img) and (.services.proxy.labels["ob1.proxy-routes"] == $r)
-                  and ([$r | scan("url: \"([^\"]*)\"")[]] == ["http://mcp.ob1.internal.:8000", "http://mcp.canary.ob1.internal.:8000", "http://mcp.working.ob1.internal.:8000"])
-                  and ($r | contains(router("stable"; "Path(`/mcp`) || PathPrefix(`/mcp/`)"; "not-legacy"; "stable"; 30)))
-                  and ([("canary", "working") | . as $t | $r | contains(router($t; "Path(`/\($t)/mcp`) || PathPrefix(`/\($t)/mcp/`)"; "not-legacy, tier-absent"; $t; 30))] | all)
-                  and ($r | contains(router("tier-off"; "PathRegexp(`(?i)^/(canary|working)`)"; "not-served"; "noop@internal"; 25)))
-                  and ($r | contains(router("health"; "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"; "not-legacy"; "stable"; 20)))
-                  and ($r | contains("    tier-absent:\n      errors:\n        status: [\"502\"]\n"))
-                  and ([("stable", "canary", "working") | . as $t | $c.services["\($t)-server"] as $s | $c.services["\($t)-api"] as $a
-                        | ($s.networks.mesh.aliases == [name("mcp"; $t)]) and ($a.networks.mesh.aliases == [name("api"; $t)])
-                          and ($s.environment.DATABASE_URL | test("@\($t)-postgres:5432/")) and ($s.environment.OB1_TIER == $t)
-                          and ($a.image == $s.image) and ($a.command == ["api.ts"])
-                          and ($a.environment.OB1_TIER == $t) and ($a.environment.DATABASE_URL == $s.environment.DATABASE_URL)] | all)
-                  and .networks.mesh.internal == true'
+            | jq -e --arg img "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1")) and (.services.proxy.ports | length == 1) and (.services.proxy.image == $img) and ([.services[] | select(.network_mode != null)] | length == 0)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \

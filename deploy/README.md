@@ -167,15 +167,17 @@ the repo root, with whatever `-f` files the stack was started with:
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes its
 proxy alone, on this file's `SERVER_BIND` and `SERVER_PORT`, with each tier a path
 on it (SMD-2294): `/mcp` the stable tier's server, `/canary/mcp` and
-`/working/mcp` the others', each a bodiless 404 while that tier is stopped. Its
+`/working/mcp` the others' (a bodiless 404 while that tier is stopped; stable's
+`/mcp` answers 502 then, as compose.yaml's does). Its
 servers, REST cores, three Postgres services and shared Ollama publish nothing.
 Nothing public routes to a REST core, and the root, `/.well-known` and `/api`
 are the proxy's 404: that stack has no legacy window, no authorization server
 and no `/api`. It reads `SERVER_PORT` as this file does, so to run the two side
 by side set `SERVER_PORT` in the shell for one of them, which wins over
-`deploy/.env`. Its proxy starts with stable's servers alone, so a canary or
-working tier that fails to migrate is a 404 at its path, not an outage of the
-origin. A canary stood beside this
+`deploy/.env`. Its proxy waits on no tier and starts in compose's first wave,
+so a canary or working tier whose migration fails is a 404 at its path while
+stable and the origin serve; `up` still exits 1 and names the failed migrator.
+A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own network,
 less the proxy, its server and REST core also on this stack's `mesh` as
