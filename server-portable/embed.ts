@@ -391,7 +391,7 @@ export type EmbedConfig = {
   extractHeader: boolean;
   /** Whether a call that ran to its answer budget is retried once with a frequency penalty; measured in evals/README.md. */
   extractRetryRunaway: boolean;
-  /** Whether a budgeted call's answer is streamed and aborted at the third copy of one item, before its budget — entities.ts's RunawayDetector; measured in evals/README.md (SMD-1960). */
+  /** Whether a budgeted call's answer is streamed and aborted before its budget — at the third copy of one item (entities.ts's RunawayDetector, SMD-1960) or once it ends in TOKEN_REPEATS copies of one unit (repeatedTail, SMD-2449); measured in evals/README.md. */
   extractStreamAbort: boolean;
   /**
    * A larger local model a runaway extraction call is remade on — no penalty,

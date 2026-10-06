@@ -85,7 +85,7 @@ export function extractContextNeeded(tokens: number): number;
 export const EXTRACT_WINDOW_HEADER: boolean;
 /** Whether a budgeted extraction call that ran to its budget is retried once with a frequency penalty; decided by measurement. */
 export const EXTRACT_RETRY_RUNAWAY: boolean;
-/** Whether a budgeted extraction call's answer is streamed and aborted at RUNAWAY_REPEATS copies of one item, before its budget (SMD-1960). */
+/** Whether a budgeted extraction call's answer is streamed and aborted before its budget: at RUNAWAY_REPEATS copies of one item (SMD-1960), or once it ends in TOKEN_REPEATS copies of one unit (SMD-2449). */
 export const EXTRACT_STREAM_ABORT: boolean;
 /** Where an extraction window came from: the variable, the model's served context, or the fallback. */
 export type ExtractWindowFrom = "OB1_EXTRACT_CHUNK_TOKENS" | "window" | "default";

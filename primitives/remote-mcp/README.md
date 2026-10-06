@@ -79,7 +79,7 @@ Cursor supports remote MCP servers natively. Add this to your `~/.cursor/mcp.jso
 
 Restart Cursor and the extension's tools should appear in Settings → Features → MCP.
 
-> Do **not** use `mcp-remote` for Cursor. Newer versions of `mcp-remote` attempt OAuth client registration, which fails against Open Brain's simple key-based auth. Cursor's native `url` field works directly.
+> Do **not** use `mcp-remote` for Cursor. Cursor's native `url` field works directly, and needs no bridge. (The extension servers serve no OAuth: a key is how they are reached.)
 
 ## Other Clients (Windsurf, VS Code, Zed)
 
@@ -87,7 +87,7 @@ Every MCP client handles remote servers slightly differently. Your extension acc
 
 **Option A: URL with key (easiest).** If your client has a field for a remote MCP server URL, paste the full MCP Connection URL including `?key=your-access-key`. This works for any client that supports remote MCP without requiring headers.
 
-**Option B: mcp-remote bridge (if your client only supports stdio).** Use `mcp-remote` to bridge to the remote server. This requires Node.js installed. Pass the access key via the URL query parameter (not a header) to avoid OAuth discovery issues with newer versions of `mcp-remote`:
+**Option B: mcp-remote bridge (if your client only supports stdio).** Use `mcp-remote` to bridge to the remote server. This requires Node.js installed. Pass the access key via the URL query parameter (not a header): it rides every request on every version of `mcp-remote` (the note below says why):
 
 ```json
 {
@@ -104,7 +104,7 @@ Every MCP client handles remote servers slightly differently. Your extension acc
 }
 ```
 
-> Older examples pass the access key via `--header`. This breaks with `mcp-remote@latest` because it now attempts OAuth client registration before sending custom headers. Pass the key via the `?key=` query parameter instead. The bridge is a stdio process on your machine, but it is a bridge: the server it reaches is still the one HTTP process — the rule is that the *server* is never a stdio process.
+> Older examples pass the access key via `--header`, which some `mcp-remote` versions did not send before attempting OAuth client registration. Pass the key via the `?key=` query parameter instead: it rides every request on every version. The same holds for the core brain's own MCP server. At the public origin of a stack with the `auth` profile on it advertises OAuth (a preview; [`deploy/README.md`](../../deploy/README.md), "Authorization server"), and a keyless request to its `/mcp` there gets the challenge that starts a sign-in. A request that carries a key never does. The bridge is a stdio process on your machine, but it is a bridge: the server it reaches is still the one HTTP process — the rule is that the *server* is never a stdio process.
 
 ## Troubleshooting
 
