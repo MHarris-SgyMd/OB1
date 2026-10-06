@@ -3683,6 +3683,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(followCode === 0, `the follower exits 0 on SIGINT (exit ${followCode}; ${followOut.split("\n").filter(Boolean).slice(-2).join(" | ")})`);
   assert((await entityByName("Grafana")) !== undefined, "…and Grafana is in the graph");
 
+  const extractedNow = async (id: string) => (await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${id}::uuid`)[0].c > 0;
+
   // A follower outlasts its database going away (SMD-2599). It reaches
   // Postgres through a relay this suite cuts: once while it polls, once while
   // a thought's model call is in hand, so the write and the lease's return
@@ -3692,7 +3694,6 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   {
     const relay = await cuttableRelay(URL_!);
     const cutFollower = Bun.spawn(["bun", "--no-env-file", join(HERE, "extract-entities.ts"), "--url", relay.url, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
-    const extractedNow = async (id: string) => (await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${id}::uuid`)[0].c > 0;
     // Deleted at the end, so the sections after count the thoughts they did.
     let idle = "";
     let inHand = "";
@@ -3760,6 +3761,35 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       ac.abort();
       await running.catch(() => 0);
       await relay.close();
+    }
+  }
+
+  // A claim that throws spends none of a follower's --limit (review pass 2):
+  // claim_thoughts is renamed away for three polls, each worker's claim
+  // failing, then back, and a follower of --limit 1 still extracts its
+  // thought and ends there. Before, the first failed claim spent the limit
+  // and the follower ended with the thought pending.
+  {
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const target = await seed("Zed rotated the grafana keys while the claims failed.");
+    const signature = "claim_thoughts(text, text, int, int, int)";
+    let code = -1;
+    try {
+      await sql.unsafe(`ALTER FUNCTION ${signature} RENAME TO claim_thoughts_hidden`);
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; });
+      await Bun.sleep(3000);
+      await sql.unsafe(`ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts`);
+      const ended = await pollUntil(async () => code !== -1, 15_000);
+      ac.abort();
+      await running;
+      assert(ended && (await extractedNow(target)) && lines.some((l) => /claim_thoughts\(.*does not exist — this worker stops/.test(l)),
+             `a follower of --limit 1 whose claims failed for three polls extracts its thought once they answer, and ends there (ended ${ended}, exit ${code}, extracted ${await extractedNow(target)})`);
+    } finally {
+      ac.abort();
+      const [{ hidden }] = await sql`SELECT to_regprocedure('claim_thoughts_hidden(text, text, int, int, int)') IS NOT NULL AS hidden`;
+      if (hidden) await sql.unsafe(`ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts`);
+      await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
     }
   }
 

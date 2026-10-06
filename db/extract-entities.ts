@@ -910,13 +910,17 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       while (!stopping && !limitReached()) {
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
+        /** Reserved for a claim that has not answered: a follower gives it back if the claim throws (review pass 2). */
+        let unclaimed = 0;
         try {
           const room = LIMIT > 0 ? LIMIT - reserved : BATCH;
           if (room <= 0) return;
           const want = Math.min(BATCH, room);
           reserved += want;
+          unclaimed = want;
           batch = (await sql`
             SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${want}, ${TTL})`) as { thought_id: string; attempt: number }[];
+          unclaimed = 0;
           reserved -= want - batch.length;
           if (batch.length === 0) return;
           const ids = batch.map((b) => b.thought_id);
@@ -926,6 +930,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {
+          // A follower outlasts the database, so a claim that never answered must
+          // not spend its --limit (review pass 2); a run without --follow ends here.
+          if (FOLLOW) reserved -= unclaimed;
           err(`  ${workerId}: ${(e as Error).message} — this worker stops`);
           return;
         }
