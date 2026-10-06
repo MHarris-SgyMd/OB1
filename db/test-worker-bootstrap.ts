@@ -14,7 +14,7 @@
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, probeChat, probeUntilUp, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, probeChat, probeUntilUp, ProviderOutage, regateMessage, SUSPECT_WINDOW_MS, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -246,6 +246,31 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   o.end();
   o.settled("B");
   ok(o.begin("503", "B") === "outage", "a thought that finished meanwhile is a suspect no longer");
+
+  // "Right after" is a window from the probe that answered (review pass 1).
+  let clock = 0;
+  const w = new ProviderOutage(() => clock);
+  w.begin("503", "D");
+  clock = 1_000;
+  w.end();
+  clock = 1_000 + SUSPECT_WINDOW_MS;
+  ok(w.begin("503", "D") === "thought", "a suspect failing again at the window's edge is its own");
+  w.begin("503", "E");
+  w.end();
+  clock += SUSPECT_WINDOW_MS + 1;
+  ok(w.begin("503", "E") === "outage", "a suspect meeting an outage past the window is in an outage like any other thought");
+
+  // A stop ends a probe in flight, as "out" (review pass 1).
+  const hang = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
+  try {
+    const stop = new AbortController();
+    const t0 = Date.now();
+    setTimeout(() => stop.abort(), 100);
+    const stopped = await probeChat({ base: `http://127.0.0.1:${hang.port}/v1`, headers: {} }, "m", 10_000, stop.signal);
+    ok(stopped.state === "out" && Date.now() - t0 < 2000, `a stop ends a probe in flight at once, as out (${JSON.stringify(stopped)} after ${Date.now() - t0} ms)`);
+  } finally {
+    hang.stop(true);
+  }
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);

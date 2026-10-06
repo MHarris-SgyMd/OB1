@@ -93,8 +93,9 @@
  * other workers stop after theirs, and the follower probes the model on the
  * same schedule until it answers. A thought that draws the error again right
  * after a probe answered is its own fault, and is recorded failed. Before it
- * writes anything, a follower probes once: a model the provider does not
- * serve, a key it refuses or a wrong base URL exits 2 there, and an
+ * writes anything, the worker key's registration included, a follower probes
+ * once. A model the provider does not serve (OB1_EXTRACT_ESCALATE_MODEL's
+ * too, when set), a key it refuses or a wrong base URL exits 2 there, and an
  * unreachable provider is waited for. A run without --follow keeps the
  * pauses, then records the thought failed and stops, as before.
  *
@@ -454,6 +455,60 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     return 2;
   }
 
+  // ── The provider, for a follower (SMD-2599) ─────────────────────────────────
+
+  /**
+   * A follower waits a provider outage out rather than failing the thoughts
+   * it claims meanwhile: one-token chat calls to the model (probeChat, not
+   * GET /models, which Ollama answers while chat does not), bounded by a
+   * minute — the call's own timeout after a timeout, which a busy local
+   * model may need to get to the probe at all — and ended by the pass's stop.
+   * It asks once before it writes anything, the worker key's registration
+   * included: a model the provider does not serve — the escalation model too,
+   * when one is set — a key it refuses or a base URL that is no API is a
+   * refusal at start, exit 2, as preflight's would be; once the models have
+   * answered, one going missing (Ollama pulling it again) is an outage. An
+   * unreachable provider at start is waited for.
+   */
+  const probe = (ms = Math.min(TIMEOUT_S, 60) * 1000, wake?: AbortSignal, model = cfg.metadataModel) => probeChat(cfg.chat, model, ms, wake);
+  const outage = new ProviderOutage();
+  /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
+  async function waitForProvider(wake: AbortSignal): Promise<void> {
+    const down = Date.now();
+    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.metadataModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    if (await probeUntilUp(() => probe(undefined, wake), wake)) {
+      outage.end();
+      out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+    }
+  }
+  if (FOLLOW && !STATUS_ONLY && !DRY_RUN) {
+    if (stoppedEarly()) return 130;
+    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
+    const wake = opts.signal ?? new AbortController().signal;
+    const first = await probe(undefined, wake);
+    if (first.state === "missing" || first.state === "refused") {
+      err(`\n  ${cfg.chat.base} ${first.state === "missing" ? `does not serve ${cfg.metadataModel}` : "refuses a one-token call"} at start (${first.why.slice(0, 300)}).\n` +
+        `  A --follow worker refuses this before it claims anything (SMD-2599): ${first.state === "missing" ? `pull the model, or set OB1_METADATA_MODEL to one the provider serves` : "check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1)"}. Once running, a model that goes missing is waited for.`);
+      return 2;
+    }
+    if (first.state === "out") {
+      outage.begin(first.why);
+      await waitForProvider(wake);
+    }
+    // The escalation model is asked once, here only: probing it on every
+    // check of an outage would load the larger model each time (review pass 1:
+    // unprobed, a missing one failed every runaway thought, where the run had
+    // exited 2 naming it).
+    if (WINDOWING.escalateModel && !wake.aborted) {
+      const escalation = await probe(undefined, wake, WINDOWING.escalateModel);
+      if (escalation.state === "missing") {
+        err(`\n  ${cfg.chat.base} does not serve ${WINDOWING.escalateModel}, OB1_EXTRACT_ESCALATE_MODEL, at start (${escalation.why.slice(0, 300)}).\n` +
+          `  A --follow worker refuses this before it claims anything (SMD-2599): pull the model, set OB1_EXTRACT_ESCALATE_MODEL to one the provider serves, or unset it for the penalised retry.`);
+        return 2;
+      }
+    }
+  }
+
   // ── Identity ────────────────────────────────────────────────────────────────
 
   /**
@@ -644,44 +699,6 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       );
     }
     return 0;
-  }
-
-  // ── The provider, for a follower (SMD-2599) ─────────────────────────────────
-
-  /**
-   * A follower waits a provider outage out rather than failing the thoughts
-   * it claims meanwhile: one-token chat calls to the model (probeChat, not
-   * GET /models, which Ollama answers while chat does not), bounded by the
-   * call timeout or a minute. It asks once before anything is written: a
-   * model the provider does not serve, a key it refuses or a base URL that is
-   * no API is a refusal at start, exit 2, as preflight's would be; once the
-   * model has answered, its going missing (Ollama pulling it again) is an
-   * outage. An unreachable provider at start is waited for.
-   */
-  const probe = () => probeChat(cfg.chat, cfg.metadataModel, Math.min(TIMEOUT_S, 60) * 1000);
-  const outage = new ProviderOutage();
-  /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
-  async function waitForProvider(wake: AbortSignal): Promise<void> {
-    const down = Date.now();
-    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.metadataModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
-    if (await probeUntilUp(probe, wake)) {
-      outage.end();
-      out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-    }
-  }
-  if (FOLLOW) {
-    if (stoppedEarly()) return 130;
-    const first = await probe();
-    if (first.state === "missing" || first.state === "refused") {
-      err(`\n  ${cfg.chat.base} ${first.state === "missing" ? `does not serve ${cfg.metadataModel}` : "refuses a one-token call"} at start (${first.why.slice(0, 300)}).\n` +
-        `  A --follow worker refuses this before it claims anything (SMD-2599): ${first.state === "missing" ? `pull the model, or set OB1_METADATA_MODEL to one the provider serves` : "check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1)"}. Once running, a model that goes missing is waited for.`);
-      return 2;
-    }
-    if (first.state === "out") {
-      outage.begin(first.why);
-      // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
-      await waitForProvider(opts.signal ?? new AbortController().signal);
-    }
   }
 
   // ── The run ─────────────────────────────────────────────────────────────────
@@ -1039,11 +1056,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // Under --follow, the provider's state rather than the thought's
                 // or the request's (SMD-2599): a transient error past the pauses,
                 // the model missing (Ollama pulling it; the start probe saw it
-                // answer), or a timeout the probe cannot get an answer past either.
+                // answer), or a timeout the probe cannot get an answer past
+                // either — given the call's whole timeout, as a model busy with
+                // another worker's call may need it, and ended by a stop or
+                // another worker's outage, which it joins unprobed (review pass 1).
                 const down = FOLLOW && (
                   (kind === "transient" && attempt >= TRANSIENT_PAUSES_MS.length) ||
                   (kind === "fatal" && modelMissing(e)) ||
-                  (kind === "thought" && timedOut(e) && isOut(await probe())));
+                  (kind === "thought" && timedOut(e) && !stopping && (outage.reason !== null || isOut(await probe(TIMEOUT_S * 1000, halt.signal)))));
                 if (down) {
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;

@@ -489,6 +489,43 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return 2;
   }
 
+  // ── The provider, for a follower (SMD-2599) ─────────────────────────────────
+
+  /**
+   * As extract-entities.ts's: a follower probes the judge model with a
+   * one-token call before it writes anything, the worker key's registration
+   * included — a model the provider does not serve, a key it refuses or a
+   * wrong base URL exits 2 there, an unreachable provider is waited for — and
+   * while it waits an outage out. After a pair's timeout the probe has the
+   * call's whole timeout, and the pass's stop ends it.
+   */
+  const probe = (ms = Math.min(TIMEOUT_S, 60) * 1000, wake?: AbortSignal) => probeChat(cfg.chat, cfg.judgeModel, ms, wake);
+  const outage = new ProviderOutage();
+  /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
+  async function waitForProvider(wake: AbortSignal): Promise<void> {
+    const down = Date.now();
+    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    if (await probeUntilUp(() => probe(undefined, wake), wake)) {
+      outage.end();
+      out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+    }
+  }
+  if (FOLLOW && !REVIEW_ONLY && !STATUS_ONLY && !DRY_RUN) {
+    if (stoppedEarly()) return 130;
+    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
+    const wake = opts.signal ?? new AbortController().signal;
+    const first = await probe(undefined, wake);
+    if (first.state === "missing" || first.state === "refused") {
+      err(`\n  ${cfg.chat.base} ${first.state === "missing" ? `does not serve ${cfg.judgeModel}` : "refuses a one-token call"} at start (${first.why.slice(0, 300)}).\n` +
+        `  A --follow worker refuses this before it claims anything (SMD-2599): ${first.state === "missing" ? "pull the model, or set OB1_JUDGE_MODEL (else OB1_METADATA_MODEL) to one the provider serves" : "check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1)"}. Once running, a model that goes missing is waited for.`);
+      return 2;
+    }
+    if (first.state === "out") {
+      outage.begin(first.why);
+      await waitForProvider(wake);
+    }
+  }
+
   // ── Identity ────────────────────────────────────────────────────────────────
 
   /**
@@ -866,40 +903,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return 0;
   }
 
-  // ── The provider, for a follower (SMD-2599) ─────────────────────────────────
-
-  /**
-   * As extract-entities.ts's: a follower probes the judge model with a
-   * one-token call before anything is written — a model the provider does not
-   * serve, a key it refuses or a wrong base URL exits 2 there, an unreachable
-   * provider is waited for — and while it waits an outage out.
-   */
-  const probe = () => probeChat(cfg.chat, cfg.judgeModel, Math.min(TIMEOUT_S, 60) * 1000);
-  const outage = new ProviderOutage();
-  /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
-  async function waitForProvider(wake: AbortSignal): Promise<void> {
-    const down = Date.now();
-    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
-    if (await probeUntilUp(probe, wake)) {
-      outage.end();
-      out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-    }
-  }
-  if (FOLLOW) {
-    if (stoppedEarly()) return 130;
-    const first = await probe();
-    if (first.state === "missing" || first.state === "refused") {
-      err(`\n  ${cfg.chat.base} ${first.state === "missing" ? `does not serve ${cfg.judgeModel}` : "refuses a one-token call"} at start (${first.why.slice(0, 300)}).\n` +
-        `  A --follow worker refuses this before it claims anything (SMD-2599): ${first.state === "missing" ? "pull the model, or set OB1_JUDGE_MODEL (else OB1_METADATA_MODEL) to one the provider serves" : "check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1)"}. Once running, a model that goes missing is waited for.`);
-      return 2;
-    }
-    if (first.state === "out") {
-      outage.begin(first.why);
-      // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
-      await waitForProvider(opts.signal ?? new AbortController().signal);
-    }
-  }
-
   // ── The run ─────────────────────────────────────────────────────────────────
 
   if (stoppedEarly()) return 130;
@@ -1097,7 +1100,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           // Under --follow, a timeout the probe gets no answer past either is
           // the provider hung, not this pair (SMD-2599): the thought goes back
           // to the pool unrecorded, its proposals written so far standing.
-          if (FOLLOW && isOut(await probe())) throw new ProviderDown(`the judge call timed out after ${TIMEOUT_S} s, and a one-token call got no answer either`);
+          if (FOLLOW && !stopping && (outage.reason !== null || isOut(await probe(TIMEOUT_S * 1000, halt.signal)))) throw new ProviderDown(`the judge call timed out after ${TIMEOUT_S} s, and a one-token call got no answer either`);
           problems.push(`pair with ${c.older_id}: timed out after ${TIMEOUT_S} s`);
           continue;
         }

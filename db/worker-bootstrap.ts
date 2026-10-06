@@ -311,18 +311,20 @@ export type Probe = { state: "up" } | { state: "out" | "missing" | "refused"; wh
  * endpoint answers 503 (busy) or the model is still being pulled, so only the
  * call the pass makes says the pass can go on.
  */
-export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number): Promise<Probe> {
+export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
   let r: Response;
   try {
     r = await fetch(`${endpoint.base}/chat/completions`, {
       method: "POST",
       headers: endpoint.headers,
       body: JSON.stringify({ model, messages: [{ role: "user", content: PROBE_PROMPT }], max_tokens: 1 }),
-      signal: AbortSignal.timeout(timeoutMs),
-      // The probe's deadline is the one deadline, as the workers' calls' are.
+      // The probe's deadline is the one deadline, as the workers' calls' are;
+      // `wake` (the pass's stop) ends it sooner, as "out".
+      signal: wake ? AbortSignal.any([AbortSignal.timeout(timeoutMs), wake]) : AbortSignal.timeout(timeoutMs),
       timeout: false,
     });
   } catch (e) {
+    if (wake?.aborted) return { state: "out", why: "the probe was stopped" };
     return { state: "out", why: timedOut(e) ? `no answer to a one-token call in ${timeoutMs / 1000} s` : (e as Error).message };
   }
   const words = (await r.text().catch(() => "")).slice(0, 300);
@@ -344,7 +346,7 @@ export class ProviderDown extends Error {
 }
 
 /** Whether a probe found the provider still out: no answer, or the model missing. */
-export function isOut(p: Probe): boolean {
+export function isOut(p: Probe): p is Extract<Probe, { why: string }> {
   return p.state === "out" || p.state === "missing";
 }
 
@@ -360,13 +362,21 @@ export function probeUntilUp(probe: () => Promise<Probe>, wake: AbortSignal, sle
   return waitOut({
     check: async () => {
       const p = await probe();
-      if (p.state !== "up" && isOut(p)) throw new StillOut(p.why);
+      if (isOut(p)) throw new StillOut(p.why);
     },
     outage: (e) => e instanceof StillOut,
     wake,
     sleep,
   });
 }
+
+/**
+ * How long after a probe answered a thought in hand at the outage still
+ * counts as "right after": the pauses (65 s) and a slow model call or two
+ * past the re-claim, which comes first in the pool (the row keeps its
+ * enqueued_at).
+ */
+export const SUSPECT_WINDOW_MS = 15 * 60_000;
 
 /**
  * A --follow worker's provider outage (SMD-2599): why it began, and the
@@ -376,17 +386,24 @@ export function probeUntilUp(probe: () => Promise<Probe>, wake: AbortSignal, sle
  * but one that draws a provider error again right after the provider has
  * answered a probe is the thought's own (a document that crashes the server
  * every time), and `begin` says so, so it is recorded failed and visible
- * rather than cycling through the pool for ever.
+ * rather than cycling through the pool for ever. "Right after" is within
+ * SUSPECT_WINDOW_MS of the probe that answered: a thought another process
+ * finished meanwhile, and an edit re-queued hours later, meets a later
+ * outage as any other thought does (review pass 1).
  */
 export class ProviderOutage {
   reason: string | null = null;
   private count = 0;
+  private endedAt = 0;
   /** Thoughts in hand at outage `count`: an entry from an earlier outage is no longer "right after". */
   private suspects = new Map<string, number>();
 
+  /** `now` is the clock; the suite's own, to run the window without the wall clock. */
+  constructor(private readonly now: () => number = Date.now) {}
+
   /** Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". */
   begin(reason: string, thoughtId?: string): "outage" | "thought" {
-    if (thoughtId !== undefined && this.reason === null && this.suspects.get(thoughtId) === this.count) {
+    if (thoughtId !== undefined && this.reason === null && this.suspects.get(thoughtId) === this.count && this.now() - this.endedAt <= SUSPECT_WINDOW_MS) {
       this.suspects.delete(thoughtId);
       return "thought";
     }
@@ -402,6 +419,7 @@ export class ProviderOutage {
   /** A probe answered. */
   end(): void {
     this.reason = null;
+    this.endedAt = this.now();
   }
 
   /** A thought finished — succeeded, or recorded failed — and is a suspect no longer. */
