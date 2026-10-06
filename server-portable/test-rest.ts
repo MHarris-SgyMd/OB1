@@ -11,7 +11,7 @@
  *   bun test-rest.ts
  */
 
-import { createAssert } from "../db/test-support.ts";
+import { createAssert, RuntimeUrl } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { TOOLS, TOOL_NAMES, READ_TOOL_NAMES, CAPTURE_TOOL_NAMES, type ToolName } from "./tools.ts";
 import { SPECS, type Core } from "./core/index.ts";
@@ -406,6 +406,18 @@ console.log("\n[8] One log line per request: method, route, status, time — no 
   const all = lines.join("\n");
   for (const s of ["9f0c1e2a", "someone-secret", "private query", "read-raw", "write-raw", "x=1"]) assert(!all.includes(s), `no ${s} in the log`);
   assert(/^api GET - 404 /.test(lines[3] ?? ""), `an unrouted request is logged without its path (${lines[3]})`);
+}
+
+console.log("\n[9] A request URL that will not parse — Bun builds it from the Host header unchecked — still has its query read: a refusal, not a 500 (SMD-2535)");
+{
+  // api.ts rebuilds such a request before routing (root.ts routable); the
+  // app reads its query without parsing the URL all the same, with a path
+  // Hono reads from the string as it would.
+  for (const host of ["x:99999", "[::1", "brain.example.test:abc"]) {
+    const r = await json(await app.fetch(new RuntimeUrl(`http://${host}/v1/thoughts?limit=x`, { headers: { "x-brain-key": "read-raw" } })));
+    const issues = (r.body.issues ?? []) as { path: string }[];
+    assert(r.status === 400 && r.body.code === "REFUSED_INPUT" && issues[0]?.path === "limit", `Host ${host}: GET /v1/thoughts?limit=x → 400 naming limit (${r.status} ${JSON.stringify(r.body).slice(0, 80)})`);
+  }
 }
 
 report();
