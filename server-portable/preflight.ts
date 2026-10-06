@@ -29,12 +29,12 @@ import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
-import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
+import { ago, heartbeatState, ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
-import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
+import { restartCommand, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -120,7 +120,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log", "tier",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log", "tier", "workers",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -4049,6 +4049,42 @@ if (configFailed) {
           }
         } catch (e) {
           add("tier", "warn", `could not verify: ${(e as Error).message}`, "The check reads ob1_config.tier / last_ingest.");
+        }
+
+        // The long-running workers' heartbeats (SMD-2261, db/pass-stamp.ts):
+        // board-sync's --loop and the extraction and consolidation followers
+        // stamp one after every pass. One older than three of its own intervals
+        // is a stopped worker — board-sync was down four days (2026-09-27 to
+        // 10-01) while the tier row above passed. A fresh one whose last pass
+        // failed, or whose last block of answers passed SMD-2266's malformed
+        // alarm, warns too: a follower says the alarm only on stderr. A worker
+        // that never ran on this brain has no row and nothing is said.
+        {
+          const w = facts.workers;
+          if (w === null) {
+            if ("workers" in facts.unread) add("workers", "warn", `could not verify: ${facts.unread.workers.message}`, "The check reads ob1_config's heartbeat: rows.");
+            else add("workers", "skip", "no ob1_config — migration 006 is not applied.");
+          } else if (w.heartbeats.length === 0) {
+            add("workers", "skip", `no long-running worker has stamped a heartbeat on this brain${w.ignored ? ` (${w.ignored} heartbeat row(s) not of the shape, ignored)` : ""}.`);
+          } else {
+            const wrong = w.heartbeats.filter((h) => h.stale || h.ended || h.outcome === "failed" || h.malformed?.alarm);
+            const detail = w.heartbeats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + (w.ignored ? `; ${w.ignored} heartbeat row(s) not of the shape, ignored` : "");
+            if (wrong.length === 0) {
+              add("workers", "ok", detail);
+            } else {
+              const fixes = wrong.map((h) => {
+                const name = h.job ?? h.worker;
+                const key = h.key;
+                const checkModel = h.malformed?.alarm ? ", once OB1_METADATA_MODEL, the endpoint and the prompt are checked (its last block passed the malformed alarm)" : "";
+                if (h.stale || h.ended) return `${name} ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again${checkModel} — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
+                if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row keeps the block until the follower judges a healthy one of 48 answers; once fixed, DELETE FROM ob1_config WHERE key = '${key}' clears it and the follower stamps afresh.`;
+                return h.worker === "board-sync"
+                  ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
+                  : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
+              });
+              add("workers", "warn", detail, fixes.join(" "));
+            }
+          }
         }
 
         await sql.close();

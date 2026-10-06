@@ -736,8 +736,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
 
     const stamp = openSql(toUrl);
     try {
-      await stampTier(stamp, tier);
-      await setConfig(stamp, "last_refresh", new Date().toISOString());
+      await settleRefreshed(stamp, tier);
     } finally {
       await stamp.close();
     }
@@ -760,6 +759,20 @@ async function readConfig(sql: SQL, key: string): Promise<string | null> {
 async function configTier(sql: SQL): Promise<string | null> {
   const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.ob1_config') IS NOT NULL AS present`;
   return present ? readConfig(sql, "tier") : null;
+}
+
+/**
+ * A refreshed target's own stamps, once its restore and migrations are done:
+ * its tier and the refresh's time, and none of --from's heartbeats (SMD-2261).
+ * The dump copies ob1_config whole, so the source's `heartbeat:` rows would
+ * report its workers as this brain's — alive for three intervals, stale for
+ * ever after — and preflight would name a restart for a worker that is not
+ * this brain's (review pass 1). A worker of this tier stamps its own.
+ */
+export async function settleRefreshed(sql: SQL, tier: Tier): Promise<void> {
+  await stampTier(sql, tier);
+  await setConfig(sql, "last_refresh", new Date().toISOString());
+  await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
 }
 
 /** Upsert an ob1_config KV row — the write half beside readConfig. */

@@ -369,6 +369,7 @@ Brain embedding: qwen3-embedding:4b @ 1024
 Rows:            373 thoughts · 1,204 audit events · 90 chunks · 512 entities
 Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
+Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
 ```
 
@@ -390,14 +391,19 @@ past the database's clock, is passed over), and `?` when the read did not answer
 (named in `Not read`). It is a
 high-water mark — the newest board move the brain reflects, not proof it reflects
 every one before it — and a quiet board leaves it old on a current brain.
-`tier.ts --compare` diffs it between two brains.
+`tier.ts --compare` diffs it between two brains. `Workers` is each long-running
+worker's heartbeat (SMD-2261): alive, running a pass, stopped, or stale past
+three of its intervals, with the last pass's outcome and a tripped malformed
+alarm; preflight's `workers` row warns on the same and names the restart
+(`db/README.md`, "Long-running workers report their liveness").
 
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
 token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
 `unreleased`, `latestMigration`, `commit`, `store`, `tier`, `embedding`,
 `ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
 database's facts (the ledger as `{ present, readable }`, not its names; the
-watermark as `boardSync`, an ISO instant or null) or
+watermark as `boardSync`, an ISO instant or null; the long-running workers'
+heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261) or
 `{ "error": … }` when it cannot answer. Beside the record, `oauth` is the
 server's own view of its public origin (SMD-2382): `{ configured, origin,
 advertised }`, which `deploy/smoke.sh` compares with what reaches it. It answers within 2.5 s
@@ -570,7 +576,10 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   server's and the database's own facts, and one value read from thoughts'
   metadata — the board-sync watermark, which the read itself holds to one shape
   (a UTC instant to the millisecond, never past an hour from now by the
-  database's clock) or leaves null.
+  database's clock) or leaves null — and the workers' heartbeats, rows any role
+  with the worker group can write, which `parseHeartbeats` carries only in full
+  (a known worker's key and job of a bounded alphabet, counts, the enums as
+  written, the database's own instant) and otherwise counts as ignored.
 - A refusal answers `{ code, retryable, text }`. The reads': `NOT_FOUND`,
   `REFUSED_FILTER`, `REFUSED_EGRESS` (with its `rule`), `REFUSED_SINCE`,
   `REFUSED_CURSOR`. Capture's: the pointer and metadata shapes
@@ -685,12 +694,12 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 690 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, and a `Host` the URL parser refuses, or none
+bun test-server.ts        # 699 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, and a `Host` the URL parser refuses, or none
 bun test-auth.ts          # 165 — scoped, hashed, named keys
 bun test-rest.ts          # 271 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 193 — fully local provider, no credential
 bun run test:sql          # 203 — store conformance, real Postgres in a container
-bun run test:e2e          # 472 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 476 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 149 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
