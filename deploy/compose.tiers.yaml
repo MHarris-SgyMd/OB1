@@ -119,10 +119,12 @@ x-tier-routes: &tier-routes |
           servers:
             - url: "http://mcp.working.ob1.internal.:8000"
 
-# The server environment every tier shares — a copy of compose.yaml's server
-# block minus DATABASE_URL and OB1_TIER, which are per-tier below, where each
-# tier's server and REST core take one block. Held to the same house form
-# (check 14): each OB1_* value is `${NAME}` or `${NAME:-default}`.
+# The server environment every tier shares: compose.yaml's server knobs that a
+# tier's servers read (this stack runs no typed-decision tier, extraction or
+# authorization server, so their knobs are not here), less DATABASE_URL and
+# OB1_TIER, which are per-tier below, where each tier's server and REST core
+# take one block. Held to the same house form (check 14): each OB1_* value is
+# `${NAME}` or `${NAME:-default}`; check 27 holds every tier to it.
 x-server-env: &server-env
   MCP_ACCESS_KEYS: ${MCP_ACCESS_KEYS:?set MCP_ACCESS_KEYS in deploy/.env — mint with server-portable/keygen.ts}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -407,9 +409,9 @@ services:
       retries: 3
 
   # ── the proxy ────────────────────────────────────────────────────────────
-  # The stack's one published port, and compose.yaml's proxy in every setting
-  # but its route table and its waiting (check 27 holds the rest equal): the same pinned image (CI holds the two equal), the
-  # same unprivileged user, access log without query or header, and ping
+  # The stack's one published port, and compose.yaml's proxy in every key but
+  # its route table and its waiting, which check 27 holds: the same pinned
+  # image, unprivileged user, access log without query or header, and ping
   # entrypoint. It does no authentication; each server checks the key.
   proxy:
     image: docker.io/library/traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
