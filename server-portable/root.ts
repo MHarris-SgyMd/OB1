@@ -308,3 +308,35 @@ export function agents(): AgentResolver {
   if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS), Date.now, storeKind(env()) === "sql");
   return _agents;
 }
+
+/** Where a request whose URL will not parse is rebuilt: `.invalid` (RFC 6761) is no host a client dials or an origin names. */
+export const REBUILD_ORIGIN = "http://unparsable-host.invalid";
+
+/**
+ * The request as each entry hands it to its app (index.ts, api.ts). Bun
+ * builds `req.url` from the request's `Host` header unchecked: a `Host` the
+ * URL parser refuses (`x:99999`, `[::1`, an unbracketed `::1:8000`) leaves a
+ * URL that will not parse, and no `Host` (HTTP/1.0) or one with userinfo, a
+ * path or a non-ASCII name leaves the bare request target (`/mcp`). Hono
+ * reads the path from that string, so a bare target is routed wrong (a 405
+ * at /health), and a `new URL(req.url)` past it throws (a 500) (SMD-2535).
+ * Such a request is rebuilt at this origin: its path (normalised, as Bun
+ * normalises one at a `Host` that parses), and its query, method, headers,
+ * body and abort signal as they came; its `Host` header is kept, for
+ * oauth-edge.ts atOrigin to judge. It is a new object, so a Bun API keyed by
+ * the request (`server.requestIP`) does not know it; nothing here calls one.
+ * A request whose URL parses passes as it came.
+ */
+export function routable(req: Request): Request {
+  if (URL.canParse(req.url)) return req;
+  const target = req.url.replace(/^[a-z][a-z\d+.-]*:\/\/[^/?#]*/i, "");
+  // Joined, not resolved against the origin: a target of `//x` is a path, not another host.
+  const url = `${REBUILD_ORIGIN}${target.startsWith("/") ? "" : "/"}${target}`;
+  // From its parts, never `new Request(url, req)`: Bun's copy of a body does
+  // not settle when the client leaves mid-upload (its handler would wait
+  // forever), and a URL given beside a request is not normalised. A GET or
+  // HEAD arrives with a null body, so no method makes this throw. `duplex` is
+  // in no RequestInit type; typed, not cast, so a misspelt field still fails.
+  const init: RequestInit & { duplex: "half" } = { method: req.method, headers: req.headers, body: req.body, duplex: "half", signal: req.signal };
+  return new Request(url, init);
+}

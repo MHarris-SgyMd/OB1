@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createAssert } from "../db/test-support.ts";
+import { createAssert, RuntimeUrl } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
 import { FORK_VERSION } from "../db/version.mjs";
@@ -2134,6 +2134,123 @@ console.log("\n[19] A key on the old root URL is logged once, by name, only when
   } finally {
     console.warn = realWarn;
   }
+}
+
+console.log("\n[20] A Host the URL parser refuses, or none, is answered as a request at any Host but the public origin's — the refusal, `ok`, the REST core's 401 — never a 500 or a wrong route (SMD-2535)");
+{
+  // Bun builds req.url from the Host header unchecked: `x:99999`, `[::1`,
+  // `brain.example.test:abc` and `::1:8000` leave a URL that will not parse;
+  // no Host (HTTP/1.0), userinfo or a path leave the bare request target, which Hono routed wrong (a 405 at /health). Raw sockets,
+  // since fetch sends a Host of its own. The REST core is served beside the
+  // MCP server through its own entry, api.ts; no row below reaches a store.
+  const { routable, REBUILD_ORIGIN } = await import("./root.ts");
+  const rest = Bun.serve({ ...(await import("./api.ts")).default, port: 0 });
+  const { connect } = await import("node:net");
+  const raw = (port: number, text: string) => new Promise<string>((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1", () => sock.write(text));
+    let got = "";
+    sock.on("data", (d) => (got += d));
+    sock.on("close", () => resolve(got));
+    sock.on("error", reject);
+    setTimeout(() => sock.destroy(), 3_000);
+  });
+  /** The request line and Host: HTTP/1.0 with none for `null`, which HTTP/1.1 would make Bun's own 400. */
+  const headOf = (method: string, target: string, host: string | null) =>
+    [`${method} ${target} HTTP/${host === null ? "1.0" : "1.1"}`, ...(host === null ? [] : [`host: ${host}`])];
+  const ask = async (port: number, method: string, target: string, host: string | null, headers: string[] = [], body = "") => {
+    const head = [...headOf(method, target, host), ...headers, "connection: close", `content-length: ${Buffer.byteLength(body)}`];
+    const got = await raw(port, `${head.join("\r\n")}\r\n\r\n${body}`);
+    return { status: Number(got.split(" ")[1]), body: got.slice(got.indexOf("\r\n\r\n") + 4) };
+  };
+  const J = ["content-type: application/json", "accept: application/json, text/event-stream"];
+  const LIST = JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list" });
+  for (const host of ["x:99999", "[::1", "brain.example.test:abc", null, "a@brain.example.test", "brain.example.test/x", "::1:8000"]) {
+    const at = host === null ? "no Host (HTTP/1.0)" : `Host ${host}`;
+    let r = await ask(PORT, "POST", "/mcp", host, J, LIST);
+    assert(r.status === 200 && /"code":-32001/.test(r.body), `${at}: a keyless POST /mcp → the -32001 refusal, no challenge (${r.status} ${r.body.slice(0, 60)})`);
+    r = await ask(PORT, "POST", `/mcp?key=${KEY}`, host, J, LIST);
+    assert(r.status === 200 && r.body.includes('"name":"search"'), `${at}: POST /mcp?key= → the tools, the key read from the query (${r.status} ${r.body.slice(0, 60)})`);
+    r = await ask(PORT, "GET", "/health", host);
+    assert(r.status === 200 && r.body === "ok", `${at}: GET /health → ok (${r.status} ${JSON.stringify(r.body.slice(0, 40))})`);
+    r = await ask(PORT, "GET", edgeModule.PRM_PATH, host);
+    assert(r.status === 404, `${at}: the protected-resource document → 404, no origin's (${r.status})`);
+    r = await ask(rest.port!, "GET", "/v1/thoughts", host);
+    assert(r.status === 401 && r.body.includes('"UNAUTHORIZED"'), `${at}: the REST core, keyless → its 401 (${r.status} ${r.body.slice(0, 40)})`);
+    r = await ask(rest.port!, "GET", "/v1/thoughts?limit=x", host, [`x-brain-key: ${KEY}`]);
+    assert(r.status === 400 && r.body.includes('"path":"limit"'), `${at}: the REST core, keyed, its query read → 400 naming limit (${r.status} ${r.body.slice(0, 60)})`);
+  }
+  // A path is read as Bun reads one at a Host that parses: `\` is `/` and `..` steps up (review pass 1).
+  for (const host of ["localhost", "x:99999", null]) {
+    const r = await ask(PORT, "GET", "/x\\..\\health", host);
+    assert(r.status === 200 && r.body === "ok", `${host ?? "no Host"}: GET /x\\..\\health → ok, the path normalised (${r.status})`);
+  }
+  // Bun hands a GET a null body, sent or not, so its rebuild cannot throw on one.
+  const getWithBody = await ask(PORT, "GET", "/health", "x:99999", [], "a body");
+  assert(getWithBody.status === 200 && getWithBody.body === "ok", `Host x:99999: GET /health with a body → ok (${getWithBody.status})`);
+
+  // A client that leaves mid-upload leaves no request behind: the rebuilt
+  // body throws as the request's own does, where a copy of the request never
+  // settled and its handler waited forever (review pass 1). Keyless at the
+  // MCP endpoint, keyed at the REST core's capture; localhost the control.
+  // Returns how many requests were pending as the client left: one, or the row would hold nothing (review pass 2).
+  const leave = (s: { port?: number; pendingRequests: number }, target: string, host: string | null, headers: string[]) => new Promise<number>((resolve) => {
+    const head = [...headOf("POST", target, host), "content-type: application/json", ...headers, "content-length: 1000"];
+    const sock = connect(s.port!, "127.0.0.1", () => { sock.write(`${head.join("\r\n")}\r\n\r\n{"jsonrpc":"2.0","id":1`); setTimeout(() => { const pending = s.pendingRequests; sock.destroy(); resolve(pending); }, 150); });
+    sock.on("error", () => resolve(-1));
+  });
+  const settled = async (s: { pendingRequests: number }) => { for (let i = 0; i < 40 && s.pendingRequests > 0; i++) await Bun.sleep(50); return s.pendingRequests; };
+  // Each MCP hang-up is logged as abandoned; muted here, so the suite's output
+  // stays its own (review pass 3). The row below checks that line.
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    for (const host of ["localhost", "x:99999", null]) {
+      const at = host === null ? "no Host (HTTP/1.0)" : `Host ${host}`;
+      const mcpHeld = await leave(server, "/mcp", host, J.slice(1));
+      const mcpLeft = await settled(server);
+      const restHeld = await leave(rest, "/v1/thoughts", host, [`x-brain-key: ${KEY}`]);
+      const restLeft = await settled(rest);
+      assert(mcpHeld === 1 && restHeld === 1 && mcpLeft === 0 && restLeft === 0,
+        `${at}: a client that leaves mid-upload leaves no request pending (pending as it left: MCP ${mcpHeld}, REST ${restHeld}; after: MCP ${mcpLeft}, REST ${restLeft})`);
+    }
+  } finally {
+    console.warn = realWarn;
+  }
+  // The rebuilt request carries the client's abort, so a tool call it leaves
+  // is said as [17] says one at a Host that parses (review pass 1).
+  const warned: string[] = [];
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  embedDelayMs = 2_000;
+  try {
+    const call = JSON.stringify({ jsonrpc: "2.0", id: 52, method: "tools/call", params: { name: "search_thoughts", arguments: { query: "left at a bad Host" } } });
+    await new Promise<void>((resolve) => {
+      const head = [...headOf("POST", "/mcp", "x:99999"), ...J, `x-brain-key: ${KEY}`, `content-length: ${Buffer.byteLength(call)}`];
+      const sock = connect(PORT, "127.0.0.1", () => { sock.write(`${head.join("\r\n")}\r\n\r\n${call}`); setTimeout(() => { sock.destroy(); resolve(); }, 500); });
+      sock.on("error", () => resolve());
+    });
+    await Bun.sleep(2_500); // the stub's sleep behind it settles
+  } finally {
+    console.warn = realWarn;
+    embedDelayMs = 0;
+  }
+  assert(warned.some((l) => l.startsWith("request abandoned by the client") && l.includes("tools/call search_thoughts")),
+    `Host x:99999: a tool call the client leaves is logged as abandoned (${JSON.stringify(warned.map((l) => l.slice(0, 60)))})`);
+  rest.stop(true);
+
+  // routable's own rules: a request whose URL parses is passed as it came; one
+  // that will not is rebuilt at an origin no client dials, all else kept.
+  const asCame = new Request("http://localhost/mcp?key=k");
+  assert(routable(asCame) === asCame, "a URL that parses: the same request");
+  const rebuilt = routable(new RuntimeUrl("http://x:99999/mcp?key=k", { method: "POST", headers: { "x-brain-key": "h", host: "x:99999" }, body: "the body" }));
+  assert(rebuilt.url === `${REBUILD_ORIGIN}/mcp?key=k` && rebuilt.method === "POST" && rebuilt.headers.get("x-brain-key") === "h" && rebuilt.headers.get("host") === "x:99999" && (await rebuilt.text()) === "the body",
+    `a URL that will not parse: its path and query at ${REBUILD_ORIGIN}, its method, headers (the Host too) and body kept (${rebuilt.url})`);
+  for (const [given, want] of [["/mcp", "/mcp"], ["//x/health", "//x/health"], ["*", "/*"], ["http://[::1/a?b#c", "/a?b#c"]] as const) {
+    assert(routable(new RuntimeUrl(given)).url === `${REBUILD_ORIGIN}${want}`, `${JSON.stringify(given)} → ${want}, a path and not another host (${routable(new RuntimeUrl(given)).url})`);
+  }
+  // The edge reads a key form from the query the way auth.ts does, so the two agree on such a URL too.
+  const kindOf = (url: string) => { try { return edgeModule.presentedKind(new RuntimeUrl(url)); } catch (e) { return `threw ${(e as Error).message}`; } };
+  const kinds = [kindOf("http://x:99999/mcp?key="), kindOf("/mcp")];
+  assert(kinds.join() === "key,none", `presentedKind under a URL that will not parse: an empty ?key= is a key client, none is none (${kinds.join()})`);
 }
 
 server.stop();
