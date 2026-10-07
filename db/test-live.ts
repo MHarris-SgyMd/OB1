@@ -3789,6 +3789,42 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     }
   }
 
+  // A passing claim error costs a follower nothing (review pass 4): a
+  // stand-in claim_thoughts raises lock_not_available (55P03) for three polls,
+  // each worker's claim failing, then the real one is back, and a follower of
+  // --limit 1 claims its thought, extracts it and ends — the failed claims
+  // took nothing from the limit, and did not end the run.
+  {
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const target = await seed("Bo rotated the grafana keys while the claims timed out.");
+    let code = -1;
+    let swapped = false;
+    try {
+      await sql.unsafe("ALTER FUNCTION claim_thoughts(text, text, int, int, int) RENAME TO claim_thoughts_hidden");
+      swapped = true;
+      await sql.unsafe(`CREATE FUNCTION claim_thoughts(p_work_type text, p_worker_id text, p_batch int DEFAULT 16, p_ttl_seconds int DEFAULT 900, p_max_attempts int DEFAULT 3)
+                          RETURNS TABLE (thought_id uuid, attempt int) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'a lock not available, for the suite' USING ERRCODE = '55P03'; END $$`);
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      await Bun.sleep(3000);
+      await sql.unsafe("DROP FUNCTION claim_thoughts(text, text, int, int, int)");
+      await sql.unsafe("ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
+      swapped = false;
+      const ended = await pollUntil(async () => code !== -1, 15_000);
+      ac.abort();
+      await running;
+      assert(ended && code === 0 && (await extractedNow(target)) && lines.filter((l) => /a lock not available, for the suite — this worker stops/.test(l)).length >= 2,
+             `a follower of --limit 1 whose claims met a passing error for three polls claims its thought once they answer, extracts it, and ends (ended ${ended}, exit ${code}, extracted ${await extractedNow(target)}${lines.find((l) => l.startsWith("rejected:")) ? `; ${lines.find((l) => l.startsWith("rejected:"))?.slice(0, 80)}` : ""})`);
+    } finally {
+      ac.abort();
+      if (swapped) {
+        await sql.unsafe("DROP FUNCTION IF EXISTS claim_thoughts(text, text, int, int, int)");
+        await sql.unsafe("ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
+      }
+      await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
+    }
+  }
+
   // A follower's --limit counts the thoughts it takes and does not hand back
   // (review pass 3): a follower of --limit 1 whose thought a database cut
   // hands back unfinished claims it again when the database answers,
@@ -3802,7 +3838,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     try {
       slowMs = 2500;
       target = await seed("Ari tuned the grafana pager while the database was away.");
-      const running = runExtract({ url: relay.url, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; });
+      const running = runExtract({ url: relay.url, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       await pollUntil(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${target}::uuid AND work_type = ${KEY}`)[0]?.status === "claimed", 5000);
       await relay.cut();
       await Bun.sleep(4000);

@@ -14,7 +14,7 @@
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, outageWait, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, outageWait, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -157,6 +157,11 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     "the server starting up or shutting down, a connection exception and too many connections are the database unavailable");
   ok(!databaseUnavailable(pg("ERR_POSTGRES_SYNTAX_ERROR", "42601")) && !databaseUnavailable(pg("ERR_POSTGRES_SERVER_ERROR", "42883")) && !databaseUnavailable(pg("ERR_POSTGRES_SERVER_ERROR", "28P01")),
     "a syntax error, a missing function and a password refused are not — the run still ends on them");
+  // An error no wait mends ends a follower; a passing one costs a worker its poll (review pass 4).
+  ok(databasePermanent(pg("ERR_POSTGRES_SERVER_ERROR", "42883")) && databasePermanent(pg("ERR_POSTGRES_SERVER_ERROR", "42501")) && databasePermanent(pg("ERR_POSTGRES_SERVER_ERROR", "28P01")) && databasePermanent(pg("ERR_POSTGRES_SERVER_ERROR", "3D000")),
+    "a function missing, a privilege revoked, a password refused and a database gone are permanent");
+  ok(!databasePermanent(pg("ERR_POSTGRES_SERVER_ERROR", "57014")) && !databasePermanent(pg("ERR_POSTGRES_SERVER_ERROR", "55P03")) && !databasePermanent(pg("ERR_POSTGRES_SERVER_ERROR", "40001")) && !databasePermanent(pg("ERR_POSTGRES_SERVER_ERROR", "53200")) && !databasePermanent(pg("ERR_POSTGRES_CONNECTION_REFUSED")),
+    "a statement or lock timeout, a serialization failure, out of memory and a connection refused are not");
   ok(!databaseUnavailable({ name: "Error", code: "ERR_POSTGRES_CONNECTION_REFUSED" }) && !databaseUnavailable(null) && !databaseUnavailable({ message: "connect ECONNREFUSED" }),
     "nor is an error that is not the client's — a provider's dropped connection is classifyError's");
   ok(outageWait(0) === 5_000 && outageWait(1) === 10_000 && outageWait(5) === 160_000 && outageWait(6) === 300_000 && outageWait(1e6) === 300_000,

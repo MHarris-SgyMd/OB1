@@ -240,6 +240,21 @@ export function databaseUnavailable(e: unknown): boolean {
   return typeof errno === "string" && (errno.startsWith("08") || ["57P01", "57P02", "57P03", "53300"].includes(errno));
 }
 
+/**
+ * Whether a database error is one no wait mends (SMD-2599, review pass 4):
+ * a statement or object the server refuses — SQLSTATE class 42 (a function
+ * or table missing, a privilege revoked) or 28 (authorization) — or a
+ * database or schema that does not exist (3D000, 3F000). A follower's worker
+ * ends the run on one of these, as the pass's own errors do; anything else
+ * not databaseUnavailable's — a statement or lock timeout, out of memory or
+ * disk, a serialization failure — costs that worker its poll, as before.
+ */
+export function databasePermanent(e: unknown): boolean {
+  const { name, errno } = (e ?? {}) as { name?: string; errno?: unknown };
+  if (name !== "PostgresError" && name !== "SQLError") return false;
+  return typeof errno === "string" && (errno.startsWith("42") || errno.startsWith("28") || errno === "3D000" || errno === "3F000");
+}
+
 /** The wait between a follower's checks during an outage: 5 s, doubling, at most 5 min. */
 export const OUTAGE_FIRST_MS = 5_000;
 export const OUTAGE_MAX_MS = 300_000;

@@ -126,7 +126,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
 import {
   actorKindOf, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -1197,7 +1197,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           } finally {
             claiming -= want;
           }
-          for (const b of batch) taken.add(b.thought_id);
+          // Tracked under --limit only: a follower without one runs for months (review pass 4).
+          if (LIMIT > 0) for (const b of batch) taken.add(b.thought_id);
           if (batch.length === 0) return;
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
@@ -1206,11 +1207,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {
-          // A follower outlasts the database going away; any other database
-          // error — a function missing, a grant revoked — ends the run, as the
-          // pass's own errors do (review pass 3: it stopped this worker only,
-          // and the follower polled into it for ever).
-          if (FOLLOW && !databaseUnavailable(e)) throw e;
+          // A follower outlasts the database going away; an error no wait
+          // mends — a function missing, a grant revoked — ends the run, as the
+          // pass's own errors do (review pass 3); a passing one — a timeout, a
+          // serialization failure — costs this worker its poll (review pass 4).
+          if (FOLLOW && databasePermanent(e)) throw e;
           err(`  ${workerId}: ${(e as Error).message} — this worker stops`);
           return;
         }
@@ -1321,6 +1322,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               gone = !exists;
             }
           } catch (e) {
+            // The database went away under the release: the row is this
+            // worker's again, for the finally to return and --limit to give
+            // back (review pass 4).
+            if (FOLLOW && databaseUnavailable(e)) hb.held.add(b.thought_id);
             err(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
             return;
           }
@@ -1485,8 +1490,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   // Leases a worker could not return as it ended, returned before the run
   // ends where the database answers; else they expire within --ttl (review pass 3).
-  for (const w of unreturned) {
-    await sql`SELECT release_claims_for_worker(${JOB}, ${w})`.then(() => unreturned.delete(w), () => {});
+  // All at once, and not when the run ended waiting for the database; one
+  // line when they could not go (review pass 4).
+  if (after !== null && unreturned.size > 0) {
+    const kept = (await Promise.all([...unreturned].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.then(() => 0, () => 1)))).reduce((a: number, b: number) => a + b, 0);
+    if (kept > 0) err(`  ${kept} worker(s)' leases could not be returned as the run ended; they expire within ${TTL} s`);
   }
   const elapsed = (Date.now() - started) / 1000;
   out(
