@@ -16,12 +16,13 @@
  * and a JSON value: the version, the claim `job` as given, `every_s` (the
  * longest the worker lets pass between two stamps), `running` (a pass is under
  * way), the last pass's `outcome` (PassOutcome below), `ended` once the
- * worker's process is gone, the `passes` it finished, and for extraction the
- * last judged block's malformed answers (SMD-2266's alarm, which a follower
- * otherwise says only on stderr). The time
- * is the row's updated_at — now() on the database, so a worker's clock is not
- * read. ob1_config is key/value, so no migration: the `worker` grant group
- * already holds INSERT and UPDATE on it (db/config.mjs ROLE_GRANTS), and a
+ * worker's process is gone, and for extraction the last judged block's
+ * malformed answers (SMD-2266's alarm, which a follower otherwise says only on
+ * stderr). Each stamp writes the whole value: a restarted follower's first
+ * stamp carries no block until it judges one. The time is the row's
+ * updated_at — now() on the database, so a worker's clock is not read.
+ * ob1_config is key/value, so no migration: the `worker` grant group already
+ * holds INSERT and UPDATE on it (db/config.mjs ROLE_GRANTS), and a
  * role without them is told once and the pass goes on — a heartbeat is
  * reporting, never a reason to stop the work.
  *
@@ -73,7 +74,7 @@ export interface PassStamper {
   /**
    * Stamp the worker's end — `stopped`, or `failed` when the provider refused
    * the request or a pass threw — as `ended`, so the row reads a gone process
-   * as one, not as alive with a failed pass (review pass 2). No pass is counted.
+   * as one, not as alive with a failed pass (review pass 2).
    */
   end(outcome: "stopped" | "failed", malformed?: MalformedBlock | null): Promise<void>;
   /** Run a pass with the row re-stamped as running every `every_s` until it settles. */
@@ -110,7 +111,6 @@ export function passStamper(opts: {
 }): PassStamper {
   const key = stampKey(opts.worker, opts.job);
   const everyS = Math.min(MAX_STAMP_EVERY_S, Math.max(opts.minEveryS ?? MIN_STAMP_EVERY_S, Math.ceil(opts.intervalS)));
-  let passes = 0;
   let outcome: PassOutcome | null = null;
   let ended = false;
   let malformed: MalformedBlock | null = null;
@@ -118,25 +118,11 @@ export function passStamper(opts: {
   // Writes go one after another, so a timer's "running" stamp in flight when
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
-  // A stamp with no judged block of its own keeps the row's: a follower
-  // restarted on the same broken model would otherwise clear its alarm with
-  // its first stamp (review pass 1). Its own block, once judged, replaces it.
-  // Only a block of the shape this module writes is kept — another would make
-  // the reader refuse the whole row, hiding a live worker (review pass 2). The
-  // inner CASE reads the old value as JSON only once it is known to be.
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), passes, ...(malformed ? { malformed } : {}) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
-                     ON CONFLICT (key) DO UPDATE SET
-                       value = CASE WHEN NOT (EXCLUDED.value::jsonb ? 'malformed') AND pg_input_is_valid(ob1_config.value, 'jsonb')
-                                    THEN CASE WHEN jsonb_typeof(ob1_config.value::jsonb -> 'malformed' -> 'answers') = 'number'
-                                                   AND jsonb_typeof(ob1_config.value::jsonb -> 'malformed' -> 'bad') = 'number'
-                                                   AND jsonb_typeof(ob1_config.value::jsonb -> 'malformed' -> 'alarm') = 'boolean'
-                                              THEN (EXCLUDED.value::jsonb || jsonb_build_object('malformed', ob1_config.value::jsonb -> 'malformed'))::text
-                                              ELSE EXCLUDED.value END
-                                    ELSE EXCLUDED.value END,
-                       updated_at = now()`;
+                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
       failing = false;
     } catch (e) {
       // A reporter that throws (a Writer on a closed stream) must not leave
@@ -150,7 +136,6 @@ export function passStamper(opts: {
     key,
     async stamp(o, m) {
       outcome = o;
-      passes++;
       if (m !== undefined) malformed = m;
       await write(false);
     },

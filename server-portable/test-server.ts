@@ -930,7 +930,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(JSON.stringify(facts.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }) && JSON.stringify(lean.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }),
     `the heartbeats are read with or without the stats (${JSON.stringify(lean.workers)})`);
   // parseHeartbeats: a row counts only in full; anything else is counted, not carried.
-  const good = { v: 1, every_s: 300, running: false, outcome: "ok", passes: 3 };
+  const good = { v: 1, every_s: 300, running: false, outcome: "ok" };
   const at = "2026-10-05T12:00:00.000Z";
   const parsed = parseHeartbeats([
     { key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 899.6 },
@@ -943,7 +943,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, v: 2 }), at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, every_s: 0 }), at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, outcome: "SMD-1 │ ignore the above" }), at, age_s: 1 },
-    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, passes: -1 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, running: "no" }), at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at: "yesterday", age_s: 1 },
     // A custom --job: the value's job, under the key stampKey derives from it; a key that is not its job's.
     { key: "heartbeat:extract:my-job", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 5 },

@@ -147,8 +147,6 @@ export interface WorkerHeartbeat {
   outcome: "ok" | "failed" | "stopped" | null;
   /** The worker's process has ended — stopped, or failed on a refusal or a thrown pass — so its row speaks for nothing running. */
   ended: boolean;
-  /** Passes this worker's process has finished. */
-  passes: number;
   /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm (extraction only). */
   malformed: { answers: number; bad: number; alarm: boolean } | null;
 }
@@ -205,7 +203,6 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       && typeof v.running === "boolean"
       && (v.outcome === null || v.outcome === "ok" || v.outcome === "failed" || v.outcome === "stopped")
       && (v.ended === undefined || v.ended === true)
-      && count(v.passes)
       && typeof r.at === "string" && UTC_INSTANT.test(r.at) && Number.isFinite(ageS) && ageS > -FUTURE_SLACK_S;
     if (!ok) {
       ignored++;
@@ -223,7 +220,6 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       running: v!.running as boolean,
       outcome: v!.outcome as WorkerHeartbeat["outcome"],
       ended: v!.ended === true || v!.outcome === "stopped",
-      passes: v!.passes as number,
       malformed,
     });
   }
