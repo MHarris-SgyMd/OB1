@@ -29,14 +29,12 @@ import type { Input } from "./schemas.ts";
 // caller's to add.
 //
 // A key that cannot read is also refused the ticket keys (TICKET_META_KEYS,
-// SMD-2617): a row carrying `issue` claims that ticket, and of a ticket's rows
-// nothing supersedes, the newest `linear_updated_at` is its head (068), whose
-// status every thought filed under the ticket reads, the board-synced row
-// included. A capture-only key could otherwise flip another key's thoughts to
-// done without touching them; and that watermark, with Linear's status, on a
-// pasted ticket header would have board-sync call the ticket unchanged while
-// its state stays put. A write key keeps them: it can edit any thought
-// through update_thought anyway.
+// SMD-2617): 068's ticket head reads them from any row carrying `issue`, so a
+// capture-only key could set the status every thought filed under the ticket
+// reads; and on a pasted ticket header, with Linear's status, the watermark
+// would have board-sync call the ticket unchanged, so Linear's edits to its
+// text never reach the brain (changes/smd-2617.md). A write key keeps them:
+// it can edit any thought through update_thought anyway.
 const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
 const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed"]);
 const TICKET_META = new Set<string>(TICKET_META_KEYS);

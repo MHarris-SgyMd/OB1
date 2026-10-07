@@ -575,8 +575,8 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `REFUSED_FILTER`, `REFUSED_EGRESS` (with its `rule`), `REFUSED_SINCE`,
   `REFUSED_CURSOR`. Capture's: the pointer and metadata shapes
   (`REFUSED_SUPERSEDES_SHAPE`, `REFUSED_DERIVED_FROM_SHAPE`,
-  `REFUSED_METADATA_SHAPE` with its `problem`, and the `key` when it is a reserved
-  or ticket key; a capture-only key is refused a ticket's lifecycle keys, `issue`,
+  `REFUSED_METADATA_SHAPE` with its `problem`, and the `key` unless the key itself
+  is malformed; a capture-only key is refused a ticket's lifecycle keys, `issue`,
   `status`, `status_type` and `linear_updated_at`, SMD-2617), SMD-1978's pointer
   codes (`DERIVED_FROM_MISSING` with a reader's `positions`, a reader's `REFUSED_SUPERSEDES_UNKNOWN`,
   `SUPERSEDES_UNJUDGED`; a capture-only key's `supersedes` it cannot prove its

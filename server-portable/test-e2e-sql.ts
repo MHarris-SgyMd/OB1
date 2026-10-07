@@ -1854,10 +1854,11 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // read the ticket's real status after the capture key tries to state it
   // done. Each ticket key is refused, naming it, before either model call;
   // nothing lands; the head, node_state and 077's settled read keep the
-  // writer's started state. A note's own `ticket` only reads the head. The
-  // summary opens with its session header, which makes the ticket central to
-  // it (077), so a forged done head would demote it. The writer's row carries
-  // no watermark ([14] holds brain_info's null while no thought carries one).
+  // writer's started state. `ticket` is not refused: a row carrying it only
+  // reads the head. The summary opens with its session header, which makes
+  // the ticket central to it (077), so a forged done head would demote it.
+  // The writer's row carries no watermark ([14] holds brain_info's null while
+  // no thought carries one).
   {
     const TKT = "TKT-2617";
     const stated = await result("capture_thought", { content: `[13d] ${TKT} — the writer's ticket row`, source: "linear",

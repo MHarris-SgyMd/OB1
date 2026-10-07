@@ -345,14 +345,14 @@ console.log("\n[6] test-auth's cases against REST: a read key cannot write, a ca
     `a capture key's ticket key is a 400 naming the rule and the key (${forged.status} ${JSON.stringify(forged.body)})`);
   const stated = await rest("POST", "/v1/thoughts", { content: "eta: a write key's ticket row", metadata: { issue: "TKT-2617", status_type: "started" } }, KEYS.writer);
   assert(stated.status === 201, `…and a write key's is a creation (${stated.status})`);
-  // The key is in the value only when it is one of the server's own names: a
-  // reserved key's is, a badly shaped key (the caller's raw input) is not.
+  // The key is in the value unless it is itself malformed: a reserved key's
+  // and an over-long value's are, a badly shaped key (the caller's raw input) is not.
   const reserved = await rest("POST", "/v1/thoughts", { content: "eta: a reserved key", metadata: { type: "task" } }, KEYS.writer);
   const badKey = await rest("POST", "/v1/thoughts", { content: "eta: a badly shaped key", metadata: { "Bad Key": 1 } }, KEYS.writer);
   const longValue = await rest("POST", "/v1/thoughts", { content: "eta: an over-long value", metadata: { long_note: "x".repeat(201) } }, KEYS.writer);
   assert(reserved.status === 400 && reserved.body.problem === "reserved_key" && reserved.body.key === "type" && badKey.status === 400 && badKey.body.problem === "bad_key" && !("key" in badKey.body)
-      && longValue.status === 400 && longValue.body.problem === "value_too_long" && !("key" in longValue.body),
-    `a reserved key's refusal names it; a bad key's, and an over-long value's, carry the rule alone (${JSON.stringify(reserved.body)} | ${JSON.stringify(badKey.body)} | ${JSON.stringify(longValue.body)})`);
+      && longValue.status === 400 && longValue.body.problem === "value_too_long" && longValue.body.key === "long_note",
+    `a reserved key's and an over-long value's refusals name the key; a bad key's carries the rule alone (${JSON.stringify(reserved.body)} | ${JSON.stringify(badKey.body)} | ${JSON.stringify(longValue.body)})`);
   const hm = await mcp("capture_thought", { content: "theta: a capture key's thought" }, KEYS.hook);
   const { text: _t, ...hookFacts } = hm.sc;
   const { embeddingAttached: _a, ...hookRest } = r.body;

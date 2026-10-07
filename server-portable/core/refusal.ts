@@ -49,6 +49,8 @@ export type Refusal =
 export type MetadataProblem = "too_many_keys" | "bad_key" | "reserved_key" | "ticket_key" | "bad_value" | "value_too_long";
 /** The keys a ticket's lifecycle is read from (068's head, board-sync's plan), which a key that cannot read may not set (SMD-2617). */
 export const TICKET_META_KEYS = ["issue", "status", "status_type", "linear_updated_at"] as const;
+/** The four as the tool description and the refusal name them, one rendering for both. */
+export const TICKET_META_KEYS_TEXT = TICKET_META_KEYS.map((k) => `\`${k}\``).join(", ");
 /** The bounds a caller's `metadata` is held to (SMD-2014): here, beside the refusal that names them, so its words need not load the write path. */
 export const META_VALUE_MAX = 200;
 export const META_KEYS_MAX = 8;
@@ -73,11 +75,10 @@ const FACTS: Facts = {
   REFUSED_CURSOR: none,
   REFUSED_SUPERSEDES_SHAPE: none,
   REFUSED_DERIVED_FROM_SHAPE: none,
-  // Which rule, and the key when it is one of the server's own names (a
-  // reserved or ticket key), so a client reading values knows what to drop
-  // (SMD-2617). A bad key is the caller's raw input, and stays in the text;
-  // a bad value's or an over-long one's key is in the text alone too.
-  REFUSED_METADATA_SHAPE: (r) => ({ problem: r.problem, ...(r.key !== undefined && (r.problem === "reserved_key" || r.problem === "ticket_key") ? { key: r.key } : {}) }),
+  // Which rule, and the key, so a client reading values knows what to drop
+  // (SMD-2617) — unless the key itself is malformed: a bad key is the
+  // caller's raw input, and stays in the text.
+  REFUSED_METADATA_SHAPE: (r) => ({ problem: r.problem, ...(r.key !== undefined && r.problem !== "bad_key" ? { key: r.key } : {}) }),
   SUPERSEDES_UNJUDGED: none,
   REFUSED_SUPERSEDES_UNKNOWN: none,
   // The derived_from indices to drop — present only for a caller allowed to
