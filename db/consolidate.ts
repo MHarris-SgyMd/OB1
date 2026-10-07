@@ -146,6 +146,7 @@ import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { PROPOSAL_TEXT_MAX, snipText } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { passStamper, stampKey } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
@@ -964,6 +965,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let halt = new AbortController();
   let done = 0;
   let failed = 0;
+  /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
+  let providerStops = 0;
+  /** Whether the last pass found nothing to do: its stamp keeps the word before it. */
+  let lastPassIdle = false;
   let vanished = 0;
   let lost = 0;
   let beats = 0;
@@ -1345,6 +1350,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
                   if (outage.begin(msg, b.thought_id) === "outage") {
+                    providerStops++;
                     halt.abort();
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
                     return;
@@ -1546,6 +1552,36 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    */
   const unreturned = new Set<string>();
 
+  // A follower's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
+  // pass and re-stamped while one runs. A one-shot run stamps nothing.
+  const stamper = FOLLOW
+    ? passStamper({
+        sql, worker: "consolidate", job: JOB, intervalS: FOLLOW,
+        onError: (e) => err(`  heartbeat ${stampKey("consolidate", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
+      })
+    : null;
+  // A pass that throws ends the run; its heartbeat says so first, as the
+  // worker's end. A pass is "failed" when a worker of it stopped on the
+  // provider still failing after its pauses — the provider down, not a
+  // document it cannot read (review pass 2: counting rows done against rows
+  // failed read a down judge as ok); a pass with work is "ok" otherwise, and a
+  // poll with nothing to do keeps the last pass's word.
+  let passOutcome: "ok" | "failed" = "ok";
+  const stampedPass = async () => {
+    const at = providerStops;
+    try {
+      const counted = await (stamper ? stamper.during(pass()) : pass());
+      if (providerStops > at) passOutcome = "failed";
+      else if (!lastPassIdle) passOutcome = "ok";
+      return counted;
+    } catch (e) {
+      // A database outage is no end under --follow: followedPass waits it out
+      // (SMD-2599), and an ended stamp would say so for every pass after it.
+      if (!(FOLLOW && databaseUnavailable(e))) await stamper?.end("failed");
+      throw e;
+    }
+  };
+
   let firstPass = true;
   async function pass(): Promise<Counts> {
     halt = new AbortController();
@@ -1569,7 +1605,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (firstPass && before.thoughts === 0) out("  no thought has extracted entities and a vector — run db/extract-entities.ts first; this pass pairs thoughts by the entities they share" + (FOLLOW ? ", and will poll until some do" : ""));
     firstPass = false;
     total += before.pending + before.claimed;
-    if (before.pending + before.claimed === 0) return before;
+    lastPassIdle = before.pending + before.claimed === 0;
+    if (lastPassIdle) return before;
     if (!FOLLOW || added > 0 || before.pending > 0) printCounts(before, "before");
     // A worker that throws — a Writer that throws, in practice; each catches
     // its own database errors — stops the rest after the thought in hand, and
@@ -1597,9 +1634,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   async function followedPass(): Promise<Counts | null> {
     for (;;) {
       try {
-        const c = await pass();
-        // A worker found the provider not answering and ended the pass (SMD-2599).
-        if (outage.reason !== null && !stopping) await waitForProvider(onStop.signal);
+        const c = await stampedPass();
+        // A worker found the provider not answering and ended the pass
+        // (SMD-2599): the heartbeat says so, and stays a running follower's
+        // while it probes, so preflight reads it alive, not stale (SMD-2261).
+        if (outage.reason !== null && !stopping) {
+          await stamper?.stamp("failed");
+          await (stamper ? stamper.during(waitForProvider(onStop.signal)) : waitForProvider(onStop.signal));
+        }
         return c;
       } catch (e) {
         if (!FOLLOW || !databaseUnavailable(e)) throw e;
@@ -1613,11 +1655,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   let after = await followedPass();
   if (FOLLOW) {
+    await stamper?.stamp(passOutcome);
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
       after = await followedPass();
+      await stamper?.stamp(passOutcome);
     }
+    // The follower ends — a signal, its --limit, or the provider refusing the
+    // request itself — and the row says so: its age then warns, as it should.
+    await stamper?.end(configError ? "failed" : "stopped");
   }
 
   // Leases a worker could not return as it ended, returned before the run

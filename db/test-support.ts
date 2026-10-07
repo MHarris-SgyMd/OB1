@@ -695,6 +695,53 @@ export class RuntimeUrl extends Request {
   override get url() { return this.given; }
 }
 
+// Raw HTTP over a socket, for the rows about the Host Bun builds `req.url`
+// from: fetch sends a Host of its own (SMD-2535, SMD-2595).
+
+/** What a server sends back to `text` before it closes, or within 3 s; on a socket error, what came so far. */
+export function rawExchange(port: number, text: string): Promise<string> {
+  return new Promise<string>((resolve) => {
+    const sock = connect(port, "127.0.0.1", () => sock.write(text));
+    let got = "";
+    sock.on("data", (d) => (got += d));
+    sock.on("close", () => resolve(got));
+    sock.on("error", () => resolve(got));
+    setTimeout(() => sock.destroy(), 3_000);
+  });
+}
+
+/** The request line and Host: HTTP/1.0 with none for `null`, which HTTP/1.1 would make Bun's own 400. */
+export function requestHead(method: string, target: string, host: string | null): string[] {
+  return [`${method} ${target} HTTP/${host === null ? "1.0" : "1.1"}`, ...(host === null ? [] : [`host: ${host}`])];
+}
+
+/** One request over a raw socket at `host`, and the status and body it got. */
+export async function askRaw(port: number, method: string, target: string, host: string | null, headers: string[] = [], body = ""): Promise<{ status: number; body: string }> {
+  const head = [...requestHead(method, target, host), ...headers, "connection: close", `content-length: ${Buffer.byteLength(body)}`];
+  const got = await rawExchange(port, `${head.join("\r\n")}\r\n\r\n${body}`);
+  return { status: Number(got.split(" ")[1]), body: got.slice(got.indexOf("\r\n\r\n") + 4) };
+}
+
+/**
+ * A JSON POST whose client leaves mid-upload: the head and `partial` of a
+ * 1000-byte body, then the socket dropped after 150 ms. Returns how many
+ * requests the server had pending as the client left — one, or a row that
+ * reads pendingSettled afterwards holds nothing — or -1 on a socket error.
+ */
+export function leaveMidUpload(server: { port?: number; pendingRequests: number }, target: string, host: string | null, headers: string[], partial: string): Promise<number> {
+  return new Promise<number>((resolve) => {
+    const head = [...requestHead("POST", target, host), "content-type: application/json", ...headers, "content-length: 1000"];
+    const sock = connect(server.port!, "127.0.0.1", () => { sock.write(`${head.join("\r\n")}\r\n\r\n${partial}`); setTimeout(() => { const pending = server.pendingRequests; sock.destroy(); resolve(pending); }, 150); });
+    sock.on("error", () => resolve(-1));
+  });
+}
+
+/** The server's pending requests once they settle, or after 2 s. */
+export async function pendingSettled(server: { pendingRequests: number }): Promise<number> {
+  for (let i = 0; i < 40 && server.pendingRequests > 0; i++) await Bun.sleep(50);
+  return server.pendingRequests;
+}
+
 /**
  * A stub provider's answer that never comes: the request stays open until the
  * client's own deadline (OB1_LLM_TIMEOUT) abandons it. Two things follow for

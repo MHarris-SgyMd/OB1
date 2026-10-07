@@ -49,7 +49,7 @@
  */
 
 import { createClient } from "../../../compat/supabase-sql/index.ts";
-import { authenticateRequest, canWrite } from "../_shared/auth.ts";
+import { authenticateRequest, canWrite, queryOf } from "../_shared/auth.ts";
 import {
   isRecord,
   asString,
@@ -570,8 +570,9 @@ const handler = async (req: Request) => {
     return json({ error: "Unauthorized" }, 401);
   }
 
-  const url = new URL(req.url);
-  const dryRun = url.searchParams.get("dry_run") === "true";
+  // Read without parsing the URL, which Bun builds from the Host header unchecked (SMD-2595).
+  const query = queryOf(req.url);
+  const dryRun = query.get("dry_run") === "true";
   // The worker writes. A read-scoped key may preview — dry_run writes nothing —
   // and nothing more.
   if (!canWrite(principal) && !dryRun) {
@@ -589,7 +590,7 @@ const handler = async (req: Request) => {
     return json({ error: "An embedding key is required: set OPENROUTER_API_KEY or OPENAI_API_KEY (the profile carries a vector; ANTHROPIC_API_KEY alone cannot embed)" }, 503);
   }
 
-  const targetName = url.searchParams.get("name") || undefined;
+  const targetName = query.get("name") || undefined;
   // Subject key for the canonical-profile dedupe — "self" when caller did
   // not scope the request. Must match the value written into
   // metadata.subject on insert/update.
