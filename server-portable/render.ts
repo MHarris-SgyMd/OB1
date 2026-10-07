@@ -23,7 +23,7 @@ import type { AuditChange, DryRunClaimResult, LoggedSearchPage, ReleaseLeasesRes
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY, TRUST } from "./core/filter.ts";
-import { failure, META_KEYS_MAX, META_VALUE_MAX, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, Updated } from "./core/writes.ts";
@@ -830,6 +830,7 @@ function metadataShape(r: Extract<Refusal, { code: "REFUSED_METADATA_SHAPE" }>):
     case "too_many_keys": return `Refused: \`metadata\` carries ${r.count} keys — at most ${META_KEYS_MAX}.`;
     case "bad_key": return `Refused: the \`metadata\` key "${k.slice(0, 40)}" must be lower-case letters, digits and underscores, 2–40 characters, starting with a letter.`;
     case "reserved_key": return `Refused: \`metadata.${k}\` is set by the server, not the caller — use the \`source\` argument for the origin label; drop the rest.`;
+    case "ticket_key": return `Refused: \`metadata.${k}\` states a ticket's lifecycle, which a capture-only key may not set (${TICKET_META_KEYS_TEXT}) — drop it, or capture with a key that can write.`;
     case "bad_value": return `Refused: \`metadata.${k}\` must be a string, number or boolean.`;
     case "value_too_long": return `Refused: \`metadata.${k}\` is ${r.length} characters — at most ${META_VALUE_MAX}.`;
   }
