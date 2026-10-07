@@ -3204,9 +3204,9 @@ One `ob1_config` row per worker and job — `heartbeat:board-sync`,
 `heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3` — whose
 value names the `job` (a claim worker's, as given — the restart works that
 pool), `every_s` (the worker's interval, at least a minute), whether a pass is
-`running`, the last pass's `outcome`, whether the worker has `ended`, the
-`passes` the process finished, and, for extraction, the last judged block's
-malformed answers and whether they passed SMD-2266's alarm. The time is the
+`running`, the last pass's `outcome`, whether the worker has `ended`, and, for
+extraction, the last judged block's malformed answers and whether they passed
+SMD-2266's alarm. The time is the
 row's `updated_at`, the database's `now()`.
 
 - **`ok`:** the pass ran, whatever its rows came to — a document the model
@@ -3225,12 +3225,13 @@ row's `updated_at`, the database's `now()`.
 
 A pass is stamped `running` as it starts and every `every_s` while it runs, so
 a follower's first pass over a backlog reads alive, as lease renewal keeps its
-claims. A restarted follower keeps the row's malformed block (one of the shape
-this module writes) until it judges a block of its own, so restarting on the
-same broken model does not clear the alarm. Once the model is fixed, the block
-clears when the follower judges 48 healthy answers, or at once by deleting the
-row. There is one row per job, not per process: two followers of one job share
-it, the last to stamp written. A tier refresh deletes the source's rows
+claims. Each stamp writes the whole value, so a restarted follower's row
+carries no malformed block until it judges its next one (48 answers or more,
+judged once a pass drains the pool). A restart clears the alarm, so fix the
+model first: a follower restarted on the same broken model reads healthy until
+48 new answers trip it again, which on a quiet brain can take days. There is
+one row per job, not per process: two followers of one job share it, the last
+to stamp written. A tier refresh deletes the source's rows
 (`tier.ts`), so a canary never reports stable's workers; a `pg_dump` restored
 onto another host carries them too — alive for up to three intervals, then
 stopped or stale — until deleted. A block the reader cannot trust is left off
