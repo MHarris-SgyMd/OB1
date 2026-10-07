@@ -410,7 +410,7 @@ console.log("\n[8] One log line per request: method, route, status, time — no 
 
 console.log("\n[9] A request URL that will not parse — Bun builds it from the Host header unchecked — still has its query read: a refusal, not a 500 (SMD-2535)");
 {
-  // api.ts rebuilds such a request before routing (root.ts routable); the
+  // api.ts rebuilds such a request before routing (auth.ts routable); the
   // app reads its query without parsing the URL all the same, with a path
   // Hono reads from the string as it would.
   for (const host of ["x:99999", "[::1", "brain.example.test:abc"]) {

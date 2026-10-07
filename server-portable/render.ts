@@ -35,7 +35,7 @@ export type Reply = { content: { type: "text"; text: string }[]; isError?: true;
 type Safe<T> = (v: T) => object;
 /** A tool whose text is its value's JSON: the value itself (the spec's structured-plus-serialized shape). */
 const AS_JSON = Symbol("the value is the text's JSON");
-/** brain_info: its whole record beside the table — the server's and the database's own facts, versions included, so not held to tokens. Its one value from thoughts' metadata, the board-sync watermark, is held to a UTC instant by its read (brain-info.ts's BOARD_SYNC_SQL and boardSyncValue). */
+/** brain_info: its whole record beside the table — the server's and the database's own facts, versions included, so not held to tokens. Its one value from thoughts' metadata, the board-sync watermark, is held to a UTC instant by its read (brain-info.ts's BOARD_SYNC_SQL and boardSyncValue), and the workers' heartbeats, from ob1_config rows a worker role writes, to counts, enums and bounded tokens (parseHeartbeats). */
 const AS_RECORD = Symbol("the value is the server's own record");
 
 /** An outcome in the tool's words — its value's text, or its refusal's — with the text inside the value, last, so no field can stand in for it. */
@@ -801,14 +801,18 @@ export const renderJobHandle = (o: Outcome<JobHandle>): Reply => render(o, (v) =
  * a legitimate state and a silent one, and unlike the re-embed there is no
  * claim row here to record it. A provider that REFUSED the length stays silent,
  * as change 27 decided: that is the vector every long capture gets there.
+ * `recaptures`: whether this caller's re-capture writes onto a row that holds
+ * the text. A capture-only key's does not (080, SMD-2539) and is not told
+ * whether the text was new, so its note says what each case got and names the
+ * re-embed pass alone (review pass 2: "stored" claimed a write a 'keep'
+ * re-capture never made).
  */
-function explainHeadWindow(e: HeadWindow | null): string {
+function explainHeadWindow(e: HeadWindow | null, recaptures = true): string {
   if (!e?.fellBack || e.refused) return "";
-  return (
-    `\n\nNote: the whole content could not be embedded in one call (${e.error ?? "no detail"}); ` +
-    `the head window's vector stands in for it. The thought is stored and searchable, and every search chunk ` +
-    `has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
-  );
+  const head = `\n\nNote: the whole content could not be embedded in one call (${e.error ?? "no detail"}); the head window's vector stands in for it. `;
+  return recaptures
+    ? `${head}The thought is stored and searchable, and every search chunk has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
+    : `${head}A new thought is stored with it and every search chunk's vector; text already captured keeps its own vector, or takes this one if it had none, and gets none of these chunks. A re-embed pass gives a head window's vector the whole-content one once the provider answers.`;
 }
 
 /**
@@ -912,15 +916,17 @@ export function renderCapture(o: Outcome<Captured>): Reply {
       confirmation += chat.allowed
         ? `\n\nNote: ${contextFailures} of ${chunks} search chunks were embedded without ` +
           `their situating context — the call failed, or returned a blurb too long to be one. ` +
-          `They are stored and searchable; re-capture to regenerate, or check the model at ` +
+          // A capture-only key's re-capture writes no windows (080, SMD-2539),
+          // and it is not told whether the text was new.
+          (reader ? `They are stored and searchable; re-capture to regenerate, or check the model at ` : `A new thought stores them so, searchable; text already captured gets none of them. Check the model at `) +
           `${chat.base}.`
         // The blurbs are chat calls, and the gate refused the chat endpoint
         // (SMD-1903): not a model to check, and the reason is the one the
         // tagging note below carries.
         : `\n\nNote: the ${chunks} search chunks were embedded without their situating context — ` +
-          `the blurb calls were not made: ${chat.reason}. They are stored and searchable.`;
+          `the blurb calls were not made: ${chat.reason}. ${reader ? "They are stored and searchable." : "A new thought stores them so, searchable; text already captured gets none of them."}`;
     }
-    confirmation += explainHeadWindow(v.headWindow);
+    confirmation += explainHeadWindow(v.headWindow, reader);
 
     // Migration 035 (SMD-1453): a re-capture writes no provenance. The text
     // was already a thought, so the derived_from / supersedes named here
@@ -963,13 +969,19 @@ export function renderCapture(o: Outcome<Captured>): Reply {
         ? `\n\nNote: the tagging call for this capture was not made — ${why}. The existing thought keeps its tags; its metadata now carries the refusal marker.`
         : existed === false
           ? `\n\nNote: no topics, people or type were extracted — ${why}.`
-          : `\n\nNote: the tagging call for this capture was not made — ${why}. A new thought has no topics or type; text already captured keeps its tags, with the refusal marker merged in.`;
+          // `existed` unsaid: a key that cannot read, whose re-capture merges
+          // nothing (080, SMD-2539), or a database before 035, which merges.
+          : `\n\nNote: the tagging call for this capture was not made — ${why}. A new thought has no topics or type; text already captured keeps its tags${reader ? ", with the refusal marker merged in" : ""}.`;
     } else if (typeof meta.metadata_extraction_failed === "string") {
       confirmation +=
-        `\n\nNote: the thought was saved, but automatic tagging failed ` +
+        // A key that cannot read is not told whether the text was new, and
+        // its re-capture saves nothing onto an existing thought (080,
+        // SMD-2539), so its note says the capture's tagging failed, not that
+        // a thought was saved (review pass 3).
+        `\n\nNote: ${reader ? "the thought was saved, but automatic tagging failed" : "automatic tagging failed for this capture"} ` +
         // The marker is the server's reason code (extractMetadata keeps a
         // model's own out of the tags), on the one line all the same (SMD-2510).
-        `(${metaText(meta.metadata_extraction_failed, TYPE_MAX)}) — topics and people are placeholders. ` +
+        `(${metaText(meta.metadata_extraction_failed, TYPE_MAX)}) — ${reader ? "topics and people are placeholders" : "a new thought's topics and people are placeholders; text already captured keeps its tags"}. ` +
         `Check the chat endpoint (${chat.base}), its credential, and the server logs.`;
     }
     return confirmation;

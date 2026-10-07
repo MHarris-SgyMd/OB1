@@ -31,7 +31,7 @@
  */
 
 import { createClient } from "../../compat/supabase-sql/index.ts";
-import { authenticateRequest, canWrite } from "../_shared/auth.ts";
+import { authenticateRequest, canWrite, queryOf } from "../_shared/auth.ts";
 import {
   isRecord,
   asString,
@@ -588,8 +588,9 @@ const handler = async (req: Request) => {
     return json({ error: "Unauthorized" }, 401);
   }
 
-  const url = new URL(req.url);
-  const dryRun = url.searchParams.get("dry_run") === "true";
+  // Read without parsing the URL, which Bun builds from the Host header unchecked (SMD-2595).
+  const query = queryOf(req.url);
+  const dryRun = query.get("dry_run") === "true";
   // The worker writes. A read-scoped key may preview — dry_run writes nothing —
   // and nothing more.
   if (!canWrite(principal) && !dryRun) {
@@ -600,7 +601,7 @@ const handler = async (req: Request) => {
     return json({ error: "No LLM API key configured" }, 503);
   }
 
-  const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") ?? "10", 10) || 10, 1), 50);
+  const limit = Math.min(Math.max(parseInt(query.get("limit") ?? "10", 10) || 10, 1), 50);
 
   // Wall-clock budget. Supabase Edge Functions hard-kill at 150s; we stop
   // claiming new items at 140s so the in-flight item can finish and we can

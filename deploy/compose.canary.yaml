@@ -1,0 +1,40 @@
+# The canary tier on stable's mesh (SMD-2294). deploy/canary.sh names this file
+# beside compose.yaml when it runs the canary as its own compose project,
+# open-brain-canary, and sets CANARY_STABLE_MESH to stable's mesh network
+# (<stable project>_mesh). Not for a stack of its own.
+#
+# The canary's server and REST core join that network under the canary's names
+# alone: mcp.canary.ob1.internal, which stable's proxy routes /canary/mcp to,
+# and api.canary.ob1.internal. A network key of its own, not `mesh`: compose.yaml
+# gives the services on `mesh` this stack's own names (mcp.ob1.internal,
+# api.ob1.internal, auth.ob1.internal), and on stable's network they would take
+# a share of stable's /mcp, /api and /auth. Compose still adds each container's
+# service name (`server`, `api`) there, which is why stable's proxy dials its
+# backends by their mesh names alone (SMD-2294 PR 1).
+#
+# The canary keeps its own default network, where its Postgres and the refresh
+# reach it, and its own `mesh`, which nothing else joins. It runs with
+# COMPOSE_PROFILES empty (canary.sh), so its server advertises no OAuth: on
+# stable's mesh it would otherwise find stable's authorization server.
+#
+# The rule for anything a canary dials: a rooted *.canary.ob1.internal name.
+# From the canary's containers mcp.ob1.internal, api.ob1.internal and
+# auth.ob1.internal each name its own container and stable's alike (measured on
+# podman), and a request sent by those names could reach stable's brain with
+# stable's keys. Today only the server's OAuth probe dials one
+# (auth.ob1.internal), and only under a profile, which the canary runs without.
+
+services:
+  server:
+    networks:
+      stable-mesh:
+        aliases: [mcp.canary.ob1.internal]
+  api:
+    networks:
+      stable-mesh:
+        aliases: [api.canary.ob1.internal]
+
+networks:
+  stable-mesh:
+    name: ${CANARY_STABLE_MESH:?deploy/canary.sh sets CANARY_STABLE_MESH to stable's mesh network}
+    external: true

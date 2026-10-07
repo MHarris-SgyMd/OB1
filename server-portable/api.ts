@@ -6,7 +6,8 @@
 // reached as api.ob1.internal on the mesh, and at /api only where the operator
 // names deploy/compose.api-public.yaml.
 
-import { agents, closeStore, db, env, initEnv, routable, serveHere } from "./root.ts";
+import { agents, closeStore, db, env, initEnv, serveHere } from "./root.ts";
+import { routable } from "./auth.ts";
 import { createCore } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";

@@ -280,6 +280,13 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // (046), which 073 clamps to the key's kind: a lowering stands, a raise
       // is filed as a claim on the audit row. Absent: the key's trust.
       ...(trust !== undefined ? { event: { trust } } : {}),
+      // A capture-only key alters no thought it did not write (SMD-1298), and
+      // a re-capture of text already in the brain lands on that thought's row:
+      // "keep" has 080's upsert_thought leave it — no metadata, no source, no
+      // event, no updated_at — save a vector the row lacks (SMD-2539). Its own
+      // text too: one rule, no ownership read. A write key keeps the merge;
+      // it holds update_thought, so the merge grants it nothing.
+      ...(reader ? {} : { recapture: "keep" as const }),
     };
     let captured;
     // One mend per pointer kind: the pointer's ends itself (it is gone), and
@@ -326,6 +333,9 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // pass — an existence oracle on a capture-only key). The id is returned
     // either way; a hook needs it to supersede its own earlier summary.
     const existed = reader ? captured.existed : undefined;
+    // So a capture key's reply is a fresh capture's even where its re-capture
+    // wrote nothing (080's 'keep', SMD-2539): the chunk count and the notes
+    // below speak of what a capture computed, not of what landed.
     // Migration 035 (SMD-1453): a re-capture writes no provenance, so what was
     // named here and what stands — the row's pointer the store returned beside
     // `existed` — are what the note says.
