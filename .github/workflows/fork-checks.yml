@@ -1122,9 +1122,11 @@ jobs:
       # `sh -c` refuses without a worker key and on a setting that is not
       # digits — `--status` as a value once reached the CLI as a flag, ran
       # and exited 0 — both exit 2 before bun starts; and a well-formed
-      # setting with a key the server does not hold gets as far as the
-      # worker, whose own refusal (exit 2, worker-bootstrap.ts) proves the
-      # exec and the arguments were taken.
+      # setting gets as far as the worker, whose own refusal proves the exec
+      # and the arguments were taken: SMD-2599's start probe, which a
+      # --follow worker makes before it registers a key or claims anything,
+      # and which this stack's provider stub (embeddings only, a bare 404
+      # for chat) refuses with exit 2.
       - name: The workers profile refuses before it starts a follower
         working-directory: deploy
         run: |
@@ -1148,9 +1150,9 @@ jobs:
           worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_WORKERS='1 --limit 1'
           hold "OB1_EXTRACT_FOLLOW ('') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only"
           worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
-          hold 'OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS'
+          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
           worker consolidate -e OB1_WORKER_KEY=not-a-key
-          hold 'OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS'
+          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
 
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own
