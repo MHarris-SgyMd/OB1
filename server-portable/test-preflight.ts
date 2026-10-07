@@ -1576,7 +1576,7 @@ else {
   // A follower between its polls holds no lease: its fresh heartbeat for the
   // key reads running; a stale or ended one does not (SMD-2261 item 7).
   const followerBeat = (agoS: number, extra: object = {}) =>
-    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${CONS}`}, ${JSON.stringify({ v: 1, job: CONS, every_s: 60, running: false, outcome: "ok", passes: 3, ...extra })}, now() - make_interval(secs => ${agoS}))
+    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${CONS}`}, ${JSON.stringify({ v: 1, job: CONS, every_s: 60, running: false, outcome: "ok", ...extra })}, now() - make_interval(secs => ${agoS}))
            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
   // A live lease and a fresh heartbeat together: the lease's words, which say more.
   await claims`SELECT claim_thoughts(${CONS}, 'preflight-live', 1)`;
@@ -1585,7 +1585,7 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   // A fresh heartbeat for another key is not this key's follower.
   await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${CONS}`}`;
-  await claims`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:someone-else@p3', ${JSON.stringify({ v: 1, job: "consolidate:someone-else@p3", every_s: 60, running: false, outcome: "ok", passes: 1 })})`;
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:someone-else@p3', ${JSON.stringify({ v: 1, job: "consolidate:someone-else@p3", every_s: 60, running: false, outcome: "ok" })})`;
   assert(/stopped before it finished/.test(row((await run(SQL_ENV)).out, "consolidate pass")), "a fresh heartbeat under another key leaves this one stopped");
   await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:someone-else@p3'`;
   await followerBeat(20);
@@ -3287,12 +3287,12 @@ else {
     const beat = (key: string, value: object, agoS: number) =>
       claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${key}, ${JSON.stringify(value)}, now() - make_interval(secs => ${agoS}))
              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
-    const v = (o: object = {}) => ({ v: 1, every_s: 300, running: false, outcome: "ok", passes: 4, ...o });
+    const v = (o: object = {}) => ({ v: 1, every_s: 300, running: false, outcome: "ok", ...o });
     const none = await run(SQL_ENV);
     assert(/·\s+workers\s+no long-running worker has stamped a heartbeat on this brain\.$/m.test(none.out), `a brain no worker ran on says nothing is stamped, as a skip (${row(none.out, "workers")})`);
 
     await beat("heartbeat:board-sync", v(), 120);
-    await beat("heartbeat:extract:qwen2.5:7b@p2", v({ every_s: 60, running: true, passes: 0, outcome: null }), 30);
+    await beat("heartbeat:extract:qwen2.5:7b@p2", v({ every_s: 60, running: true, outcome: null }), 30);
     const fresh = await run(SQL_ENV);
     assert(/✓\s+workers\s+board-sync alive \(last stamped 2 min ago, every 300 s\); extract:qwen2\.5:7b@p2 running a pass \(last stamped 30 s ago, every 60 s\)$/m.test(fresh.out),
       `fresh heartbeats read ok, each named with its age and interval (${row(fresh.out, "workers")})`);
@@ -3321,7 +3321,7 @@ else {
     const wrong = await run(SQL_ENV);
     assert(/!\s+workers\s+board-sync alive, its last pass failed \(last stamped 60 s ago, every 300 s\); extract:qwen2\.5:7b@p2 alive \(last stamped 10 s ago, every 60 s; 12 of its last 50 answers malformed\)$/m.test(wrong.out),
       `a failed last pass and a malformed alarm each warn on a fresh heartbeat (${row(wrong.out, "workers")})`);
-    assert(/board-sync's last pass failed — errors in its report, or Linear or the database out of reach: its log says why\. extract:qwen2\.5:7b@p2's model answered 12 of 50 malformed: check OB1_METADATA_MODEL.*The row keeps the block until the follower judges a healthy one of 48 answers; once fixed, DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' clears it/.test(fix(wrong.out, "workers")),
+    assert(/board-sync's last pass failed — errors in its report, or Linear or the database out of reach: its log says why\. extract:qwen2\.5:7b@p2's model answered 12 of 50 malformed: check OB1_METADATA_MODEL.*The row carries the block until the follower judges its next block \(48 answers or more\)\. A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers\./.test(fix(wrong.out, "workers")),
       `…each with its own remedy (${fix(wrong.out, "workers")})`);
 
     // A custom --job: the restart names the job the follower works, not its key (review pass 1).
