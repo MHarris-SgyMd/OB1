@@ -1,13 +1,16 @@
 # The three-brain promotion pipeline as one stack (SMD-1806).
 #
-# Three brains over one corpus, each its own Postgres and its own server on its
-# own loopback port, one shared Ollama:
+# Three brains over one corpus, each its own Postgres and its own two servers —
+# the MCP server and the REST core (SMD-2284) — one shared Ollama, and one
+# proxy in front, the stack's one published port, where each tier is a path
+# (SMD-2294):
 #
-#   stable  (:8010) — the record, the only writer; rebuilt by db/ingest-records.ts.
-#   canary  (:8011) — main's shadow; refreshed from stable and migrated forward by
-#                     db/tier.ts on every merge, then the query log is replayed and
-#                     the ids diffed.
-#   working (:8012) — a per-worktree disposable copy of stable, migrated by the branch.
+#   stable  (/mcp)         — the record, the only writer; rebuilt by db/ingest-records.ts.
+#   canary  (/canary/mcp)  — main's shadow; refreshed from stable and migrated forward
+#                            by db/tier.ts on every merge, then the query log is
+#                            replayed and the ids diffed.
+#   working (/working/mcp) — a per-worktree disposable copy of stable, migrated by
+#                            the branch.
 #
 #   docker compose -f deploy/compose.tiers.yaml --profile local-models up --build
 #   podman compose -f deploy/compose.tiers.yaml --profile local-models up --build
@@ -16,21 +19,116 @@
 # instead — deploy/README.md, "Pinning a release"). Secrets come from deploy/.env (gitignored); copy
 # .env.example first. Each server's OB1_TIER falls back to its own tier, so leave
 # OB1_TIER UNSET in deploy/.env for this stack — setting it would force all three
-# servers to the same tier. Everything else is forwarded exactly as compose.yaml
-# forwards it (check 14 holds every OB1_* value to `${NAME}`/`${NAME:-default}`),
-# via the anchors below so the three servers cannot drift.
+# tiers to the same tier. The knobs in x-server-env below are forwarded as
+# compose.yaml forwards them (check 14 holds every OB1_* value to
+# `${NAME}`/`${NAME:-default}`), through the anchors so the tiers cannot drift.
 #
-# What the host can reach: the three servers, each on 127.0.0.1 unless its
-# `*_SERVER_BIND` knob says otherwise (check 13, SMD-1844). The three Postgres
-# services and Ollama publish nothing; each server reaches its own database by
-# service name on the compose network, and db/tier.ts reaches them the same way
-# through deploy/tier.sh --network open-brain-tiers_default (SMD-2036).
+# What the host can reach: the proxy alone, on 127.0.0.1:${SERVER_PORT:-8000}
+# unless SERVER_BIND says otherwise (check 13, SMD-1844) — compose.yaml's knobs,
+# since this stack stands in for it: run the two side by side with SERVER_PORT
+# set in the shell for one of them, which wins over deploy/.env. The
+# servers, the REST cores, the three Postgres services and Ollama publish
+# nothing. Each server reaches its own database by service name on the compose
+# network, and db/tier.ts reaches them the same way through deploy/tier.sh
+# --network open-brain-tiers_default (SMD-2036). The proxy reaches the servers
+# on the internal `mesh` network by name — mcp.ob1.internal, the stable tier's
+# as in compose.yaml, and mcp.canary.ob1.internal, mcp.working.ob1.internal —
+# never by service name. The REST cores answer there as api.ob1.internal,
+# api.canary.ob1.internal and api.working.ob1.internal, and nothing public
+# routes to them.
 
 name: open-brain-tiers
 
-# The server environment every tier shares — a copy of compose.yaml's server
-# block minus DATABASE_URL and OB1_TIER, which are per-tier below. Held to the
-# same house form (check 14): each OB1_* value is `${NAME}` or `${NAME:-default}`.
+# The proxy's route table, inline as compose.yaml's is (and for the same
+# reasons: one file to ship, a label copy so a changed route recreates the
+# proxy). A request's path reaches its server as it came: the server answers
+# POST at every path and /health under any prefix.
+#   stable   /mcp and everything under it — the stable tier's server;
+#   canary, working  /canary/mcp and /working/mcp and everything under each;
+#   tier-off every other path starting with /canary or /working, in any case:
+#            a bare 404, never another tier's server;
+#   health   GET, HEAD and OPTIONS /health at the origin root — stable's.
+# A canary or working tier that is stopped or still starting is a bare 404
+# (`tier-absent`, 502 rewritten); stable's /mcp and /health answer 502 then,
+# as compose.yaml's do. No route answers the root, /.well-known or /api: this stack has
+# no legacy window (SMD-2306), no authorization server and no public REST
+# path, so each is Traefik's own 404, and a tier is reached with keys.
+# `not-legacy` deletes compose.yaml's marker for the root URL's window, which
+# this stack does not have, so a client cannot have a key logged as a
+# straggler. The table holds no comment of its own: Traefik renders it as a
+# Go template first, so a comment line there is not inert, and check 27 holds
+# it byte for byte.
+x-tier-routes: &tier-routes |
+  http:
+    routers:
+      stable:
+        rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
+        priority: 30
+        entryPoints: [web]
+        middlewares: [not-legacy]
+        service: stable
+      canary:
+        rule: "Path(`/canary/mcp`) || PathPrefix(`/canary/mcp/`)"
+        priority: 30
+        entryPoints: [web]
+        middlewares: [not-legacy, tier-absent]
+        service: canary
+      working:
+        rule: "Path(`/working/mcp`) || PathPrefix(`/working/mcp/`)"
+        priority: 30
+        entryPoints: [web]
+        middlewares: [not-legacy, tier-absent]
+        service: working
+      tier-off:
+        rule: "PathRegexp(`(?i)^/(canary|working)`)"
+        priority: 25
+        entryPoints: [web]
+        middlewares: [not-served]
+        service: noop@internal
+      health:
+        rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
+        priority: 20
+        entryPoints: [web]
+        middlewares: [not-legacy]
+        service: stable
+    middlewares:
+      not-legacy:
+        headers:
+          customRequestHeaders:
+            X-OB1-Legacy-Route: ""
+      tier-absent:
+        errors:
+          status: ["502"]
+          service: noop@internal
+          statusRewrites:
+            "502": 404
+      not-served:
+        errors:
+          status: ["418"]
+          service: noop@internal
+          statusRewrites:
+            "418": 404
+    services:
+      stable:
+        loadBalancer:
+          servers:
+            - url: "http://mcp.ob1.internal.:8000"
+      canary:
+        loadBalancer:
+          servers:
+            - url: "http://mcp.canary.ob1.internal.:8000"
+      working:
+        loadBalancer:
+          servers:
+            - url: "http://mcp.working.ob1.internal.:8000"
+
+# The server environment every tier shares: compose.yaml's server knobs that a
+# tier's servers read (this stack runs no typed-decision tier, extraction or
+# authorization server, so their knobs are not here), less DATABASE_URL and
+# OB1_TIER, which are per-tier below, where each tier's server and REST core
+# take one block. Check 27 holds it to compose.yaml's server environment less
+# those knobs (its TIER_OMITTED_ENV), value for value, so a knob compose.yaml
+# gains fails until it is here or named there.
 x-server-env: &server-env
   MCP_ACCESS_KEYS: ${MCP_ACCESS_KEYS:?set MCP_ACCESS_KEYS in deploy/.env — mint with server-portable/keygen.ts}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -67,7 +165,7 @@ x-server-env: &server-env
   PORT: "8000"
 
 # The migrate one-shot's environment, minus its per-tier DATABASE_URL — the schema
-# contract every tier is built under (must match db/config.mjs, as compose.yaml).
+# contract every tier is built under: compose.yaml's, which check 27 holds.
 x-migrate-env: &migrate-env
   OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}
   OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
@@ -99,12 +197,18 @@ x-tier-migrate: &tier-migrate
     dockerfile: db/Dockerfile
   restart: "no"
 
+# The host's name for Docker on Linux, which provides none (podman and Docker
+# Desktop do): compose.yaml's server and REST core carry the same entry, so
+# .env.example's host-Ollama form is one address per runtime here too.
+x-host-alias: &host-alias
+  - "host.docker.internal:host-gateway"
+
 # The Ollama image, one anchor as in compose.yaml and held equal to its pin by
 # scripts/release-artifacts.ts (a rehearsal runs on every PR touching deploy/).
 x-ollama-image: &ollama-image ollama/ollama:0.34.3
 
 services:
-  # ── stable ───────────────────────────────────────────────────────────────
+  # ── stable ─────────────────────────────────────────────────────────────────
   stable-postgres:
     <<: *tier-postgres
     volumes:
@@ -119,18 +223,19 @@ services:
       stable-postgres:
         condition: service_healthy
 
+  # The stable tier's MCP server, named so its REST core runs this image by name.
   stable-server:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-stable-server
+    pull_policy: never
     build:
       context: ..
       dockerfile: server-portable/Dockerfile
       args:
         OB1_GIT_SHA: ${OB1_GIT_SHA:-unknown}
-    environment:
+    environment: &stable-env
       <<: *server-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@stable-postgres:5432/openbrain
       OB1_TIER: ${OB1_TIER:-stable}
-    ports:
-      - "${STABLE_SERVER_BIND:-127.0.0.1}:${STABLE_SERVER_PORT:-8010}:8000"
     depends_on:
       stable-postgres:
         condition: service_healthy
@@ -138,8 +243,40 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
+    networks:
+      default: {}
+      mesh:
+        aliases: [mcp.ob1.internal]
 
-  # ── canary ───────────────────────────────────────────────────────────────
+  # The stable tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
+  # the server's environment. Reached on the mesh, and on the default network
+  # where its database is; nothing public routes to it.
+  stable-api:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-stable-server
+    pull_policy: never
+    command: ["api.ts"]
+    environment: *stable-env
+    depends_on:
+      stable-postgres:
+        condition: service_healthy
+      stable-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
+    networks:
+      default: {}
+      mesh:
+        aliases: [api.ob1.internal]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+  # ── canary ─────────────────────────────────────────────────────────────────
   canary-postgres:
     <<: *tier-postgres
     volumes:
@@ -154,18 +291,19 @@ services:
       canary-postgres:
         condition: service_healthy
 
+  # The canary tier's MCP server, named so its REST core runs this image by name.
   canary-server:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-canary-server
+    pull_policy: never
     build:
       context: ..
       dockerfile: server-portable/Dockerfile
       args:
         OB1_GIT_SHA: ${OB1_GIT_SHA:-unknown}
-    environment:
+    environment: &canary-env
       <<: *server-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@canary-postgres:5432/openbrain
       OB1_TIER: ${OB1_TIER:-canary}
-    ports:
-      - "${CANARY_SERVER_BIND:-127.0.0.1}:${CANARY_SERVER_PORT:-8011}:8000"
     depends_on:
       canary-postgres:
         condition: service_healthy
@@ -173,8 +311,40 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
+    networks:
+      default: {}
+      mesh:
+        aliases: [mcp.canary.ob1.internal]
 
-  # ── working ──────────────────────────────────────────────────────────────
+  # The canary tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
+  # the server's environment. Reached on the mesh, and on the default network
+  # where its database is; nothing public routes to it.
+  canary-api:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-canary-server
+    pull_policy: never
+    command: ["api.ts"]
+    environment: *canary-env
+    depends_on:
+      canary-postgres:
+        condition: service_healthy
+      canary-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
+    networks:
+      default: {}
+      mesh:
+        aliases: [api.canary.ob1.internal]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+  # ── working ────────────────────────────────────────────────────────────────
   working-postgres:
     <<: *tier-postgres
     volumes:
@@ -189,18 +359,19 @@ services:
       working-postgres:
         condition: service_healthy
 
+  # The working tier's MCP server, named so its REST core runs this image by name.
   working-server:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-working-server
+    pull_policy: never
     build:
       context: ..
       dockerfile: server-portable/Dockerfile
       args:
         OB1_GIT_SHA: ${OB1_GIT_SHA:-unknown}
-    environment:
+    environment: &working-env
       <<: *server-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@working-postgres:5432/openbrain
       OB1_TIER: ${OB1_TIER:-working}
-    ports:
-      - "${WORKING_SERVER_BIND:-127.0.0.1}:${WORKING_SERVER_PORT:-8012}:8000"
     depends_on:
       working-postgres:
         condition: service_healthy
@@ -208,13 +379,97 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
+    networks:
+      default: {}
+      mesh:
+        aliases: [mcp.working.ob1.internal]
+
+  # The working tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
+  # the server's environment. Reached on the mesh, and on the default network
+  # where its database is; nothing public routes to it.
+  working-api:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-working-server
+    pull_policy: never
+    command: ["api.ts"]
+    environment: *working-env
+    depends_on:
+      working-postgres:
+        condition: service_healthy
+      working-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    extra_hosts: *host-alias
+    networks:
+      default: {}
+      mesh:
+        aliases: [api.working.ob1.internal]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+  # ── the proxy ────────────────────────────────────────────────────────────
+  # The stack's one published port, and compose.yaml's proxy in every key but
+  # its route table and its waiting, which check 27 holds: the same pinned
+  # image, unprivileged user, access log without query or header, and ping
+  # entrypoint. It does no authentication; each server checks the key.
+  proxy:
+    image: docker.io/library/traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: delete
+      TRAEFIK_PROVIDERS_FILE_DIRECTORY: /etc/traefik/dynamic
+      TRAEFIK_ACCESSLOG: "true"
+      TRAEFIK_ACCESSLOG_FORMAT: json
+      TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_CLIENTUSERNAME: drop
+      TRAEFIK_PING: "true"
+      TRAEFIK_PING_ENTRYPOINT: ping
+      TRAEFIK_ENTRYPOINTS_PING_ADDRESS: "127.0.0.1:8082"
+      TRAEFIK_GLOBAL_CHECKNEWVERSION: "false"
+      TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false"
+    configs:
+      - source: tier-routes
+        target: /etc/traefik/dynamic/routes.yaml
+    labels:
+      ob1.proxy-routes: *tier-routes
+    ports:
+      - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
+    # The default network, where the port is published, and the mesh, where
+    # it reaches each tier's server by name; no search domains, so an absent
+    # name is never looked for under the host's.
+    networks: [default, mesh]
+    dns_search: ["."]
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # No depends_on: the proxy starts in compose's first wave, before any
+    # migrator finishes, so every `up` brings the origin up. Compose stops
+    # scheduling once a dependency fails, and a proxy waiting on any tier —
+    # stable's alone, even — stayed created and never started when a tier's
+    # migration failed fast (review pass 2, 4 of 4 runs). A tier that never
+    # starts is its route's 404, and stable's /mcp answers 502 until its server
+    # is up, as compose.yaml's does while it starts. Name the services to
+    # start part of the stack: `up proxy` alone brings no tier.
+    restart: unless-stopped
 
   # ── the shared model provider ────────────────────────────────────────────
   # One Ollama for all three tiers (the cost SMD-1806 contains — one model server,
-  # three brains). Optional, enabled with `--profile local-models`; the three
-  # servers' OB1_LLM_BASE_URL falls back to it by name — and since SMD-1875
-  # each server's preflight dials that name once and refuses to start without
-  # the profile or a base URL of its own in deploy/.env.
+  # three brains). Optional, enabled with `--profile local-models`; the
+  # servers' and REST cores' OB1_LLM_BASE_URL falls back to it by name — and
+  # since SMD-1875 each one's preflight dials that name once and refuses to
+  # start without the profile or a base URL of its own in deploy/.env. Both
+  # services are compose.yaml's, key for key, which check 27 holds.
   ollama:
     image: *ollama-image
     profiles: ["local-models"]
@@ -235,12 +490,14 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
       OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
+      OB1_EXTRACT_ESCALATE_MODEL: ${OB1_EXTRACT_ESCALATE_MODEL:-}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         ollama pull ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
         ollama pull ${OB1_METADATA_MODEL:-qwen2.5:7b}
         [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
+        [ -z "$$OB1_EXTRACT_ESCALATE_MODEL" ] || ollama pull "$$OB1_EXTRACT_ESCALATE_MODEL"
     restart: "no"
 
 volumes:
@@ -248,3 +505,14 @@ volumes:
   canary-pgdata:
   working-pgdata:
   ollama:
+
+networks:
+  # The internal network the proxy reaches the tiers' servers on, and where
+  # their REST cores answer; no route out.
+  mesh:
+    internal: true
+
+configs:
+  # The proxy's route table, inline: x-tier-routes above.
+  tier-routes:
+    content: *tier-routes

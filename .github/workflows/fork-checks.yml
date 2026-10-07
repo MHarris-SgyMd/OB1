@@ -1151,6 +1151,12 @@ jobs:
           # config lists is the canary's own proxy, started only with --port).
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml config --format json \
             | jq -e '(.services.server.networks["stable-mesh"].aliases == ["mcp.canary.ob1.internal"]) and (.services.api.networks["stable-mesh"].aliases == ["api.canary.ob1.internal"]) and (.networks["stable-mesh"] | .external == true and .name == "open-brain_mesh") and (.networks.mesh.name == "open-brain-canary_mesh") and ([.services[] | select(.networks["stable-mesh"] != null)] | length == 2) and ([.services[].ports[]?] | length == 1)'
+          # The three-brain stack (SMD-2294) publishes its proxy alone, on
+          # loopback, on compose.yaml's pinned image, as compose renders it.
+          # Its routes and each tier's wiring are check-fork-consistency's
+          # check 27, which reads the file itself.
+          docker compose -f compose.tiers.yaml --profile local-models config --format json \
+            | jq -e --arg img "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1")) and (.services.proxy.ports | length == 1) and (.services.proxy.image == $img) and ([.services[] | select(.network_mode != null)] | length == 0)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
