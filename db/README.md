@@ -3430,12 +3430,12 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2465 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1100 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1111 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts) import with no side effect, refuse through run() — no database
-bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
+bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -3574,12 +3574,19 @@ and warning when none is set. **Errors and actors:** one `classifyError`
 classifies a provider error into thought / transient / fatal for both workers
 (extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
-`actorPayload` rather than by hand. The module returns its outcome rather than
+`actorPayload` rather than by hand. **Outages** (SMD-2599): a `--follow`
+worker of either kind waits a database outage out — `databaseUnavailable`
+names the errors that mean the database is not answering (a connection
+refused, closed or timed out; SQLSTATE class 08, 57P01–57P03, 53300), and
+`waitOut` checks again after 5 s, doubling to 5 min, until it answers or a stop
+wakes it; a thought in hand records nothing, and its lease is returned when the
+database is back. A run without `--follow` still exits 1 on it. The module returns its outcome rather than
 exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s,
 `consolidate.ts`'s and `reembed.ts`'s (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
-the `classifyError` rules and the identity cases that refuse before connecting;
-`test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that
+the `classifyError` rules, the identity cases that refuse before connecting and
+the outage rules and schedule; `test-live.ts` [24b] the capped resolve, and
+[10] and [16] each follower outlasting a database cut through a relay; and `test-cli.ts`'s census checks that
 no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
 `resolve_agent(` or `parseKeyRecords`.
 

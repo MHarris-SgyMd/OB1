@@ -77,6 +77,13 @@
  * enqueues every new or edited thought, and either the next run or a `--follow`
  * process extracts it. To stop: delete that row and the trigger goes quiet.
  *
+ * A `--follow` process outlasts the database going away (SMD-2599): an error
+ * that says it is not answering — refused, closed, starting up — is said once
+ * and waited out, checking after 5 s and twice as long each time up to 5 min
+ * (worker-bootstrap.ts, waitOut), and polling resumes when it answers. A
+ * thought in hand is recorded nothing; its lease is returned when the
+ * database is back. A run without --follow still exits 1 on it.
+ *
  * ── Identity ────────────────────────────────────────────────────────────────
  * The worker authenticates like any client: OB1_WORKER_KEY holds a raw access
  * key whose hash is in MCP_ACCESS_KEYS, and the run resolves it through
@@ -128,7 +135,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
@@ -875,12 +882,18 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let configError = null as string | null;
 
   /**
-   * --limit counts thoughts CLAIMED, reserved at claim time, so two workers
-   * cannot each take one on a limit of one. A claimed row is always processed.
+   * --limit counts the thoughts this run has TAKEN — claimed and not handed
+   * back unfinished — and the claims in flight, so two workers cannot each
+   * take one on a limit of one. A row a worker hands back unfinished as it
+   * ends (an outage, a stop) leaves `taken`, and counts again only if it is
+   * claimed again; a claim that never answered took nothing; a dead worker's
+   * leases are not this run's until a claim returns them (review pass 3: a
+   * reserved count patched at three sites, each with its own edge).
    */
-  let reserved = 0;
+  const taken = new Set<string>();
+  let claiming = 0;
   function limitReached(): boolean {
-    return LIMIT > 0 && reserved >= LIMIT;
+    return LIMIT > 0 && taken.size + claiming >= LIMIT;
   }
 
   /**
@@ -909,13 +922,18 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
         try {
-          const room = LIMIT > 0 ? LIMIT - reserved : BATCH;
+          const room = LIMIT > 0 ? LIMIT - taken.size - claiming : BATCH;
           if (room <= 0) return;
           const want = Math.min(BATCH, room);
-          reserved += want;
-          batch = (await sql`
-            SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${want}, ${TTL})`) as { thought_id: string; attempt: number }[];
-          reserved -= want - batch.length;
+          claiming += want;
+          try {
+            batch = (await sql`
+              SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${want}, ${TTL})`) as { thought_id: string; attempt: number }[];
+          } finally {
+            claiming -= want;
+          }
+          // Tracked under --limit only: a follower without one runs for months (review pass 4).
+          if (LIMIT > 0) for (const b of batch) taken.add(b.thought_id);
           if (batch.length === 0) return;
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
@@ -924,6 +942,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {
+          // A follower outlasts the database going away; an error no wait
+          // mends — a function missing, a grant revoked — ends the run, as the
+          // pass's own errors do (review pass 3); a passing one — a timeout, a
+          // serialization failure — costs this worker its poll (review pass 4).
+          if (FOLLOW && databasePermanent(e)) throw e;
           err(`  ${workerId}: ${(e as Error).message} — this worker stops`);
           return;
         }
@@ -951,6 +974,13 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // The calls a thrown thought made — its fourth window timing out
                 // is four calls — count too (second review pass).
                 calls += callsMadeBy(e);
+                // The database went away under the write: not the thought's, so
+                // nothing is recorded; the worker ends, and the follower waits
+                // for the database before its next pass (SMD-2599).
+                if (FOLLOW && databaseUnavailable(e)) {
+                  err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
+                  return;
+                }
                 const kind = classifyError(e, { maxTokensFatal: true });
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
                 if (kind === "thought") {
@@ -1041,6 +1071,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               gone = !exists;
             }
           } catch (e) {
+            // The database went away under the release: the row is this
+            // worker's again, for the finally to return and --limit to give
+            // back (review pass 4).
+            if (FOLLOW && databaseUnavailable(e)) hb.held.add(b.thought_id);
             err(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
             return;
           }
@@ -1077,11 +1111,16 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     } finally {
       hb.stop();
       beats += hb.beats;
+      // Rows still held are handed back unfinished: out of --limit's count
+      // before the release goes out, so another worker's claim of one counts it.
+      for (const id of hb.held) taken.delete(id);
       let freed = 0;
       try {
         [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       } catch (e) {
-        err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s`);
+        // A follower returns them once the database answers again (SMD-2599).
+        if (FOLLOW) unreturned.add(workerId);
+        err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s${FOLLOW ? ", or return when the database answers again" : ""}`);
       }
       activeWorkers.delete(workerId);
       // Outside the release's try: a Writer's throw here is the Writer's, not a
@@ -1159,6 +1198,13 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       `${retries ? `; once the model is right, ${retries}, with --job ${JOB} if OB1_METADATA_MODEL changes` : ""}.`;
   }
 
+  /**
+   * Workers whose leases could not be returned as they ended — the database
+   * was not answering — returned at the start of the next pass rather than
+   * left to expire a lease later (SMD-2599). A follower's only.
+   */
+  const unreturned = new Set<string>();
+
   /** The last judged block, for the heartbeat; null until one is judged. */
   let lastBlock: MalformedBlock | null = null;
   // A follower's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
@@ -1184,13 +1230,19 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       else if (!lastPassIdle) passOutcome = "ok";
       return counted;
     } catch (e) {
-      await stamper?.end("failed");
+      // A database outage is no end under --follow: followedPass waits it out
+      // (SMD-2599), and an ended stamp would say so for every pass after it.
+      if (!(FOLLOW && databaseUnavailable(e))) await stamper?.end("failed");
       throw e;
     }
   };
 
   let firstPass = true;
   async function pass(): Promise<Counts> {
+    for (const w of unreturned) {
+      await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
+      unreturned.delete(w);
+    }
     // The backlog is pooled once. While following, the trigger enqueues every
     // new capture, so re-running enqueue_thoughts — a scan of every thought —
     // each poll would find nothing and cost the table.
@@ -1220,7 +1272,29 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   out(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
 
-  let after = await stampedPass();
+  /**
+   * A follower's pass, which a database outage does not end (SMD-2599): an
+   * error that says the database is not answering is said once and waited
+   * out on outageWait's schedule, until a SELECT 1 answers — and the pass
+   * runs again at once, so its counts are read — or a stop wakes the wait,
+   * and the counts are null. Bun's pool reconnects on the next query. Any
+   * other error ends the run, as before; a run without --follow is unchanged.
+   */
+  async function followedPass(): Promise<Counts | null> {
+    for (;;) {
+      try {
+        return await stampedPass();
+      } catch (e) {
+        if (!FOLLOW || !databaseUnavailable(e)) throw e;
+        const down = Date.now();
+        err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+        if (!(await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal }))) return null;
+        out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+      }
+    }
+  }
+
+  let after = await followedPass();
   if (FOLLOW) {
     // Only a block it will poll after: the last pass's — the limit reached, or
     // stopped — is the final judgement's, which says the exit the run takes
@@ -1236,12 +1310,20 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
-      after = await stampedPass();
+      after = await followedPass();
       say();
       await stamper?.stamp(passOutcome, lastBlock);
     }
   }
 
+  // Leases a worker could not return as it ended, returned before the run
+  // ends where the database answers; else they expire within --ttl (review pass 3).
+  // All at once, and not when the run ended waiting for the database; one
+  // line when they could not go (review pass 4).
+  if (after !== null && unreturned.size > 0) {
+    const kept = (await Promise.all([...unreturned].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.then(() => 0, () => 1)))).reduce((a: number, b: number) => a + b, 0);
+    if (kept > 0) err(`  ${kept} worker(s)' leases could not be returned as the run ended; they expire within ${TTL} s`);
+  }
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
   // How the runaways were handled: a penalised same-model retry, an escalation to
   // the larger model (SMD-2000), or both. A count is named only when it happened,
@@ -1275,6 +1357,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // follower stopped at its --limit on a tripped block exits 3, and its row
   // carries the alarm too. Its age then warns, as it should.
   await stamper?.end(configError ? "failed" : "stopped", lastBlock);
+  if (after === null) {
+    // A follower stopped while it waited for the database: the counts
+    // cannot be read, and are not guessed (SMD-2599).
+    if (alarmLine) err(alarmLine);
+    err(`\n  stopped while the database was not answering: the pool's counts and the graph are not read — --status reads them once it answers`);
+    if (configError) err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}`);
+    return configError ? 2 : hardStopped ? 130 : 0;
+  }
   const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
   // The alarm before the failures: a model at fault explains them, and
   // --retry-failed under it would fail them again. Leased and pending rows keep

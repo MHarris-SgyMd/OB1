@@ -21,6 +21,7 @@ import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit }
 import { refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
 import { CLIENT_SCOPES, hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
+import { sleepUnless } from "./lease.ts";
 
 // ── Egress ───────────────────────────────────────────────────────────────────
 
@@ -217,4 +218,76 @@ export function classifyError(e: unknown, opts: { maxTokensFatal?: boolean } = {
   if (status !== undefined && status >= 400 && status < 500) return "fatal";
   if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
   return "thought";
+}
+
+// ── Outages (SMD-2599) ───────────────────────────────────────────────────────
+
+/**
+ * Whether a database error says the database is not answering, rather than
+ * that a statement is wrong: a --follow worker waits the first out and stops
+ * on the second, as it always has. Bun's client throws a PostgresError either
+ * way (measured on Bun 1.4 against a restarted and a stopped Postgres): the
+ * client's own codes for a connection refused, closed or timed out, and the
+ * server's SQLSTATE for a connection exception (class 08), an administrator's
+ * or a crash's shutdown and "starting up" (57P01–57P03), and too many
+ * connections (53300). A syntax error, a missing function or a constraint is
+ * none of these, and still ends the run.
+ */
+export function databaseUnavailable(e: unknown): boolean {
+  const { name, code, errno } = (e ?? {}) as { name?: string; code?: unknown; errno?: unknown };
+  if (name !== "PostgresError" && name !== "SQLError") return false;
+  if (typeof code === "string" && /^ERR_POSTGRES_(CONNECTION_|IDLE_TIMEOUT|LIFETIME_TIMEOUT)/.test(code)) return true;
+  return typeof errno === "string" && (errno.startsWith("08") || ["57P01", "57P02", "57P03", "53300"].includes(errno));
+}
+
+/**
+ * Whether a database error is one no wait mends (SMD-2599, review pass 4):
+ * a statement or object the server refuses — SQLSTATE class 42 (a function
+ * or table missing, a privilege revoked) or 28 (authorization) — or a
+ * database or schema that does not exist (3D000, 3F000). A follower's worker
+ * ends the run on one of these, as the pass's own errors do; anything else
+ * not databaseUnavailable's — a statement or lock timeout, out of memory or
+ * disk, a serialization failure — costs that worker its poll, as before.
+ */
+export function databasePermanent(e: unknown): boolean {
+  const { name, errno } = (e ?? {}) as { name?: string; errno?: unknown };
+  if (name !== "PostgresError" && name !== "SQLError") return false;
+  return typeof errno === "string" && (errno.startsWith("42") || errno.startsWith("28") || errno === "3D000" || errno === "3F000");
+}
+
+/** The wait between a follower's checks during an outage: 5 s, doubling, at most 5 min. */
+export const OUTAGE_FIRST_MS = 5_000;
+export const OUTAGE_MAX_MS = 300_000;
+
+/** The wait before check `step` (0 first) of an outage. */
+export function outageWait(step: number): number {
+  return Math.min(OUTAGE_MAX_MS, OUTAGE_FIRST_MS * 2 ** Math.min(step, 16));
+}
+
+/**
+ * Wait an outage out (SMD-2599): sleep, then `check`, on outageWait's
+ * schedule, until a check resolves — true — or `wake` aborts — false, the
+ * caller's stop. A check that throws what `outage` says is still the outage
+ * waits again; anything else is thrown, so a database that answers with a
+ * refusal (a password changed while it was down) ends the run rather than
+ * being waited on for ever.
+ */
+export async function waitOut(opts: {
+  check: () => Promise<unknown>;
+  outage: (e: unknown) => boolean;
+  wake: AbortSignal;
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<boolean> {
+  const sleep = opts.sleep ?? sleepUnless;
+  for (let step = 0; ; step++) {
+    await sleep(outageWait(step), opts.wake);
+    if (opts.wake.aborted) return false;
+    try {
+      await opts.check();
+      return true;
+    } catch (e) {
+      if (!opts.outage(e)) throw e;
+    }
+  }
 }
