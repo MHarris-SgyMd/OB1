@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2465 assertions: 2465 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty (80) migrations applied, and
+`bun test-schema.ts` prints `2501 assertions: 2501 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-one (81) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-2638).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1108,6 +1108,45 @@ reads to warn naming 080 when 073 or an earlier file is re-applied by hand over
 it. It refuses to apply without 060, 061 or 073. The fix needs this file and a
 server that sends the word: either alone, a capture key's re-capture merges.
 test-schema [71], test-upgrade [20ad], test-e2e-sql [13c].
+
+Migration 081 has a capture-only key's thought stop being its own once
+another key or board-sync takes it, lapses a pointer the key had already
+written onto it, and re-checks the key's pointer at its own write (SMD-2638).
+A capture-only key may set `supersedes` only on a thought it captured
+(SMD-2473), and capturing a text first was enough: a write key that later
+captured the same text landed on that row, board-sync adopted a row holding a
+ticket's text, and the capture key could still mark it superseded. One rule,
+`ob1_takes_thought`, says when an update event takes a thought from the agent
+that captured it — someone else then holds the text: another agent, or none,
+that records a re-capture, moves the text, or gives the metadata an `issue` it
+lacked (board-sync's adoption). A metadata move alone does not take it,
+attributed or not — a writer's tag, `backfill_thought_actors` (which this
+README tells operators to run after `set_agent_kind`), a recipe — nor does a
+vector, a pointer or a fingerprint: a lapse puts a summary the hook superseded
+back to current, so only a write that puts another's text on the row may
+cause one. `ob1_thought_taken` reads the rule for one thought; the server reads
+it beside the capture row for every target of a capture-only key's
+`supersedes`. A write key's re-capture that changes nothing writes no event, so
+the stores call `ob1_note_recapture` after a capture without `recapture: 'keep'`
+lands on an existing row: when the row's capture row says it was a
+capture-only key's (`actor_context` `"scope": "capture"`, which the server
+writes from SMD-2638 on), the row is not yet taken and the caller is another
+agent, it appends one update event, diff `{"recaptured": true}`, and projects
+it (only `updated_at` moves); any other row is left as 060 leaves it. The
+lapse, an AFTER INSERT trigger on `thought_audit`, clears the pointer onto a
+taken thought of each thought its capturer captured with that pointer under
+the capture scope and no update has re-pointed since — an update event of its
+own under the actor of the write that took the target. The check at the
+write, a second AFTER INSERT trigger on a capture-scoped capture event that
+names `supersedes`, locks the target `FOR SHARE` (which waits for any taker)
+and refuses the capture, SQLSTATE `OB004`, when the target is another's, taken,
+or already superseded; the server drops the pointer and writes again. One
+superseder per target bounds a lapse to one event. A pointer a write key set,
+and a capture-only key's rows from before the scope mark, are never lapsed,
+noted or checked. Apply it before running the server that reads it: without
+`ob1_thought_taken` every capture-only key's `supersedes` is the server's error
+to retry. It refuses to apply without 060 or 061. test-schema [72],
+test-upgrade [20ae], test-e2e-sql [13b] and [13e].
 
 ## What changed relative to the guide
 
@@ -3429,7 +3468,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2465 assertions, PGlite, no container
+bun test-schema.ts                          # 2501 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1100 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
