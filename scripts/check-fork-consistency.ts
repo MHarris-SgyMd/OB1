@@ -287,7 +287,8 @@
  *      deploy/compose.tiers.yaml, parsed and x-* anchors aside, equals the
  *      stack generated from compose.yaml and the tier list — every value
  *      compose.yaml's, renamed to the tier where it names one, what it leaves
- *      out named, the route table byte for byte with no comment in it — and
+ *      out named, the route table byte for byte with no comment in it; what
+ *      every tier would share refused as generated — and
  *      its raw text is one file to compose and Bun.YAML: no control, format or
  *      separator character but space and line feed, no `!` or `%` directive
  *      outside a comment, no YAML 1.1 number; each rule is the only catch of
@@ -5622,20 +5623,28 @@ checkCaptureTrust();
 // Postgres on stable's data directory, caught by one tier's half of one rule)
 // — so there is one rule for what the file says: parsed, x-* anchors aside
 // (compose ignores them), it equals the stack tierStack() generates from
-// compose.yaml and the tier list. Every value is compose.yaml's, renamed to
-// the tier where it names one — each tier's Postgres and its volume, its
-// migrator, its server and REST core under its image, database, OB1_TIER,
-// waits and mesh names — beside compose.yaml's proxy (the route table as its
-// config and label, waiting on nothing: a tier's failed migration left a
-// waiting proxy unstarted, review pass 2) and Ollama's two. What it leaves
-// out it names: TIER_OMITTED_ENV, the services this stack does not run
-// (TIER_ABSENT_SERVICES), the migrator's image name. The route table is held
+// compose.yaml and the tier list. Its services are compose.yaml's postgres,
+// migrate, server and api once per tier, each value compose.yaml's renamed to
+// the tier where it names one — the Postgres volume, the database in
+// DATABASE_URL, OB1_TIER, the image, the waits, the mesh name — beside
+// compose.yaml's proxy (the route table as its config and label, waiting on
+// nothing: a tier's failed migration left a waiting proxy unstarted, review
+// pass 2) and Ollama's two; compose.yaml's other services, and the volumes
+// and networks only they use, are not in this stack. Within the services it
+// takes, what it leaves out it names: TIER_OMITTED_ENV, the waits on
+// TIER_ABSENT_SERVICES, the migrator's image name and pull policy, OB1_TIER
+// and the name it is given. A value compose.yaml gains that every tier would
+// then share — a volume's or the mesh's name, a mount, a container name,
+// port or address, another alias, stable's mesh names in a canary or working
+// value — is refused as it is generated (the rule `shared`), not demanded of
+// this file: it is renamed per tier in tierStack() or left out. The route table is held
 // byte for byte, comment lines included, and carries none: Traefik renders
 // the file as a Go template before it reads the YAML, so a comment there can
 // emit a router (pass 7). Any value changed anywhere is a difference, so no
 // branch goes unprobed; an intended change edits tierStack() or
-// TIER_ROUTE_TABLE too, deliberately, as check 13's PUBLISHES does, and a key
-// compose.yaml gains fails here until it is carried over or left out by name.
+// TIER_ROUTE_TABLE too, deliberately, as check 13's PUBLISHES does, and a
+// value compose.yaml gains in a service tierStack() takes fails here until it
+// is carried over, renamed per tier or left out by name.
 //
 // The rest is on the raw text, so that compose and Bun.YAML read one file:
 // no control, format or separator character but the space and the line feed
@@ -5644,7 +5653,8 @@ checkCaptureTrust();
 // one and content to the other, pass 7); no `!` and no `%` directive outside a
 // comment (compose honours !reset and !override, also through a %TAG handle,
 // and Bun.YAML reads past them); no YAML 1.1 number (012 is 10 to compose, 12
-// to Bun.YAML). Each rule must be the only catch of one of TIER_STACK_PROBES.
+// to Bun.YAML). Each rule must be the only catch of one of TIER_STACK_PROBES
+// or, for `shared`, TIER_COMPOSE_PROBES, which edit compose.yaml.
 const TIERS = ["stable", "canary", "working"] as const;
 /** A tier's name on the mesh: compose.yaml's own for stable, the tier's under it for the others. */
 const tierMeshName = (kind: "mcp" | "api", tier: string) => tier === "stable" ? `${kind}.ob1.internal` : `${kind}.${tier}.ob1.internal`;
@@ -5664,9 +5674,9 @@ const TIER_ROUTE_TABLE = (() => {
     + "  services:\n"
     + TIERS.map((t) => `    ${t}:\n      loadBalancer:\n        servers:\n          - url: "http://${tierMeshName("mcp", t)}.:8000"\n`).join("");
 })();
-/** compose.yaml's server and REST core knobs a tier's servers do not read: this stack runs no extraction, typed-decision tier or authorization server, and no profiles. */
+/** compose.yaml's server and REST core knobs a tier's servers do not read: this stack runs no extraction, typed-decision tier or authorization server, and no auth or orchestration profile. */
 const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES"];
-/** compose.yaml's services this stack does not run, so nothing here waits on them. */
+/** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;
 /** A value as JSON with every object's keys sorted, so two parses compare by content, not key order. */
@@ -5688,7 +5698,8 @@ function tierStack(compose: Mapping): Mapping {
     "ollama-pull": c["ollama-pull"],
   };
   for (const t of TIERS) {
-    const db = `postgres://postgres:\${POSTGRES_PASSWORD}@${t}-postgres:5432/openbrain`;
+    // compose.yaml's database, its host the tier's Postgres.
+    const db = (env: unknown) => String(isMapping(env) ? env.DATABASE_URL : "").replace("@postgres:", `@${t}-postgres:`);
     // compose.yaml's postgres and migrate are the tier's; the services this stack does not run go.
     const toTier = (k: string) => TIER_ABSENT_SERVICES.includes(k) ? undefined : k === "postgres" || k === "migrate" ? `${t}-${k}` : k;
     const image = `\${COMPOSE_PROJECT_NAME:-open-brain-tiers}-${t}-server`;
@@ -5697,14 +5708,14 @@ function tierStack(compose: Mapping): Mapping {
       return {
         ...svc,
         image,
-        environment: { ...omitKeys(svc?.environment, TIER_OMITTED_ENV), DATABASE_URL: db, OB1_TIER: `\${OB1_TIER:-${t}}` },
+        environment: { ...omitKeys(svc?.environment, TIER_OMITTED_ENV), DATABASE_URL: db(svc?.environment), OB1_TIER: `\${OB1_TIER:-${t}}` },
         depends_on: renameKeys(svc?.depends_on, toTier),
-        networks: { ...networks, mesh: { ...(networks.mesh as Mapping), aliases: [tierMeshName(kind, t)] } },
+        networks: { ...networks, mesh: { ...(networks.mesh as Mapping), aliases: (((networks.mesh as Mapping)?.aliases ?? []) as string[]).map((a) => a === tierMeshName(kind, "stable") ? tierMeshName(kind, t) : a) } },
       };
     };
-    services[`${t}-postgres`] = { ...c.postgres, volumes: ((c.postgres?.volumes ?? []) as string[]).map((v) => v.replace(/^pgdata:/, `${t}-pgdata:`)) };
+    services[`${t}-postgres`] = { ...c.postgres, volumes: ((c.postgres?.volumes ?? []) as unknown[]).map((v) => typeof v === "string" ? v.replace(/^pgdata:/, `${t}-pgdata:`) : isMapping(v) && v.source === "pgdata" ? { ...v, source: `${t}-pgdata` } : v) };
     // Each tier builds its own migrator under compose's default name, so compose.yaml's image name and pull policy go.
-    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...(c.migrate?.environment as Mapping), DATABASE_URL: db }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
+    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...(c.migrate?.environment as Mapping), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
     services[`${t}-server`] = tierServer(c.server, "mcp");
     services[`${t}-api`] = tierServer(c.api, "api");
   }
@@ -5718,6 +5729,35 @@ function tierStack(compose: Mapping): Mapping {
     networks: { mesh: networks.mesh },
     configs: { "tier-routes": { ...(configs["proxy-routes"] as Mapping), content: TIER_ROUTE_TABLE } },
   };
+}
+/** What tierStack() generated that every tier would share, or that points a canary or working value at stable's — each to be renamed per tier in tierStack() or left out, never copied. */
+function tierHazards(want: Mapping): string[] {
+  const out: string[] = [];
+  const volumes = want.volumes as Mapping, networks = want.networks as Mapping, services = want.services as Record<string, Mapping>;
+  for (const t of TIERS) {
+    const v = volumes[`${t}-pgdata`];
+    if (isMapping(v) && ("name" in v || "external" in v)) out.push(`volumes.${t}-pgdata takes compose.yaml's pgdata ${"name" in v ? `name ${JSON.stringify(v.name)}` : "external flag"}, one volume for every tier`);
+  }
+  if (isMapping(networks.mesh) && ("name" in networks.mesh || "external" in networks.mesh)) out.push("networks.mesh takes compose.yaml's mesh name, so the tiers would join another project's mesh");
+  for (const t of TIERS) for (const kind of ["postgres", "migrate", "server", "api"]) {
+    const name = `${t}-${kind}`, svc = services[name] ?? {};
+    for (const k of ["container_name", "hostname", "ports"]) if (k in svc) out.push(`${name}.${k} would be one for every tier`);
+    for (const m of (svc.volumes ?? []) as unknown[]) {
+      const source = typeof m === "string" ? m.split(":")[0] : isMapping(m) ? m.source : m;
+      if (source !== `${t}-pgdata`) out.push(`${name} mounts ${JSON.stringify(typeof m === "string" ? m : source)}, which every tier would share`);
+    }
+    for (const [net, cfg] of Object.entries(isMapping(svc.networks) ? svc.networks : {})) {
+      const c = isMapping(cfg) ? cfg : {};
+      for (const k of ["ipv4_address", "ipv6_address"]) if (k in c) out.push(`${name}.networks.${net}.${k} would be one for every tier`);
+      const own = kind === "server" ? tierMeshName("mcp", t) : kind === "api" ? tierMeshName("api", t) : undefined;
+      for (const a of (c.aliases ?? []) as string[]) if (!(net === "mesh" && a === own)) out.push(`${name} answers as ${a} on ${net}, a name every tier would share`);
+    }
+    const env = isMapping(svc.environment) ? svc.environment : {};
+    if ("DATABASE_URL" in env && !String(env.DATABASE_URL).includes(`@${t}-postgres:`)) out.push(`${name}'s DATABASE_URL does not dial ${t}-postgres: compose.yaml's does not dial \`@postgres:\``);
+    const stableName = t === "stable" ? undefined : canonJson(svc).match(/\b(mcp|api)\.ob1\.internal\b/)?.[0];
+    if (stableName) out.push(`${name} names ${stableName}, stable's mesh name`);
+  }
+  return out;
 }
 /** Where two parsed values differ, by path: a mapping down to its keys, a multi-line string to its first differing line. */
 function pathDiffs(got: unknown, want: unknown, path: string, out: string[]) {
@@ -5735,7 +5775,7 @@ function pathDiffs(got: unknown, want: unknown, path: string, out: string[]) {
   }
 }
 /** Check 27's rules, by id; each must be the only catch of at least one probe. */
-const TIER_RULES = ["parse", "characters", "yaml-tags", "yaml-numbers", "stack"] as const;
+const TIER_RULES = ["parse", "characters", "yaml-tags", "yaml-numbers", "shared", "stack"] as const;
 type TierRule = (typeof TIER_RULES)[number];
 /** Every way compose.tiers.yaml's text strays from check 27's rules, each with its rule; none when it holds. */
 function tierStackProblems(tiersText: string, composeText: string): { rule: TierRule; message: string }[] {
@@ -5760,9 +5800,13 @@ function tierStackProblems(tiersText: string, composeText: string): { rule: Tier
     return [...out, { rule: "parse", message: `does not parse as YAML: ${(e as Error).message}` }];
   }
   if (!isMapping(doc)) return [...out, { rule: "parse", message: `is not one YAML mapping (${Array.isArray(doc) ? "several documents — compose merges them, so a second one adds what nothing here holds" : typeof doc})` }];
+  // A generated stack the tiers would share is refused as such, and nothing is demanded of this file.
+  const want = tierStack(compose);
+  const hazards = tierHazards(want);
+  if (hazards.length) return [...out, { rule: "shared", message: `tierStack() generates, from compose.yaml, what the tiers would share: ${hazards.slice(0, 6).join("; ")}${hazards.length > 6 ? `; and ${hazards.length - 6} more` : ""} — rename it per tier in tierStack(), or leave it out there by name; copying it here is not the fix` }];
   const diffs: string[] = [];
-  pathDiffs(JSON.parse(JSON.stringify(omitKeys(doc, Object.keys(doc).filter((k) => k.startsWith("x-"))))), JSON.parse(JSON.stringify(tierStack(compose))), "", diffs);
-  if (diffs.length) flag("stack", `is not the stack check 27 generates from compose.yaml and the tier list (tierStack): ${diffs.slice(0, 6).join("; ")}${diffs.length > 6 ? `; and ${diffs.length - 6} more` : ""} — an intended change edits tierStack() or TIER_ROUTE_TABLE too, and a key compose.yaml gained that a tier must not carry is left out there by name`);
+  pathDiffs(JSON.parse(JSON.stringify(omitKeys(doc, Object.keys(doc).filter((k) => k.startsWith("x-"))))), JSON.parse(JSON.stringify(want)), "", diffs);
+  if (diffs.length) flag("stack", `is not the stack check 27 generates from compose.yaml and the tier list (tierStack): ${diffs.slice(0, 6).join("; ")}${diffs.length > 6 ? `; and ${diffs.length - 6} more` : ""} — an intended change edits tierStack() or TIER_ROUTE_TABLE too; a value compose.yaml gained is carried over here, or renamed per tier or left out by name there`);
   return out;
 }
 /** [what the probe changes, then each edit: the text it replaces in compose.tiers.yaml, its replacement, and how many times the text occurs (1 if left out)] — each must turn check 27 false. */
@@ -5799,6 +5843,14 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["canary's REST core answering as stable's", ["        aliases: [api.canary.ob1.internal]", "        aliases: [api.ob1.internal]"]],
   ["working's server behind a profile", ["  working-server:\n", "  working-server:\n    profiles: [never]\n"]],
 ];
+/** [what the probe changes in compose.yaml, the text it replaces, its replacement] — each must turn check 27 false against compose.tiers.yaml as it is. */
+const TIER_COMPOSE_PROBES: [string, string, string][] = [
+  ["compose.yaml's Postgres volume given a fixed name", "\nvolumes:\n  pgdata:\n", "\nvolumes:\n  pgdata:\n    name: open-brain-pgdata\n"],
+  ["compose.yaml's mesh given a fixed name", "  mesh:\n    internal: true\n  egress: {}\n", "  mesh:\n    internal: true\n    name: ob1-mesh\n  egress: {}\n"],
+  ["compose.yaml's Postgres on a bind mount", "      - pgdata:/var/lib/postgresql/data\n", "      - ${PGDATA_DIR:-./pgdata}:/var/lib/postgresql/data\n"],
+  ["compose.yaml's server dialling the REST core by stable's mesh name", "      PORT: \"8000\"\n", "      PORT: \"8000\"\n      OB1_REST_URL: ${OB1_REST_URL:-http://api.ob1.internal.:8000}\n"],
+  ["compose.yaml's server under a second mesh alias", "        aliases: [mcp.ob1.internal]\n", "        aliases: [mcp.ob1.internal, brain.ob1.internal]\n"],
+];
 function checkTierStack() {
   const tiersPath = join(ROOT, "deploy", "compose.tiers.yaml");
   const composePath = join(ROOT, "deploy", "compose.yaml");
@@ -5806,17 +5858,26 @@ function checkTierStack() {
   const tiersText = readFileSync(tiersPath, "utf8");
   const composeText = readFileSync(composePath, "utf8");
   const soleCatch = new Set<TierRule>();
+  // On a file that already strays, every probe strays too, so which rule alone catches each says nothing.
+  const base = tierStackProblems(tiersText, composeText);
+  const caught = (what: string, problems: { rule: TierRule }[]) => {
+    const rules = new Set(problems.map((p) => p.rule));
+    if (rules.size === 0) fail(SELF, `check 27 no longer catches ${what} (its own probe)`);
+    if (rules.size === 1) soleCatch.add([...rules][0]);
+  };
+  for (const [what, from, to] of TIER_COMPOSE_PROBES) {
+    if (composeText.split(from).length !== 2) { fail(SELF, `check 27's probe "${what}" finds its anchor ${composeText.split(from).length - 1} times in deploy/compose.yaml, not once — re-anchor it`); continue; }
+    caught(what, tierStackProblems(tiersText, composeText.replace(from, to)));
+  }
   for (const [what, ...edits] of TIER_STACK_PROBES) {
     let text = tiersText;
     const misanchored = edits.find(([from, , n = 1]) => text.split(from).length - 1 !== n);
     if (misanchored) { fail(SELF, `check 27's probe "${what}" finds its anchor ${text.split(misanchored[0]).length - 1} times in deploy/compose.tiers.yaml, not ${misanchored[2] ?? 1} — re-anchor it`); continue; }
     for (const [from, to] of edits) text = text.replaceAll(from, to);
-    const rules = new Set(tierStackProblems(text, composeText).map((p) => p.rule));
-    if (rules.size === 0) fail(SELF, `check 27 no longer catches ${what} (its own probe)`);
-    if (rules.size === 1) soleCatch.add([...rules][0]);
+    caught(what, tierStackProblems(text, composeText));
   }
-  for (const rule of TIER_RULES) if (!soleCatch.has(rule)) fail(SELF, `check 27's rule "${rule}" is the only catch of none of its probes — add a probe that it alone catches, or remove the rule if another already holds what it does`);
-  for (const p of tierStackProblems(tiersText, composeText)) fail("deploy/compose.tiers.yaml", `${p.message} (SMD-2294)`);
+  if (base.length === 0) for (const rule of TIER_RULES) if (!soleCatch.has(rule)) fail(SELF, `check 27's rule "${rule}" is the only catch of none of its probes — add a probe that it alone catches, or remove the rule if another already holds what it does`);
+  for (const p of base) fail("deploy/compose.tiers.yaml", `${p.message} (SMD-2294)`);
 }
 checkTierStack();
 
