@@ -111,6 +111,8 @@ const EXPOSURE =
   "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
 const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
 const CATALOG_HINT = "run once as the SQL store (OB1_STORE unset, DATABASE_URL set) against the same database to read the catalog";
+
+// ── The pass rows' leases (SMD-2423) ────────────────────────────────────────
 /**
  * A pass's claimed rows by lease (SMD-2423): live, and expired by the rule
  * release_stale_leases and worker_status use (`ttl_expires_at < now()`), so the
