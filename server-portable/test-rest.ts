@@ -11,11 +11,11 @@
  *   bun test-rest.ts
  */
 
-import { createAssert } from "../db/test-support.ts";
+import { createAssert, RuntimeUrl } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { TOOLS, TOOL_NAMES, READ_TOOL_NAMES, CAPTURE_TOOL_NAMES, type ToolName } from "./tools.ts";
 import { SPECS, type Core } from "./core/index.ts";
-import { ok, refuse } from "./core/refusal.ts";
+import { META_KEYS_MAX, ok, refuse, TICKET_META_KEYS } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { ROUTES, pathFields } from "./rest/routes.ts";
 import { createRestApp, inputFromQuery, headerKeys, REFUSAL_STATUS } from "./rest/app.ts";
@@ -65,6 +65,12 @@ console.log("\n[2] The OpenAPI document lists every operation the tools expose, 
     assert(JSON.stringify(got) === JSON.stringify(want), `${t.name}: its ${op.requestBody ? "body" : "query"} is the schema's fields (${got.join(",")})`);
   }
   assert(ops.includes("whoami") && ops.includes("job_stream"), "whoami and the job stream are operations");
+  // The capture body's metadata says what is refused, from the constants the
+  // check reads (SMD-2617): the bound, and a capture-only key's ticket keys.
+  const capOp = doc.paths[ROUTES.capture_thought.path][ROUTES.capture_thought.method.toLowerCase()];
+  const metaDesc = String((capOp.requestBody?.content["application/json"].schema.properties?.metadata as { description?: string } | undefined)?.description ?? "");
+  assert(metaDesc.includes(`at most ${META_KEYS_MAX} keys`) && TICKET_META_KEYS.every((k) => metaDesc.includes(`\`${k}\``)) && /for a capture-only key/.test(metaDesc),
+    `the capture body's metadata names its bound and every ticket key a capture-only key is refused (${metaDesc.slice(-160)})`);
   assert(!JSON.stringify(doc).includes("GET /jobs/"), "no description sends a REST client to the MCP server's /jobs");
   for (const path of ["/v1/whoami", "/v1/jobs/{job_id}/stream", "/health"]) assert("405" in (doc.paths[path].get as unknown as { responses: Record<string, unknown> }).responses, `${path} documents its 405`);
   // Every status a keyed operation can answer is documented, each refusal's code under its own.
@@ -406,6 +412,18 @@ console.log("\n[8] One log line per request: method, route, status, time — no 
   const all = lines.join("\n");
   for (const s of ["9f0c1e2a", "someone-secret", "private query", "read-raw", "write-raw", "x=1"]) assert(!all.includes(s), `no ${s} in the log`);
   assert(/^api GET - 404 /.test(lines[3] ?? ""), `an unrouted request is logged without its path (${lines[3]})`);
+}
+
+console.log("\n[9] A request URL that will not parse — Bun builds it from the Host header unchecked — still has its query read: a refusal, not a 500 (SMD-2535)");
+{
+  // api.ts rebuilds such a request before routing (auth.ts routable); the
+  // app reads its query without parsing the URL all the same, with a path
+  // Hono reads from the string as it would.
+  for (const host of ["x:99999", "[::1", "brain.example.test:abc"]) {
+    const r = await json(await app.fetch(new RuntimeUrl(`http://${host}/v1/thoughts?limit=x`, { headers: { "x-brain-key": "read-raw" } })));
+    const issues = (r.body.issues ?? []) as { path: string }[];
+    assert(r.status === 400 && r.body.code === "REFUSED_INPUT" && issues[0]?.path === "limit", `Host ${host}: GET /v1/thoughts?limit=x → 400 naming limit (${r.status} ${JSON.stringify(r.body).slice(0, 80)})`);
+  }
 }
 
 report();

@@ -128,7 +128,7 @@ EMBEDDING (at least one required)
 
 ### 1. Run the server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and its own `_shared/` helpers, and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps):
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape), its own `_shared/` helpers and one name from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's): `routable`, the request rebuilt where its URL will not parse (SMD-2595) — its key is still its own compare. It is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps):
 
 ```bash
 PORT=8787 \

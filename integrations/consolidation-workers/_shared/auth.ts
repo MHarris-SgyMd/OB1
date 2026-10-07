@@ -284,6 +284,63 @@ export function canCapture(p: Principal): boolean {
 }
 
 /**
+ * A request URL's query string, read without parsing the rest of the URL,
+ * which Bun builds from the `Host` header unchecked: a `Host` the URL parser
+ * refuses would make `new URL(req.url)` throw (SMD-2535). The text from the
+ * first `?` before any `#` is handed over with that `?`, which the parser
+ * drops as `URL` does (`??key=` is a `?key` parameter), so for any URL Bun
+ * builds the parameters are its `searchParams`.
+ */
+export function queryOf(url: string): URLSearchParams {
+  const beforeHash = url.split("#", 1)[0];
+  const start = beforeHash.indexOf("?");
+  return new URLSearchParams(start === -1 ? "" : beforeHash.slice(start));
+}
+
+// routable and requestAt live here, not in root.ts, because this is the module
+// whose byte-identical copies sit in each vendored tree (`bun run sync-auth` in
+// extensions/) (SMD-2595).
+
+/** Where a request whose URL will not parse is rebuilt: `.invalid` (RFC 6761) is no host a client dials or an origin names. */
+export const REBUILD_ORIGIN = "http://unparsable-host.invalid";
+
+/**
+ * The request at `url`, built from its parts — method, headers, body and abort
+ * signal as they came — and never as `new Request(url, req)`: Bun's copy of a
+ * body does not settle when the client leaves mid-upload (its handler would
+ * wait forever), and a URL given beside a request is not normalised. A GET or
+ * HEAD arrives with a null body, so no method makes this throw. It is a new
+ * object, so a Bun API keyed by the request (`server.requestIP`) does not know
+ * it; nothing that calls this calls one.
+ */
+export function requestAt(req: Request, url: string | URL): Request {
+  // `duplex` is in no RequestInit type; typed, not cast, so a misspelt field still fails.
+  const init: RequestInit & { duplex: "half" } = { method: req.method, headers: req.headers, body: req.body, duplex: "half", signal: req.signal };
+  return new Request(url, init);
+}
+
+/**
+ * The request each entry that routes by its path routes by. Bun builds
+ * `req.url` from the request's `Host` header unchecked: a `Host` the URL
+ * parser refuses (`x:99999`, `[::1`, an unbracketed `::1:8000`) leaves a URL
+ * that will not parse, and no `Host` (HTTP/1.0) or one with userinfo, a path
+ * or a non-ASCII name leaves the bare request target (`/mcp`). Hono reads the
+ * path from that string, so a bare target is routed wrong (a 405 at /health),
+ * and a `new URL(req.url)` past it throws (a 500) (SMD-2535). Such a request
+ * is rebuilt at REBUILD_ORIGIN by requestAt: its path (normalised, as Bun
+ * normalises one at a `Host` that parses), and its query, method, headers,
+ * body and abort signal as they came; its `Host` header is kept, for
+ * oauth-edge.ts atOrigin to judge. A request whose URL parses passes as it
+ * came.
+ */
+export function routable(req: Request): Request {
+  if (URL.canParse(req.url)) return req;
+  const target = req.url.replace(/^[a-z][a-z\d+.-]*:\/\/[^/?#]*/i, "");
+  // Joined, not resolved against the origin: a target of `//x` is a path, not another host.
+  return requestAt(req, `${REBUILD_ORIGIN}${target.startsWith("/") ? "" : "/"}${target}`);
+}
+
+/**
  * Every key a request presents, wherever a client can put one: the `x-brain-key`
  * header (the core server's), `x-access-key` (the extensions'), `?key=` — the
  * URL form Claude Desktop's connectors need, kept for the reason the header of
@@ -298,7 +355,7 @@ export function canCapture(p: Principal): boolean {
 export function presentedKeys(req: Request): string[] {
   const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
   const forms = [req.headers.get("x-brain-key"), req.headers.get("x-access-key"),
-    new URL(req.url).searchParams.get("key"), bearer];
+    queryOf(req.url).get("key"), bearer];
   return [...new Set(forms.filter((k): k is string => Boolean(k)))];
 }
 

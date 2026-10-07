@@ -5202,6 +5202,8 @@ const ROOT_ROLE: TransportRole = {
 const API_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
     ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "serveHere"])],
+    // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
+    ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
   ]),
   wiring: false,

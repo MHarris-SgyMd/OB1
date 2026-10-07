@@ -974,10 +974,18 @@ export function captureEnvelope(
    * key's kind — a lowering stands, a raise is filed as a claim. Absent: no
    * `event` key, the key's trust.
    */
-  event?: WriteEvent
+  event?: WriteEvent,
+  /**
+   * Migration 080 (SMD-2539), `p_payload.recapture`: "keep" leaves a row that
+   * already holds the text as it is — no metadata merge, no event, save a
+   * vector it lacks. Absent: the merge, which a database before 080 does
+   * whatever this says.
+   */
+  recapture?: "keep"
 ): Record<string, unknown> {
   return {
     ...payload,
+    ...(recapture !== undefined ? { recapture } : {}),
     ...(event?.trust !== undefined ? { event: { trust: event.trust } } : {}),
     ...(actor ? { actor: actorPayload(actor) } : {}),
     ...(embeddingModel !== undefined ? { embedding_model: embeddingModel } : {}),
@@ -1320,6 +1328,12 @@ export interface ThoughtStore {
      * declares it — clamped to the key's kind by 073. Absent: the key's.
      */
     event?: WriteEvent;
+    /**
+     * Migration 080 (SMD-2539): "keep" for a key that cannot read — a capture
+     * that lands on an existing row writes nothing to it but a vector the row
+     * lacks. Absent: the merge (035). Rides the envelope (captureEnvelope).
+     */
+    recapture?: "keep";
   }): Promise<CaptureResult>;
 
   /**

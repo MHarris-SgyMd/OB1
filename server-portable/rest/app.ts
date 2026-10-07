@@ -8,7 +8,7 @@
 
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { authenticate, canRead, CLIENT_SCOPES, type AuthConfig, type Principal } from "../auth.ts";
+import { authenticate, canRead, CLIENT_SCOPES, queryOf, type AuthConfig, type Principal } from "../auth.ts";
 import type { AgentOutcome } from "../agents.ts";
 import { SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
@@ -240,7 +240,7 @@ export function createRestApp(deps: RestDeps): Hono {
       // only the one the route reads: input sent the other way is refused, not
       // dropped (a DELETE's body `detach_citations` would otherwise be ignored).
       let rest: Record<string, unknown>;
-      const query = new URL(c.req.url).searchParams;
+      const query = queryOf(c.req.url);
       if (readsQuery(route.method)) {
         // Bun hands a GET's handler no body, whatever was sent: the headers
         // that announced one are what is left of it (review pass 2).

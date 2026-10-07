@@ -1166,10 +1166,23 @@ jobs:
         run: |
           docker compose -f compose.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.proxy.ports | length == 1) and (.services.server | has("ports") | not) and (.services.api | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and ([.services[] | select(.network_mode != null)] | length == 0)'
+          # SMD-2294: the proxy dials every backend by a rooted mesh name — the
+          # server, the canary's and working tier's servers and the
+          # authorization server — never a service name, which a tier of
+          # another project on the mesh answers to as well.
+          docker compose -f compose.yaml config --format json \
+            | jq -e '[.configs["proxy-routes"].content | scan("url: \"([^\"]*)\"")[]] | . == ["http://mcp.ob1.internal.:8000", "http://mcp.canary.ob1.internal.:8000", "http://mcp.working.ob1.internal.:8000", "http://auth.ob1.internal.:3000"]'
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
-          # its route file is its label, as the base one is.
+          # its route file is its label, as the base one is; it dials the REST
+          # core by its rooted mesh name too (SMD-2294).
           docker compose -f compose.yaml -f compose.api-public.yaml --profile local-models config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-api-route"] == .configs["proxy-api-route"].content) and (.configs["proxy-api-route"].content | test("middlewares: \\[api-no-forwarder, api-strip\\]") and test("X-Brain-Forwarder: \"\""))'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-api-route"] == .configs["proxy-api-route"].content) and (.configs["proxy-api-route"].content | test("middlewares: \\[api-no-forwarder, api-strip\\]") and test("X-Brain-Forwarder: \"\"")) and ([.configs["proxy-api-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://api.ob1.internal.:8000"])'
+          # The canary's overlay (SMD-2294), as canary.sh runs it: its server and
+          # REST core join stable's mesh under the canary's names alone, the
+          # canary's own `mesh` stays its own, and it adds no port (the one the
+          # config lists is the canary's own proxy, started only with --port).
+          CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml config --format json \
+            | jq -e '(.services.server.networks["stable-mesh"].aliases == ["mcp.canary.ob1.internal"]) and (.services.api.networks["stable-mesh"].aliases == ["api.canary.ob1.internal"]) and (.networks["stable-mesh"] | .external == true and .name == "open-brain_mesh") and (.networks.mesh.name == "open-brain-canary_mesh") and ([.services[] | select(.networks["stable-mesh"] != null)] | length == 2) and ([.services[].ports[]?] | length == 1)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
@@ -1557,10 +1570,18 @@ jobs:
 
       # SMD-2038. deploy/canary.sh stands a canary beside this stack and takes
       # it down again; this step is its refusals, each with exit 2 and nothing
-      # started, stamped or registered: a port a container holds, one a host
-      # process listens on, a stable stamped or marked as a copy, a provider
-      # only stable's network has, and another connector under the name. A
-      # stand-in `claude` on PATH answers `mcp get` (FAKE_URL at FAKE_SCOPE,
+      # started, stamped or registered:
+      # - a stable whose proxy routes no /canary/mcp (a release from before
+      #   SMD-2294, made here by recreating the proxy with that label), and
+      #   one whose proxy is off its mesh;
+      # - an empty --port, and a --stable-project no compose project could
+      #   be named (a blank one would match every project's containers);
+      # - with --port, a port a container holds and one a host process
+      #   listens on;
+      # - a stable stamped or marked as a copy;
+      # - a provider only stable's network has;
+      # - another connector under the name.
+      # A stand-in `claude` on PATH answers `mcp get` (FAKE_URL at FAKE_SCOPE,
       # user by default) and logs every other call, the key cut; the next
       # step uses it too.
       - name: The canary's refusals, from deploy/canary.sh
@@ -1585,14 +1606,25 @@ jobs:
             [ "$rc" = 2 ] || { cat /tmp/canary-refused.out >&2; echo "canary.sh ${*:2}: expected a refusal (exit 2), got $rc" >&2; exit 1; }
             grep -F "$1" /tmp/canary-refused.out || { cat /tmp/canary-refused.out >&2; exit 1; }
           }
+          printf 'services:\n  proxy:\n    labels:\n      ob1.proxy-routes: "a route table from before SMD-2294"\n' > /tmp/old-stable.yaml
+          docker compose -f compose.yaml -f /tmp/old-stable.yaml up -d --wait --wait-timeout 120 proxy
+          refused 'routes no /canary/mcp' up
+          docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy
+          # A stable proxy off its own mesh could not reach a canary there.
+          docker network disconnect open-brain_mesh "$(docker compose -f compose.yaml ps -q proxy)"
+          refused 'is not on open-brain_mesh' up
+          docker compose -f compose.yaml up -d --force-recreate --wait --wait-timeout 120 proxy
+          refused 'takes a value' up --port ''
+          refused 'takes a value' up --name ' '
+          refused 'takes a compose project name' up --stable-project 'Open Brain'
           # The image the stack already pulled holds the port as well as any.
           docker run -d --name ob1-port-squat -p 127.0.0.1:8011:5432 -e POSTGRES_PASSWORD=squat pgvector/pgvector:0.8.6-pg16
-          refused 'port 8011 is published by ob1-port-squat' up
+          refused 'port 8011 is published by ob1-port-squat' up --port 8011
           docker rm -f ob1-port-squat
           python3 -m http.server 8011 --bind 127.0.0.1 > /dev/null 2>&1 &
           SQUAT=$!
           for _ in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/8011) 2>/dev/null && break; sleep 0.25; done
-          refused 'already listens on 127.0.0.1:8011' up
+          refused 'already listens on 127.0.0.1:8011' up --port 8011
           kill "$SQUAT"
           q "INSERT INTO ob1_config (key, value) VALUES ('tier', 'working')"
           refused "is stamped tier 'working'" up
@@ -1606,24 +1638,35 @@ jobs:
           [ -z "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" ] || { echo "a refusal stamped stable" >&2; exit 1; }
           [ ! -s /tmp/fake-claude.log ] || { cat /tmp/fake-claude.log >&2; echo "a refusal touched the connector" >&2; exit 1; }
 
-      # SMD-2038. The canary's life beside this stack, in two `up`s. canary.sh
-      # runs compose.yaml again as the project open-brain-canary: its
-      # Postgres, a refresh from this stack's through tier.sh on both
-      # networks, its server built from this checkout behind its own proxy on
-      # 8011 (SMD-1846), then the smoke.
-      # The first `up --connect` runs over a stable carrying the protective
-      # mark `stable` (not a refresh's) and under SERVER_BIND=0.0.0.0; it
-      # stamps stable, stays on loopback, registers the connector, and its
-      # vector probe must pass on the thought whose text holds literals (SMD
-      # key, path), searched for without them. The second `up` runs with the
-      # stub serving another model: the thought put on stable just before it
-      # reaches the canary, and the smoke fails on the 50% floor. Then
-      # teardown: `down --volumes` refused on a canary stamped working; an
-      # empty canary deleted; with no volume, nothing to delete and a
-      # local-scope connector left alone; a volume by the canary's name that
-      # compose did not make, holding a table, refused with nothing left
-      # running; a last `down` removing its own connector. The stack is the
-      # one it was: the same Postgres container, its thoughts, its server.
+      # SMD-2038, SMD-2294. The canary's life beside this stack, in three `up`s.
+      # canary.sh runs compose.yaml again as the project open-brain-canary:
+      # its Postgres, a refresh from this stack's through tier.sh on both
+      # networks, its server and REST core built from this checkout, then the
+      # smoke.
+      # - The first `up --connect` answers at /canary/mcp on this stack's own
+      #   origin. Its servers join open-brain_mesh under the canary's names
+      #   alone, and no canary proxy runs. It runs over a stable carrying the
+      #   protective mark `stable` (not a refresh's). It stamps stable,
+      #   registers the connector at /canary/mcp, and reports tier canary with
+      #   OAuth not configured. Its vector probe must pass on the thought whose
+      #   text holds literals (SMD key, path), searched for without them.
+      # - The second `up` is the fallback, --port 8011 under
+      #   SERVER_BIND=0.0.0.0. Its own proxy is on loopback, its servers have
+      #   left stable's mesh, and /canary/mcp is the proxy's 404 again. The stub
+      #   serves another model: the thought put on stable just before it
+      #   reaches the canary, and the smoke fails on the 50% floor.
+      # - A third `up`, back on stable's origin: the canary's proxy is removed,
+      #   8011 is free, and a connector left at the old URL is named.
+      # - Then teardown:
+      #   - `down --volumes` is refused on a canary stamped working;
+      #   - an empty canary is deleted;
+      #   - with no volume, there is nothing to delete, and a local-scope
+      #     connector is left alone;
+      #   - a volume by the canary's name that compose did not make, holding a
+      #     table, is refused with nothing left running;
+      #   - a last `down` removes its own connector.
+      # The stack is the one it was: the same Postgres container, its thoughts,
+      # its server.
       - name: A canary stands beside the stack from deploy/canary.sh
         working-directory: deploy
         run: |
@@ -1632,6 +1675,9 @@ jobs:
           canary_left() { docker ps -aq --filter label=com.docker.compose.project=open-brain-canary; }
           vec() { curl -s http://127.0.0.1:11434/v1/embeddings -d "{\"input\": \"$1\"}" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["data"][0]["embedding"], separators=(",", ":")))'; }
           seed() { q "SELECT upsert_thought('$1', '{\"metadata\": {\"source\": \"ci-tier\"}}'::jsonb, '$(vec "$1")'::vector)" > /dev/null; q "SELECT id FROM thoughts WHERE content = '$1'"; }
+          # Each canary server's aliases on stable's mesh, one container a line.
+          on_stable_mesh() { docker inspect -f '{{with index .NetworkSettings.Networks "open-brain_mesh"}}{{join .Aliases " "}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q "$1")"; }
+          health() { curl -s --max-time 20 -H "x-brain-key: $OB1_SMOKE_KEY" "http://127.0.0.1:8010$1/health"; }
           export PATH="/tmp/fake-bin:$PATH" FAKE_URL=""
           : > /tmp/fake-claude.log
           refused() {
@@ -1642,22 +1688,54 @@ jobs:
           BEFORE="$(docker compose -f compose.yaml ps -q postgres)"
           LITERAL_ID="$(seed 'canary literal probe SMD-4242 in deploy/probe_file.ts: the wombat register of burrows')"
           q "ALTER DATABASE openbrain SET ob1.refresh_target = 'stable'"
-          SERVER_BIND=0.0.0.0 ./canary.sh up --connect | tee /tmp/canary-up.out
+          ./canary.sh up --connect | tee /tmp/canary-up.out
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
+          # The auth step left OB1_PUBLIC_ORIGIN in .env: the canary on stable's
+          # origin is reached wherever that origin is, and says so.
+          grep -F 'note: stable has a public origin (https://brain.example.test)' /tmp/canary-up.out
           grep -F "returns it first: $LITERAL_ID at" /tmp/canary-up.out
-          grep -F 'mcp add --transport http --scope user open-brain-canary http://127.0.0.1:8011/mcp -H' /tmp/fake-claude.log
-          [ "$(docker compose -p open-brain-canary -f compose.yaml port proxy 8000)" = 127.0.0.1:8011 ] || { echo "the canary is not on loopback only" >&2; exit 1; }
+          grep -F 'mcp add --transport http --scope user open-brain-canary http://127.0.0.1:8010/canary/mcp -H' /tmp/fake-claude.log
+          [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy)" ] || { echo "a canary on stable's origin runs a proxy of its own" >&2; exit 1; }
+          for svc in server:mcp api:api; do
+            got=$(on_stable_mesh "${svc%%:*}")
+            grep -qw "${svc#*:}.canary.ob1.internal" <<<"$got" || { echo "the canary's ${svc%%:*} is not on stable's mesh as ${svc#*:}.canary.ob1.internal: '$got'" >&2; exit 1; }
+            if grep -qwE '(mcp|api|auth)\.ob1\.internal' <<<"$got"; then echo "the canary's ${svc%%:*} claims one of stable's own names on stable's mesh: '$got'" >&2; exit 1; fi
+          done
+          jq -e '.tier == "canary" and .oauth.configured == false' <<<"$(health /canary/mcp)" > /dev/null || { echo "/canary/mcp/health is not the canary's, or it is configured for OAuth: $(health /canary/mcp | head -c 200)" >&2; exit 1; }
+          jq -e '.tier != "canary"' <<<"$(health /mcp)" > /dev/null || { echo "stable's /mcp answered as the canary" >&2; exit 1; }
           [ "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" = stable ] || { echo "stable is not stamped tier=stable" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the canary did not get the tier step's thought" >&2; exit 1; }
           seed 'canary re-sync probe: the numbat almanac' > /dev/null
           touch /tmp/provider-stub-wrong
-          rc=0; ./canary.sh up > /tmp/canary-wrong.out 2>&1 || rc=$?
+          rc=0; SERVER_BIND=0.0.0.0 ./canary.sh up --port 8011 > /tmp/canary-wrong.out 2>&1 || rc=$?
           rm -f /tmp/provider-stub-wrong
           [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
           grep -F 'returned none of' /tmp/canary-wrong.out
           grep -F 'canary server stopped for the refresh' /tmp/canary-wrong.out
+          grep -F 'canary at http://127.0.0.1:8011/mcp' /tmp/canary-wrong.out
+          [ "$(docker compose -p open-brain-canary -f compose.yaml port proxy 8000)" = 127.0.0.1:8011 ] || { echo "the canary's own proxy is not on loopback only" >&2; exit 1; }
+          [ -z "$(on_stable_mesh server)$(on_stable_mesh api)" ] || { echo "the canary behind its own proxy is still on stable's mesh" >&2; exit 1; }
+          [ "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/canary/mcp/health)" = 404 ] || { echo "/canary/mcp still answers with the canary behind its own proxy" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
+          # Back on stable's origin, the way a canary stood up before SMD-2294
+          # moves over: its own proxy goes, its port is free, and a connector
+          # left at the old URL is named.
+          FAKE_URL='http://127.0.0.1:8011/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-back.out
+          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…, where this canary no longer answers: move it with claude mcp remove --scope user open-brain-canary, then up --connect' /tmp/canary-back.out
+          # The proxy went last, after the health wait and the connector step
+          # (whose note prints after both): a run that failed before then would
+          # have kept it, and the connector at its port the canary's.
+          noted=$(grep -nF 'connector open-brain-canary still points at' /tmp/canary-back.out | cut -d: -f1)
+          removed=$(grep -nF 'canary proxy removed' /tmp/canary-back.out | cut -d: -f1)
+          if ! { [ -n "$noted" ] && [ -n "$removed" ] && [ "$noted" -lt "$removed" ]; }; then echo "the canary's own proxy was not removed after the connector step (noted at line ${noted:-?}, removed at ${removed:-?})" >&2; exit 1; fi
+          [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy)" ] || { echo "the canary's own proxy outlived the move to stable's origin" >&2; exit 1; }
+          if (exec 3<>/dev/tcp/127.0.0.1/8011) 2>/dev/null; then echo "port 8011 still answers after the canary's proxy went" >&2; exit 1; fi
+          grep -qw mcp.canary.ob1.internal <<<"$(on_stable_mesh server)" || { echo "the canary back on stable's origin is not on stable's mesh" >&2; exit 1; }
+          # The first keyed request to a server this --no-smoke run recreated:
+          # a cold key registry answers plain `ok` (smoke.sh warms it the same way).
+          for _ in 1 2 3 4 5; do jq -e '.tier == "canary"' <<<"$(health /canary/mcp)" > /dev/null 2>&1 && break; sleep 2; done
+          jq -e '.tier == "canary"' <<<"$(health /canary/mcp)" > /dev/null || { echo "/canary/mcp does not answer as the canary again: $(health /canary/mcp | head -c 120)" >&2; exit 1; }
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
           cq "ALTER DATABASE openbrain RESET ob1.refresh_target"
           refused 'refusing to delete its volume' down --volumes
@@ -1669,10 +1747,13 @@ jobs:
           docker compose -p open-brain-canary -f compose.yaml up -d --wait postgres
           ./canary.sh down --volumes | tee /tmp/canary-down-empty.out
           grep -F 'canary down, its database deleted' /tmp/canary-down-empty.out
-          FAKE_SCOPE="Local config (private to you in this project)" FAKE_URL=http://127.0.0.1:8011/ ./canary.sh down --volumes | tee /tmp/canary-down2.out
+          FAKE_SCOPE="Local config (private to you in this project)" FAKE_URL=http://127.0.0.1:8010/canary/mcp ./canary.sh down --volumes | tee /tmp/canary-down2.out
           grep -F 'nothing to delete' /tmp/canary-down2.out
           grep -F 'is in local scope, not user — left as it is' /tmp/canary-down2.out
           ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed a local-scope connector" >&2; exit 1; }
+          FAKE_URL='http://127.0.0.1:8010/mcp?key=x' ./canary.sh down | tee /tmp/canary-down3.out
+          grep -F "not this canary's" /tmp/canary-down3.out
+          ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed a connector at stable's own /mcp" >&2; exit 1; }
           docker volume create open-brain-canary_pgdata
           docker run -d --name ob1-volume-squat -e POSTGRES_PASSWORD=squat -e POSTGRES_DB=openbrain -v open-brain-canary_pgdata:/var/lib/postgresql/data pgvector/pgvector:0.8.6-pg16
           for _ in $(seq 1 60); do docker exec -e PGPASSWORD=squat ob1-volume-squat psql -h 127.0.0.1 -U postgres -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1 && break; sleep 1; done
@@ -1682,7 +1763,7 @@ jobs:
           [ -z "$(canary_left)" ] || { echo "the refused down left canary containers" >&2; exit 1; }
           docker volume inspect open-brain-canary_pgdata > /dev/null
           docker volume rm open-brain-canary_pgdata
-          FAKE_URL=http://127.0.0.1:8011/ ./canary.sh down
+          FAKE_URL=http://127.0.0.1:8010/canary/mcp ./canary.sh down
           grep -F 'mcp remove --scope user open-brain-canary' /tmp/fake-claude.log
           [ -z "$(canary_left)" ] || { echo "canary containers remain" >&2; exit 1; }
           [ -z "$(docker volume ls -q --filter label=com.docker.compose.project=open-brain-canary)" ] || { echo "the canary's volume remains" >&2; exit 1; }
@@ -1826,6 +1907,77 @@ jobs:
           LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
           if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
           grep -qE '^.*api GET /v1/whoami 200 [0-9]+ms$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+
+      # SMD-2294: a canary or working tier of its own compose project joins
+      # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
+      # /canary/mcp and /working/mcp there. With no tier both are the proxy's
+      # bodiless 404, and so is every other path starting with either word,
+      # in any case and whatever follows (an escaped slash, a `;`, a pasted
+      # zero-width space), which never falls to the legacy route. A stand-in per tier on
+      # the mesh, under its tier's name and under `server` as a tier's
+      # container is, answers its own route: the client's Host passed, the
+      # legacy marker deleted, its own 4xx and 5xx untouched, headers and all
+      # (only a 502 is the proxy's 404). From the mesh, `server` then names
+      # more than one container: the collision the route table's mesh names
+      # avoid while no tier claims stable's own names, which the static check
+      # in "Every published port binds loopback" holds. Gone, each is a 404,
+      # and the proxy logged no route-table error.
+      - name: The tier routes reach a tier on the mesh, and nothing else under its prefix
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -sS -o /tmp/tier-body -D /tmp/tier-head -w '%{http_code}' --max-time 15 "$@"; }
+          bare404() { c=$(code "${@:2}") || c="no answer (curl exit $?)"; if ! { [ "$c" = 404 ] && [ ! -s /tmp/tier-body ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's bodiless 404" >&2; exit 1; fi; }
+          bare404 'GET /canary/mcp/health with no canary' "$B/canary/mcp/health"
+          bare404 'a keyed tools/list at /canary/mcp with no canary' -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
+          bare404 'GET /working/mcp/health with no working tier' "$B/working/mcp/health"
+          offprefix() {
+            for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
+              bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
+            done
+          }
+          offprefix ""
+          trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          # Each answers /…/status/NNN with that status, its body and an
+          # x-tier header, and anything else with the path, the Host and the
+          # legacy marker it was sent.
+          for tier in canary working; do
+            docker run -d --name "ob1-ci-$tier-stand-in" --network open-brain_mesh --network-alias "mcp.$tier.ob1.internal" --network-alias server --entrypoint bun "$IMAGE" \
+              -e "Bun.serve({ port: 8000, fetch(r) { const p = new URL(r.url).pathname; const s = /\/status\/(\d+)$/.exec(p); if (s) return new Response('$tier ' + s[1], { status: Number(s[1]), headers: { 'x-tier': '$tier' } }); return new Response('$tier ' + p + ' host=' + r.headers.get('host') + ' legacy=' + (r.headers.get('x-ob1-legacy-route') ?? '-')); } })" > /dev/null
+          done
+          H="${B#http://}"
+          for tier in canary working; do
+            want="$tier /$tier/mcp/health host=$H legacy=-"
+            for _ in $(seq 1 40); do [ "$(curl -s --max-time 2 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health")" = "$want" ] && break; sleep 0.5; done
+            got=$(curl -sS --max-time 5 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health") || got="no answer (curl exit $?)"
+            [ "$got" = "$want" ] || { echo "/$tier/mcp/health did not reach the $tier stand-in with the client's Host and no legacy marker: '$got'" >&2; exit 1; }
+            got=$(curl -sS --max-time 5 -X POST -d '{}' "$B/$tier/mcp") || got="no answer (curl exit $?)"
+            [ "$got" = "$tier /$tier/mcp host=$H legacy=-" ] || { echo "a POST to /$tier/mcp did not reach the $tier stand-in: '$got'" >&2; exit 1; }
+            for s in 401 404 429 500 503 504; do
+              c=$(code "$B/$tier/mcp/status/$s") || c="no answer (curl exit $?)"
+              if ! { [ "$c" = "$s" ] && [ "$(cat /tmp/tier-body)" = "$tier $s" ] && grep -qix "x-tier: $tier"$'\r' /tmp/tier-head; }; then echo "the $tier tier's own $s came back as $c '$(head -c 80 /tmp/tier-body)', or without its header: only a 502 is the proxy's" >&2; exit 1; fi
+            done
+            bare404 "the $tier tier's own 502" "$B/$tier/mcp/status/502"
+          done
+          offprefix " beside both tiers"
+          holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')
+          [ "$holders" -ge 2 ] || { echo "from the mesh, \`server\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }
+          [ "$(curl -s --max-time 5 "$B/mcp/health")" = ok ] || { echo "stable's /mcp/health stopped answering ok beside the tiers" >&2; exit 1; }
+          docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
+          for tier in canary working; do
+            for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health" || true)" = 404 ] && break; sleep 0.5; done
+            bare404 "GET /$tier/mcp/health once the tier left" "$B/$tier/mcp/health"
+          done
+          # A router whose rule does not compile is dropped, its paths to the
+          # next router (legacy), and a route file Traefik cannot read takes
+          # every route with it, with nothing but this line to say so. Traefik
+          # colours the level whatever --no-color asks, hence ERR.* and no space.
+          # An errors middleware's line about a Host it cannot parse is the
+          # client's, not the table's.
+          PLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
+          if grep -E 'ERR.*(building configuration|routerName=|middlewareName=|serviceName=)' <<<"$PLOG" | grep -v 'Unable to create error page request'; then echo "the proxy logged a route-table error (above): the router it names was dropped" >&2; exit 1; fi
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy

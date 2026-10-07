@@ -34,10 +34,10 @@ import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MO
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
-import { workerIdentity } from "./worker-bootstrap.ts";
+import { PROBE_PROMPT, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
@@ -51,11 +51,13 @@ import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.t
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
-import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
+import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
+import { passStamper, stampKey } from "./pass-stamp.ts";
+import { parseHeartbeats } from "../server-portable/brain-info.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, replayOne, targetRefusal, where } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, replayOne, settleRefreshed, targetRefusal, where } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -71,6 +73,17 @@ if (!URL_) {
 
 
 const { assert, skip, total, skipped, docCheck, report } = createAssert();
+
+/**
+ * Cut the pauses before a follower's provider outage to 100 ms in this
+ * process (SMD-2599): the worker reads the exported array as it runs.
+ * Returns the restore, for the case's finally.
+ */
+function shortenPauses(): () => void {
+  const saved = [...TRANSIENT_PAUSES_MS];
+  TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
+  return () => { TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved); };
+}
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
 function migrate(...extra: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
@@ -2793,8 +2806,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(ghost.length === 1, "another process holds the one pending row");
   {
     const pf = await preflight();
-    assert(PASS_LINE.exec(pf.out)?.[1] === "40 thoughts — 39 succeeded, 0 failed, 1 in flight, 0 pending, 0 not yet in the pool",
-      `preflight reports the lease another process holds as unfinished work (${PASS_LINE.exec(pf.out)?.[1] ?? "no re-embed pass line"})`);
+    // Its lease is live, so the pass is running, not stopped: ok, no remedy
+    // that would start a second worker (SMD-2423).
+    const running = /re-embed pass\s+reembed:test: (\d+ thoughts — [^\n]*not yet in the pool) — a pass under this key is running: 1 in flight/.exec(pf.out)?.[1];
+    assert(running === "40 thoughts — 39 succeeded, 0 failed, 1 in flight, 0 pending, 0 not yet in the pool",
+      `preflight reports the lease another process holds as unfinished work, running (${running ?? "no running re-embed pass line"})`);
   }
   const ghostStatus = await reembed("--status");
   assert(/held by ghost: 1 rows, earliest lease deadline \d{4}-\d\d-\d\d [^\n]*release_claims_for_worker/.test(ghostStatus.out),
@@ -3445,14 +3461,41 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   let unavailableCalls = 0;
   /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
   let unavailableMs = 0;
+  /**
+   * Until this time every request — a follower's probe too — answers `down`
+   * (SMD-2599): a 503, a 404 for the model, or no answer at all ("hang").
+   * `probes` counts the follower's one-token probes, answered apart from the
+   * calls so a follower's start costs no counted call.
+   */
+  let downUntil = 0;
+  let down: "503" | "404" | "hang" = "503";
+  let probes = 0;
+  /** The models a probe or a call named, whatever the answer: the escalation model's start check must load nothing (review pass 3). */
+  const modelsNamed: string[] = [];
   const model = Bun.serve({
     port: 0,
     async fetch(req) {
+      // GET /models, the escalation model's start check: what an Ollama lists (review pass 3).
+      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "stub-escalate:latest" }] });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      modelsNamed.push(body.model ?? "");
+      if (Date.now() < downUntil) {
+        if (down === "hang") return neverAnswers();
+        return down === "404"
+          ? new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 })
+          : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      }
+      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        probes++;
+        if (body.model === "absent-model") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       calls++;
       modelsAsked.push(body.model ?? "");
       // The thought is the user message; the rules are the system message.
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      // A thought that draws a 500 every time, whatever the provider's state (SMD-2599).
+      if (prompt.includes("poison-500")) return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
       if (refuseCalls > 0) {
         refuseCalls--;
         // A beat late, so another worker's call is in hand by then.
@@ -3666,6 +3709,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(retried.code === 0 && /1 extracted, 0 failed/.test(retried.out), `--retry-failed with --limit 1 extracts the one failed row and exits 0 (exit ${retried.code})`);
   assert((await entityByName("Socrates")) !== undefined, "…and its entity is in the graph");
 
+  // The one-shot runs above stamped no heartbeat: only a follower does (SMD-2261).
+  const beatsOf = async (worker: string) => (await sql`SELECT key, value FROM ob1_config WHERE key LIKE ${`heartbeat:${worker}:%`}`) as { key: string; value: string }[];
+  assert((await beatsOf("extract")).length === 0, "no one-shot extraction run left a heartbeat row");
   // --follow: a capture made while the worker is polling is extracted without a
   // new run, and the first signal ends the process with exit 0.
   const follower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
@@ -3682,7 +3728,427 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(extracted, "a thought captured while --follow polls is extracted by the trigger and the poll, with no new run");
   assert(followCode === 0, `the follower exits 0 on SIGINT (exit ${followCode}; ${followOut.split("\n").filter(Boolean).slice(-2).join(" | ")})`);
   assert((await entityByName("Grafana")) !== undefined, "…and Grafana is in the graph");
+  // …and its heartbeat: one row under its job, stopped by the signal, the
+  // passes it finished counted, judged against a minute (a 1-second poll).
+  const extractBeats = await beatsOf("extract");
+  const eb = extractBeats.length === 1 ? JSON.parse(extractBeats[0].value) : null;
+  assert(eb !== null && /^heartbeat:extract:\S+@p\d+$/.test(extractBeats[0].key) && eb.v === 1 && eb.outcome === "stopped" && eb.running === false && eb.passes >= 2 && eb.every_s === 60,
+    `the follower stamped one heartbeat, stopped, with its passes (${extractBeats.map((b) => `${b.key} ${b.value}`).join("; ")})`);
 
+  const extractedNow = async (id: string) => (await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${id}::uuid`)[0].c > 0;
+
+  // A follower outlasts its database going away (SMD-2599). It reaches
+  // Postgres through a relay this suite cuts: once while it polls, once while
+  // a thought's model call is in hand, so the write and the lease's return
+  // both fail. Each time it says so, waits, and resumes when the relay is
+  // back — the thought in hand recorded nothing, its lease returned at once
+  // rather than after --ttl (900 s, past this test), and extracted.
+  {
+    const relay = await cuttableRelay(URL_!);
+    const cutFollower = Bun.spawn(["bun", "--no-env-file", join(HERE, "extract-entities.ts"), "--url", relay.url, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    // Deleted at the end, so the sections after count the thoughts they did.
+    let idle = "";
+    let inHand = "";
+    try {
+      await Bun.sleep(1500);
+      await relay.cut();
+      idle = await seed("Quinn moved the alert rules to grafana while the database was away.");
+      await Bun.sleep(2500);
+      const aliveIdle = cutFollower.exitCode === null;
+      await relay.restore();
+      const idleDone = await pollUntil(() => extractedNow(idle), 15_000);
+      // The model answers slowly, and the relay is cut while the call is in hand.
+      slowMs = 2500;
+      inHand = await seed("Rosa tuned the grafana panels while the database was away.");
+      const claimed = await pollUntil(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${inHand}::uuid AND work_type = ${KEY}`)[0]?.status === "claimed", 5000);
+      await relay.cut();
+      await Bun.sleep(4000);
+      const aliveInHand = cutFollower.exitCode === null;
+      await relay.restore();
+      const inHandDone = await pollUntil(() => extractedNow(inHand), 20_000);
+      // The heartbeat (SMD-2261) of a follower that waited the cuts out says
+      // it is running, not ended: a pass the database failed is no end.
+      const beatAfterCuts = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}") as { ended?: boolean; passes?: number };
+      slowMs = 0;
+      cutFollower.kill("SIGINT");
+      const cutOut = (await new Response(cutFollower.stdout).text()) + (await new Response(cutFollower.stderr).text());
+      const cutCode = await cutFollower.exited;
+      const [claim] = await sql`SELECT status, attempt_count FROM thought_work_claims WHERE thought_id = ${inHand}::uuid AND work_type = ${KEY}`;
+      assert(aliveIdle && idleDone, `a follower whose database is cut while it polls keeps running, and extracts the thought captured meanwhile once it is back (alive ${aliveIdle}, extracted ${idleDone}; ${cutOut.split("\n").filter((l) => /not answering|answers again/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
+      assert(/the database is not answering \([^)]*\) — the follower waits for it, checking after 5 s and then twice as long each time, up to 5 min/.test(cutOut) && /the database answers again after \d+ s; polling resumes/.test(cutOut),
+             "…and says when the database stopped answering and when it answered again");
+      assert(claimed && aliveInHand && inHandDone && claim?.status === "succeeded" && claim?.attempt_count === 1,
+             `a cut while a thought's model call is in hand: the follower stays up, records nothing, returns the lease when the database is back, and extracts the thought (claimed ${claimed}, alive ${aliveInHand}, extracted ${inHandDone}, claim ${claim?.status}/attempt ${claim?.attempt_count})`);
+      assert(cutOut.includes(`recording nothing for ${inHand}`) && /could not return its leases \([^)]*\); they expire within 900 s, or return when the database answers again/.test(cutOut),
+             "…and names the thought it recorded nothing for, and the leases it returns when the database answers");
+      assert(cutCode === 0, `…and a signal still ends it with 0 (exit ${cutCode})`);
+      assert(beatAfterCuts.passes !== undefined && beatAfterCuts.ended === undefined,
+             `…and its heartbeat after the cuts is a running follower's, not an ended one's (${JSON.stringify(beatAfterCuts)})`);
+    } finally {
+      slowMs = 0;
+      if (cutFollower.exitCode === null) cutFollower.kill("SIGKILL");
+      await relay.close();
+      for (const id of [idle, inHand]) if (id) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    }
+  }
+
+  // A stop just after the database answers again ends the run with the counts
+  // read, not "stopped while the database was not answering" (review pass 1):
+  // the pass runs again at once. In this process, the relay cut during the
+  // poll sleep and restored after the first check; the stop sent as the
+  // "answers again" line is written.
+  {
+    const relay = await cuttableRelay(URL_!);
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const write = (l: string) => {
+      lines.push(l);
+      if (/the database answers again/.test(l)) ac.abort();
+    };
+    const running = runExtract({ url: relay.url, env, workers: 1, follow: 2, signal: ac.signal, writer: { out: write, err: write } });
+    try {
+      await Bun.sleep(1000);
+      await relay.cut();
+      await Bun.sleep(4000);
+      await relay.restore();
+      const code = await running;
+      assert(code === 0 && lines.some((l) => /the database answers again/.test(l)) && !lines.some((l) => /stopped while the database was not answering/.test(l)) && lines.some((l) => /^  after: \d+ thoughts/.test(l)),
+             `a follower stopped just after the database answers again reads its counts and exits 0 (exit ${code}; ${lines.filter((l) => /answers again|stopped while|after:/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
+    } finally {
+      ac.abort();
+      await running.catch(() => 0);
+      await relay.close();
+    }
+  }
+
+  // A permanent database error ends a follower, as the pass's own do: its
+  // claim fails on a function gone (42883), not on the database away, and the
+  // run rejects with it rather than polling into it for ever (review pass 3).
+  {
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const target = await seed("Zed rotated the grafana keys while the claims failed.");
+    let outcome = "running";
+    try {
+      await sql.unsafe("ALTER FUNCTION claim_thoughts(text, text, int, int, int) RENAME TO claim_thoughts_hidden");
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((c) => { outcome = `exit ${c}`; }, (e) => { outcome = `rejected: ${(e as Error).message}`; });
+      const ended = await pollUntil(async () => outcome !== "running", 10_000);
+      ac.abort();
+      await running;
+      assert(ended && /^rejected: .*claim_thoughts.*does not exist/.test(outcome),
+             `a follower whose claim meets a function gone ends with the error, not polling into it (${outcome.slice(0, 120)})`);
+    } finally {
+      ac.abort();
+      const [{ hidden }] = await sql`SELECT to_regprocedure('claim_thoughts_hidden(text, text, int, int, int)') IS NOT NULL AS hidden`;
+      if (hidden) await sql.unsafe("ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
+      await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
+    }
+  }
+
+  // A passing claim error costs a follower nothing (review pass 4): a
+  // stand-in claim_thoughts raises lock_not_available (55P03) for three polls,
+  // each worker's claim failing, then the real one is back, and a follower of
+  // --limit 1 claims its thought, extracts it and ends — the failed claims
+  // took nothing from the limit, and did not end the run.
+  {
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const target = await seed("Bo rotated the grafana keys while the claims timed out.");
+    let code = -1;
+    let swapped = false;
+    try {
+      await sql.unsafe("ALTER FUNCTION claim_thoughts(text, text, int, int, int) RENAME TO claim_thoughts_hidden");
+      swapped = true;
+      await sql.unsafe(`CREATE FUNCTION claim_thoughts(p_work_type text, p_worker_id text, p_batch int DEFAULT 16, p_ttl_seconds int DEFAULT 900, p_max_attempts int DEFAULT 3)
+                          RETURNS TABLE (thought_id uuid, attempt int) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'a lock not available, for the suite' USING ERRCODE = '55P03'; END $$`);
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      await Bun.sleep(3000);
+      await sql.unsafe("DROP FUNCTION claim_thoughts(text, text, int, int, int)");
+      await sql.unsafe("ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
+      swapped = false;
+      const ended = await pollUntil(async () => code !== -1, 15_000);
+      ac.abort();
+      await running;
+      assert(ended && code === 0 && (await extractedNow(target)) && lines.filter((l) => /a lock not available, for the suite — this worker stops/.test(l)).length >= 2,
+             `a follower of --limit 1 whose claims met a passing error for three polls claims its thought once they answer, extracts it, and ends (ended ${ended}, exit ${code}, extracted ${await extractedNow(target)}${lines.find((l) => l.startsWith("rejected:")) ? `; ${lines.find((l) => l.startsWith("rejected:"))?.slice(0, 80)}` : ""})`);
+    } finally {
+      ac.abort();
+      if (swapped) {
+        await sql.unsafe("DROP FUNCTION IF EXISTS claim_thoughts(text, text, int, int, int)");
+        await sql.unsafe("ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
+      }
+      await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
+    }
+  }
+
+  // A follower's --limit counts the thoughts it takes and does not hand back
+  // (review pass 3): a follower of --limit 1 whose thought a database cut
+  // hands back unfinished claims it again when the database answers,
+  // extracts it, and ends there.
+  {
+    const relay = await cuttableRelay(URL_!);
+    const lines: string[] = [];
+    const ac = new AbortController();
+    let code = -1;
+    let target = "";
+    try {
+      slowMs = 2500;
+      target = await seed("Ari tuned the grafana pager while the database was away.");
+      const running = runExtract({ url: relay.url, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      await pollUntil(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${target}::uuid AND work_type = ${KEY}`)[0]?.status === "claimed", 5000);
+      await relay.cut();
+      await Bun.sleep(4000);
+      await relay.restore();
+      slowMs = 0;
+      const ended = await pollUntil(async () => code !== -1, 25_000);
+      ac.abort();
+      await running;
+      assert(ended && (await extractedNow(target)) && lines.some((l) => new RegExp(`recording nothing for ${target}`).test(l)),
+             `a follower of --limit 1 whose thought a database cut handed back extracts it once the database answers, and ends (ended ${ended}, exit ${code}, extracted ${await extractedNow(target)})`);
+    } finally {
+      slowMs = 0;
+      ac.abort();
+      await relay.close();
+      if (target) await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
+    }
+  }
+
+  // A follower outlasts its provider going away (SMD-2599), in this process
+  // with the pauses before an outage cut to 100 ms (the worker reads the
+  // exported array as it runs; restored after). One follower, four events:
+  // a 503 past the pauses, the model missing, a hung provider (the call
+  // times out and the probe gets no answer either), and a thought that
+  // draws a 500 every time. The first three end extracted with nothing
+  // failed and the follower still running; the fourth ends failed, once a
+  // probe has answered. Then a start that finds the model unserved is
+  // refused with exit 2, and a run without --follow records the failure as
+  // before.
+  {
+    const restorePauses = shortenPauses();
+    const claimRow = async (id: string) => (await sql`SELECT status, attempt_count, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; attempt_count: number; last_error: string | null } | undefined;
+    const created: string[] = [];
+    try {
+      const lines: string[] = [];
+      const ac = new AbortController();
+      let settled = false;
+      let followCode = -1;
+      // Deadlines past the waits: a 503 for 8 s is probed at 5 s and 15 s.
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 2, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
+      try {
+        await pollUntil(async () => probes >= 1, 10_000);
+        await Bun.sleep(500);
+        const startProbes = probes;
+        // A 503 past the pauses.
+        down = "503";
+        downUntil = Date.now() + 8000;
+        const busy = await seed("Tess wired the outage pager into grafana.");
+        created.push(busy);
+        const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Extraction request to [^)]*503/.test(l)) && (await claimRow(busy))?.status === "pending", 6000);
+        const during = await claimRow(busy);
+        const busyDone = await pollUntil(async () => (await claimRow(busy))?.status === "succeeded" && (await extractedNow(busy)), 25_000);
+        assert(startProbes >= 1 && pooled && during?.attempt_count === 0 && during.last_error === null && busyDone && (await claimRow(busy))?.status === "succeeded" && !settled,
+               `a 503 past the pauses: the thought goes back to the pool (pending, attempt ${during?.attempt_count}, no error), the follower waits, and extracts it when the provider answers — still running (pooled ${pooled}, extracted ${busyDone}, ${probes - startProbes} probe(s) answered)`);
+        assert(lines.some((l) => /the follower calls stub-meta at http:\/\/127\.0\.0\.1:\d+\/v1 for one token after 5 s and then twice as long each time, up to 5 min/.test(l)) && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
+               "…and says when the provider stopped answering, how it waits, and when it answered again");
+        // The model missing, as while Ollama pulls it: no pauses, an outage at once.
+        down = "404";
+        downUntil = Date.now() + 3000;
+        const pulled = await seed("Uma rebuilt the grafana alerts after the model was pulled again.");
+        created.push(pulled);
+        const pulledDone = await pollUntil(async () => (await claimRow(pulled))?.status === "succeeded" && (await extractedNow(pulled)), 20_000);
+        assert(pulledDone && (await claimRow(pulled))?.status === "succeeded" && !settled && lines.some((l) => /the provider is not answering \([^)]*404 \{"error":\{"message":"model \\"stub-meta\\" not found/.test(l)),
+               `the model missing mid-run is an outage, not the provider's refusal: no exit, and the thought is extracted once the model answers (extracted ${pulledDone}, settled ${settled})`);
+        // A hung provider: the call times out at 2 s, and the probe gets no answer either.
+        down = "hang";
+        downUntil = Date.now() + 6000;
+        const hung = await seed("Vic moved the grafana panels while the provider hung.");
+        created.push(hung);
+        const hungDone = await pollUntil(async () => (await claimRow(hung))?.status === "succeeded" && (await extractedNow(hung)), 25_000);
+        assert(hungDone && (await claimRow(hung))?.status === "succeeded" && !settled && lines.some((l) => /the provider is not answering \([^)]*timed out/.test(l)),
+               `a timeout the probe cannot get past either is an outage: the thought is extracted once the provider answers, not failed (extracted ${hungDone}, claim ${(await claimRow(hung))?.status})`);
+        // A thought that draws a 500 every time, the provider otherwise up.
+        const poisoned = await seed("The poison-500 note.");
+        created.push(poisoned);
+        const poisonFailed = await pollUntil(async () => (await claimRow(poisoned))?.status === "failed", 25_000);
+        const poisonRow = await claimRow(poisoned);
+        assert(poisonFailed && /^provider error again right after the provider answered a probe, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonRow?.last_error ?? "") && !settled,
+               `a thought that draws the error again right after a probe answered is its own: recorded failed, the follower still running (${poisonRow?.status}: ${poisonRow?.last_error?.slice(0, 120)})`);
+        const failedOthers = (await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed' AND thought_id = ANY(${sql.array([busy, pulled, hung], "TEXT")}::uuid[])`)[0].n;
+        assert(failedOthers === 0, `…and none of the outages' thoughts is failed (${failedOthers})`);
+      } finally {
+        downUntil = 0;
+        ac.abort();
+        await running;
+      }
+      assert(followCode === 0, `a follower stopped after the outages exits 0 (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
+
+      // A start that finds the model unserved: a refusal, before anything is
+      // written — under a key never seen, which the refusal leaves unregistered
+      // (review pass 1: the probe came after the worker key's registration).
+      const refusedOut: string[] = [];
+      const stopRefused = new AbortController();
+      const guard = setTimeout(() => stopRefused.abort(), 15_000);
+      const freshKey = "f".repeat(64);
+      const refusedEnv = { ...env, OB1_METADATA_MODEL: "absent-model", OB1_WORKER_KEY: freshKey, MCP_ACCESS_KEYS: `${env.MCP_ACCESS_KEYS},probe-refusal:write:${hashKey(freshKey)}` };
+      const refusedCode = await runExtract({ url: URL_!, env: refusedEnv, job: KEY, workers: 1, follow: 1, signal: stopRefused.signal, writer: { out: (l) => refusedOut.push(l), err: (l) => refusedOut.push(l) } });
+      clearTimeout(guard);
+      const registered = (await sql`SELECT count(*)::int AS n FROM ob1_agent_keys WHERE key_hash = ${hashKey(freshKey)}`)[0].n;
+      assert(refusedCode === 2 && refusedOut.some((l) => /does not serve absent-model, OB1_METADATA_MODEL, at start \(404 [^)]*not found/.test(l)) && refusedOut.some((l) => /pull the model, or set OB1_METADATA_MODEL to one the provider serves/.test(l)) && registered === 0,
+             `a follower whose model the provider does not serve at start is refused, exit 2, its key not yet registered (exit ${refusedCode}, ${registered} key row(s): ${refusedOut.find((l) => /at start/.test(l))?.trim().slice(0, 140)})`);
+      // …and so is one whose escalation model the provider does not serve (review pass 1).
+      const escOut: string[] = [];
+      const stopEsc = new AbortController();
+      const escGuard = setTimeout(() => stopEsc.abort(), 15_000);
+      const namedBefore = modelsNamed.length;
+      const escCode = await runExtract({ url: URL_!, env: { ...env, OB1_EXTRACT_ESCALATE_MODEL: "absent-model" }, workers: 1, follow: 1, signal: stopEsc.signal, writer: { out: (l) => escOut.push(l), err: (l) => escOut.push(l) } });
+      clearTimeout(escGuard);
+      assert(escCode === 2 && escOut.some((l) => /does not serve absent-model, OB1_EXTRACT_ESCALATE_MODEL, at start: GET \/models does not list it/.test(l)) && !modelsNamed.slice(namedBefore).includes("absent-model"),
+             `a follower whose escalation model the provider does not list at start is refused, exit 2, and the model was never called (exit ${escCode}: ${escOut.find((l) => /at start|refuses/.test(l))?.trim().slice(0, 140)})`);
+
+      // A start that finds the provider down waits for it after every other
+      // refusal (review pass 2): a key other than the recorded one is refused
+      // at once, not held behind the wait…
+      {
+        down = "503";
+        downUntil = Date.now() + 60_000;
+        const mismatchOut: string[] = [];
+        const stopMismatch = new AbortController();
+        const mismatchGuard = setTimeout(() => stopMismatch.abort(), 15_000);
+        const t0 = Date.now();
+        const mismatchCode = await runExtract({ url: URL_!, env: { ...env, OB1_METADATA_MODEL: "other-model" }, workers: 1, follow: 1, signal: stopMismatch.signal, writer: { out: (l) => mismatchOut.push(l), err: (l) => mismatchOut.push(l) } });
+        clearTimeout(mismatchGuard);
+        downUntil = 0;
+        assert(mismatchCode === 2 && Date.now() - t0 < 10_000 && mismatchOut.some((l) => /Refusing to extract under a key other than the one ob1_config records without --switch-key/.test(l)) && !mismatchOut.some((l) => /not answering at start/.test(l)),
+               `a follower started with the provider down and another model's key is refused at once, not after the wait (exit ${mismatchCode} after ${Date.now() - t0} ms)`);
+      }
+      // …and a model the provider turns out not to serve, once it answers, is
+      // refused there rather than waited on for ever (review pass 2).
+      {
+        down = "503";
+        downUntil = Date.now() + 3000;
+        const lateOut: string[] = [];
+        const stopLate = new AbortController();
+        const lateGuard = setTimeout(() => stopLate.abort(), 20_000);
+        const lateCode = await runExtract({ url: URL_!, env: { ...env, OB1_METADATA_MODEL: "absent-model" }, job: KEY, workers: 1, follow: 1, signal: stopLate.signal, writer: { out: (l) => lateOut.push(l), err: (l) => lateOut.push(l) } });
+        clearTimeout(lateGuard);
+        downUntil = 0;
+        assert(lateCode === 2 && lateOut.some((l) => /the provider is not answering at start \(503 [^)]*\) — the follower claims nothing until it does/.test(l)) && lateOut.some((l) => /does not serve absent-model, OB1_METADATA_MODEL, at start \(404 /.test(l)),
+               `a follower whose provider was down at start and then answers that it does not serve the model is refused, exit 2 (exit ${lateCode}: ${lateOut.filter((l) => /at start/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
+      }
+
+      // A follower's --limit counts the thoughts it finishes: one an outage
+      // returned is claimed again, and the follower of --limit 1 ends once it
+      // is extracted (review pass 1: the outage spent the limit, and the
+      // follower ended with the thought pending).
+      {
+        const limitLines: string[] = [];
+        const stopLimited = new AbortController();
+        let limitedCode = -1;
+        const limited = runExtract({ url: URL_!, env, workers: 1, follow: 1, limit: 1, signal: stopLimited.signal, writer: { out: (l) => limitLines.push(l), err: (l) => limitLines.push(l) } }).then((c) => { limitedCode = c; });
+        try {
+          await Bun.sleep(1000);
+          down = "404";
+          downUntil = Date.now() + 3000;
+          const counted = await seed("Xan paged the on-call while the model was pulled.");
+          created.push(counted);
+          const ended = await pollUntil(async () => limitedCode !== -1, 20_000);
+          assert(ended && (await claimRow(counted))?.status === "succeeded" && limitLines.some((l) => /the provider answers again/.test(l)),
+                 `a follower of --limit 1 whose thought an outage returned extracts it once the provider answers, and ends there (ended ${ended}, exit ${limitedCode}, claim ${(await claimRow(counted))?.status})`);
+        } finally {
+          downUntil = 0;
+          stopLimited.abort();
+          await limited;
+        }
+      }
+
+      // A stop ends a probe in flight: after a timeout of 8 s the probe has the
+      // call's whole timeout, and a first stop 2 s into it returns at once
+      // (review pass 1).
+      {
+        const stopProbe = new AbortController();
+        const probeLines: string[] = [];
+        let returnedAt = 0;
+        // Deleted when the case ends: left pending, it would be the one-shot run's first claim below.
+        let slow = "";
+        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 8, signal: stopProbe.signal, writer: { out: (l) => probeLines.push(l), err: (l) => probeLines.push(l) } }).then((c) => { returnedAt = Date.now(); return c; });
+        try {
+          await Bun.sleep(1000);
+          down = "hang";
+          downUntil = Date.now() + 60_000;
+          slow = await seed("Yara watched the pager while the provider hung.");
+          await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
+          await Bun.sleep(10_000);
+          const stoppedAt = Date.now();
+          stopProbe.abort();
+          const code = await probing;
+          assert(code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
+                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status})`);
+        } finally {
+          downUntil = 0;
+          stopProbe.abort();
+          await probing;
+          if (slow) await sql`SELECT delete_thought(${slow}::uuid, NULL::jsonb)`;
+        }
+      }
+
+      // A run without --follow keeps the pauses, then records the thought failed and stops, as before.
+      down = "503";
+      downUntil = Date.now() + 30_000;
+      const oneShot = await seed("Wren checked the grafana pager without a follower.");
+      created.push(oneShot);
+      const oneShotOut: string[] = [];
+      const oneShotCode = await runExtract({ url: URL_!, env, workers: 1, writer: { out: (l) => oneShotOut.push(l), err: (l) => oneShotOut.push(l) } });
+      downUntil = 0;
+      const oneShotRow = await claimRow(oneShot);
+      assert(oneShotCode === 1 && oneShotRow?.status === "failed" && /^provider error after 3 retries: /.test(oneShotRow.last_error ?? "") && !oneShotOut.some((l) => /not answering/.test(l)),
+             `a run without --follow still records the thought failed after the pauses and exits 1 (exit ${oneShotCode}: ${oneShotRow?.status}, ${oneShotRow?.last_error?.slice(0, 60)})`);
+    } finally {
+      downUntil = 0;
+      restorePauses();
+      for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    }
+  }
+
+
+  // A follower whose provider stays down (SMD-2261's heartbeat under
+  // SMD-2599): past the pauses the thought goes back to the pool and the
+  // follower waits, its heartbeat "failed" — the provider, not a document —
+  // and still a running follower's while it probes, so preflight reads it
+  // alive, not stale. Once the provider is back, the pass that extracts the
+  // thought stamps ok. (SMD-2261 had the worker record the thought failed
+  // and stop; SMD-2599 waits instead.)
+  {
+    const restorePauses = shortenPauses();
+    const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+    let downNote = "";
+    const ac2 = new AbortController();
+    let downRun: Promise<unknown> = Promise.resolve();
+    try {
+      downRun = runExtract({ url: URL_!, env, workers: 1, follow: 1, signal: ac2.signal, writer: { out: () => {}, err: () => {} } }).catch(() => 0);
+      await Bun.sleep(1000);
+      down = "503";
+      downUntil = Date.now() + 600_000;
+      downNote = await seed("A note the provider is down for, while followed.");
+      let downBeat = await beatOf();
+      for (let i = 0; i < 80 && downBeat.outcome !== "failed"; i++) { await Bun.sleep(250); downBeat = await beatOf(); }
+      await Bun.sleep(1500);
+      const heldBeat = await beatOf();
+      const heldClaim = (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${downNote}::uuid AND work_type = ${KEY}`)[0]?.status;
+      downUntil = 0;
+      let backBeat = heldBeat;
+      for (let i = 0; i < 120 && backBeat.outcome !== "ok"; i++) { await Bun.sleep(250); backBeat = await beatOf(); }
+      assert(downBeat.outcome === "failed" && heldBeat.outcome === "failed" && heldBeat.running === true && heldClaim === "pending" && backBeat.outcome === "ok",
+        `a follower whose provider stays down stamps failed, stays a running follower while it waits with the thought back in the pool, and a pass after the provider is back stamps ok (${JSON.stringify([downBeat.outcome, heldBeat.outcome, heldBeat.running, heldClaim, backBeat.outcome])})`);
+    } finally {
+      downUntil = 0;
+      ac2.abort();
+      await downRun;
+      restorePauses();
+      if (downNote) await sql`SELECT delete_thought(${downNote}::uuid, NULL::jsonb)`;
+    }
+  }
   // Stopping a pass (SMD-2304). Four notes the stub answers with nothing, one
   // worker, slow answers: a stop lands while a thought is in hand.
   const notes: string[] = [];
@@ -3774,6 +4240,22 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          && !fatal.stderr.includes("stopping after the current thought") && !fatal.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(fatal.stdout)
          && (await noteClaims()).succeeded === 2 && !(await noteClaims()).claimed,
          `after the provider's refusal, the pass's first stop is the hard one: the other worker's thought in hand is released, not finished (exit ${fatal.code}, ${afterFatal instanceof Promise ? "a release" : String(afterFatal)}, claims ${JSON.stringify(await noteClaims())})`);
+  // A follower the provider refuses ends, and its heartbeat says failed, not
+  // stopped: a restart will not help until the request is fixed (SMD-2261).
+  const refusedNote = await seed("A note the provider will refuse while followed.");
+  refuseCalls = 1;
+  const refusedFollow = await extractInProcess({ workers: 1, follow: 30 });
+  refuseCalls = 0;
+  const refusedBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+  assert(refusedFollow.code === 2 && refusedBeat.outcome === "failed" && refusedBeat.ended === true, `a follower ended by the provider's refusal stamps its end, failed (exit ${refusedFollow.code}, ${JSON.stringify(refusedBeat)})`);
+  await sql`SELECT delete_thought(${refusedNote}::uuid, NULL::jsonb)`;
+  // A following pass that throws (here its Writer, on the pass's own counts
+  // line) ends the run, and its heartbeat says so as the worker's end (review pass 3).
+  const thrownNote = await seed("A note whose pass throws while followed.");
+  const thrownFollow = await runExtract({ url: URL_!, env, workers: 1, follow: 30, writer: { out: (l) => { if (l.startsWith("  before:")) throw new Error("writer boom"); }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+  const thrownBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+  assert(thrownFollow === "writer boom" && thrownBeat.outcome === "failed" && thrownBeat.ended === true, `a following pass that throws stamps the worker's end, failed (${thrownFollow}, ${JSON.stringify(thrownBeat)})`);
+  await sql`SELECT delete_thought(${thrownNote}::uuid, NULL::jsonb)`;
 
   // A caller's signal aborted during start-up stops the run before its next
   // write, and the failed row stays failed rather than returned to a pool
@@ -3921,6 +4403,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     return { code, ms: Date.now() - at };
   };
   const followSoft = await followRun((_, ac2) => ac2.abort());
+  // One pass, then asleep, then stopped: the row counts that pass and says stopped (SMD-2261).
+  const softBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+  assert(softBeat.passes === 1 && softBeat.outcome === "stopped" && softBeat.running === false, `a follower stopped asleep after its first pass stamped that pass, then stopped (${JSON.stringify(softBeat)})`);
   const followHard = await followRun((st) => { st?.(); void st?.(); });
   assert(followSoft.code === 0 && followSoft.ms < 1500 && followHard.code === 130 && followHard.ms < 1500,
          `a follower asleep wakes on a caller's abort (exit ${followSoft.code} after ${followSoft.ms} ms) and on the hard stop, which is 130 (exit ${followHard.code} after ${followHard.ms} ms)`);
@@ -4126,6 +4611,13 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     await Bun.sleep(1500);
   }
   await Bun.sleep(2500);
+  // Every row failed, but on documents the model cannot read, not a down
+  // provider: the passes are ok, and the alarm rides the poll's stamp, which
+  // is what preflight warns on (review pass 2: rows failed against rows done
+  // read a poison document, or a down judge, wrongly).
+  const failingBeat = (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0];
+  assert(JSON.parse(failingBeat?.value ?? "{}").outcome === "ok" && JSON.parse(failingBeat?.value ?? "{}").malformed?.alarm === true,
+    `a follower whose rows fail on the documents stamps ok, its tripped block on the poll's stamp (${failingBeat?.value})`);
   alarmFollower.kill("SIGINT");
   const alarmFollowErr = await new Response(alarmFollower.stderr).text();
   const alarmFollowOut = (await new Response(alarmFollower.stdout).text()) + alarmFollowErr;
@@ -4135,6 +4627,12 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(alarmFollowCode === 0 && alarmAt >= 0 && alarmAt < alarmFollowErr.indexOf("stopping after the current thought")
          && alarmFollowOut.split("The follower keeps polling; stopped by a signal, it exits 0.").length === 2 && !/Exiting \d/.test(alarmFollowOut),
          `a follower says the model is likely at fault while it polls, once, not at its stop, and exits 0 on SIGINT (exit ${alarmFollowCode}: ${alarmFollowOut.split("\n").find((l) => /answers were/.test(l))?.trim().slice(-120)})`);
+  // …and its heartbeat carries the block, so preflight's workers row warns on
+  // a follower nobody watches the stderr of (SMD-2261).
+  const alarmBeat = (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0];
+  const ab = alarmBeat ? JSON.parse(alarmBeat.value) : null;
+  assert(ab?.malformed?.alarm === true && ab.malformed.answers === 48 && ab.malformed.bad === 48 && ab.outcome === "stopped",
+    `the follower's heartbeat carries its tripped block (${alarmBeat?.value})`);
   // A retry chose its rows for failing: the 60 notes back, still in prose,
   // trip the alarm, which does not clear their documents (review pass 1).
   const retriedNotes = await extract("--retry-failed");
@@ -4146,11 +4644,15 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // A follower that ends at its --limit with the last block tripped: the
   // final judgement's line, saying the exit it takes, not "keeps polling …
   // exits 0" (review pass 2, caught by running it).
+  // Its row cleared of the earlier block first, so the block it carries after is this run's final judgement.
+  await sql`UPDATE ob1_config SET value = (value::jsonb - 'malformed')::text WHERE key = ${`heartbeat:${KEY}`}`;
   for (let i = 0; i < 48; i++) await seed(`A limited reference-list page, number ${i}.`);
   const limitedFollow = await extract("--follow", "1", "--limit", "48");
   assert(limitedFollow.code === 3 && limitedFollow.out.includes("  48 of the follower's last 48 answers were not JSON") && /\n    Check OB1_METADATA_MODEL \(stub-meta\)[^\n]*\. Exiting 3\./.test(limitedFollow.out)
          && !limitedFollow.out.includes("keeps polling"),
          `a follower that trips the alarm on the pass that reaches its --limit says it exits 3, and exits 3 (exit ${limitedFollow.code}: ${limitedFollow.out.split("\n").find((l) => /Exiting|keeps polling/.test(l))?.trim().slice(-120)})`);
+  const limitedBeat = (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0];
+  assert(JSON.parse(limitedBeat?.value ?? "{}").malformed?.alarm === true, `a follower stopped at its --limit carries the final judgement's block on its row (${limitedBeat?.value})`);
   proseKeys.delete("reference-list page");
 
   model.stop(true);
@@ -4166,10 +4668,15 @@ console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger m
   // A runaway on the small model's FIRST call only: the larger model answers
   // whole, and so does the small model's penalised retry (frequency_penalty
   // set), so the control run below converges without escalation.
+  /** What GET /models lists, and whether a gone-stub* escalation model is served, for a follower's cases below (SMD-2599 review pass 4). */
+  let listedIds: string[] = ["stub-meta"];
+  let goneServed = false;
   const escModel = Bun.serve({
     port: 0,
     async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: listedIds.map((id) => ({ id })) });
       const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages?: { role: string; content: string }[] };
+      if (body.model?.startsWith("gone-stub") && !goneServed) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (/runaway/.test(prompt) && body.model === "stub-meta" && body.frequency_penalty === undefined) {
         return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
@@ -4213,6 +4720,58 @@ console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger m
   const ctlLine = await dumpLineFor(dumpCtl, tCtl);
   assert(ctlLine?.retried === true && ctlLine.escalated === undefined, `the dump line records retried and NOT escalated (${JSON.stringify(ctlLine)})`);
   try { unlinkSync(dumpCtl); } catch { /* already gone */ }
+
+  // A follower's escalation model (SMD-2599 review pass 4). One the start
+  // saw listed that goes missing — pulled again — is an outage probed by its
+  // own name, and the runaway is escalated once it is back; one the start
+  // could not confirm — the list names another tag of its base, so its
+  // absence proves nothing — is the provider's refusal at its first 404,
+  // exit 2, as before this ticket.
+  {
+    const restorePauses = shortenPauses();
+    try {
+      await sql`DELETE FROM thoughts`;
+      await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+      // Seen at start, then gone, then back.
+      listedIds = ["stub-meta", "gone-stub"];
+      goneServed = false;
+      const seenLines: string[] = [];
+      const seenStop = new AbortController();
+      let seenCode = -1;
+      const seenRun = runExtract({ url: URL_!, env: { ...baseEnv, OB1_EXTRACT_ESCALATE_MODEL: "gone-stub" }, workers: 1, follow: 1, signal: seenStop.signal, writer: { out: (l) => seenLines.push(l), err: (l) => seenLines.push(l) } })
+        .then((c) => { seenCode = c; }, (e) => { seenCode = -2; seenLines.push(`rejected: ${(e as Error).message}`); });
+      await Bun.sleep(1000);
+      const tSeen = await seedOne("The runaway widget report, while the escalation model is pulled again.");
+      const waited = await pollUntil(async () => seenLines.some((l) => /the follower calls gone-stub at /.test(l)), 10_000);
+      goneServed = true;
+      const seenDone = await pollUntil(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${tSeen}::uuid`)[0]?.status === "succeeded", 20_000);
+      seenStop.abort();
+      await seenRun;
+      assert(waited && seenDone && seenCode === 0,
+             `an escalation model seen at start that goes missing is an outage probed by its own name, and the runaway is escalated once it is back (waited ${waited}, extracted ${seenDone}, exit ${seenCode})`);
+      // Never confirmed: the list names gone-stub:latest, not gone-stub:7b, and the 404 is the provider's refusal.
+      await sql`DELETE FROM thoughts`;
+      await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+      listedIds = ["stub-meta", "gone-stub:latest"];
+      goneServed = false;
+      const unseenLines: string[] = [];
+      const unseenStop = new AbortController();
+      const unseenGuard = setTimeout(() => unseenStop.abort(), 20_000);
+      let unseenCode = -1;
+      const unseenRun = runExtract({ url: URL_!, env: { ...baseEnv, OB1_EXTRACT_ESCALATE_MODEL: "gone-stub:7b" }, workers: 1, follow: 1, signal: unseenStop.signal, writer: { out: (l) => unseenLines.push(l), err: (l) => unseenLines.push(l) } })
+        .then((c) => { unseenCode = c; }, (e) => { unseenCode = -2; unseenLines.push(`rejected: ${(e as Error).message}`); });
+      await Bun.sleep(1000);
+      await seedOne("The runaway widget report, with an escalation model never confirmed.");
+      await unseenRun;
+      clearTimeout(unseenGuard);
+      assert(unseenCode === 2 && unseenLines.some((l) => /the provider refuses the request itself \(Extraction request to [^)]*404/.test(l)) && !unseenLines.some((l) => /the follower calls gone-stub/.test(l)),
+             `an escalation model the start could not confirm draws the provider's refusal at its first 404, exit 2, not an outage that waits on it for ever (exit ${unseenCode})`);
+    } finally {
+      listedIds = ["stub-meta"];
+      goneServed = false;
+      restorePauses();
+    }
+  }
 
   escModel.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -4681,10 +5240,17 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   let judgeUnavailable = 0;
   /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
   let judgeUnavailableMs = 0;
+  /** Until this time the judge, and a follower's probe, answer `judgeDown`: a 503, or nothing at all (SMD-2599). */
+  let judgeDownUntil = 0;
+  let judgeDown: "503" | "hang" = "503";
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      // Until judgeDownUntil every request, a follower's probe too, answers judgeDown (SMD-2599).
+      if (Date.now() < judgeDownUntil) return judgeDown === "hang" ? neverAnswers() : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      // A follower's one-token probe, answered apart: no judge call counted.
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
       calls++;
       modelsSeen.add(String(body.model));
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
@@ -5223,23 +5789,44 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     // waits on the first polls and is settled once the vector lands, and the
     // line says "1 settled" alone — anchored, so a "; 1 wait" suffix fails
     // (third review pass, mutant: bags for the sets survived every tooth).
+    // The follower reaches Postgres through a relay cut while the vector lands
+    // (SMD-2599): it outlasts the cut, as extract's does, and the poll after
+    // the relay is back settles the row.
     seen.length = 0;
-    const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
-    await Bun.sleep(2500);
-    assert((await proposalRow(cedar.id)).status === "stale" && seen.length === 0, "the follower's first polls leave the row waiting and call no judge");
-    await sql`UPDATE thoughts SET embedding = ${unit(11)}::vector WHERE id = ${cedarOld}::uuid`;
+    const consolidateBeats = async () => (await sql`SELECT key, value FROM ob1_config WHERE key LIKE 'heartbeat:consolidate:%'`) as { key: string; value: string }[];
+    assert((await consolidateBeats()).length === 0, "no one-shot consolidation run left a heartbeat row (SMD-2261)");
+    const relay = await cuttableRelay(URL_!);
+    const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", relay.url, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
     let followSettled = false;
-    for (let i = 0; i < 40 && !followSettled; i++) {
-      await Bun.sleep(250);
-      followSettled = (await proposalRow(cedar.id)).status === "rejected";
+    let aliveCut = false;
+    try {
+      await Bun.sleep(2500);
+      assert((await proposalRow(cedar.id)).status === "stale" && seen.length === 0, "the follower's first polls leave the row waiting and call no judge");
+      await relay.cut();
+      await sql`UPDATE thoughts SET embedding = ${unit(11)}::vector WHERE id = ${cedarOld}::uuid`;
+      await Bun.sleep(2500);
+      aliveCut = follower.exitCode === null;
+      await relay.restore();
+      for (let i = 0; i < 80 && !followSettled; i++) {
+        await Bun.sleep(250);
+        followSettled = (await proposalRow(cedar.id)).status === "rejected";
+      }
+    } finally {
+      follower.kill("SIGINT");
     }
-    follower.kill("SIGINT");
     const followOut = (await new Response(follower.stdout).text()) + (await new Response(follower.stderr).text());
     const followCode = await follower.exited;
+    await relay.close();
+    assert(aliveCut && /the database is not answering \([^)]*\) — the follower waits for it/.test(followOut) && /the database answers again after \d+ s; polling resumes/.test(followOut),
+           `a consolidate follower whose database is cut keeps running, says so, and resumes when it is back (alive ${aliveCut}; ${followOut.split("\n").filter((l) => /not answering|answers again/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
     assert(followSettled && followCode === 0 && /\(1 more re-pooled for stale proposals\)/.test(followOut) && seen.length === 1,
            `the poll after the vector lands re-pools the thought and settles the row, one judge call in all (exit ${followCode}; ${followOut.split("\n").filter((l) => /pool:|stale proposals:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
     assert(/^\s*stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\) — distinct rows across the polls\s*$/m.test(followOut),
            `…and the summary counts the row once, settled, with no wait clause (${staleLine(followOut)})`);
+    const cb = await consolidateBeats();
+    const cv = cb.length === 1 ? JSON.parse(cb[0].value) : null;
+    assert(cv !== null && cb[0].key === `heartbeat:${KEY}` && cv.outcome === "stopped" && cv.passes >= 2 && cv.every_s === 60 && !("malformed" in cv),
+      `the consolidation follower stamped one heartbeat under its key, stopped, with no malformed block (${cb.map((b) => `${b.key} ${b.value}`).join("; ")})`);
     const olderBack = await consolidate("--status");
     assert(olderBack.code === 0 && !/stale/.test(olderBack.out.split("\n").find((l) => /queue:/.test(l)) ?? "x stale"), `no stale row is left (${olderBack.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 160)})`);
     assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "…still without an audit row");
@@ -5492,6 +6079,50 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     // The hard stop wakes a worker pausing on a provider error: run() back at
     // once, and the pair not judged again after the leases are gone — held on
     // extract in [10], and here on consolidate's own wiring (review pass 3).
+    // A consolidation follower whose judge stays down through the pauses: the
+    // pass is "failed", whatever thoughts with no candidates it finished
+    // without a call — the case the first rule read as ok (SMD-2261, review
+    // pass 2); once the judge is back, a pass with work reads ok. Under
+    // SMD-2599 the follower waits the outage out, the thought back in the
+    // pool, its heartbeat a running follower's while it probes. The 503s
+    // answer judge calls only, so the start's probe answers (down mode would
+    // hold the follower at its start) and so does the first outage probe,
+    // 5 s in, once the 503s have stopped; the pauses are cut to 100 ms.
+    {
+      const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+      // One thought back in the pool, one with a candidate the judge is asked
+      // about at the worker's defaults, every other pooled thought settled, so
+      // the polls after its failed pass are idle.
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+      const [{ id: one }] = await sql`SELECT p AS id FROM unnest(ARRAY(SELECT consolidation_pool(${KEY}))) p
+                                       WHERE EXISTS (SELECT 1 FROM consolidation_candidates(p, 3, 0.6::float)) ORDER BY p LIMIT 1`;
+      await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, finished_at)
+                SELECT p, ${KEY}, 'succeeded', now() FROM unnest(ARRAY(SELECT consolidation_pool(${KEY}))) p WHERE p <> ${one}::uuid`;
+      const restorePauses = shortenPauses();
+      judgeUnavailable = 1_000;
+      const ac2 = new AbortController();
+      const down = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, signal: ac2.signal, writer: { out: () => {}, err: () => {} } }).catch(() => 2);
+      let downBeat = await beatOf();
+      for (let i = 0; i < 400 && downBeat.outcome !== "failed"; i++) { await Bun.sleep(250); downBeat = await beatOf(); }
+      // The word holds while it waits, a running follower's (review pass 3 held idle polls; SMD-2599 waits).
+      await Bun.sleep(1500);
+      const heldBeat = await beatOf();
+      const heldClaim = (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${one}::uuid AND work_type = ${KEY}`)[0]?.status;
+      judgeUnavailable = 0;
+      restorePauses();
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${one}::uuid AND status <> 'claimed'`;
+      let backBeat = downBeat;
+      for (let i = 0; i < 80 && backBeat.outcome !== "ok"; i++) { await Bun.sleep(250); backBeat = await beatOf(); }
+      ac2.abort();
+      await down;
+      assert(downBeat.outcome === "failed" && heldBeat.outcome === "failed" && heldBeat.running === true && heldClaim === "pending" && backBeat.outcome === "ok",
+        `a consolidation follower whose judge stays down stamps failed, stays a running follower while it waits with the thought back in the pool, and stamps ok once a pass after it is back has work (${JSON.stringify([downBeat.outcome, heldBeat.outcome, heldBeat.running, heldClaim, backBeat.outcome])})`);
+      // A following pass that throws ends the run as the worker's end, failed.
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+      const thrown = await runConsolidate({ url: URL_!, env, workers: 1, follow: 30, writer: { out: (l) => { if (l.startsWith("  before:")) throw new Error("writer boom"); }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);
+      const thrownBeat = await beatOf();
+      assert(thrown === "writer boom" && thrownBeat.outcome === "failed" && thrownBeat.ended === true, `a following consolidation pass that throws stamps the worker's end, failed (${thrown}, ${JSON.stringify(thrownBeat)})`);
+    }
     await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
     judgeUnavailable = 100;
     let pauseStop: PassStop | undefined;
@@ -5609,6 +6240,48 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const [settled] = await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${staleT}::uuid`;
     assert(settleRun.code === 0 && settled.status === "rejected" && /no longer a candidate pair — two tickets Linear links — each its own record \(079's rule\)/.test(String(settled.review_note)),
       `a stale proposal on two linked tickets is settled by the pass, the note naming 079's rule (${settled.status}: ${settled.review_note})`);
+  }
+
+  // A consolidate follower outlasts its provider going away (SMD-2599), as
+  // extract's does in [10]: in this process, the pauses cut to 100 ms, the
+  // judge answering 503 for 8 s while a newer thought of a pair is judged,
+  // then hanging for 6 s past a 2 s --timeout while another is.
+  {
+    const restorePauses = shortenPauses();
+    const lines: string[] = [];
+    const ac = new AbortController();
+    let settled = false;
+    let followCode = -1;
+    const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 2, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+      .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
+    const claimOf = async (id: string) => (await sql`SELECT status, attempt_count, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; attempt_count: number; last_error: string | null } | undefined;
+    try {
+      await Bun.sleep(1000);
+      judgeDownUntil = Date.now() + 8000;
+      await seed("The outage runbook pages the on-call by phone.", 9, 3, ["outage-runbook"]);
+      const newer = await seed("The outage runbook pages the on-call by chat now.", 9, 0, ["outage-runbook"]);
+      const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Judge request to [^)]*503/.test(l)) && (await claimOf(newer))?.status === "pending", 8000);
+      const during = await claimOf(newer);
+      const judgedAfter = await pollUntil(async () => (await claimOf(newer))?.status === "succeeded", 25_000);
+      assert(pooled && during?.attempt_count === 0 && during.last_error === null && judgedAfter && !settled && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
+             `a consolidate follower: a 503 past the pauses returns the thought to the pool unrecorded, and it is judged once the judge answers — the follower still running (pooled ${pooled}, judged ${judgedAfter})`);
+      // A hung judge: the pair's call times out, and the probe gets no answer either.
+      judgeDown = "hang";
+      judgeDownUntil = Date.now() + 6000;
+      await seed("The status page lists the outage runbook's owner.", 10, 3, ["status-page"]);
+      const hungNewer = await seed("The status page lists the outage runbook's new owner.", 10, 0, ["status-page"]);
+      const hungJudged = await pollUntil(async () => (await claimOf(hungNewer))?.status === "succeeded", 25_000);
+      const hungRow = await claimOf(hungNewer);
+      assert(hungJudged && !settled && lines.some((l) => /the provider is not answering \(the judge call timed out after 2 s, and a one-token call got no answer either\)/.test(l)),
+             `a consolidate follower: a pair's timeout the probe cannot get past either is an outage, and the thought is judged once the judge answers, not failed (${hungRow?.status}: ${hungRow?.last_error?.slice(0, 80)})`);
+    } finally {
+      judgeDown = "503";
+      judgeDownUntil = 0;
+      ac.abort();
+      await running;
+      restorePauses();
+    }
+    assert(followCode === 0, `…and exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
   }
 
   judge.stop(true);
@@ -9363,6 +10036,160 @@ console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress
   } finally {
     stub.stop(true);
     await wsql.close();
+  }
+}
+
+console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one ob1_config row per worker and job, stamped after each pass and re-stamped while one runs, a failed write said once, and board-sync's loop stamping ok, failed and stopped (SMD-2261)");
+{
+  const hsql = new SQL({ url: URL_!, max: 2 });
+  const row = async (key: string) => {
+    const [r] = await hsql`SELECT value, extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = ${key}`;
+    return r ? { ...JSON.parse(r.value), age: Number(r.age) } : null;
+  };
+  try {
+    // The key names its worker first, once.
+    assert(stampKey("board-sync") === "heartbeat:board-sync" && stampKey("extract", "extract:qwen2.5:7b@p2") === "heartbeat:extract:qwen2.5:7b@p2" && stampKey("extract", "my-job") === "heartbeat:extract:my-job" && stampKey("extract", "extractor-v2") === "heartbeat:extract:extractor-v2",
+      "stampKey: board-sync alone, a job named for its worker kept, a custom job prefixed — one that only begins with the worker's name too");
+
+    // A pass's stamp: outcome, passes, the malformed block, the interval's minute floor.
+    const st = passStamper({ sql: hsql as never, worker: "extract", job: "extract:test@p2", intervalS: 15 });
+    await st.stamp("ok", { answers: 50, bad: 12, alarm: true });
+    const one = await row(st.key);
+    assert(one?.v === 1 && one.outcome === "ok" && one.passes === 1 && one.running === false && one.every_s === 60 && one.malformed?.alarm === true && one.malformed.bad === 12 && one.age < 5,
+      `a stamp records the outcome, the pass, the block and a minute's floor (${JSON.stringify(one)})`);
+    await st.end("stopped");
+    const two = await row(st.key);
+    assert(two?.outcome === "stopped" && two.ended === true && two.passes === 1 && two.malformed?.bad === 12 && two.job === "extract:test@p2", `a stop is the worker's end, no pass, the last block stays, and the job is in the value (${JSON.stringify(two)})`);
+    // A restarted follower (a new stamper, no block of its own) keeps the row's
+    // block, so a restart on the same model does not clear the alarm; its own
+    // judged block replaces it (review pass 1).
+    const restarted = passStamper({ sql: hsql as never, worker: "extract", job: "extract:test@p2", intervalS: 15 });
+    await restarted.stamp("ok");
+    const kept = await row(st.key);
+    await restarted.stamp("ok", { answers: 48, bad: 2, alarm: false });
+    const replaced = await row(st.key);
+    assert(kept?.malformed?.alarm === true && kept.passes === 1 && replaced?.malformed?.alarm === false && replaced.malformed.bad === 2,
+      `a restart keeps the row's tripped block until it judges its own (${JSON.stringify(kept?.malformed)} → ${JSON.stringify(replaced?.malformed)})`);
+    // Only a block of the shape the stamper writes is kept, and an old value
+    // that is not JSON is simply overwritten (review pass 2).
+    const shapeKey = "heartbeat:consolidate:shape@p3";
+    const shapeStamper = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:shape@p3", intervalS: 60 });
+    const keptFrom = [];
+    for (const old of [JSON.stringify({ v: 1, malformed: { answers: "x", bad: 1, alarm: true } }), JSON.stringify({ v: 1, malformed: null }), JSON.stringify({ v: 1, malformed: [1] }), "oops"]) {
+      await hsql`INSERT INTO ob1_config (key, value) VALUES (${shapeKey}, ${old}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+      await shapeStamper.stamp("ok");
+      const got = await row(shapeKey);
+      keptFrom.push(got !== null && !("malformed" in got) && got.outcome === "ok");
+    }
+    assert(keptFrom.every(Boolean), `an old block not of the shape, or an old value not JSON, is replaced by the stamp whole (${keptFrom.join(",")})`);
+    // Blocks of the right JSON types but numbers the reader refuses, or a
+    // field missing or mistyped alone: whatever the merge keeps, the worker is
+    // still read, its block left off (review pass 3: such a block hid it).
+    const stillRead = [];
+    for (const m of [{ answers: 10, bad: 20, alarm: true }, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: 1, bad: "x", alarm: true }, { answers: 1, bad: 0, alarm: "yes" }]) {
+      await hsql`INSERT INTO ob1_config (key, value) VALUES (${shapeKey}, ${JSON.stringify({ v: 1, malformed: m })}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+      await shapeStamper.stamp("ok");
+      const rows = await hsql`SELECT key, value, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at, extract(epoch FROM now() - updated_at)::float8 AS age_s FROM ob1_config WHERE key = ${shapeKey}`;
+      const read = parseHeartbeats(rows as never);
+      stillRead.push(read.heartbeats.length === 1 && read.heartbeats[0].malformed === null && read.ignored === 0);
+    }
+    assert(stillRead.every(Boolean), `a kept block the reader refuses never hides the worker (${stillRead.join(",")})`);
+    // A pass is stamped running as it starts, before the timer's first tick.
+    const starting = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:start@p3", intervalS: 15 });
+    let atStart: { running?: boolean } | null = null;
+    await starting.during((async () => { await Bun.sleep(400); atStart = await row(starting.key); })());
+    assert((atStart as { running?: boolean } | null)?.running === true, `a pass is stamped running as it starts (${JSON.stringify(atStart)})`);
+    // An interval past what a timer holds is recorded at the cap, which the reader takes.
+    const huge = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:huge@p3", intervalS: 3_000_000 });
+    await huge.stamp("ok");
+    assert((await row(huge.key))?.every_s === 2_147_483, `a huge interval is recorded at the cap (${(await row(huge.key))?.every_s})`);
+
+    // While a pass runs the row is re-stamped "running" on the timer; the
+    // pass's own stamp after it is the last word.
+    const fast = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:test@p3", intervalS: 1, minEveryS: 1 });
+    let mid: { running?: boolean } | null = null;
+    await fast.during((async () => { await Bun.sleep(2600); mid = await row(fast.key); })());
+    await fast.stamp("ok");
+    const after = await row(fast.key);
+    assert(mid !== null && (mid as { running: boolean }).running === true && after?.running === false && after.outcome === "ok",
+      `a pass longer than the interval is stamped running on the timer, and done after (${JSON.stringify(mid)} → ${JSON.stringify(after)})`);
+    await Bun.sleep(1500);
+    const quiet = await row(fast.key);
+    assert(quiet?.running === false && (quiet?.age ?? 0) >= 1, `the timer stops with the pass: nothing re-stamps after it (${JSON.stringify(quiet)})`);
+
+    // A role that cannot write: said once, the work goes on, said again only after a write succeeded.
+    let failNow = true;
+    const errors: string[] = [];
+    const flaky = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      if (failNow) return Promise.reject(new Error("permission denied for table ob1_config"));
+      return (hsql as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown>)(strings, ...values);
+    }) as never;
+    const denied = passStamper({ sql: flaky, worker: "board-sync", intervalS: 300, onError: (e) => errors.push(e.message) });
+    await denied.stamp("ok");
+    await denied.stamp("ok");
+    failNow = false;
+    await denied.stamp("ok");
+    failNow = true;
+    await denied.stamp("failed");
+    assert(errors.length === 2 && errors.every((m) => /permission denied/.test(m)), `a failed write is said once, and again only after one succeeded (${errors.length})`);
+    // A reporter that throws leaves no later stamp broken (review pass 1).
+    failNow = true;
+    let throwCalls = 0;
+    const throwing = passStamper({ sql: flaky, worker: "consolidate", job: "consolidate:throw@p3", intervalS: 60, onError: () => { throwCalls++; throw new Error("stderr closed"); } });
+    const first = await throwing.stamp("ok").then(() => "resolved", () => "rejected");
+    await throwing.stamp("ok");
+    failNow = false;
+    await throwing.stamp("ok");
+    assert(first === "resolved" && throwCalls === 1 && (await row(throwing.key))?.passes === 3, `a throwing reporter is told once, neither rejects the stamp nor stops the next (${first}, ${throwCalls})`);
+
+    // board-sync's loop: a pass that reports errors, one that throws, one that
+    // finishes; then the signal. The loop's code is the last pass's.
+    await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    const codes = [1, "throw", 0] as const;
+    let i = 0;
+    const seenOutcomes: string[] = [];
+    const loopStamper = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 10 });
+    const origStamp = loopStamper.stamp.bind(loopStamper);
+    loopStamper.stamp = async (o, m) => { seenOutcomes.push(o); await origStamp(o, m); };
+    const origEnd = loopStamper.end.bind(loopStamper);
+    loopStamper.end = async (o, m) => { seenOutcomes.push(`end:${o}`); await origEnd(o, m); };
+    const log = console.log, error = console.error;
+    console.log = () => {};
+    console.error = () => {};
+    let loopCode: number;
+    let midLoop: { running?: boolean } | null = null;
+    try {
+      loopCode = await loopPasses({
+        once: async () => { if (i === 0) { await Bun.sleep(300); midLoop = await row("heartbeat:board-sync"); } const c = codes[i++]; if (c === "throw") throw new Error("Linear unreachable"); return c; },
+        intervalS: 10, stopped: () => i >= codes.length, stamper: loopStamper, sleep: async () => {},
+      });
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+    const board = await row("heartbeat:board-sync");
+    assert((midLoop as { running?: boolean } | null)?.running === true, `board-sync's pass is stamped running while it runs (${JSON.stringify(midLoop)})`);
+    assert(seenOutcomes.join(",") === "failed,failed,ok,end:stopped" && loopCode! === 0 && board?.outcome === "stopped" && board.ended === true && board.passes === 3 && board.every_s === 60,
+      `the loop stamps each pass's outcome (errors and a throw both failed), then stopped (${seenOutcomes.join(",")}; ${JSON.stringify(board)})`);
+    // A dry run or an audit passes no stamper: the loop writes no row.
+    await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    let j = 0;
+    console.log = () => {};
+    try { await loopPasses({ once: async () => (j++, 0), intervalS: 10, stopped: () => j >= 1, stamper: null, sleep: async () => {} }); } finally { console.log = log; }
+    assert((await row("heartbeat:board-sync")) === null, "a loop with no stamper (a dry run, an audit) writes no heartbeat");
+
+    // A tier refresh copies ob1_config whole: its settle step deletes the
+    // source's heartbeats, so a canary never reports stable's workers (review pass 1).
+    const keep = await hsql`SELECT key, value FROM ob1_config WHERE key IN ('tier', 'last_refresh')`;
+    await passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 300 }).stamp("ok");
+    await settleRefreshed(hsql as never, "canary");
+    const [after2] = await hsql`SELECT (SELECT count(*)::int FROM ob1_config WHERE key LIKE 'heartbeat:%') AS beats, (SELECT value FROM ob1_config WHERE key = 'tier') AS tier, (SELECT value FROM ob1_config WHERE key = 'last_refresh') AS refreshed`;
+    await hsql`DELETE FROM ob1_config WHERE key IN ('tier', 'last_refresh')`;
+    for (const k of keep as { key: string; value: string }[]) await hsql`INSERT INTO ob1_config (key, value) VALUES (${k.key}, ${k.value})`;
+    assert(after2.beats === 0 && after2.tier === "canary" && /^\d{4}-/.test(after2.refreshed ?? ""), `a refresh's settle stamps the tier and its time and leaves no heartbeat (${JSON.stringify(after2)})`);
+  } finally {
+    await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await hsql.close();
   }
 }
 

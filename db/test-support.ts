@@ -16,6 +16,7 @@
 import { SQL } from "bun";
 import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_CURRENT_SIGNATURE, SEARCH_THOUGHTS_CURRENT_SIGNATURE_7, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
+import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, identityRefusal, reachedDatabaseRefusal, resetRefusal, socketRefusal } from "./connect.ts";
@@ -684,6 +685,64 @@ export function createAssert(): {
 }
 
 /**
+ * A Request whose `url` is the string given, as Bun hands a handler one built
+ * from a `Host` it never checked (`http://x:99999/mcp`, or the bare `/mcp`).
+ * Request's own constructor refuses such a URL, so it is stood in for
+ * (SMD-2535).
+ */
+export class RuntimeUrl extends Request {
+  constructor(private readonly given: string, init?: RequestInit) { super("http://stand-in.test/", init); }
+  override get url() { return this.given; }
+}
+
+// Raw HTTP over a socket, for the rows about the Host Bun builds `req.url`
+// from: fetch sends a Host of its own (SMD-2535, SMD-2595).
+
+/** What a server sends back to `text` before it closes, or within 3 s; on a socket error, what came so far. */
+export function rawExchange(port: number, text: string): Promise<string> {
+  return new Promise<string>((resolve) => {
+    const sock = connect(port, "127.0.0.1", () => sock.write(text));
+    let got = "";
+    sock.on("data", (d) => (got += d));
+    sock.on("close", () => resolve(got));
+    sock.on("error", () => resolve(got));
+    setTimeout(() => sock.destroy(), 3_000);
+  });
+}
+
+/** The request line and Host: HTTP/1.0 with none for `null`, which HTTP/1.1 would make Bun's own 400. */
+export function requestHead(method: string, target: string, host: string | null): string[] {
+  return [`${method} ${target} HTTP/${host === null ? "1.0" : "1.1"}`, ...(host === null ? [] : [`host: ${host}`])];
+}
+
+/** One request over a raw socket at `host`, and the status and body it got. */
+export async function askRaw(port: number, method: string, target: string, host: string | null, headers: string[] = [], body = ""): Promise<{ status: number; body: string }> {
+  const head = [...requestHead(method, target, host), ...headers, "connection: close", `content-length: ${Buffer.byteLength(body)}`];
+  const got = await rawExchange(port, `${head.join("\r\n")}\r\n\r\n${body}`);
+  return { status: Number(got.split(" ")[1]), body: got.slice(got.indexOf("\r\n\r\n") + 4) };
+}
+
+/**
+ * A JSON POST whose client leaves mid-upload: the head and `partial` of a
+ * 1000-byte body, then the socket dropped after 150 ms. Returns how many
+ * requests the server had pending as the client left — one, or a row that
+ * reads pendingSettled afterwards holds nothing — or -1 on a socket error.
+ */
+export function leaveMidUpload(server: { port?: number; pendingRequests: number }, target: string, host: string | null, headers: string[], partial: string): Promise<number> {
+  return new Promise<number>((resolve) => {
+    const head = [...requestHead("POST", target, host), "content-type: application/json", ...headers, "content-length: 1000"];
+    const sock = connect(server.port!, "127.0.0.1", () => { sock.write(`${head.join("\r\n")}\r\n\r\n${partial}`); setTimeout(() => { const pending = server.pendingRequests; sock.destroy(); resolve(pending); }, 150); });
+    sock.on("error", () => resolve(-1));
+  });
+}
+
+/** The server's pending requests once they settle, or after 2 s. */
+export async function pendingSettled(server: { pendingRequests: number }): Promise<number> {
+  for (let i = 0; i < 40 && server.pendingRequests > 0; i++) await Bun.sleep(50);
+  return server.pendingRequests;
+}
+
+/**
  * A stub provider's answer that never comes: the request stays open until the
  * client's own deadline (OB1_LLM_TIMEOUT) abandons it. Two things follow for
  * the test: the stub decides WHICH request hangs from its body, since a
@@ -693,6 +752,64 @@ export function createAssert(): {
  */
 export function neverAnswers(): Promise<never> {
   return new Promise<never>(() => {});
+}
+
+/** Poll `cond` every 250 ms for up to `ms`: true as soon as it holds, else its last answer. */
+export async function pollUntil(cond: () => Promise<boolean>, ms: number): Promise<boolean> {
+  for (const until = Date.now() + ms; Date.now() < until;) {
+    if (await cond()) return true;
+    await Bun.sleep(250);
+  }
+  return cond();
+}
+
+/**
+ * A TCP relay on the loopback in front of a database URL's server, which a suite cuts and
+ * restores to take a server away from one client while the suite's own
+ * connection stays up (SMD-2599: a --follow worker outlasting its database).
+ * `cut()` destroys every relayed connection and stops listening, so the
+ * client's next connect is refused, as a stopped Postgres refuses it;
+ * `restore()` listens again on the same port. Works where the suite cannot
+ * stop the server itself — CI's service container. `url` is the given
+ * database URL with its host and port the relay's.
+ */
+export async function cuttableRelay(databaseUrl: string): Promise<{ url: string; cut(): Promise<void>; restore(): Promise<void>; close(): Promise<void> }> {
+  const target = new URL(databaseUrl);
+  const host = target.hostname;
+  const port = Number(target.port || 5432);
+  const sockets = new Set<Socket>();
+  const server = createServer((client) => {
+    const upstream = connect(port, host);
+    for (const s of [client, upstream]) {
+      sockets.add(s);
+      s.on("close", () => sockets.delete(s));
+      s.on("error", () => { client.destroy(); upstream.destroy(); });
+    }
+    client.on("close", () => upstream.destroy());
+    upstream.on("close", () => client.destroy());
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  const listen = (at: number) => new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(at, "127.0.0.1", () => { server.off("error", reject); resolve(); });
+  });
+  await listen(0);
+  const bound = (server.address() as AddressInfo).port;
+  const cut = async () => {
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    for (const s of sockets) s.destroy();
+    await closed;
+  };
+  const relayed = new URL(databaseUrl);
+  relayed.hostname = "127.0.0.1";
+  relayed.port = String(bound);
+  return {
+    url: relayed.href,
+    cut,
+    restore: () => listen(bound),
+    close: async () => { if (server.listening) await cut(); },
+  };
 }
 
 /**

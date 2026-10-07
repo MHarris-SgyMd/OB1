@@ -36,6 +36,8 @@
  * `invalid_token`.
  */
 
+import { queryOf } from "./auth.ts";
+
 /** The hosts an `http:` origin may name: OAuth 2.1 allows plain HTTP for loopback alone. */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
@@ -151,7 +153,7 @@ export type Presented = "none" | "key" | "token";
 
 export function presentedKind(req: Request): Presented {
   // Present, not truthy: a connector pasted with an empty key is still a key client.
-  if (req.headers.has("x-brain-key") || req.headers.has("x-access-key") || new URL(req.url).searchParams.has("key")) return "key";
+  if (req.headers.has("x-brain-key") || req.headers.has("x-access-key") || queryOf(req.url).has("key")) return "key";
   // The Bearer scheme with anything after it, or nothing: a client whose key
   // variable is unset sends `Bearer ` (which arrives as `Bearer`), and is a
   // key client all the same (review pass 3).
@@ -167,8 +169,11 @@ export function presentedKind(req: Request): Presented {
  * the origin's own scheme, so the host name is compared as the URL normalises
  * it and only that scheme's default port (`:443` from a TLS front, for an
  * `https:` origin) counts as none. A `Host` that is not a bare host and port
- * (`x:99999`, `user@host`, `host/x`) is not the origin's. A request built
- * with no `Host` (a suite's) is read by its URL's.
+ * (`x:99999`, `user@host`, `host/x`) is not the origin's, though one the URL
+ * parser cleans up to the origin's name is (a Latin-1 spelling of a punycode
+ * name, an embedded tab, a trailing `\`).
+ * A request with no `Host` is read by its URL's: a suite's, or HTTP/1.0's,
+ * which auth.ts routable rebuilt at no origin's (SMD-2535).
  */
 function atOrigin(req: Request, origin: string): URL | null {
   const o = new URL(origin);

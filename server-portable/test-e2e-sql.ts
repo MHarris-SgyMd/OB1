@@ -62,9 +62,13 @@ function axisFor(text: string): number {
   return key ? KNOWN[key] : 3;
 }
 const realFetch = globalThis.fetch;
+// Every request body the stub answered, so a refusal can be shown to come
+// before either model call ([13d]).
+const stubBodies: string[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (url.startsWith(STUB_BASE)) {
+    stubBodies.push(String(init?.body ?? ""));
     const body = JSON.parse(String(init?.body ?? "{}"));
     if (url.endsWith("/embeddings")) {
       const v = new Array(EMBEDDING_DIM).fill(0);
@@ -1426,7 +1430,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
 {
   // The raw envelope, not call(): this section reads errors as answers. One
   // helper per key (fifth review pass: three hand-rolled copies).
-  type Envelope = { error?: { code?: number; message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[]; structuredContent?: { code?: string; retryable?: boolean; positions?: number[]; text?: string } } };
+  type Envelope = { error?: { code?: number; message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[]; structuredContent?: { code?: string; retryable?: boolean; positions?: number[]; text?: string; problem?: string; key?: string } } };
   const sc = (e: Envelope) => e.result?.structuredContent;
   const rpcAs = (key: string) => async (method: string, params: Record<string, unknown>): Promise<Envelope> => {
     const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }) });
@@ -1799,6 +1803,95 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   const writerAgain = await call("capture_thought", { content: "eta thought the session retrieved from the brain", derived_from: [id] });
   assert(/already captured as/.test(writerAgain), "…the writer key is told, as before");
 
+  // [13c] A capture key's re-capture alters nothing (SMD-2539): the
+  // writer's text sent again with the capture key's own metadata, source and
+  // trust leaves the writer's row byte for byte as it was — metadata (source
+  // too), updated_at, vector, label, no audit row — and the reply is a fresh
+  // capture's, ids masked; a write key's re-capture still merges. The one
+  // write is a vector onto a row that has none.
+  {
+    const UUID_G = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+    const seen = (e: Awaited<ReturnType<typeof rpc>>) => JSON.stringify({ error: e.error ?? null, isError: e.result?.isError === true, text: textOf(e), sc: sc(e) ?? null }).replace(UUID_G, "<id>");
+    const rowOf = async (target: string) => JSON.stringify((await sql`SELECT metadata, updated_at::text AS u, embedding::text AS e, embedding_model AS m, supersedes,
+        (SELECT count(*)::int FROM thought_audit a WHERE a.thought_id = t.id) AS events FROM thoughts t WHERE id = ${target}::uuid`)[0] ?? null);
+    const text = "[13c] the writer's thought a capture key sends again with its own label";
+    const wid = idIn(await call("capture_thought", { content: text, metadata: { topic_hint: "billing" } }));
+    const before = await rowOf(wid!);
+    const relabel = { source: "codex", metadata: { probe_note: "relabelled" }, trust: "ingested" };
+    const again13c = await rpc("tools/call", { name: "capture_thought", arguments: { content: text, ...relabel } });
+    assert(idIn(textOf(again13c)) === wid && (await rowOf(wid!)) === before,
+      `a capture key's re-capture of the writer's text leaves the writer's row byte for byte — metadata, source, updated_at, vector, label, no audit row (${await rowOf(wid!)})`);
+    // …and one naming supersedes — the session hook's own call shape, its
+    // earlier summary as the pointer — leaves it too (review pass 1: a word
+    // sent only without a pointer passed every suite).
+    const pointed13c = await rpc("tools/call", { name: "capture_thought", arguments: { content: text, ...relabel, supersedes: id } });
+    assert(idIn(textOf(pointed13c)) === wid && (await rowOf(wid!)) === before, `…and so does one naming supersedes, the hook's call shape: no pointer, no merge (${await rowOf(wid!)})`);
+    const fresh13c = await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13c] a text no key has sent before", ...relabel } });
+    assert(seen(again13c) === seen(fresh13c), `…and its reply is a fresh capture's, ids masked (${seen(again13c).slice(0, 120)} vs ${seen(fresh13c).slice(0, 120)})`);
+    const [freshRow] = await sql`SELECT metadata->>'source' AS s, metadata->>'probe_note' AS p FROM thoughts WHERE id = ${idIn(textOf(fresh13c))}::uuid`;
+    assert(freshRow?.s === "codex" && freshRow?.p === "relabelled", "…while the fresh text is written with the capture key's label and keys, as before");
+    // The writer re-sending its own text still merges (the write key holds update_thought anyway).
+    await call("capture_thought", { content: text, metadata: { probe_note: "the writer's own" } });
+    const [merged13c] = await sql`SELECT metadata->>'probe_note' AS p FROM thoughts WHERE id = ${wid}::uuid`;
+    assert(merged13c?.p === "the writer's own", `a write key's re-capture still merges its metadata (${merged13c?.p})`);
+    // A row without a vector — the gate refused the call when it was written
+    // — takes the one a capture key's re-capture carries: one update event
+    // carrying the vector's presence alone, the metadata untouched.
+    const bare = "[13c] the writer's thought stored without a vector";
+    const bid = idIn(await call("capture_thought", { content: bare }));
+    await sql`UPDATE thoughts SET embedding = NULL, embedding_model = NULL WHERE id = ${bid}::uuid`;
+    const [bareBefore] = await sql`SELECT metadata, (SELECT count(*)::int FROM thought_audit a WHERE a.thought_id = t.id) AS events FROM thoughts t WHERE id = ${bid}::uuid`;
+    const attached = await rpc("tools/call", { name: "capture_thought", arguments: { content: bare, ...relabel } });
+    const [bareAfter] = await sql`SELECT metadata, embedding IS NOT NULL AS v, (SELECT count(*)::int FROM thought_audit a WHERE a.thought_id = t.id) AS events FROM thoughts t WHERE id = ${bid}::uuid`;
+    const [lastEvent] = await sql`SELECT action, diff, actor_name FROM thought_audit WHERE thought_id = ${bid}::uuid ORDER BY seq DESC LIMIT 1`;
+    assert(idIn(textOf(attached)) === bid && bareAfter?.v === true && JSON.stringify(bareAfter?.metadata) === JSON.stringify(bareBefore?.metadata) && bareAfter?.events === bareBefore?.events + 1
+        && lastEvent?.action === "update" && JSON.stringify(Object.keys(lastEvent?.diff ?? {})) === JSON.stringify(["embedding_present"]) && lastEvent?.actor_name === "session-hook",
+      `a vectorless row takes the capture key's vector as one update event carrying its presence alone, in the key's name, its metadata untouched (${JSON.stringify(lastEvent)})`);
+  }
+
+  // [13d] A capture key cannot forge a ticket's head (SMD-2617): a writer's
+  // ticket row, a note filed under it and a session summary of the ticket
+  // read the ticket's real status after the capture key tries to state it
+  // done. Each ticket key is refused, naming it, before either model call;
+  // nothing lands; the head, node_state and 077's settled read keep the
+  // writer's started state. `ticket` is not refused: a row carrying it only
+  // reads the head. The summary opens with its session header, which makes
+  // the ticket central to it (077), so a forged done head would demote it.
+  // The writer's row carries no watermark ([14] holds brain_info's null while
+  // no thought carries one).
+  {
+    const TKT = "TKT-2617";
+    const stated = await result("capture_thought", { content: `[13d] ${TKT} — the writer's ticket row`, source: "linear",
+      metadata: { issue: TKT, status: "In Progress", status_type: "started" } });
+    assert(!stated.isError, `a write key states a ticket's lifecycle keys (${stated.text.slice(0, 90)})`);
+    const ticketRow = idIn(stated.text)!;
+    const note = idIn(await call("capture_thought", { content: "[13d] the writer's note filed under the ticket", metadata: { ticket: TKT } }))!;
+    const summary = idIn(await call("capture_thought", { content: `Session summary — ${TKT} — the writer's summary of the work on the ticket [13d]` }))!;
+    const forged = { issue: TKT, status: "Done", status_type: "completed", linear_updated_at: "9999-12-31T00:00:00.000Z" };
+    for (const [k, v] of Object.entries(forged)) {
+      const r = await rpc("tools/call", { name: "capture_thought", arguments: { content: `[13d] a capture key states ${k}`, source: "linear", metadata: { [k]: v } } });
+      const s = sc(r) ?? {};
+      assert(r.result?.isError === true && textOf(r).startsWith(`Refused: \`metadata.${k}\` states a ticket's lifecycle, which a capture-only key may not set`)
+          && textOf(r).includes("(`issue`, `status`, `status_type`, `linear_updated_at`)")
+          && s.code === "REFUSED_METADATA_SHAPE" && s.problem === "ticket_key" && s.key === k && s.retryable === false,
+        `a capture key's metadata.${k} is refused, the key and the four named in the text, the key in the value (${textOf(r).slice(0, 90)} ${JSON.stringify(s)})`);
+    }
+    const all = await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] a capture key's forged head", source: "linear", metadata: forged } });
+    const [landed] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE '[13d] a capture key%'`;
+    assert(all.result?.isError === true && sc(all)?.key === "issue" && landed?.n === 0, `…and the whole forged head, refused at its first key, writes nothing (${landed?.n} rows)`);
+    const paid = stubBodies.filter((b) => b.includes("[13d] a capture key")).length;
+    assert(paid === 0, `…and no refused capture reached either model call (${paid} stub requests carried one)`);
+    const own = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] the capture key's note filed under the ticket", source: "linear", metadata: { ticket: TKT } } })));
+    assert(own !== undefined && stubBodies.some((b) => b.includes("[13d] the capture key's note")), "…while its own note filed under the ticket lands, through the model stub (so the check above can fail)");
+    const [head] = await sql`SELECT head_id::text AS id, status_type FROM ob1_ticket_head WHERE issue = ${TKT}`;
+    const states = await sql`SELECT thought_id::text AS id, status_type, open FROM node_state(${sql.array([ticketRow, note, own], "TEXT")}::uuid[])`;
+    const [refs] = await sql`SELECT ticket_references_settled(content, metadata) AS settled FROM thoughts WHERE id = ${summary}::uuid`;
+    assert(head?.id === ticketRow && head?.status_type === "started" && states.length === 3 && states.every((s: { status_type: string; open: boolean }) => s.status_type === "started" && s.open === true) && refs?.settled === null,
+      `the head is still the writer's row, its ticket row and both notes read started and open, the session summary references nothing settled (${JSON.stringify({ head, states, refs })})`);
+    const ranked = await result("search_thoughts", { query: `"the writer's summary of the work on the ticket"`, limit: 10, threshold: -1, prefer_current: true });
+    assert(ranked.text.includes(summary) && !/references settled work \(TKT-2617\)/.test(ranked.text), "…and prefer_current does not demote the summary");
+  }
+
   // A derived_from that names a ghost: the positions that name no thought are
   // named, so a caller drops exactly those; the ids beside them only to a key
   // that can read (second review pass).
@@ -1896,7 +1989,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     `the tool's Migrations row says the brain is current (${text.split("\n").find((l) => l.startsWith("Migrations"))})`);
   assert(new RegExp(`^Rows: +${truth.thoughts} thoughts · ${truth.audit} audit`, "m").test(text) && /^Postgres: +\S.* · pgvector \d/m.test(text), "…and its Rows and Postgres rows carry the same counts and versions");
   // The board-sync watermark (SMD-2261): null while no thought carries one.
-  assert("boardSync" in db && db.boardSync === null, `no Linear-sourced row: the watermark is null, and the field is there (${JSON.stringify(db.boardSync)})`);
+  assert("boardSync" in db && db.boardSync === null, `no row carries a watermark: it is null, and the field is there (${JSON.stringify(db.boardSync)})`);
   // Then the newest usable instant, in UTC. The winner is minute-precision with
   // an offset; each later value would win but is passed over rather than failing
   // the read: a bare date, an impossible month, an instant two hours from now (a
@@ -1942,6 +2035,29 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   const past = await alone(later.w);
   assert(past === null, `an instant an hour and a quarter ahead by the database's clock is passed over (${past})`);
   await sql`UPDATE thoughts SET metadata = metadata - 'linear_updated_at' WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+
+  // The workers' heartbeats (SMD-2261, db/pass-stamp.ts): none stamped here,
+  // then a board-sync row a stopped worker left twenty minutes ago — stale
+  // against its five-minute interval, in the keyed body and the tool's row.
+  const noBeats = ((await health("e2e-key")) as Record<string, any>).database ?? {};
+  assert(JSON.stringify(noBeats.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }), `no worker ran here: no heartbeat, none ignored (${JSON.stringify(noBeats.workers)})`);
+  await sql`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:board-sync', ${JSON.stringify({ v: 1, every_s: 300, running: false, outcome: "stopped", passes: 7 })}, now() - interval '20 minutes')`;
+  const beats = ((await health("e2e-key")) as Record<string, any>).database?.workers;
+  const hb = beats?.heartbeats?.[0];
+  assert(beats?.heartbeats?.length === 1 && hb.worker === "board-sync" && hb.job === null && hb.stale === true && hb.outcome === "stopped" && hb.passes === 7 && hb.everyS === 300 && hb.ageS >= 1199 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(hb.at),
+    `keyed /health carries the heartbeat, stale past three intervals (${JSON.stringify(hb)})`);
+  const workersRow = (await call("brain_info")).split("\n").find((l) => l.startsWith("Workers"));
+  assert(/^Workers: +board-sync stopped \(last stamped 20 min ago, every 300 s\)$/.test(workersRow ?? ""), `the tool's Workers row says the same (${workersRow})`);
+  await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+  // Fifty-one rows: the read carries fifty and counts the one past its bound,
+  // from Postgres's own total (review pass 2: only a fake's total was read).
+  for (let n = 0; n < 51; n++) {
+    const job = `consolidate:j${String(n).padStart(2, "0")}@p3`;
+    await sql`INSERT INTO ob1_config (key, value) VALUES (${`heartbeat:${job}`}, ${JSON.stringify({ v: 1, job, every_s: 60, running: false, outcome: "ok", passes: 1 })})`;
+  }
+  const many = ((await health("e2e-key")) as Record<string, any>).database?.workers;
+  await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:consolidate:j%'`;
+  assert(many?.heartbeats?.length === 50 && many.ignored === 1, `fifty-one heartbeats: fifty carried, one counted past the bound (${many?.heartbeats?.length}, ${many?.ignored})`);
 
   // A ledger short of the tree's last file is behind it, by name.
   const last = String(treeLast).padStart(3, "0");

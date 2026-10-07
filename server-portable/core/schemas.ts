@@ -8,6 +8,7 @@
 import { z } from "zod";
 import type { ToolName } from "../tools.ts";
 import { SAID_BY, TRUST } from "./filter.ts";
+import { META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
 export type ToolSpec = {
@@ -265,7 +266,7 @@ export const SPECS = {
     description:
       "Say what this Open Brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
       "the Postgres and pgvector versions, the schema version and highest migration applied (and whether that is this server's last), " +
-      "row counts, database size, vector-index parameters and the board-sync watermark (the newest Linear update any thought reflects). Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
+      "row counts, database size, vector-index parameters, the board-sync watermark (the newest Linear update any thought reflects) and the long-running workers' heartbeats (alive, stopped or stale). Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
       "(it compares the highest number applied; a skipped or edited migration is what `migrate.ts --dry-run` lists).",
     annotations: {
       readOnlyHint: true,
@@ -290,7 +291,7 @@ export const SPECS = {
       derived_from: z.array(z.string()).optional()
         .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result). Recorded when the thought is new; if this text was already captured, the existing thought's provenance is left as it is."),
       supersedes: z.string().optional()
-        .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead."),
+        .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead (a key that can write). A capture-only key may replace only a thought it captured itself, attributed to its agent id, that still exists; any other id is left out without a word and the capture lands without it (while the server cannot check — its agent registry unreachable, or the target's capture record unreadable — it asks for a retry instead)."),
       // SMD-1298. Where the capture comes from, for metadata.source — "mcp"
       // when absent, as every capture before it. A session-end hook says
       // `claude-code` or `codex`; a per-source weight (SMD-1297) and the
@@ -312,7 +313,7 @@ export const SPECS = {
       // and a per-source weight (SMD-1297) can tell a model summary from the
       // derived one.
       metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
-        .describe("Extra metadata keys to store on the thought (e.g. `{\"summary_model\": \"llama3.1:8b\"}`). Lower-case keys, string/number/boolean values; at most 8 keys. Keys the server owns — `source` (use the `source` argument), `type`, `topics`, `people` and the like — are refused. Returned to readers alongside the server's own metadata."),
+        .describe(`Extra metadata keys to store on the thought (e.g. \`{"summary_model": "llama3.1:8b"}\`). Lower-case keys, string/number/boolean values; at most ${META_KEYS_MAX} keys. Keys the server owns — \`source\` (use the \`source\` argument), \`type\`, \`topics\`, \`people\` and the like — are refused, and so, for a capture-only key, are a ticket's lifecycle keys (${TICKET_META_KEYS_TEXT}). Returned to readers alongside the server's own metadata.`),
     },
   },
   update_thought: {

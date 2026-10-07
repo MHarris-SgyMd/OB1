@@ -65,6 +65,11 @@ console.log("[1] captureThought without chunks — the 3-arg RPC, unchanged");
   assert(Number(row.d) === DIM, "the embedding was stored, not dropped");
   assert(row.metadata?.type === "idea", `metadata survived the RPC (${JSON.stringify(row.metadata)})`);
   assert(row.m === "unit-test-model", `the model rode in the envelope over PostgREST too (${row.m})`);
+  // 080 (SMD-2539): the recapture word rides the envelope too — a 'keep'
+  // re-capture over PostgREST leaves the row's metadata as it was.
+  const kept = await store.captureThought({ content: "a short thought that needs no chunking", payload: { metadata: { probe_note: "kept" } }, embedding: vec(0), embeddingModel: "unit-test-model", recapture: "keep" });
+  const [keptRow] = await sql`SELECT metadata FROM thoughts WHERE id = ${id}`;
+  assert(kept.id === id && kept.existed === true && JSON.stringify(keptRow.metadata) === JSON.stringify(row.metadata), `a 'keep' re-capture over PostgREST leaves the row — the word rode the envelope (${JSON.stringify(keptRow.metadata)})`);
   // The eighth argument by name (021): relabelled with content, untouched without.
   await store.updateThought({ id, content: "a short thought that needs no chunking", embedding: vec(0), embeddingModel: "unit-test-model-2" });
   await store.updateThought({ id, metadataPatch: { type: "note" } });

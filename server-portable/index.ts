@@ -2,7 +2,7 @@
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
 import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";
-import { authenticateRequest, canCapture, canRead, canWrite, CLIENT_SCOPES, type Principal } from "./auth.ts";
+import { authenticateRequest, canCapture, canRead, canWrite, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
@@ -573,7 +573,8 @@ export function legacyRouteLine(name: string, method: string, path: string): str
 }
 function noteLegacyRoute(req: Request, name: string): void {
   if (req.headers.get(LEGACY_ROUTE_HEADER) !== "1" || legacyNamesLogged.has(name)) return;
-  // The line first: a URL that does not parse throws here, before the name is marked as said.
+  // The line first, so a throw here leaves the name unsaid. rawPath cannot
+  // throw through the entry, which hands on only URLs that parse (auth.ts routable).
   const line = legacyRouteLine(name, req.method, rawPath(req));
   legacyNamesLogged.add(name);
   console.warn(line);
@@ -1040,8 +1041,9 @@ export default {
   // and the default is the right reaper for a dead socket (SMD-1864).
   // An empty PORT is unset, not port 0 (a random port, silently) — `||`, the rule the vendored servers' tails share (SMD-1799).
   port: Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.PORT || 8000),
-  fetch: (...args: Parameters<typeof app.fetch>) => {
-    if (SERVES_ON_BUN && !bunServer && isStoppable(args[1])) bunServer = args[1];
-    return app.fetch(...args);
+  fetch: (...[req, ...rest]: Parameters<typeof app.fetch>) => {
+    if (SERVES_ON_BUN && !bunServer && isStoppable(rest[0])) bunServer = rest[0];
+    // A request whose URL will not parse, rebuilt so it is routed and refused, not a 500 (SMD-2535).
+    return app.fetch(routable(req), ...rest);
   },
 };

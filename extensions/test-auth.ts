@@ -63,7 +63,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
-import { createAssert, PACKAGES, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, PACKAGES, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -586,9 +586,10 @@ console.log(`\n[${WEBHOOK.file}]`);
 // worker dry-runs under one, the receiver admits its secret; each refuses a
 // wrong key; each is still running afterwards; then stopped. The two APIs on
 // their own constant-time compare of a single key (rest-api, smart-ingest;
-// not consumers of _shared/auth.ts, and check 8 passes them) are started too,
-// with a probe of their own. Every file in the tree that imports the shim and
-// exports the entry shape is in the list, or the guard below fails.
+// their key is not _shared/auth.ts's — they take only routable from it — and
+// check 8 passes them) are started too, with a probe of their own. Every file
+// in the tree that imports the shim and exports the entry shape is in the
+// list, or the guard below fails.
 console.log("\n[each server on the SQL shim starts under bun and answers over the port]");
 type Live = { file: string; env: Record<string, string>; probe: (base: string) => Promise<void> };
 const onShim = (file: string) => /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, file), "utf8"));
@@ -738,6 +739,101 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp" && s.writes.length > 0)) 
 for (const s of SERVERS.filter((s) => s.health)) {
   const health = await handlers[SERVERS.indexOf(s)](new Request(`http://extension.test${s.health}`, { method: "GET" }));
   assert(health.status === 200 && (await health.json()).status === "ok", `${s.file}: the unauthenticated GET ${s.health} health check still answers`);
+}
+
+// ── A request URL that will not parse ────────────────────────────────────────
+
+console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each server that reads its URL answers as at localhost, never a 500 (SMD-2595)]");
+{
+  // Bun builds req.url from the Host header unchecked: `x:99999`, `[::1`,
+  // `brain.example.test:abc` and `::1:8000` leave a URL that will not parse;
+  // no Host (HTTP/1.0), userinfo or a path leave the bare request target. Each
+  // server that reads its URL is served here and asked over a raw socket,
+  // since fetch sends a Host of its own: at Host localhost, the control, and at
+  // each of those, every answer with the control's status and the word that
+  // names the route the control reached. No row reaches a store or a model.
+  // rest-api and smart-ingest read their one key at import, so they are
+  // imported here with it set, and the environment put back after.
+  const saved = { key: process.env.MCP_ACCESS_KEY, url: process.env.SUPABASE_URL };
+  const singleKey: Record<string, Handler> = {};
+  let importFailed: unknown = null;
+  process.env.MCP_ACCESS_KEY = LEGACY_KEY;
+  process.env.SUPABASE_URL = PG_REFUSED;
+  hush(); // smart-ingest warns at import that no extraction worker is set
+  try {
+    for (const file of ["integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]) singleKey[file] = await importServer(file);
+  } catch (e) {
+    importFailed = e;
+  } finally {
+    unhush();
+    if (saved.key === undefined) delete process.env.MCP_ACCESS_KEY; else process.env.MCP_ACCESS_KEY = saved.key;
+    process.env.SUPABASE_URL = saved.url;
+  }
+  const handlerOf = (file: string): Handler | undefined => singleKey[file] ?? handlers[SERVERS.findIndex((s) => s.file === file)];
+  const ask = (port: number, method: string, target: string, host: string | null, headers: string[], body: string) =>
+    askRaw(port, method, target, host, ["content-type: application/json", ...headers], body);
+  const HOSTS = ["x:99999", "[::1", "brain.example.test:abc", "::1:8000", null, "a@brain.example.test", "brain.example.test/x"];
+  const read = [`x-brain-key: ${READ_KEY}`], legacy = [`x-brain-key: ${LEGACY_KEY}`];
+  /** A request, the status it gets at localhost and a word its body holds at every Host: each row names the route it reached. */
+  type Row = [method: string, target: string, headers: string[], status: number, says: string];
+  const worker: Row[] = [["POST", "/", [], 401, "Unauthorized"], ["POST", "/", read, 403, "dry_run=true"], ["POST", `/?dry_run=true&key=${READ_KEY}`, [], 503, "API key"]];
+  const ROWS: [string, Row[]][] = [
+    // The prefix stripped from a URL that parses: the route is reached under it.
+    ["integrations/agent-memory-api/index.ts", [["GET", "/health", [], 401, "access key"], ["POST", "/agent-memory-api/writeback", read, 403, "write"], ["GET", "/agent-memory-api/none", read, 404, "Not Found"]]],
+    ["integrations/open-brain-rest/index.ts", [["GET", "/open-brain-rest/health", read, 200, "ok"], ["POST", "/capture", read, 403, "write"], ["GET", `/health?key=${READ_KEY}`, [], 200, "ok"]]],
+    ["integrations/consolidation-workers/bio/index.ts", worker],
+    ["integrations/consolidation-workers/metadata-norm/index.ts", worker],
+    ["integrations/entity-extraction-worker/index.ts", worker],
+    ["integrations/rest-api/index.ts", [["GET", "/rest-api/health", legacy, 200, "open-brain-rest"], ["GET", "/none", legacy, 404, "Not found"], ["GET", "/health", [], 401, "Unauthorized"]]],
+    ["integrations/smart-ingest/index.ts", [["POST", "/smart-ingest", legacy, 400, "text"], ["POST", "/smart-ingest/execute", legacy, 400, "job_id"], ["POST", "/", [], 401, "Unauthorized"]]],
+  ];
+  const why = importFailed instanceof Error ? importFailed.message : String(importFailed);
+  for (const [file] of ROWS) if (!handlerOf(file)) assert(false, `${file}: has a handler to serve — it is in neither SERVERS nor the single-key imports above, or it failed to import${importFailed ? ` (${why})` : ""}`);
+  const servers = new Map(ROWS.filter(([file]) => handlerOf(file)).map(([file]) => [file, Bun.serve({ port: 0, fetch: handlerOf(file)! })]));
+  for (const s of SERVERS) if (servers.has(s.file)) env(s, KEYS);
+  // A server logs what it refuses (a URL, a body cut short) on console.error:
+  // silenced while asked, the verdicts kept and asserted after, since a
+  // failure is said there too.
+  const verdicts: [boolean, string][] = [];
+  hush();
+  try {
+    for (const [file, rows] of ROWS) {
+      const port = servers.get(file)?.port;
+      if (port === undefined) continue;
+      for (const [method, target, headers, status, says] of rows) {
+        const body = method === "GET" ? "" : "{}";
+        const control = await ask(port, method, target, "localhost", headers, body);
+        const at: { host: string; status: number; says: boolean }[] = [];
+        for (const host of HOSTS) {
+          const r = await ask(port, method, target, host, headers, body);
+          at.push({ host: host ?? "none", status: r.status, says: r.body.includes(says) });
+        }
+        const name = `${method} ${target.replace(READ_KEY, "<key>")}${headers.length ? " keyed" : ""}`;
+        verdicts.push([control.status === status && control.body.includes(says) && at.every((a) => a.status === status && a.says),
+          `${file}: ${name} → ${status}, saying ${JSON.stringify(says)}, at every Host as at localhost (localhost ${control.status} ${JSON.stringify(control.body.slice(0, 60))}; ${at.map((a) => `${a.host} ${a.status}${a.says ? "" : " not saying it"}`).join(", ")})`]);
+      }
+    }
+    // A client that leaves mid-upload leaves no request behind: the body a
+    // server is handed throws when the client leaves, as the request's own
+    // does, where a copy made by `new Request(url, req)` never settles and its
+    // handler waits forever. Each server that reads a body, at a route that
+    // reads it.
+    const write = [`x-brain-key: ${WRITE_KEY}`];
+    for (const [file, target, headers] of [["integrations/agent-memory-api/index.ts", "/writeback", write], ["integrations/open-brain-rest/index.ts", "/capture", write],
+      ["integrations/rest-api/index.ts", "/search", legacy], ["integrations/smart-ingest/index.ts", "/", legacy]] as const) {
+      const server = servers.get(file);
+      if (!server) continue;
+      for (const host of ["localhost", "x:99999", null]) {
+        const held = await leaveMidUpload(server, target, host, [...headers], '{"text":"part');
+        const left = await pendingSettled(server);
+        verdicts.push([held === 1 && left === 0, `${file}: POST ${target} at ${host === null ? "no Host" : `Host ${host}`}, the client leaving mid-upload, leaves no request pending (as it left ${held}, after ${left})`]);
+      }
+    }
+  } finally {
+    unhush();
+    for (const server of servers.values()) server.stop(true);
+  }
+  for (const [ok, said] of verdicts) assert(ok, said);
 }
 
 // ── Drift guards ─────────────────────────────────────────────────────────────

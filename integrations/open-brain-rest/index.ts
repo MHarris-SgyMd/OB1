@@ -22,7 +22,7 @@
 
 import { Hono, type MiddlewareHandler } from "hono";
 import { createClient } from "../../compat/supabase-sql/index.ts";
-import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
+import { authenticateRequest, canWrite, requestAt, routable, type Principal } from "../_shared/auth.ts";
 import { z } from "zod";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -725,14 +725,17 @@ app.post("/ingest", requireWrite, async (c) => {
   return c.json({ job_id: 0, status: "complete", extracted_count: 1, thought_id: result.thought_id }, 200, corsHeaders);
 });
 
+// The prefix stripped from a URL that parses (routable), the request handed on
+// from its parts at the stripped URL (requestAt), never `new Request(url, req)` (SMD-2595).
 const handler = (req: Request) => {
-  const url = new URL(req.url);
+  const routed = routable(req);
+  const url = new URL(routed.url);
   if (url.pathname === "/open-brain-rest") {
     url.pathname = "/";
   } else if (url.pathname.startsWith("/open-brain-rest/")) {
     url.pathname = url.pathname.slice("/open-brain-rest".length);
   }
-  return app.fetch(new Request(url, req));
+  return app.fetch(requestAt(routed, url));
 };
 
 export default {
