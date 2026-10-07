@@ -3345,6 +3345,13 @@ else {
     assert(/extract:qwen2\.5:7b@p2's last pass stopped a worker on the provider still failing after its pauses: check the provider/.test(fix((await run(SQL_ENV)).out, "workers")),
       "a live follower whose last pass hit a down provider says so");
 
+    // The sleep scheduler's row (SMD-1794): named "sleep", and gone stale, its restart from a checkout.
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await beat("heartbeat:sleep", v({ every_s: 60 }), 600);
+    const sleepOut = await run(SQL_ENV);
+    assert(/!\s+workers\s+sleep stale \(last stamped 10 min ago, every 60 s\)$/.test(row(sleepOut.out, "workers")) && /sleep has not stamped for 10 min: start it again — from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\./.test(fix(sleepOut.out, "workers")),
+      `a stale heartbeat:sleep reads as the sleep scheduler's and names its restart (${row(sleepOut.out, "workers")} | ${fix(sleepOut.out, "workers")})`);
+
     // Each claim worker's restart, and a stale row with an alarm told its restart first.
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, malformed: { answers: 50, bad: 12, alarm: true } }), 600);

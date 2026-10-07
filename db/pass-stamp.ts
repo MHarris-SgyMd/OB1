@@ -30,8 +30,9 @@
  * backlog can run for an hour, far past three of its 15-second polls. The timer says the process is alive, as
  * lease renewal does (lease.ts); a model call hung inside a live process is
  * not what it catches. Only the long-running modes stamp — sync-linear.ts
- * --loop and the --follow of extract-entities.ts and consolidate.ts — so a
- * one-shot run never leaves a row that goes stale behind it.
+ * --loop, the --follow of extract-entities.ts and consolidate.ts, and
+ * sleep.ts, through whose row its followers stamp (SMD-1794) — so a one-shot
+ * run never leaves a row that goes stale behind it.
  *
  * "Heartbeat" in lease.ts is the lease's renewal; this is the worker's own, so
  * the code calls it a pass stamp and only the key keeps the ticket's word.
@@ -41,7 +42,7 @@ import type { SQL } from "bun";
 import { MAX_TIMER_MS } from "./lease.ts";
 
 /** The workers that stamp, as the key and preflight's row name them. */
-export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate"] as const;
+export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep"] as const;
 export type StampingWorker = (typeof STAMPING_WORKERS)[number];
 
 /** The shortest gap a worker promises between stamps: a 15-second follower stamps every pass, and is judged against a minute. */
@@ -78,6 +79,12 @@ export interface PassStamper {
   end(outcome: "stopped" | "failed", malformed?: MalformedBlock | null): Promise<void>;
   /** Run a pass with the row re-stamped as running every `every_s` until it settles. */
   during<T>(pass: Promise<T>): Promise<T>;
+  /**
+   * Re-stamp the row between pass ends — running if inside `during` — with no
+   * pass counted, the outcome and block replaced when given: the sleep
+   * scheduler's beat while awake, and a pass's word mid-sleep (SMD-1794).
+   */
+  alive(outcome?: Exclude<PassOutcome, "stopped">, malformed?: MalformedBlock | null): Promise<void>;
 }
 
 /**
@@ -146,6 +153,8 @@ export function passStamper(opts: {
     }
   };
   const write = (running: boolean) => (queue = queue.then(() => send(running)));
+  /** Inside `during`: what alive() stamps `running` as. */
+  let inside = false;
   return {
     key,
     async stamp(o, m) {
@@ -163,6 +172,7 @@ export function passStamper(opts: {
     async during(pass) {
       // Stamped as it starts, so a restarted worker's first long pass is not
       // read as the stopped one's stale row until the timer's first tick.
+      inside = true;
       void write(true);
       // Unref'd, as lease.ts's beat is: the timer never holds the process open.
       const timer = setInterval(() => void write(true), Math.min(everyS * 1000, MAX_TIMER_MS));
@@ -171,7 +181,13 @@ export function passStamper(opts: {
         return await pass;
       } finally {
         clearInterval(timer);
+        inside = false;
       }
+    },
+    async alive(o, m) {
+      if (o !== undefined) outcome = o;
+      if (m !== undefined) malformed = m;
+      await write(inside);
     },
   };
 }

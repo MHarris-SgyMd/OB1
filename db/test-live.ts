@@ -45,7 +45,7 @@ import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
-import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
+import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
@@ -53,6 +53,7 @@ import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, rec
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
+import { run as runSleep } from "./sleep.ts";
 import { parseHeartbeats } from "../server-portable/brain-info.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
@@ -10125,6 +10126,15 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     await Bun.sleep(1500);
     const quiet = await row(fast.key);
     assert(quiet?.running === false && (quiet?.age ?? 0) >= 1, `the timer stops with the pass: nothing re-stamps after it (${JSON.stringify(quiet)})`);
+    // alive() re-stamps with no pass counted: idle outside a pass, running
+    // inside one, the outcome replaced when given (the sleep scheduler, SMD-1794).
+    await fast.alive();
+    const idle = await row(fast.key);
+    let inPass: { running?: boolean; outcome?: string; passes?: number } | null = null;
+    await fast.during((async () => { await fast.alive("failed"); inPass = await row(fast.key); })());
+    assert(idle?.running === false && (idle?.age ?? 9) < 1 && idle.passes === 1 && idle.outcome === "ok"
+           && (inPass as { running?: boolean } | null)?.running === true && (inPass as { outcome?: string } | null)?.outcome === "failed" && (inPass as { passes?: number } | null)?.passes === 1,
+      `alive() re-stamps without counting a pass, running only inside one, its outcome replaced when given (${JSON.stringify(idle)} → ${JSON.stringify(inPass)})`);
 
     // A role that cannot write: said once, the work goes on, said again only after a write succeeded.
     let failNow = true;
@@ -10199,6 +10209,158 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
   } finally {
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await hsql.close();
+  }
+}
+
+console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet, extraction alone until its pool drains, then consolidation beside it; a live read or write wakes it and the passes stop at once, their leases returned; a sync write does not; the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
+{
+  // The suite's client closed at [24]; each section since opens its own.
+  const sql = new SQL({ url: URL_, max: 4 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_entities`;
+  await sql`DELETE FROM query_log`;
+  await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+  const MODEL = "stub-sleep";
+  const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
+  await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
+  /** Each model call, in order: an extraction or a judgement, and when it arrived. */
+  const modelCalls: { kind: "extract" | "judge"; at: number }[] = [];
+  let slow = 0;
+  /** Extraction calls only: a judge started beside extraction would judge before it ends. */
+  let slowExtract = 0;
+  const stub = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
+      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      const judging = /<thought_a>/.test(prompt);
+      modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
+      if (slow) await Bun.sleep(slow);
+      if (!judging && slowExtract) await Bun.sleep(slowExtract);
+      if (judging) {
+        const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
+        const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
+        const answer = /monthly/.test(a) && /annually/.test(b)
+          ? { verdict: "conflict", supersedes: "B", confidence: 0.92, reason: "monthly billing against annual" }
+          : { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
+        return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
+      }
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
+    },
+  });
+  const env: Record<string, string | undefined> = { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: MODEL };
+  for (const k of ["OB1_WORKER_KEY", "OB1_JUDGE_MODEL", "OB1_CHAT_BASE_URL", "OB1_EXTRACT_ESCALATE_MODEL"]) delete env[k];
+  await sql`SELECT set_agent_kind('sync-sleep', 'ingested')`;
+  await sql`SELECT set_agent_kind('op-sleep', 'operator')`;
+  const capture = async (content: string, key: string | null, daysAgo = 0, axis = 0) => {
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, ...(key ? { actor: { name: key, via: "test-live" } } : {}) }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+    if (daysAgo) await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+    return id;
+  };
+  const claims = async (job: string) =>
+    Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${job} GROUP BY status`).map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
+  const auditRows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const beat = async () => {
+    const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; passes: number; ended?: boolean; every_s: number } : null;
+  };
+  const lines: string[] = [];
+  const sleepRun = (o: Partial<Parameters<typeof runSleep>[0]> = {}) =>
+    runSleep({ url: URL_!, env, quiet: 1, poll: 1, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) }, ...o });
+  try {
+    const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
+    const newer = await capture("We bill annually now; the monthly plan is withdrawn.", "op-sleep");
+    await capture("The deploy runs from main.", "op-sleep", 2, 1);
+    // The newer side already has entities (an earlier model's pass), the older
+    // none: judged before extraction reaches the older, the newer would find
+    // no candidate and its claim would end, the pair never judged.
+    await sql`SELECT record_thought_entities(${newer}::uuid, 'extract:earlier@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
+
+    // --dry-run: the reading and the pools, nothing written.
+    lines.length = 0;
+    const dry = await sleepRun({ quiet: 300, dryRun: true });
+    const dryText = lines.join("\n");
+    assert(dry === 0 && /awake: a sleep would begin in (29\d|300) s with no live call/.test(dryText) && new RegExp(`extract \\(${EX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\): 0 in flight, 0 pending, 3 not yet in the pool`).test(dryText) && (await claims(EX)).pending === undefined,
+      `--dry-run reads the brain awake, a capture just made, and the extraction pool unbuilt; nothing pooled (exit ${dry}: ${lines.filter((l) => /awake|extract \(/.test(l)).join(" | ").trim().slice(0, 200)})`);
+
+    // One sleep: extraction alone, drained, then consolidation, then done.
+    lines.length = 0;
+    const auditBefore = await auditRows();
+    slowExtract = 1500;
+    const once = await sleepRun();
+    slowExtract = 0;
+    const onceText = lines.join("\n");
+    const lastExtract = Math.max(...modelCalls.filter((c) => c.kind === "extract").map((c) => c.at));
+    const firstJudge = Math.min(...modelCalls.filter((c) => c.kind === "judge").map((c) => c.at));
+    const props = await sql`SELECT older_id, newer_id, status FROM supersession_proposals`;
+    assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
+      `one sleep extracts every thought, then judges, leaving the one conflict a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s))`);
+    assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("asleep:") && /both pools drained — the sleep ends/.test(onceText),
+      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it)`);
+    const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
+    assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
+      `…writing nothing to thoughts.supersedes and no audit row — its own work cannot wake it — and, without --follow, no heartbeat (${supersedes} superseding, ${(await auditRows()) - auditBefore} audit row(s), heartbeat ${JSON.stringify(await beat())})`);
+
+    // --follow: a live read wakes it mid-call; the passes stop at once.
+    lines.length = 0;
+    for (let i = 0; i < 3; i++) await capture(`A backlog note, number ${i}.`, "op-sleep", 0, 2);
+    slow = 5000;
+    const ac = new AbortController();
+    const callsBefore = modelCalls.length;
+    const following = sleepRun({ follow: true, quiet: 3, signal: ac.signal, minStampEveryS: 1 });
+    await pollUntil(async () => modelCalls.length > callsBefore && (await claims(EX)).claimed === 1, 20_000);
+    const asleepBeat = await beat();
+    const wokenAt = Date.now();
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read')`;
+    await pollUntil(async () => lines.some((l) => /awake: a live read/.test(l)) && !(await claims(EX)).claimed, 10_000);
+    const wakeMs = Date.now() - wokenAt;
+    const awakeBeat = await beat();
+    assert(asleepBeat?.running === true && wakeMs < 3000 && !(await claims(EX)).claimed && (await claims(EX)).pending === 3 && awakeBeat?.running === false && awakeBeat.passes === 1 && awakeBeat.outcome === "ok",
+      `a live read wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
+    // Asleep again after the quiet, it extracts the backlog; a sync write
+    // (a key classified 'ingested') does not wake it, a live write does.
+    slow = 0;
+    await pollUntil(async () => (await claims(EX)).succeeded === 6 && lines.some((l) => /extraction drained/.test(l)), 30_000);
+    const wakesBefore = lines.filter((l) => /awake: a live/.test(l)).length;
+    const synced = await capture("A ticket the sync copied in.", "sync-sleep", 0, 3);
+    const [syncKind] = await sql`SELECT actor_kind FROM thought_audit WHERE thought_id = ${synced}::uuid ORDER BY created_at DESC LIMIT 1`;
+    await Bun.sleep(2500);
+    const wakesAfterSync = lines.filter((l) => /awake: a live/.test(l)).length;
+    await capture("A note typed by the operator.", "op-sleep", 0, 3);
+    await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
+    assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && lines.some((l) => /awake: a live write/.test(l)),
+      `a sync write ('ingested') leaves it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write)`);
+    ac.abort();
+    const followCode = await following;
+    const endBeat = await beat();
+    assert(followCode === 0 && endBeat?.ended === true && endBeat.outcome === "stopped",
+      `a stopped --follow exits 0 and its heartbeat reads ended (exit ${followCode}; ${JSON.stringify(endBeat)})`);
+
+    // A capture whose transaction began before the sleep and commits after it
+    // is dated before the sleep: it still wakes it.
+    lines.length = 0;
+    const ac2 = new AbortController();
+    const late = sleepRun({ follow: true, quiet: 10, signal: ac2.signal });
+    const tx = await sql.reserve();
+    try {
+      await tx`BEGIN`;
+      await tx`SELECT upsert_thought(${"A note committed late."}, ${{ metadata: { source: "live" }, actor: { name: "op-sleep", via: "test-live" } }}::jsonb, ${unit(4)}::vector)`;
+      await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 20_000);
+      await tx`COMMIT`;
+    } finally {
+      tx.release();
+    }
+    const lateWoke = await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 8_000);
+    ac2.abort();
+    await late;
+    assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+  } finally {
+    stub.stop(true);
+    await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await sql`DELETE FROM query_log`;
+    await sql.close();
   }
 }
 

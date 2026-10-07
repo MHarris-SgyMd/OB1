@@ -131,7 +131,7 @@ export interface DatabaseFacts {
 export interface WorkerHeartbeat {
   /** The ob1_config row's key — what retiring the worker deletes. */
   key: string;
-  worker: "board-sync" | "extract" | "consolidate";
+  worker: "board-sync" | "extract" | "consolidate" | "sleep";
   /** The claim job it works (extract:qwen2.5:7b@p2, or a custom --job as given); null for board-sync. */
   job: string | null;
   /** When it last stamped, a UTC instant, and how long ago by the database's clock. */
@@ -156,7 +156,7 @@ export interface WorkerHeartbeat {
 /** A heartbeat older than this many of its own intervals is stale. */
 export const STALE_AFTER_INTERVALS = 3;
 
-const HEARTBEAT_KEY = /^heartbeat:(board-sync|extract|consolidate)(?::([A-Za-z0-9._:@/+-]{1,120}))?$/;
+const HEARTBEAT_KEY = /^heartbeat:(board-sync|extract|consolidate|sleep)(?::([A-Za-z0-9._:@/+-]{1,120}))?$/;
 // As long as a key's suffix with the worker's prefix on it, so every key
 // stampKey writes is one the reader takes (review pass 2: 121–128 were not).
 const JOB_TOKEN = /^[A-Za-z0-9._:@/+-]{1,132}$/;
@@ -196,7 +196,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // The job the worker works is the value's; its key must be the one
     // db/pass-stamp.ts's stampKey derives from it (a custom --job prefixed).
     const job = v?.job === undefined ? (suffix === undefined ? null : `${worker}:${suffix}`) : v.job;
-    const jobOk = worker === "board-sync"
+    const jobOk = worker === "board-sync" || worker === "sleep"
       ? suffix === undefined && v?.job === undefined
       : suffix !== undefined && typeof job === "string" && JOB_TOKEN.test(job) && r.key === `heartbeat:${job.startsWith(`${worker}:`) ? job : `${worker}:${job}`}`;
     const ok = worker !== undefined && jobOk

@@ -4154,9 +4154,11 @@ if (configFailed) {
 
         // The long-running workers' heartbeats (SMD-2261, db/pass-stamp.ts):
         // board-sync's --loop and the extraction and consolidation followers
-        // stamp one after every pass. One older than three of its own intervals
-        // is a stopped worker — board-sync was down four days (2026-09-27 to
-        // 10-01) while the tier row above passed. A fresh one whose last pass
+        // stamp one after every pass, and the sleep scheduler at least every
+        // minute, its followers through it (SMD-1794). One older than three
+        // of its own intervals is a stopped worker — board-sync was down four
+        // days (2026-09-27 to 10-01) while the tier row above passed. A fresh
+        // one whose last pass
         // failed, or whose last block of answers passed SMD-2266's malformed
         // alarm, warns too: a follower says the alarm only on stderr. A worker
         // that never ran on this brain has no row and nothing is said.

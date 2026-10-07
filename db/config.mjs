@@ -492,9 +492,10 @@ export function malformedAlarm(answers, malformed) {
  * SMD-2424, do the claim workers (`--profile workers`); a checkout's command
  * follows for a follower run by hand, the one that can carry a custom --job.
  * Consolidation takes no --job: its key follows the judge model, so the job
- * is named beside it.
+ * is named beside it. The sleep scheduler (SMD-1794) runs from a checkout.
  */
 export function restartCommand(worker, job) {
+  if (worker === "sleep") return "from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow";
   if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d --no-deps board-sync, with the -f files and -p the stack was started with (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
   const service = `podman compose -f deploy/compose.yaml --profile workers up -d --no-deps ${worker}, with the -f files and -p the stack was started with (docker compose alike); from a checkout, `;
   if (worker === "extract") return `${service}cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;

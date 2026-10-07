@@ -2461,6 +2461,51 @@ extraction, and the server group's `SELECT` on `ob1_config`), so the role needs
 every group `migrate.ts --grant` issues — the worker group gained `DELETE`
 on the snapshot for it (the grants table). test-live [31] drives it.
 
+## Sleep: the passes while the brain is quiet (SMD-1794)
+
+Extraction and consolidation cost model time, and on a local model that time
+is shared with captures and searches. `sleep.ts` runs the two passes while the
+brain is quiet and hands the model and the database back on the first live
+call — "dolphin sleep": one half works while the other keeps answering.
+
+```bash
+bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
+bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
+bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
+#   --quiet SECONDS (300)   --poll SECONDS (5)   --workers N (1, for each pass)
+#   exits 0 done, or --follow stopped · 1 woken with work left (one sleep) · 2 usage, configuration or a pass's refusal · 130 a signal before the sleep ended
+```
+
+- **Quiet** is no live event for `--quiet` seconds. A live event is a read the
+  server logged (`query_log`, written only under `OB1_QUERY_LOG=on`) or a write
+  the audit recorded through a key not classified `ingested` (`set_agent_kind`
+  — board-sync's sync writes are background work, as the passes are). The
+  passes write no audit row and call no server, so they never wake it. Only
+  the owner can read `query_log`; a role that cannot is told once and then only
+  writes wake the brain. Measured on the stable brain over 14 days: at 300 s
+  it slept 222 times, 93% of the time, with a median sleep of 16.6 min; at
+  60 s, 98% and 12.6 min; at 900 s, 84% and 25.5 min. Counting board-sync's
+  writes as live would halve the median sleep.
+- **Asleep**, the extraction follower runs alone until its pool is drained —
+  nothing pending, in flight or not yet pooled — then the consolidation
+  follower joins it: the order "Start `extract` alone on a backlog" in
+  `deploy/README.md` asks of an operator, held by the scheduler. Followers,
+  not one-shot runs, so a database restart or a provider outage is waited out
+  (SMD-2599). A failed row stays failed: `--retry-failed` is the operator's.
+- **Waking**, both passes are hard-stopped: every lease returned, the model
+  call in hand aborted, the thoughts in hand left to the next sleep. A pass
+  runs at most `--poll` seconds beside a live call.
+- **Heartbeat.** `--follow` stamps `heartbeat:sleep` (above): running while
+  asleep, at least every minute, a pass counted per sleep, `failed` while a
+  pass's last word was. The followers stamp through it, not their own rows, so
+  a wake ends no row for preflight's `workers` row to warn about. Followers run
+  outside it — the `workers` compose profile — do not yield; the start and
+  `--dry-run` name any whose heartbeat is fresh.
+
+Not yet here, the ticket's later cuts: a budget per pass and per sleep, the
+re-derive pass (`rebuild_derived`), and a compose service. test-live [38]
+drives it against a stub model.
+
 ## Extensions
 
 The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
@@ -3196,7 +3241,9 @@ its container had gone, and preflight's `tier` row printed the last ingest as
 passing. The board-sync watermark cannot be the alarm — a quiet board stops it
 too — so each long-running worker stamps a **heartbeat** after every pass,
 whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --loop`
-and the `--follow` of `extract-entities.ts` and `consolidate.ts`. A one-shot run
+and the `--follow` of `extract-entities.ts` and `consolidate.ts` — and
+`sleep.ts --follow`, as `heartbeat:sleep`, at least every minute whether
+asleep or awake, its followers stamping through it (SMD-1794). A one-shot run
 stamps nothing, so it leaves no row to go stale, and neither does a dry run or
 an audit.
 
@@ -3461,7 +3508,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2465 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1131 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1140 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
