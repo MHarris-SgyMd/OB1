@@ -14,7 +14,7 @@ import { decideCalls, type EgressSubject } from "../egress.ts";
 import { UUID_RE, type Citation, type ThoughtStore } from "../store.ts";
 import { canRead, type Principal } from "../auth.ts";
 import { citeRows, type Ctx } from "./context.ts";
-import { META_KEYS_MAX, META_VALUE_MAX, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
+import { META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 
 // A caller-set metadata key (SMD-2014): lower-case, starts with a letter, 2-40
@@ -27,11 +27,20 @@ import type { Input } from "./schemas.ts";
 // and the extractor's own failure marker. Everything else — `summary_model`,
 // which the session hook sets when a local model wrote the summary — is the
 // caller's to add.
+//
+// A key that cannot read is also refused the ticket keys (TICKET_META_KEYS,
+// SMD-2617): 068's ticket head reads them from any row carrying `issue`, so a
+// capture-only key could set the status every thought filed under the ticket
+// reads; and on a pasted ticket header, with Linear's status, the watermark
+// would have board-sync call the ticket unchanged, so Linear's edits to its
+// text never reach the brain (changes/smd-2617.md). A write key keeps them:
+// it can edit any thought through update_thought anyway.
 const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
 const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed"]);
+const TICKET_META = new Set<string>(TICKET_META_KEYS);
 
 /** The refusal for a bad `metadata` argument, or null when it is clean (or absent). Checked before the model calls, as the other shape refusals are. */
-function metadataProblem(metadata: Record<string, unknown> | undefined): Refusal | null {
+function metadataProblem(metadata: Record<string, unknown> | undefined, reader: boolean): Refusal | null {
   if (metadata === undefined) return null;
   const at = (problem: MetadataProblem, rest: { key?: string; count?: number; length?: number } = {}): Refusal => ({ code: "REFUSED_METADATA_SHAPE", retryable: false, problem, ...rest });
   const keys = Object.keys(metadata);
@@ -39,6 +48,7 @@ function metadataProblem(metadata: Record<string, unknown> | undefined): Refusal
   for (const k of keys) {
     if (!META_KEY_RE.test(k)) return at("bad_key", { key: k });
     if (RESERVED_META.has(k)) return at("reserved_key", { key: k });
+    if (!reader && TICKET_META.has(k)) return at("ticket_key", { key: k });
     const v = metadata[k];
     if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") return at("bad_value", { key: k });
     if (typeof v === "string" && v.length > META_VALUE_MAX) return at("value_too_long", { key: k, length: v.length });
@@ -125,7 +135,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // A caller `metadata` key that names a server-owned one, or a bad shape,
     // is refused BEFORE the two model calls are paid for (SMD-2014), as the
     // pointer shapes above are.
-    const badMetadata = metadataProblem(clientMetadata);
+    const badMetadata = metadataProblem(clientMetadata, reader);
     if (badMetadata) return refuse(badMetadata);
     // A capture-only key's provenance is trimmed to the ids that exist
     // BEFORE the write, and the reply says nothing of it — not which
