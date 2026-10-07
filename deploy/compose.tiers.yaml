@@ -53,6 +53,11 @@ name: open-brain-tiers
 # as compose.yaml's do. No route answers the root, /.well-known or /api: this stack has
 # no legacy window (SMD-2306), no authorization server and no public REST
 # path, so each is Traefik's own 404, and a tier is reached with keys.
+# `not-legacy` deletes compose.yaml's marker for the root URL's window, which
+# this stack does not have, so a client cannot have a key logged as a
+# straggler. The table holds no comment of its own: Traefik renders it as a
+# Go template first, so a comment line there is not inert, and check 27 holds
+# it byte for byte.
 x-tier-routes: &tier-routes |
   http:
     routers:
@@ -87,8 +92,6 @@ x-tier-routes: &tier-routes |
         middlewares: [not-legacy]
         service: stable
     middlewares:
-      # compose.yaml's marker for the root URL's window, which this stack does
-      # not have: deleted, so a client cannot have a key logged as a straggler.
       not-legacy:
         headers:
           customRequestHeaders:

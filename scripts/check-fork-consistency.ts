@@ -285,12 +285,13 @@
  *      and its new call must declare
  *  27. the three-brain stack routes and wires each tier to itself (SMD-2294):
  *      deploy/compose.tiers.yaml, parsed and x-* anchors aside, equals the
- *      stack generated from compose.yaml and the tier list — each tier's
- *      services compose.yaml's renamed to the tier, compose.yaml's proxy with
- *      the generated route table and no waiting, Ollama's two — and its raw
- *      text carries nothing compose reads and Bun.YAML does not: no line break
- *      Bun keeps in a comment, no YAML tag, no YAML 1.1 number, no `$` in the
- *      route table; each rule is the only catch of one of its probes
+ *      stack generated from compose.yaml and the tier list — every value
+ *      compose.yaml's, renamed to the tier where it names one, what it leaves
+ *      out named, the route table byte for byte with no comment in it — and
+ *      its raw text is one file to compose and Bun.YAML: no control, format or
+ *      separator character but space and line feed, no `!` or `%` directive
+ *      outside a comment, no YAML 1.1 number; each rule is the only catch of
+ *      one of its probes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23 and 27 parse YAML with Bun.YAML)
@@ -5621,28 +5622,33 @@ checkCaptureTrust();
 // Postgres on stable's data directory, caught by one tier's half of one rule)
 // — so there is one rule for what the file says: parsed, x-* anchors aside
 // (compose ignores them), it equals the stack tierStack() generates from
-// compose.yaml and the tier list. Each tier's services are compose.yaml's,
-// renamed to the tier — its Postgres and volume, its migrator, its server and
-// REST core under its image, database, OB1_TIER, waits and mesh names, the
-// environment less TIER_OMITTED_ENV — beside compose.yaml's proxy (the route
-// table as its one config and its label, waiting on nothing: a tier's failed
-// migration left a waiting proxy unstarted, review pass 2) and Ollama's two.
-// Any value changed anywhere is a difference, so no branch goes unprobed; an
-// intended change edits tierStack() or TIER_ROUTE_TABLE too, deliberately, as
-// check 13's PUBLISHES does, and a change to compose.yaml it does not carry
-// over fails here until it does.
+// compose.yaml and the tier list. Every value is compose.yaml's, renamed to
+// the tier where it names one — each tier's Postgres and its volume, its
+// migrator, its server and REST core under its image, database, OB1_TIER,
+// waits and mesh names — beside compose.yaml's proxy (the route table as its
+// config and label, waiting on nothing: a tier's failed migration left a
+// waiting proxy unstarted, review pass 2) and Ollama's two. What it leaves
+// out it names: TIER_OMITTED_ENV, the services this stack does not run
+// (TIER_ABSENT_SERVICES), the migrator's image name. The route table is held
+// byte for byte, comment lines included, and carries none: Traefik renders
+// the file as a Go template before it reads the YAML, so a comment there can
+// emit a router (pass 7). Any value changed anywhere is a difference, so no
+// branch goes unprobed; an intended change edits tierStack() or
+// TIER_ROUTE_TABLE too, deliberately, as check 13's PUBLISHES does, and a key
+// compose.yaml gains fails here until it is carried over or left out by name.
 //
-// The rest is what compose reads and Bun.YAML does not, on the raw text: a
-// line break Bun keeps inside a comment (U+0085, U+2028, U+2029, a bare CR —
-// compose broke a "comment" into a router, run live in pass 6), a YAML tag
-// (compose honours !reset/!override, Bun reads past them), a YAML 1.1 number
-// (012 is 10 to compose, 12 to Bun), and a `$` in the route table (compose
-// interpolates even its comment lines). Each rule must be the only catch of
-// one of TIER_STACK_PROBES.
+// The rest is on the raw text, so that compose and Bun.YAML read one file:
+// no control, format or separator character but the space and the line feed
+// (compose breaks a line at U+0085, U+2028 and U+2029 and Bun.YAML does not,
+// pass 6; a no-break space or a tab before `#` made a comment of a router to
+// one and content to the other, pass 7); no `!` and no `%` directive outside a
+// comment (compose honours !reset and !override, also through a %TAG handle,
+// and Bun.YAML reads past them); no YAML 1.1 number (012 is 10 to compose, 12
+// to Bun.YAML). Each rule must be the only catch of one of TIER_STACK_PROBES.
 const TIERS = ["stable", "canary", "working"] as const;
 /** A tier's name on the mesh: compose.yaml's own for stable, the tier's under it for the others. */
 const tierMeshName = (kind: "mcp" | "api", tier: string) => tier === "stable" ? `${kind}.ob1.internal` : `${kind}.${tier}.ob1.internal`;
-/** compose.tiers.yaml's route table, comment lines aside, as Bun.YAML reads the block. */
+/** compose.tiers.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const TIER_ROUTE_TABLE = (() => {
   const router = (name: string, rule: string, priority: number, mw: string, service: string) =>
     `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n      middlewares: [${mw}]\n      service: ${service}\n`;
@@ -5658,38 +5664,59 @@ const TIER_ROUTE_TABLE = (() => {
     + "  services:\n"
     + TIERS.map((t) => `    ${t}:\n      loadBalancer:\n        servers:\n          - url: "http://${tierMeshName("mcp", t)}.:8000"\n`).join("");
 })();
-const stripYamlComments = (text: string) => text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
-/** compose.yaml's server knobs a tier's servers do not read: this stack runs no extraction, typed-decision tier or authorization server, and no profiles. */
+/** compose.yaml's server and REST core knobs a tier's servers do not read: this stack runs no extraction, typed-decision tier or authorization server, and no profiles. */
 const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES"];
+/** compose.yaml's services this stack does not run, so nothing here waits on them. */
+const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;
 /** A value as JSON with every object's keys sorted, so two parses compare by content, not key order. */
 const canonJson = (v: unknown): string => JSON.stringify(v, (_k, x) => x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, (x as Mapping)[k]])) : x);
 const isMapping = (v: unknown): v is Mapping => !!v && typeof v === "object" && !Array.isArray(v);
 const omitKeys = (o: unknown, ks: string[]) => Object.fromEntries(Object.entries(isMapping(o) ? o : {}).filter(([k]) => !ks.includes(k)));
-/** The three-brain stack as compose.tiers.yaml must parse, x-* anchors aside, generated from compose.yaml's services. */
-function tierStack(composeServices: Record<string, Mapping | undefined>): Mapping {
-  const c = composeServices;
+/** A mapping's keys renamed by `to`, values kept; a key `to` maps to undefined is dropped. */
+const renameKeys = (o: unknown, to: (k: string) => string | undefined) => Object.fromEntries(Object.entries(isMapping(o) ? o : {}).flatMap(([k, v]) => { const n = to(k); return n === undefined ? [] : [[n, v]]; }));
+/** The three-brain stack as compose.tiers.yaml must parse, x-* anchors aside, generated from compose.yaml. */
+function tierStack(compose: Mapping): Mapping {
+  const c = (compose.services ?? {}) as Record<string, Mapping | undefined>;
   const services: Mapping = {
-    proxy: { ...omitKeys(c.proxy, ["depends_on"]), configs: [{ source: "tier-routes", target: "/etc/traefik/dynamic/routes.yaml" }], labels: { "ob1.proxy-routes": TIER_ROUTE_TABLE } },
+    proxy: {
+      ...omitKeys(c.proxy, ["depends_on"]),
+      configs: ((c.proxy?.configs ?? []) as Mapping[]).map((cf) => cf.source === "proxy-routes" ? { ...cf, source: "tier-routes" } : cf),
+      labels: { ...(c.proxy?.labels as Mapping), "ob1.proxy-routes": TIER_ROUTE_TABLE },
+    },
     ollama: c.ollama,
     "ollama-pull": c["ollama-pull"],
   };
   for (const t of TIERS) {
     const db = `postgres://postgres:\${POSTGRES_PASSWORD}@${t}-postgres:5432/openbrain`;
-    const environment = { ...omitKeys(c.server?.environment, TIER_OMITTED_ENV), DATABASE_URL: db, OB1_TIER: `\${OB1_TIER:-${t}}` };
-    const depends_on = { [`${t}-postgres`]: { condition: "service_healthy" }, [`${t}-migrate`]: { condition: "service_completed_successfully" } };
+    // compose.yaml's postgres and migrate are the tier's; the services this stack does not run go.
+    const toTier = (k: string) => TIER_ABSENT_SERVICES.includes(k) ? undefined : k === "postgres" || k === "migrate" ? `${t}-${k}` : k;
     const image = `\${COMPOSE_PROJECT_NAME:-open-brain-tiers}-${t}-server`;
-    services[`${t}-postgres`] = { ...c.postgres, volumes: [`${t}-pgdata:/var/lib/postgresql/data`] };
-    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...(c.migrate?.environment as Mapping), DATABASE_URL: db }, depends_on: { [`${t}-postgres`]: { condition: "service_healthy" } } };
-    services[`${t}-server`] = { ...c.server, image, environment, depends_on, networks: { default: {}, mesh: { aliases: [tierMeshName("mcp", t)] } } };
-    services[`${t}-api`] = { ...c.api, image, environment, depends_on, networks: { default: {}, mesh: { aliases: [tierMeshName("api", t)] } } };
+    const tierServer = (svc: Mapping | undefined, kind: "mcp" | "api") => {
+      const networks = (svc?.networks ?? {}) as Mapping;
+      return {
+        ...svc,
+        image,
+        environment: { ...omitKeys(svc?.environment, TIER_OMITTED_ENV), DATABASE_URL: db, OB1_TIER: `\${OB1_TIER:-${t}}` },
+        depends_on: renameKeys(svc?.depends_on, toTier),
+        networks: { ...networks, mesh: { ...(networks.mesh as Mapping), aliases: [tierMeshName(kind, t)] } },
+      };
+    };
+    services[`${t}-postgres`] = { ...c.postgres, volumes: ((c.postgres?.volumes ?? []) as string[]).map((v) => v.replace(/^pgdata:/, `${t}-pgdata:`)) };
+    // Each tier builds its own migrator under compose's default name, so compose.yaml's image name and pull policy go.
+    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...(c.migrate?.environment as Mapping), DATABASE_URL: db }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
+    services[`${t}-server`] = tierServer(c.server, "mcp");
+    services[`${t}-api`] = tierServer(c.api, "api");
   }
+  const volumes = (compose.volumes ?? {}) as Mapping;
+  const networks = (compose.networks ?? {}) as Mapping;
+  const configs = (compose.configs ?? {}) as Mapping;
   return {
     name: "open-brain-tiers",
     services,
-    volumes: { ...Object.fromEntries(TIERS.map((t) => [`${t}-pgdata`, null])), ollama: null },
-    networks: { mesh: { internal: true } },
-    configs: { "tier-routes": { content: TIER_ROUTE_TABLE } },
+    volumes: { ...Object.fromEntries(TIERS.map((t) => [`${t}-pgdata`, volumes.pgdata])), ollama: volumes.ollama },
+    networks: { mesh: networks.mesh },
+    configs: { "tier-routes": { ...(configs["proxy-routes"] as Mapping), content: TIER_ROUTE_TABLE } },
   };
 }
 /** Where two parsed values differ, by path: a mapping down to its keys, a multi-line string to its first differing line. */
@@ -5708,41 +5735,34 @@ function pathDiffs(got: unknown, want: unknown, path: string, out: string[]) {
   }
 }
 /** Check 27's rules, by id; each must be the only catch of at least one probe. */
-const TIER_RULES = ["parse", "line-breaks", "yaml-tags", "yaml-numbers", "route-dollar", "stack"] as const;
+const TIER_RULES = ["parse", "characters", "yaml-tags", "yaml-numbers", "stack"] as const;
 type TierRule = (typeof TIER_RULES)[number];
 /** Every way compose.tiers.yaml's text strays from check 27's rules, each with its rule; none when it holds. */
 function tierStackProblems(tiersText: string, composeText: string): { rule: TierRule; message: string }[] {
   const out: { rule: TierRule; message: string }[] = [];
   const flag = (rule: TierRule, message: string) => { out.push({ rule, message }); };
-  // The raw text: what compose reads and Bun.YAML does not.
+  // The raw text, so that compose and Bun.YAML read one file.
   const lineOf = (i: number) => tiersText.slice(0, i).split("\n").length;
-  const breaks = [...tiersText.matchAll(/\r(?!\n)|[\u0085\u2028\u2029]/g)].map((m) => lineOf(m.index));
-  if (breaks.length) flag("line-breaks", `line ${[...new Set(breaks)].join(", ")} carries a line break Bun.YAML does not read as one (U+0085, U+2028, U+2029 or a bare CR) — compose breaks the line there, so a comment can carry keys only compose sees`);
-  const code = tiersText.split("\n").map((l, i) => [i + 1, l] as const).filter(([, l]) => !/^\s*#/.test(l));
-  const tagged = code.filter(([, l]) => /(^|[\s[{,:-])!(?=[!<A-Za-z])/.test(l));
-  if (tagged.length) flag("yaml-tags", `line ${tagged.map(([n]) => n).join(", ")} carries a YAML tag — compose reads !reset and !override, Bun.YAML reads past them, so this check would hold a file compose does not run`);
-  const numbers = code.filter(([, l]) => /(^|[\s[{,:-])[-+]?(0[0-9]+|[0-9]+(_[0-9]+)+)(?=\s*($|[,\]}#]))/.test(l));
+  const odd = [...tiersText.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${lineOf(m.index)} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`);
+  if (odd.length) flag("characters", `line ${[...new Set(odd)].join(", ")} carries a control, format or separator character other than the space and the line feed — compose and Bun.YAML part lines, comments and indentation differently around them (a tab, a no-break space, U+0085, U+2028 or U+2029 made a comment of keys only compose saw)`);
+  const code = tiersText.split("\n").map((l, i) => [i + 1, l] as const).filter(([, l]) => !/^ *#/.test(l));
+  const tagged = code.filter(([, l]) => l.includes("!") || l.startsWith("%"));
+  if (tagged.length) flag("yaml-tags", `line ${tagged.map(([n]) => n).join(", ")} carries a \`!\` or a \`%\` directive outside a comment — compose reads !reset and !override, also through a %TAG handle, and Bun.YAML reads past them, so this check would hold a file compose does not run`);
+  const numbers = code.filter(([, l]) => /(^|[ [{,:-])[-+]?(0[0-9]+|[0-9]+(_[0-9]+)+)(?= *($|[,\]}#]))/.test(l));
   if (numbers.length) flag("yaml-numbers", `line ${numbers.map(([n]) => n).join(", ")} carries a number YAML 1.1 reads otherwise (a leading zero is octal, an underscore a separator, to compose; Bun.YAML reads neither) — quote it or write it plainly`);
   // The parsed file against the generated stack.
   let doc: unknown;
-  let compose: { services?: Record<string, Mapping | undefined> };
+  let compose: Mapping;
   try {
     doc = Bun.YAML.parse(tiersText);
-    compose = (Bun.YAML.parse(composeText) ?? {}) as typeof compose;
+    compose = (Bun.YAML.parse(composeText) ?? {}) as Mapping;
   } catch (e) {
     return [...out, { rule: "parse", message: `does not parse as YAML: ${(e as Error).message}` }];
   }
   if (!isMapping(doc)) return [...out, { rule: "parse", message: `is not one YAML mapping (${Array.isArray(doc) ? "several documents — compose merges them, so a second one adds what nothing here holds" : typeof doc})` }];
-  const got: Mapping = JSON.parse(JSON.stringify(omitKeys(doc, Object.keys(doc).filter((k) => k.startsWith("x-")))));
-  const table = (got.configs as Record<string, Mapping> | undefined)?.["tier-routes"]?.content;
-  if (typeof table === "string" && table.includes("$")) flag("route-dollar", "the route table holds a `$`, which compose interpolates even on a comment line");
-  // The route table and its label copy are compared without their comment lines.
-  if (typeof table === "string") (got.configs as Record<string, Mapping>)["tier-routes"].content = stripYamlComments(table);
-  const proxyLabels = ((got.services as Record<string, Mapping> | undefined)?.proxy?.labels) as Mapping | undefined;
-  if (isMapping(proxyLabels) && typeof proxyLabels["ob1.proxy-routes"] === "string") proxyLabels["ob1.proxy-routes"] = stripYamlComments(proxyLabels["ob1.proxy-routes"] as string);
   const diffs: string[] = [];
-  pathDiffs(got, tierStack(compose.services ?? {}), "", diffs);
-  if (diffs.length) flag("stack", `is not the stack check 27 generates from compose.yaml and the tier list (tierStack): ${diffs.slice(0, 6).join("; ")}${diffs.length > 6 ? `; and ${diffs.length - 6} more` : ""} — an intended change edits tierStack() or TIER_ROUTE_TABLE too`);
+  pathDiffs(JSON.parse(JSON.stringify(omitKeys(doc, Object.keys(doc).filter((k) => k.startsWith("x-"))))), JSON.parse(JSON.stringify(tierStack(compose))), "", diffs);
+  if (diffs.length) flag("stack", `is not the stack check 27 generates from compose.yaml and the tier list (tierStack): ${diffs.slice(0, 6).join("; ")}${diffs.length > 6 ? `; and ${diffs.length - 6} more` : ""} — an intended change edits tierStack() or TIER_ROUTE_TABLE too, and a key compose.yaml gained that a tier must not carry is left out there by name`);
   return out;
 }
 /** [what the probe changes, then each edit: the text it replaces in compose.tiers.yaml, its replacement, and how many times the text occurs (1 if left out)] — each must turn check 27 false. */
@@ -5751,10 +5771,14 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["a file that does not parse", ["name: open-brain-tiers\n", "name: [open-brain-tiers\n"]],
   ["a second document after the first", ["    content: *tier-routes\n", "    content: *tier-routes\n---\nservices:\n  proxy:\n    extra_hosts: [\"mcp.canary.ob1.internal:10.0.0.9\"]\n"]],
   ["a catch-all router to working behind U+0085 on a route table comment (run live, pass 6)", ["    routers:\n", "    routers:\n      # note\u0085      all:\u0085        rule: \"PathPrefix(`/`)\"\u0085        priority: 100\u0085        entryPoints: [web]\u0085        service: working\n"]],
+  ["a catch-all router to working on a line led by a no-break space (run live, pass 7)", ["    routers:\n", "    routers:\n      \u00a0#all: {rule: \"PathPrefix(`/`)\", priority: 100, entryPoints: [web], service: working}\n"]],
+  ["a tab before a route table comment, which Traefik refuses whole (run live, pass 7)", ["    services:\n      stable:\n", "    services:\n      \t# a note\n      stable:\n"]],
   ["a service answering as stable behind U+2028 on a comment", ["  ollama-pull:\n", "  # a note\u2028  shadow:\u2028    image: oven/bun:1.4.0-alpine\u2028    networks:\u2028      mesh:\u2028        aliases: [mcp.ob1.internal]\n  ollama-pull:\n"]],
   ["a !reset on the proxy's query-string drop, which compose honours and Bun.YAML reads past", ["QUERYPARAMETERS_DEFAULTMODE: drop", "QUERYPARAMETERS_DEFAULTMODE: !reset drop"]],
+  ["a !reset through a %TAG handle on canary's mesh name (run live, pass 7)", ["# The three-brain promotion pipeline", "%TAG !0! !\n---\n# The three-brain promotion pipeline"], ["        aliases: [mcp.canary.ob1.internal]", "        aliases: !0!reset [mcp.canary.ob1.internal]"]],
   ["an octal retry count", ["    retries: 12\n", "    retries: 012\n"]],
-  ["a variable on a comment line in the route table", ["    middlewares:\n      # compose.yaml's marker", "    middlewares:\n      # ${OB1_ROUTE_NOTE:-}\n      # compose.yaml's marker"]],
+  ["a Go template on a route table comment, which Traefik renders", ["    middlewares:\n", "    middlewares:\n      # {{ \"note\" }}\n"]],
+  ["a variable on a route table comment, which compose interpolates", ["    middlewares:\n", "    middlewares:\n      # ${OB1_ROUTE_NOTE:-}\n"]],
   // The parsed file against the generated stack.
   ["a duplicate canary router, after health", ["        service: stable\n    middlewares:", "        service: stable\n      canary:\n        rule: \"Path(`/canary/mcp`)\"\n        priority: 30\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: stable\n    middlewares:"]],
   ["an extra catch-all router", ["    routers:\n", "    routers:\n      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: working\n"]],
