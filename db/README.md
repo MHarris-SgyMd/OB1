@@ -2241,10 +2241,29 @@ first, then consolidation, made structural rather than left to a trigger that
 would judge a capture before
 016's worker reached it and leave a terminal claim row behind. The gate cannot
 see the other side of a pair: a newer thought judged while an older neighbour
-is still unextracted is judged without it, and the pair is not revisited, so
-run the pass after extraction has finished rather than beside it. k and the
-floor were chosen by measurement (`evals/eval-consolidate.ts`;
-`evals/README.md` has the table) and are the worker's `--k` and `--min-sim`.
+is still unextracted is judged without it, and the pair is not revisited.
+Since a candidate was captured on an earlier UTC date, a pass beside an
+extract follower is safe for captures: their neighbours were almost always
+extracted long before. What it misses is an older side that has no entities
+or no vector yet when the newer side is judged:
+- **Two captures either side of 00:00 UTC**, the earlier still in hand. One
+  extract worker claims in queue order and finishes the earlier first; with
+  two or more, the earlier can still be held.
+- **A backlog.** A first run or a `--switch-key` pools every thought at one
+  instant, claimed in no order, so drain it before consolidating (the
+  `workers` compose profile, `deploy/README.md`, SMD-2424).
+- **A failed extraction.** `--retry-failed` extracts it, but the newer
+  thoughts already judged are not judged again.
+- **A failed embedding.** A candidate needs a vector; `reembed.ts` gives it
+  one, and the same holds.
+- **An import dated older than thoughts already judged.** Same: its pairs
+  with them are not judged.
+
+The last three hold however the pass is run, once the newer thoughts have
+been judged; a failed extraction or embedding repaired before that misses
+nothing. k and the floor were chosen by measurement
+(`evals/eval-consolidate.ts`; `evals/README.md` has the table) and are the
+worker's `--k` and `--min-sim`.
 
 **The judge.** One call per pair to the judge model — `OB1_JUDGE_MODEL`, else
 the metadata model, so the harder task can run on a stronger model than every
@@ -3018,10 +3037,12 @@ stamped as — a working server pointed at the stable database, the failure the
 one-writer rule exists to prevent.
 
 **Reaching it from a client.** The server speaks Streamable HTTP, so a client
-adds it as one remote MCP entry:
+adds it as one remote MCP entry, at `/mcp` on the stack's proxy (`SERVER_PORT`,
+8000 unless set; deploy/README.md, "One origin"):
 
 ```bash
-claude mcp add --transport http open-brain-stable http://127.0.0.1:8010/mcp
+claude mcp add --transport http open-brain-stable http://127.0.0.1:8000/mcp \
+  --header "x-brain-key: <key>"
 ```
 
 ## The canary and working tiers — refresh, replay, diff, promote (SMD-1806)
@@ -3124,13 +3145,23 @@ ranking that moved or a step that failed, 2 a usage error or a refusal (SMD-2182
 A side that does not answer is named with its host and port.
 
 The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
-services, one shared Ollama, three servers on three loopback ports — built from the
-checkout (the published stable image is SMD-1860, not yet cut). A client reaches the
-working tier as a second remote MCP entry a transcript can tell from stable's:
+services, one shared Ollama, each tier's MCP server and REST core, and one proxy
+where each tier is a path: `/mcp`, `/canary/mcp`, `/working/mcp` (SMD-2294) —
+built from the checkout (the published stable image is SMD-1860, not yet cut). A
+client reaches the working tier as a second remote MCP entry a transcript can
+tell from stable's:
 
 ```bash
-claude mcp add --transport http open-brain-working http://127.0.0.1:8012/mcp
+claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working/mcp \
+  --header "x-brain-key: <key>"
 ```
+
+A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers the
+same way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
+deploy/README.md), and `--compare` takes the two URLs as they are, with a read
+key in `OB1_COMPARE_KEY` (or `--a-key`/`--b-key`, or `?key=` on a URL):
+`OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
+each labelled by host and path.
 
 **Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
 runs the refresh/replay/diff against the **published** images through the merge
@@ -3431,12 +3462,12 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2465 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1099 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1129 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts) import with no side effect, refuse through run() — no database
-bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
+bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -3575,12 +3606,27 @@ and warning when none is set. **Errors and actors:** one `classifyError`
 classifies a provider error into thought / transient / fatal for both workers
 (extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
-`actorPayload` rather than by hand. The module returns its outcome rather than
+`actorPayload` rather than by hand. **Outages** (SMD-2599): a `--follow`
+worker of either kind waits a database outage out — `databaseUnavailable`
+names the errors that mean the database is not answering (a connection
+refused, closed or timed out; SQLSTATE class 08, 57P01–57P03, 53300), and
+`waitOut` checks again after 5 s, doubling to 5 min, until it answers or a stop
+wakes it; a thought in hand records nothing, and its lease is returned when the
+database is back. It waits a provider outage out the same way.
+- **Outages:** a transient error past the pauses, the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
+- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not.
+- **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering. With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
+- **At start:** a follower probes once before it writes anything, the worker key's registration included, and waits for a provider that does not answer only after every other refusal. A model the provider does not serve, a refused key or a wrong base URL exits 2; an unreachable provider is waited for. Extract's escalation model is checked by GET `/models`, which loads nothing, and refused only where the list names models as chat does; one the start could not confirm draws exit 2 at its first 404, and one it saw that goes missing is waited for by name.
+
+A run without `--follow` keeps every exit and failure it had. The module returns its outcome rather than
 exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s,
 `consolidate.ts`'s and `reembed.ts`'s (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
-the `classifyError` rules and the identity cases that refuse before connecting;
-`test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that
+the `classifyError` rules, the identity cases that refuse before connecting and
+the outage rules and schedule, and the probe against a stub; `test-live.ts` [24b] the capped resolve, and
+[10] and [16] each follower outlasting a database cut through a relay and a
+provider outage (a 503, and in [10] the model missing, a hung provider, a
+thought that fails every time, and the refusal at start); and `test-cli.ts`'s census checks that
 no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
 `resolve_agent(` or `parseKeyRecords`.
 
