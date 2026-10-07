@@ -56,6 +56,13 @@
  *   that one: anthropics/claude-code#95270). All three serve the provider's
  *   OpenID document, whose `issuer` is `<origin>/auth`;
  * - `/healthz`, for compose.
+ * Each is matched on the request target's path as the library reads it, never
+ * decoded or resolved. A target that is not a path (absolute-form, which only
+ * a caller on the mesh can send: the proxy rewrites it), or that holds a
+ * character the library would read another way (`#`, whitespace), is 400, and a throw in
+ * the listener, or a rejection of the promise it returns, is that request's
+ * 500, not the process's end; the handlers and timeouts it hands on run
+ * outside that guard (target.ts, SMD-2615).
  *
  * State is one SQLite file (store.ts) in the `auth` service's own volume, so a
  * restart keeps every session, grant, refresh token and registered client.
@@ -78,7 +85,8 @@
  * backoff, failed client authentications (per client too) and registrations
  * an hour.
  */
-import http from "node:http";
+// Types alone: the server is made by target.ts's serve, guarded.
+import type http from "node:http";
 import Provider, { errors, type ClientMetadata, type KoaContextWithOIDC, type ResourceServer } from "oidc-provider";
 import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
@@ -88,6 +96,7 @@ import { ACCESS_TOKEN_TYPE, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
 import { Bucket, clientAddress, clientIdOf, clientKey, countsAgainstClient, retryAfter, SIGN_IN_RATE, SignInBackoff, TOKEN_FAILURES, TOKEN_PATH, Tries, TRIES_PER_SIGN_IN, trustedProxy, WindowLimit } from "./limits.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
 import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
+import { serve, targetOf } from "./target.ts";
 
 /**
  * A start that is refused: said, and after 30 s exit 2, which the restart
@@ -477,23 +486,34 @@ async function tokenGate(req: http.IncomingMessage, res: http.ServerResponse, ad
   return !wait;
 }
 
-const server = http.createServer((req, res) => {
+// Made by serve, which guards it: a throw or a rejection in a request is that
+// request's 500, never the process's end (target.ts). node:http is imported
+// for its types alone, so an `http.createServer` here fails the typecheck.
+const server = serve((req, res) => {
   // The provider builds every URL from the request's host and protocol (it
   // trusts X-Forwarded-* with proxy = true). Pin both to the configured origin.
   req.headers.host = ORIGIN.host;
   req.headers["x-forwarded-host"] = ORIGIN.host;
   req.headers["x-forwarded-proto"] = ORIGIN.protocol.slice(0, -1);
-  const url = new URL(req.url ?? "/", "http://auth");
-  if (url.pathname === "/healthz") {
+  // The path as the library will route it, so every gate below sees the path
+  // the library does; an absolute-form target, or one the library would read
+  // another way, is refused (target.ts).
+  const target = targetOf(req.url);
+  if (!target) {
+    res.writeHead(400, { "content-type": "text/plain" });
+    return res.end("bad request target: send the path alone");
+  }
+  const { path, search } = target;
+  if (path === "/healthz") {
     res.writeHead(200, { "content-type": "text/plain" });
     return res.end("ok");
   }
-  if (DISCOVERY.has(url.pathname)) {
-    mount(req, `/.well-known/openid-configuration${url.search}`);
+  if (DISCOVERY.has(path)) {
+    mount(req, `/.well-known/openid-configuration${search}`);
     return callback(req, res);
   }
-  if (url.pathname.startsWith("/auth/interaction/")) {
-    return interaction(req, res, url.pathname).catch((e: Error) => {
+  if (path.startsWith("/auth/interaction/")) {
+    return interaction(req, res, path).catch((e: Error) => {
       console.error(`interaction failed: ${e instanceof errors.OIDCProviderError ? (e.error_description ?? e.message) : (e.stack ?? e.message)}`);
       if (res.headersSent) return;
       // The library's own refusals (an expired or unknown interaction) say what
@@ -503,11 +523,11 @@ const server = http.createServer((req, res) => {
     });
   }
   const address = addressOf(req);
-  if (address !== undefined && req.method === "POST" && TOKEN_PATH.test(url.pathname)) {
-    return void tokenGate(req, res, address).then(
+  if (address !== undefined && req.method === "POST" && TOKEN_PATH.test(path)) {
+    return tokenGate(req, res, address).then(
       (pass) => {
         if (!pass) return;
-        mount(req, (req.url ?? "").slice("/auth".length) || "/");
+        mount(req, `${path.slice("/auth".length) || "/"}${search}`);
         return callback(req, res);
       },
       () => res.destroy(),
@@ -515,7 +535,7 @@ const server = http.createServer((req, res) => {
   }
   // Every spelling the library routes to registration (registration.ts), with
   // the ones under way counted: the client is saved only after its body is read.
-  if (req.method === "POST" && REGISTRATION_PATH.test(url.pathname)) {
+  if (req.method === "POST" && REGISTRATION_PATH.test(path)) {
     let giveBackSlot = () => {};
     if (address !== undefined) {
       const wait = registrationsByAddress.take(address);
@@ -545,8 +565,8 @@ const server = http.createServer((req, res) => {
       req.destroy();
     });
   }
-  if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {
-    mount(req, (req.url ?? "").slice("/auth".length) || "/");
+  if (path === "/auth" || path.startsWith("/auth/")) {
+    mount(req, `${path.slice("/auth".length) || "/"}${search}`);
     return callback(req, res);
   }
   res.writeHead(404, { "content-type": "text/plain" });
