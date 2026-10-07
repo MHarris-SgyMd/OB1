@@ -330,7 +330,10 @@ jobs:
       # their own (SMD-2309: the password bucket, tries per sign-in, the
       # sign-in backoff, the sliding window, the token path, what counts and
       # the client a request names, the address rule, the proxy's resolution
-      # and the bounded maps). The full-stack job runs the service.
+      # and the bounded maps); and the request target (SMD-2615: the path read
+      # as the library reads it, held against parseurl itself, and a throw or
+      # rejection in a request answered 500 with the server still up). The
+      # full-stack job runs the service.
       - name: Install the authorization server's pinned packages
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
@@ -341,7 +344,7 @@ jobs:
 
       - name: Authorization server rules
         working-directory: deploy/auth
-        run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check
+        run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check
 
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
@@ -1114,6 +1117,43 @@ jobs:
           [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; cat /tmp/negative.out >&2; exit 1; }
           docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
 
+      # SMD-2424: the workers profile's own command, run for real against
+      # this stack (its database is up; --no-deps starts nothing else). The
+      # `sh -c` refuses without a worker key and on a setting that is not
+      # digits — `--status` as a value once reached the CLI as a flag, ran
+      # and exited 0 — both exit 2 before bun starts; and a well-formed
+      # setting gets as far as the worker, whose own refusal proves the exec
+      # and the arguments were taken: SMD-2599's start probe, which a
+      # --follow worker makes before it registers a key or claims anything,
+      # and which this stack's provider stub (embeddings only, a bare 404
+      # for chat) refuses with exit 2.
+      - name: The workers profile refuses before it starts a follower
+        working-directory: deploy
+        run: |
+          # Nothing else in this stack runs the workers' image: pull it first,
+          # so the bound below times the command, not Docker Hub.
+          docker compose -f compose.yaml --profile workers pull --quiet extract consolidate
+          # Bounded: a refusal that regressed starts a follower, which never exits.
+          worker() { local svc=$1; shift; set +e; timeout 120 docker compose -f compose.yaml --profile workers run --rm --no-deps -T "$@" "$svc" > /tmp/worker.out 2>&1; CODE=$?; set -e; }
+          hold() { if ! grep -qF -- "$1" /tmp/worker.out || [ "$CODE" -ne 2 ]; then echo "--- expected exit 2 and \"$1\"; got $CODE: ---" >&2; cat /tmp/worker.out >&2; exit 1; fi; }
+          worker extract -e OB1_WORKER_KEY=
+          hold 'extract: OB1_WORKER_KEY is not set in deploy/.env'
+          worker consolidate -e OB1_WORKER_KEY=
+          hold 'consolidate: OB1_WORKER_KEY is not set in deploy/.env'
+          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
+          hold "OB1_EXTRACT_FOLLOW ('--status') and OB1_EXTRACT_WORKERS ('') take digits only"
+          worker consolidate -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
+          hold "take digits only"
+          # …and each variable is checked, not only the pair's first.
+          worker consolidate -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
+          hold "OB1_CONSOLIDATE_FOLLOW ('--status') and OB1_CONSOLIDATE_WORKERS ('') take digits only"
+          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_WORKERS='1 --limit 1'
+          hold "OB1_EXTRACT_FOLLOW ('') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only"
+          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
+          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          worker consolidate -e OB1_WORKER_KEY=not-a-key
+          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
+
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own
       # rendering rather than the file: the base file publishes exactly one port
@@ -1148,6 +1188,12 @@ jobs:
           # config lists is the canary's own proxy, started only with --port).
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml config --format json \
             | jq -e '(.services.server.networks["stable-mesh"].aliases == ["mcp.canary.ob1.internal"]) and (.services.api.networks["stable-mesh"].aliases == ["api.canary.ob1.internal"]) and (.networks["stable-mesh"] | .external == true and .name == "open-brain_mesh") and (.networks.mesh.name == "open-brain-canary_mesh") and ([.services[] | select(.networks["stable-mesh"] != null)] | length == 2) and ([.services[].ports[]?] | length == 1)'
+          # The three-brain stack (SMD-2294) publishes its proxy alone, on
+          # loopback, on compose.yaml's pinned image, as compose renders it.
+          # Its routes and each tier's wiring are check-fork-consistency's
+          # check 27, which reads the file itself.
+          docker compose -f compose.tiers.yaml --profile local-models config --format json \
+            | jq -e --arg img "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1")) and (.services.proxy.ports | length == 1) and (.services.proxy.image == $img) and ([.services[] | select(.network_mode != null)] | length == 0)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
@@ -1164,6 +1210,17 @@ jobs:
           # Postgres credential, no plain password and not the POC's switch.
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
+          # SMD-2424: the workers profile's two followers publish nothing,
+          # keep the key list the worker names itself by (board-sync blanks
+          # it), are handed the worker key, mount the checkout read-only,
+          # reach a host model by the host alias, wait for the schema, keep
+          # their grace periods (120 s, 60 s), and stop after three refusals
+          # rather than loop; and each command's last line is exactly its
+          # worker's exec'd --follow, so no flag (a --switch-key would lift
+          # the model-change refusal) rides along. The refusals themselves
+          # are run, by the step above.
+          docker compose -f compose.yaml --profile workers config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
@@ -1285,7 +1342,8 @@ jobs:
       # so the per-address limits are on, a 21st bad secret for one client
       # from one forwarded address is refused 429, and that client from
       # another address, another client, a client that does not exist or a
-      # public one, is not (SMD-2309); and a stop is
+      # public one, is not (SMD-2309); an absolute-form target is 400 and
+      # `//x/healthz` a 404, with the process never restarted (SMD-2615); and a stop is
       # the server's own (exit 0 inside 5 s, its line in the log), not the
       # grace period's SIGKILL. The container goes at the end; the volume, the
       # networks and the auth lines in .env stay to the job's end (tier.sh
@@ -1385,6 +1443,15 @@ jobs:
           [ "$(auth exec -T auth stat -c '%U %a' /data)" = "bun 700" ] || { echo "/data is not the server's alone"; exit 1; }
           bogus=$(auth exec -T auth bun -e 'const r = await fetch("http://127.0.0.1:3000/auth/interaction/not-a-uid"); console.log(r.status, (await r.text()).includes("cookie not found"))')
           [ "$bogus" = "400 true" ] || { echo "an interaction with no session answered \"$bogus\", not 400 naming the missing cookie"; exit 1; }
+          # SMD-2615: absolute-form targets, each with an authority the URL parser
+          # refuses, are 400 and `//x/healthz` is not /healthz; the process is
+          # never restarted. Before, the first ended it (an empty 200, exit 1).
+          # A connection the server holds open is cut after 3 s and reads "timeout",
+          # whatever it sent first, so it fails the row rather than hanging the job.
+          # shellcheck disable=SC2016 # JavaScript, run in the container
+          odd=$(auth exec -T auth bun -e 'const { connect } = require("node:net"); const ask = (t) => new Promise((ok) => { let out = ""; const s = connect(3000, "127.0.0.1", () => s.write(`GET ${t} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)); s.on("data", (d) => (out += d)); let held = false; const timer = setTimeout(() => { held = true; s.destroy(); }, 3000); s.on("close", () => { clearTimeout(timer); ok(held ? "timeout" : out.split(" ")[1] || "none"); }); s.on("error", () => ok("refused")); }); const out = []; for (const t of ["http://x:99999/healthz", "http://[::1/auth/token", "//x/healthz"]) out.push(await ask(t)); await Bun.sleep(500); out.push(await fetch("http://127.0.0.1:3000/healthz").then((r) => r.status, () => "refused")); console.log(out.join(" "))')
+          [ "$odd" = "400 400 404 200" ] || { echo "absolute-form targets, //x/healthz, then /healthz answered \"$odd\", not \"400 400 404 200\""; exit 1; }
+          [ "$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$(auth ps -q auth)")" = "true 0" ] || { echo "the authorization server restarted after the odd targets"; exit 1; }
           # One process holds the store's write lock across the whole request and
           # lets go only after the answer, so nothing depends on two start-ups'
           # timing: the server's write waits out its 5 s and answers 500.
@@ -1393,18 +1460,19 @@ jobs:
           [ "$locked" = "500 server_error" ] || { echo "a write to a locked store answered \"$locked\", not 500 server_error"; exit 1; }
           # The cap (3 here): the client registered above and two more fill it, and the next is refused for now.
           for _ in 1 2; do auth exec -T auth bun restart-check.ts --register > /dev/null; done
-          # Every spelling the library routes to registration (any case, a trailing slash) is held to it.
+          # Every spelling the library routes to registration (any case, a trailing slash, a query: SMD-2615) is held to it.
           # shellcheck disable=SC2016 # JavaScript, run in the container
-          full=$(auth exec -T auth bun -e 'const out = []; for (const p of ["/auth/reg", "/auth/REG", "/auth/reg/"]) { const r = await fetch("http://127.0.0.1:3000" + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); out.push(`${r.status} ${(await r.json()).error} ${r.headers.get("retry-after")}`); } console.log(out.join(" | "))')
-          want="503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600"
+          full=$(auth exec -T auth bun -e 'const out = []; for (const p of ["/auth/reg", "/auth/REG", "/auth/reg/", "/auth/reg?ob1=1"]) { const r = await fetch("http://127.0.0.1:3000" + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); out.push(`${r.status} ${(await r.json()).error} ${r.headers.get("retry-after")}`); } console.log(out.join(" | "))')
+          want="503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600"
           [ "$full" = "$want" ] || { echo "registrations past the cap answered \"$full\", not \"$want\""; exit 1; }
           got=$(via_proxy -X POST -H 'content-type: application/json' -d '{"redirect_uris":["https://client.example/callback"],"token_endpoint_auth_method":"none"}' http://127.0.0.1:8010/auth/reg)
           if ! { [ "$got" = "503 -" ] && grep -qi '^retry-after: 3600' /tmp/auth-via-proxy.h; }; then echo "a registration past the cap through the proxy answered \"$got\" ($(grep -i '^retry-after' /tmp/auth-via-proxy.h || echo 'no Retry-After')), not the server's 503 with Retry-After 3600"; exit 1; fi
           # SMD-2309: twenty failed authentications for one client from one forwarded address, then the token endpoint
           # refuses that client from there for now, and neither another address nor another client from the same one;
           # a client that does not exist, or the public one registered above (no secret to guess), is never counted.
+          # Every other one carries a query, the 21st among them: the gate reads past it as the library does (SMD-2615).
           pub=$(bun -e 'console.log(JSON.parse(await Bun.stdin.text()).client_id)' < /tmp/auth-client.json)
-          bad=$(auth exec -T -e PUB="$pub" auth bun -e 'const tok = async (client, from) => (await fetch("http://127.0.0.1:3000/auth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: "Basic " + btoa(client + ":not-the-secret"), "x-forwarded-for": from }, body: "grant_type=client_credentials" })).status; const out = []; for (let i = 0; i < 21; i++) out.push(await tok("gui", "203.0.113.9")); const none = []; const open = []; for (let i = 0; i < 21; i++) { none.push(await tok("no-such-client", "203.0.113.11")); open.push(await tok(process.env.PUB, "203.0.113.12")); } console.log(out.filter((s) => s === 401).length, out.at(-1), await tok("gui", "203.0.113.10"), await tok("mcp", "203.0.113.9"), none.filter((s) => s === 401).length, open.filter((s) => s === 401).length)')
+          bad=$(auth exec -T -e PUB="$pub" auth bun -e 'const tok = async (client, from, path = "/auth/token") => (await fetch("http://127.0.0.1:3000" + path, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: "Basic " + btoa(client + ":not-the-secret"), "x-forwarded-for": from }, body: "grant_type=client_credentials" })).status; const out = []; for (let i = 0; i < 21; i++) out.push(await tok("gui", "203.0.113.9", i % 2 ? "/auth/token" : "/auth/token?ob1=1")); const none = []; const open = []; for (let i = 0; i < 21; i++) { none.push(await tok("no-such-client", "203.0.113.11")); open.push(await tok(process.env.PUB, "203.0.113.12")); } console.log(out.filter((s) => s === 401).length, out.at(-1), await tok("gui", "203.0.113.10"), await tok("mcp", "203.0.113.9"), none.filter((s) => s === 401).length, open.filter((s) => s === 401).length)')
           want="20 429 401 401 21 21"
           [ "$bad" = "$want" ] || { echo "21 bad client secrets, then another address, another client, and 21 each for no client and the public one, answered \"$bad\", not \"$want\""; exit 1; }
           grep -qF "server error: SQLiteError: database is locked" <<<"$(auth logs --no-color auth)" || { echo "the locked store's server_error is not in the log"; exit 1; }

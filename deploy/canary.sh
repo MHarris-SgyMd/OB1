@@ -15,7 +15,8 @@
 # routes /canary/mcp to the first. That route is in stable's compose.yaml from
 # SMD-2294 on; a stable running an older release has none, and then `up`
 # refuses unless --port names a loopback port for the canary's own proxy, the
-# way every canary was stood up before (8011 was the default). On stable's
+# way every canary was stood up before (on its old fixed default port, which
+# `--port` names now). On stable's
 # origin the canary is reached wherever stable is — the LAN under stable's
 # SERVER_BIND, a tunnel to its origin — with stable's keys; `up` says so when
 # stable is bound past loopback or its env file names OB1_PUBLIC_ORIGIN.
@@ -435,7 +436,7 @@ if [ -n "$PORT" ]; then
 else
   [ -n "$STABLE_PROXY" ] || { echo "no running proxy in compose project $STABLE, so the canary has no origin to answer at (/canary/mcp). Start the stack's proxy, or give the canary a proxy of its own with --port N." >&2; exit 2; }
   routes="$("$RUNTIME" inspect -f '{{index .Config.Labels "ob1.proxy-routes"}}' "$STABLE_PROXY")"
-  grep -qF 'mcp.canary.ob1.internal' <<<"$routes" || { echo "$STABLE_PROXY routes no /canary/mcp: stable runs a release from before SMD-2294. Upgrade stable, or stand the canary behind its own proxy on a loopback port as before, with --port N (8011 was the default)." >&2; exit 2; }
+  grep -qF 'mcp.canary.ob1.internal' <<<"$routes" || { echo "$STABLE_PROXY routes no /canary/mcp: stable runs a release from before SMD-2294. Upgrade stable, or stand the canary behind its own proxy on a loopback port as before, with --port N (the canary's old port, where its connector points)." >&2; exit 2; }
   # shellcheck disable=SC2016 # a Go template's variables, not the shell's
   "$RUNTIME" inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$STABLE_PROXY" | grep -qxF "$STABLE_MESH" \
     || { echo "$STABLE_PROXY is not on $STABLE_MESH, the mesh the canary's servers would join, so it could not reach them there — recreate stable's proxy (compose up -d proxy), or pass --port N." >&2; exit 2; }

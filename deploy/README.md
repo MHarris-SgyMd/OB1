@@ -160,26 +160,42 @@ the repo root, with whatever `-f` files the stack was started with:
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
+| `extract`, `consolidate` (`--profile workers`) | Listen on nothing; dial `postgres:5432` and the model provider | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2583), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
-The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
-server per tier, each on loopback by default; its three Postgres services and
-shared Ollama publish nothing, exactly as above. A canary stood beside this
+The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes its
+proxy alone, on this file's `SERVER_BIND` and `SERVER_PORT`, with each tier a path
+on it (SMD-2294): `/mcp` the stable tier's server, `/canary/mcp` and
+`/working/mcp` the others' (a bodiless 404 while that tier is stopped; stable's
+`/mcp` answers 502 then, as compose.yaml's does). Its
+servers, REST cores, three Postgres services and shared Ollama publish nothing.
+Nothing public routes to a REST core, and the root, `/.well-known` and `/api`
+are the proxy's 404: that stack has no legacy window, no authorization server
+and no `/api`. It reads `SERVER_PORT` as this file does, so to run the two side
+by side set `SERVER_PORT` in the shell for one of them, which wins over
+`deploy/.env`. Its proxy waits on no tier and starts in compose's first wave,
+so a canary or working tier whose migration fails is a 404 at its path while
+stable and the origin serve; `up` still exits 1 and names the failed migrator.
+`up proxy` alone therefore brings no tier: name the services, or none.
+Its project is `open-brain-tiers`, the file's `name:`. Leave `COMPOSE_PROJECT_NAME`
+and `-p` alone for it: either one overrides that name, and as `open-brain` the tiers
+would join this stack's project, its `proxy` and its `mesh`, where two servers
+answer as `mcp.ob1.internal`.
+A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own network,
 less the proxy, its server and REST core also on this stack's `mesh` as
 `mcp.canary.ob1.internal` and `api.canary.ob1.internal`, and reached at
 `/canary/mcp` on this stack's port (SMD-2294). Beside a stable from before
-that, `--port` gives it its own proxy on loopback, as before. The tier
-file's servers still publish a port each; SMD-2294 moves them onto proxy paths.
+that, `--port` gives it its own proxy on loopback, as before.
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `stable-server` | `stable-server:8000` | `127.0.0.1:${STABLE_SERVER_PORT:-8010}` | Through a proxy; `STABLE_SERVER_BIND=0.0.0.0` only for a proxy elsewhere |
-| `canary-server` | `canary-server:8000` | `127.0.0.1:${CANARY_SERVER_PORT:-8011}` | Through a proxy; `CANARY_SERVER_BIND=0.0.0.0` only for a proxy elsewhere |
-| `working-server` | `working-server:8000` | `127.0.0.1:${WORKING_SERVER_PORT:-8012}` | Through a proxy; `WORKING_SERVER_BIND=0.0.0.0` only for a proxy elsewhere |
+| `proxy` | dials each tier's server on `mesh`: `mcp.ob1.internal:8000` (stable), `mcp.canary.ob1.internal:8000`, `mcp.working.ob1.internal:8000` | `127.0.0.1:${SERVER_PORT:-8000}`: `/mcp`, `/canary/mcp`, `/working/mcp` | Through a TLS proxy or tunnel, as compose.yaml's proxy; `SERVER_BIND=0.0.0.0` only for a proxy on another machine |
+| `<tier>-server` | `<tier>-server:8000` on the default network; `mcp.<tier>.ob1.internal` (stable: `mcp.ob1.internal`) on `mesh` | Nothing of its own: its path on the proxy's port | Through the proxy |
+| `<tier>-api` | `api.<tier>.ob1.internal:8000` (stable: `api.ob1.internal`) on `mesh`, and `<tier>-api:8000` on the default network — a key is still required for anything but `/health` and `/openapi.json` | Nothing | Nothing |
 
 `docker compose -f deploy/compose.yaml config` renders each mapping with
 `host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.ts` check 13 parses
@@ -447,10 +463,10 @@ without a key, so it adds no name, and expects both headers (check 11).
 | n8n | `http://server:8000/` in a workflow node you built | no change needed: n8n reaches the server on the compose network, not through the proxy |
 | any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge, a dashboard's `MCP_URL` | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
 
-A stack run with `compose.tiers.yaml` publishes its tiers' servers directly
-(stable on 8010), with no proxy in front: there the root has no window, no
-headers and no line, and `/mcp` works too, since the server answers at every
-path. Moving those clients now is harmless and saves doing it later.
+A stack run with `compose.tiers.yaml` has no legacy window: since SMD-2294 its
+proxy answers the root with a 404, and each tier is `/mcp`, `/canary/mcp` or
+`/working/mcp` on the proxy's port. A client of that stack moves from the
+tier's old host port to its path.
 
 Two more things belong here, though neither applies until the stack has a
 public origin and the `auth` profile on (SMD-2382):
@@ -499,7 +515,7 @@ commit and the highest migration from it, and asserts the version is the
 checkout's:
 
 ```bash
-curl -s -H "x-brain-key: $KEY" http://127.0.0.1:8010/health | jq '{version, commit, ledgerStatus, highest: .database.highestMigration}'
+curl -s -H "x-brain-key: $KEY" "http://127.0.0.1:${SERVER_PORT:-8000}/health" | jq '{version, commit, ledgerStatus, highest: .database.highestMigration}'
 ```
 
 **The commit is a build argument.** `server-portable/Dockerfile` bakes
@@ -630,6 +646,211 @@ is the lockstep census alone; `db/README.md`, "The board in the brain"). The
 scheduled form is the one built here; a Linear webhook is exact and immediate
 but needs an inbound route — a router on the proxy (SMD-1846) and a public
 origin a vendor can reach (SMD-2382) — and the handler's shape (signature, replay window, loop guard) is SMD-1862's.
+
+## Extraction and consolidation as services
+
+Once extraction has run on a brain, each capture is queued for it as it
+lands, and an extracted thought joins consolidation's pool, but nothing does
+the work until a worker runs. The `workers` profile runs both workers as
+services: `db/extract-entities.ts --follow` as `extract` and
+`db/consolidate.ts --follow` as `consolidate`. Each drains its pool, then
+polls for new work.
+
+**The cost comes first.** Extraction makes a model call per thought (per
+window of a long one), and consolidation up to three, one per judged pair. On
+a local model that is GPU time: the dogfood brain takes 50 to 90 thoughts a
+day, and on `qwen2.5:7b` a thought's extraction took 37 s at the median (two
+workers), so a follower is idle most of the day. On a hosted provider it is
+money per call, and each thought's text goes to the provider under the egress
+policy. Decide before you enable it.
+
+The first start drains a backlog — every thought already in the brain — so
+it runs `extract` alone, and adds `consolidate` once the backlog is done
+("Start `extract` alone on a backlog", below). Mint the worker key, append
+the line keygen prints to `MCP_ACCESS_KEYS` (comma-separated), set the raw key
+as `OB1_WORKER_KEY` in `deploy/.env`, and start extraction:
+
+```bash
+(cd server-portable && bun keygen.ts --name workers --scope capture)
+podman compose -f deploy/compose.yaml --profile workers up -d extract
+```
+
+Then read where it stands, as often as you like:
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --status
+```
+
+Its `status:` line counts the pool. The backlog is done when it reads `0 in
+flight, 0 pending, 0 not yet in the pool`. "0 pending" alone is not enough:
+the last thought may still be in flight, and until the follower's first pass
+the backlog is "not yet in the pool". If it also reads `N failed`, retry
+those now, while no newer thought has been judged without them, and wait for
+the line again:
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --retry-failed --workers 1
+```
+
+Then add consolidation:
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers up -d consolidate
+podman compose -f deploy/compose.yaml --profile workers logs -f extract consolidate
+```
+
+From then on `--profile workers up -d` brings both back with the stack (or
+`COMPOSE_PROFILES=workers` in `deploy/.env`). Name the profile on `down`
+too: a plain `down` leaves the two followers running against a database it
+has removed.
+
+**What each one is:**
+- **Identity.** Both need a worker key, and refuse to start without one (exit
+  2), so what they write carries its agent id. A key the database cannot
+  resolve at start is a warning, as for a run from a checkout.
+- **Settings.** `OB1_EXTRACT_FOLLOW` and `OB1_CONSOLIDATE_FOLLOW` set the poll
+  interval in seconds (unset, 15). `OB1_EXTRACT_WORKERS` and
+  `OB1_CONSOLIDATE_WORKERS` set the worker count (unset, 1, not the CLI's 2).
+  A worker holds one model call at a time, so the two counts, with
+  `board-sync`'s calls and the captures', share the provider's parallel slots
+  (`OLLAMA_NUM_PARALLEL`): one each leaves a slot free for captures on a
+  provider with three while `board-sync` is idle. Digits only: anything else
+  is refused naming the variable, and a number the CLI then refuses (`0`,
+  more digits than it reads exactly) is refused naming its flag, `--follow`
+  or `--workers`. Everything else is the server's environment: the model, the
+  endpoints, the egress policy, the extraction window and the escalation
+  model.
+- **Code.** The services run this checkout's `db/` and `server-portable/`,
+  mounted read-only as for `board-sync`; neither release image carries the
+  workers (SMD-2601). So the profile needs a checkout, and the checkout should
+  be at the release the stack runs: a newer one runs newer worker code
+  against an older schema, and the workers do not check the schema's version.
+  The mount is the checkout compose was run from, so run it from one that
+  stays (not a worktree you will remove). A changed checkout reaches a
+  follower when it is restarted — any restart, on-failure included.
+- **Stopping.** `stop` lets each worker finish the thought it holds. The grace
+  period is 120 s for `extract` (a thought's extraction took 121 s at p90 on
+  the stable brain) and 60 s for `consolidate`. Inside it the follower exits
+  0; past it the container is killed (137). Either way it stays stopped, and
+  a thought still held is not lost: its lease lapses after 900 s and the next
+  run takes it (a thought whose lease lapses three times is recorded failed).
+- **Refusals.** A configuration refusal exits 2: no key, a key
+  `MCP_ACCESS_KEYS` does not hold, a revoked key or one whose scope grants
+  nothing (`forward`), a setting that is not a number the CLI takes, an egress
+  policy that would refuse every call (`OB1_LLM_LOCAL` unset against a host
+  Ollama), or (`extract`) a model or prompt version other than the one the
+  brain's extraction key records. So does a provider that refuses the
+  follower's first call at start — a model it does not serve, a refused key,
+  a wrong base URL (SMD-2599). The service is restarted three times — four
+  runs — then stops, and `ps` shows it exited, as `board-sync` does.
+- **Outages.** A follower waits out the database going away (it checks
+  again after 5 s, doubling to 5 min) and a provider outage — a transient
+  error past its pauses, a 404 naming the model while Ollama pulls it, a
+  timeout its probe cannot get past — and says so in its log. The thought in
+  hand goes back to the pool unrecorded, and the follower probes with a
+  one-token call until the provider answers; a thought that fails again
+  within 15 minutes of that is recorded failed, as its own fault (SMD-2599).
+  An unreachable provider at start is waited for too. None of these exits,
+  so none spends a restart.
+
+**Changing the model.** A new `OB1_METADATA_MODEL`, or a checkout whose
+extraction prompt version moved (after a pull), is a new extraction key, and
+`extract` refuses it until told. Stop both followers BEFORE the change
+reaches them:
+- a running `extract` keeps extracting under the old key, over what the
+  switch writes;
+- a `consolidate` recreated under the new key judges every thought against
+  the old model's entities, and never judges the new ones.
+
+With `COMPOSE_PROFILES=workers`, a plain `up -d` after the change starts both,
+so stop them before you pull or edit. Then run the switch once — a backlog,
+so it ends as the first start does:
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
+# now edit deploy/.env, or move the checkout
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --switch-key --workers 1
+```
+
+Check that it exited 0, read `--status` until the done line, and retry any
+`N failed` (the first start's two commands, above) before consolidation
+comes back. Then bring the followers back with the two servers, whose
+capture-time tagging reads the same `OB1_METADATA_MODEL` (`server` for MCP,
+`api` for REST):
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers up -d server api extract consolidate
+```
+
+The switch re-extracts every thought that has no row under the new key — all
+of them, for a key the brain has never used. **Going back to a model or
+prompt version used before re-extracts nothing**: every thought still has
+its finished row under that key, so the graph stays the other model's while
+`--status` reads done (SMD-2607 fixes this). Until then, judge a new model on
+a working copy (`db/tier.ts`) rather than switching the brain to it and back.
+
+Consolidation's key follows its judge model (`OB1_JUDGE_MODEL`, else the
+metadata model) and prompt version, with no switch to refuse: a new one is a
+new pool. The follower takes every thought with entities again and judges
+each pair not already proposed — up to three calls a thought, unattended.
+With `OB1_JUDGE_MODEL` set, a new metadata model leaves consolidation's key
+as it was, so thoughts already judged are not judged again against the new
+entities.
+
+**Start `extract` alone on a backlog.** A pair is judged once, from its newer
+side, against older thoughts that share an entity, have a vector and were
+captured on an earlier UTC date. If the older one had no entities or no
+vector yet, the pair is never judged. For captures beside a running `extract`
+that almost never happens: their neighbours were extracted long before. The
+exception is two captures either side of 00:00 UTC with the earlier still
+being extracted. One extract worker finishes it first, since it claims in
+queue order; with `OB1_EXTRACT_WORKERS` above 1 it can still be held. A
+backlog is different: a first run or a `--switch-key` queues every thought at
+one instant, and they are taken in no order, so a thought can be judged
+before an older neighbour is extracted. Hence the first-start order above.
+Once newer thoughts have been judged, three cases miss their pairs however
+the passes are run (`db/README.md`, "Consolidation: proposing which thoughts
+supersede which"):
+- an older thought whose extraction failed (`--retry-failed` extracts it);
+- an older thought whose embedding failed (`db/reembed.ts` embeds it; no
+  service runs it);
+- an import dated older than thoughts already judged.
+
+**Consolidation only proposes.** Nothing it finds is applied: each proposal
+waits for a person. One whose text moved under it (a stale row) is judged
+again by the next pass, which settles it unless the conflict still stands,
+when it waits for a person again (067). `--list` shows the queue.
+`--accept <id>` or `--reject <id>` decides one, with `--note` giving your
+reason. When the listing says the judge did not state which thought is
+current, an accept needs `--direction newer` or `--direction older`.
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps consolidate bun db/consolidate.ts --list
+```
+
+An accept is audited under the agent of the key in `OB1_WORKER_KEY`, which in
+this container is the workers' key. To have it recorded as yours, give your
+own key, one `MCP_ACCESS_KEYS` holds, to that one command: set before it on
+the same line, it reaches neither your shell nor the next command, and the
+bare `-e` passes it into the container without putting it on the command
+line:
+
+```bash
+OB1_WORKER_KEY="$(cat ~/.config/ob1/my-key)" podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps -e OB1_WORKER_KEY consolidate bun db/consolidate.ts --accept <id> --note "…"
+```
+
+The run prints `agent: <name>` first; check it names your key. Do not
+`export OB1_WORKER_KEY`: compose reads the shell before `deploy/.env`, so
+every later compose command in that shell — an `up -d` included — would
+start the followers under your key. Without the prefix, the decision is the
+workers' key's.
+
+A reject records no reviewer whichever key runs it (SMD-2608). Accepting
+unattended waits on a judge that can tell conflicts apart (SMD-1873).
+
+This is the baseline for the sleep scheduler (SMD-1794): always on, at low
+concurrency. The scheduler will run these passes when the logs go quiet, under
+a budget, and yield to live traffic.
 
 ## Refreshing a tier
 
@@ -877,7 +1098,8 @@ made again, re-run `up`.
 
 A stable from before SMD-2294 has no `/canary` route, and `up` refuses there
 unless `--port N` names a loopback port for the canary's own proxy, the way
-every canary was stood up before (8011 was the default): its server at
+every canary was stood up before (on its old fixed default port, which
+`--port` now names): its server at
 `/mcp` on `127.0.0.1:N`, whatever `SERVER_BIND` says for stable, and its
 servers off stable's mesh. Re-run `up` without `--port` once stable is
 upgraded, and the canary's proxy is removed.
@@ -1001,13 +1223,13 @@ project could be named among them. The second is the canary's life, in three
   configured, run no proxy, hold only its tier's names on stable's mesh, and
   say that stable's public origin reaches it; its probe must pass on a
   thought whose text holds literals, searched for without them;
-- a second `up`, with `--port 8011` under `SERVER_BIND=0.0.0.0`, against a
+- a second `up`, with `--port` under `SERVER_BIND=0.0.0.0`, against a
   provider stub serving another model. The canary's proxy must be on
   loopback, its servers off stable's mesh, `/canary/mcp` the proxy's 404
   again; the thought put on stable just before it must reach the canary, and
   the smoke must fail on the floor;
-- a third `up`, back on stable's origin: the canary's proxy removed, 8011
-  free, and a connector left at 8011 named;
+- a third `up`, back on stable's origin: the canary's proxy removed, its port
+  free, and a connector left at that port named;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope
   connector left alone);
@@ -1711,16 +1933,19 @@ so the profile builds from a checkout.
   this stack's database only with `-f deploy/compose.host-ports.yaml` ("What is
   reachable from where", above); the same goes for the two workers below.
 - **Entity extraction.** `db/extract-entities.ts --follow` is a long-running
-  worker with a per-thought model cost; it is not a service here. Run it from a
-  checkout, with `OB1_WORKER_KEY` set to a key whose hash is in
-  `MCP_ACCESS_KEYS`, when you have decided to pay that cost. A follower exits 0
-  when stopped, so watch its stderr: it says there when the model looks at
-  fault, after each pass drains the pool — a follower started on a backlog says
-  nothing until the backlog is done, so try a new model with `--limit 48` first
-  (SMD-2266, `db/README.md`). The same goes for
-  `db/consolidate.ts`, the pass that proposes supersessions from the entities
-  that worker extracts (a per-pair cost; `db/README.md`), and for reviewing
-  what it proposes.
+  worker with a per-thought model cost, so it runs as a service only when asked:
+  the `workers` profile runs it and `db/consolidate.ts --follow`, the pass that
+  proposes supersessions from the entities it extracts ("Extraction and
+  consolidation as services", above). Decide on the cost before you ask for it.
+  A follower exits 0 when stopped, so watch its log: it says there when the
+  model looks at fault, after each pass drains the pool. A follower started on
+  a backlog says nothing until the backlog is done, so try a new model on a
+  working copy with `--limit 48` first (SMD-2266, `db/README.md`; on the brain
+  itself a new model is a new key, "Changing the model" above). It waits out
+  a database restart, a provider outage or a model being pulled, and says so
+  in its log, rather than exiting or failing the thoughts it holds
+  (SMD-2599); a model the provider does not serve at start is refused with
+  exit 2. Reviewing what consolidation proposes stays a person's job.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
   The `auth` profile's authorization server runs behind the proxy's `/auth`,
