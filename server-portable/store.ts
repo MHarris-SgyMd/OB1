@@ -1417,8 +1417,8 @@ export interface ThoughtStore {
   /**
    * Whether another key or board-sync has taken the thought from the agent
    * that captured it: migration 081's ob1_thought_taken, the one rule — a
-   * re-capture by a key that can read, a text edit, a metadata move under an
-   * agent id, or the metadata gaining a ticket's `issue`. Read beside
+   * re-capture by a key that can read, a text edit, or board-sync (no agent
+   * id) giving the metadata a ticket's `issue`; a key's metadata edit never. Read beside
    * captureActorOf for every target of a capture-only key's `supersedes`
    * (SMD-2638). A malformed id is true, never owned; a database before 081
    * throws (the function is missing), and the pointer is the server's to

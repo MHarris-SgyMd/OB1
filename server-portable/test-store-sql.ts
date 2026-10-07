@@ -718,6 +718,9 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
     assert((await taken(id)) === true, `${what}: taken`);
   }
   assert((await taken(edited.id)) === false, "a write key's metadata edit alone (a tag) does not take it: the text is still only the hook's");
+  const filed = await capture("[8c] the hook's thought a write key files under a ticket", hook);
+  await store.updateThought({ id: filed.id, metadataPatch: { issue: "TKT-2638" }, actor: writer });
+  assert((await taken(filed.id)) === false, "…nor does a write key filing it under a ticket: `issue` takes a thought only under no agent id, as board-sync adopts");
   const [noopAt] = await sql`SELECT (SELECT updated_at FROM thoughts WHERE id = ${recaptured.id}::uuid) > (SELECT max(created_at) FROM thought_audit WHERE thought_id = ${recaptured.id}::uuid AND action = 'capture') AS moved`;
   assert(noopAt?.moved === true, "…and the noted re-capture moved updated_at, as its projection does");
   // The note is a capture-only key's rows': a write key's re-capture of another write key's thought records nothing and moves nothing.
@@ -769,6 +772,29 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   let refusal = "";
   try { await capture("[8c] the hook names a taken thought at the write", hook, { supersedes: lapsedNoop.t }); } catch (e) { refusal = (e as Error).message; }
   assert(/ob1_check_capture_pointer/.test(refusal), `a capture-scoped capture naming a taken thought is refused at the write (${refusal.slice(0, 90)})`);
+  // Two capture-scoped captures naming one target at once: the second waits for
+  // the first and is refused, so the target keeps one superseder (review pass 3:
+  // FOR SHARE alone let concurrent captures all pass the rule).
+  const raced = await capture("[8c] the hook's thought two captures race to supersede", hook);
+  const envelope = (_content: string) => ({ metadata: { source: "codex" }, actor: { name: hook.name, agent_id: hookId, via: hook.via, scope: "capture" }, recapture: "keep", supersedes: raced.id });
+  const first = new SQL({ url: URL_, max: 1 }), second = new SQL({ url: URL_, max: 1 });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const firstDone = first.begin(async (tx) => {
+    await tx`SELECT upsert_thought(${"[8c] the first racer"}::text, ${envelope("first")}::jsonb, NULL::vector)`;
+    await gate;
+  });
+  await Bun.sleep(200);
+  const secondDone = second`SELECT upsert_thought(${"[8c] the second racer"}::text, ${envelope("second")}::jsonb, NULL::vector)`.then(() => "written", (e: Error) => e.message);
+  await Bun.sleep(300);
+  release();
+  await firstDone;
+  const secondResult = await secondDone;
+  const [{ n: superseders }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE supersedes = ${raced.id}::uuid`;
+  await first.close();
+  await second.close();
+  await sql`DELETE FROM thoughts WHERE content IN ('[8c] the first racer', '[8c] the second racer')`;
+  assert(/ob1_check_capture_pointer/.test(secondResult) && superseders === 1, `two capture-scoped captures naming one target at once: the second waits and is refused, one superseder (${secondResult.slice(0, 80)}; ${superseders})`);
   // The reads fail closed: the taken read throws when it cannot be made, and so does a note that fails —
   // save a database before 081, where the capture stands without one.
   await sql`ALTER FUNCTION ob1_thought_taken(uuid) RENAME TO ob1_thought_taken_away`;

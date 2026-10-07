@@ -171,7 +171,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2501 assertions: 2501 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2503 assertions: 2503 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eighty-one (81) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1118,10 +1118,11 @@ captured the same text landed on that row, board-sync adopted a row holding a
 ticket's text, and the capture key could still mark it superseded. One rule,
 `ob1_takes_thought`, says when an update event takes a thought from the agent
 that captured it — someone else then holds the text: another agent, or none,
-that records a re-capture, moves the text, or gives the metadata an `issue` it
-lacked (board-sync's adoption). A metadata move alone does not take it,
-attributed or not — a writer's tag, `backfill_thought_actors` (which this
-README tells operators to run after `set_agent_kind`), a recipe — nor does a
+that records a re-capture or moves the text, or no agent giving the metadata
+an `issue` it lacked (board-sync's adoption, which writes without one). A
+key's metadata edit does not take it, whatever it adds — a writer's tag, a
+writer filing it under a ticket, `backfill_thought_actors` (which this README
+tells operators to run after `set_agent_kind`), a recipe — nor does a
 vector, a pointer or a fingerprint: a lapse puts a summary the hook superseded
 back to current, so only a write that puts another's text on the row may
 cause one. `ob1_thought_taken` reads the rule for one thought; the server reads
@@ -1138,12 +1139,14 @@ taken thought of each thought its capturer captured with that pointer under
 the capture scope and no update has re-pointed since — an update event of its
 own under the actor of the write that took the target. The check at the
 write, a second AFTER INSERT trigger on a capture-scoped capture event that
-names `supersedes`, locks the target `FOR SHARE` (which waits for any taker)
-and refuses the capture, SQLSTATE `OB004`, when the target is another's, taken,
-or already superseded; the server drops the pointer and writes again. One
-superseder per target bounds a lapse to one event. A pointer a write key set,
-and a capture-only key's rows from before the scope mark, are never lapsed,
-noted or checked. Apply it before running the server that reads it: without
+names `supersedes`, takes an advisory lock on the target (two such captures
+naming one target are serialised), locks it `FOR SHARE` (which waits for any
+taker) and refuses the capture, SQLSTATE `OB004`, when it names no agent or the
+target is another's, taken, or already superseded; the server drops the
+pointer and writes again. One superseder per target bounds a lapse to one
+event. A pointer a write key set never lapses; a pointer written before the
+server sent the scope mark never lapses, and a capture-only key's row from
+before then is never noted. Apply it before running the server that reads it: without
 `ob1_thought_taken` every capture-only key's `supersedes` is the server's error
 to retry. It refuses to apply without 060 or 061. test-schema [72],
 test-upgrade [20ae], test-e2e-sql [13b] and [13e].
@@ -3468,7 +3471,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2501 assertions, PGlite, no container
+bun test-schema.ts                          # 2503 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1100 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

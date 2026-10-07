@@ -31,12 +31,14 @@
 --     agent is another (none included) and it
 --       - records a re-capture by a key that can read (`recaptured`, below),
 --       - moves the text, or
---       - gives the metadata a ticket identity (`issue`) it lacked — how
---         board-sync adopts a row (db/sync-linear.ts); a key that cannot
---         read may not set `issue` (SMD-2617).
---     Someone else then holds the text. A metadata move alone does not take
---     the thought, attributed or not: a writer tagging the hook's summary, a
---     kanban move, backfill_thought_actors, a recipe's tags. A lapse is not
+--       - gives the metadata a ticket identity (`issue`) it lacked, under no
+--         agent id — how board-sync adopts a row (db/sync-linear.ts, which
+--         writes without one); a key that cannot read may not set `issue`
+--         (SMD-2617).
+--     Someone else then holds the text. A key's metadata edit does not take
+--     the thought, whatever it adds: a writer tagging the hook's summary or
+--     filing it under a ticket, a kanban move, backfill_thought_actors, a
+--     recipe's tags. A lapse is not
 --     fail-safe — it puts a summary the hook superseded back to current — so
 --     only a write that puts another's text on the row may cause one. Nor
 --     does a vector (db/reembed.ts), a pointer, or a fingerprint.
@@ -61,12 +63,13 @@
 --     own, under the actor of the write that took T, appended and projected.
 --     A pointer a write key set is never lapsed.
 --   * The check at the write: an AFTER INSERT trigger on thought_audit for a
---     capture-scoped capture event that names `supersedes`. It locks the
---     target FOR SHARE — which waits for any taker, every one of which holds
---     the row FOR NO KEY UPDATE before its append — and refuses the capture
---     (SQLSTATE OB004) when the target is no longer the capturing key's alone:
---     another agent captured it, it is taken, or something already
---     supersedes it. The server drops the pointer and writes again, as it
+--     capture-scoped capture event that names `supersedes`. It takes an
+--     advisory lock on the target, so two such captures naming one target
+--     are serialised and the second sees the first; locks the target FOR
+--     SHARE, which waits for any taker, every one of which holds the row FOR
+--     NO KEY UPDATE before its append; and refuses the capture (SQLSTATE
+--     OB004) when the target is no longer the capturing key's alone: another
+--     agent captured it, it is taken, or something already supersedes it. The server drops the pointer and writes again, as it
 --     does for a target deleted mid-write. One superseder per target bounds
 --     the lapse to one event, where a key pointing thousands of its own
 --     captures at one thought made the taker's write pay for each.
@@ -84,8 +87,16 @@
 --     records no re-capture.
 --   * A row a capture key forged with `issue` before SMD-2617: board-sync's
 --     patches find `issue` there already, so they do not take it.
---   * Timing: a kept pointer costs a projection a dropped one does not.
---     SMD-2473 left timing out of the oracle rule, and so does this file.
+--   * Timing: a kept pointer costs a projection a dropped one does not, a
+--     pointer refused at the write costs a second write, and the check waits
+--     behind a write in progress on the target. SMD-2473 left timing out of
+--     the oracle rule, and so does this file.
+--   * A taker under REPEATABLE READ (018's and 068's caveat): its lapse reads
+--     its transaction's snapshot, so a capture-scoped pointer it waited on is
+--     not seen. Every writer here runs READ COMMITTED.
+--   * Board-sync re-chaining a ticket group that holds a capture key's pasted
+--     header carries the key's pointer onto a board-sync row, which the lapse
+--     does not clear: SMD-2670.
 --   * A data-only reload of thought_audit (COPY into the table) fires both
 --     triggers; a pg_dump/pg_restore creates triggers after the data.
 --
@@ -121,20 +132,24 @@ IMMUTABLE
 AS $$
   -- `->>` reads a JSON null as SQL NULL: a row whose metadata held
   -- "issue": null lacked a ticket identity (board-sync's ticketIdentifier
-  -- reads it so), and gaining one takes it.
+  -- reads it so), and gaining one takes it. Only under no agent id, as
+  -- board-sync writes: a write key filing the hook's summary under a ticket
+  -- is a metadata edit, and lapsing for it would put the summary back to
+  -- current (SMD-2638 review pass 3).
   SELECT COALESCE(
     jsonb_typeof(p_diff) = 'object'
     AND p_capturer IS NOT NULL
     AND p_agent IS DISTINCT FROM p_capturer
     AND (p_diff ? 'recaptured'
          OR p_diff ? 'content'
-         OR (p_diff->'metadata'->'after'->>'issue' IS NOT NULL
+         OR (p_agent IS NULL
+             AND p_diff->'metadata'->'after'->>'issue' IS NOT NULL
              AND p_diff->'metadata'->'before'->>'issue' IS NULL)),
     false)
 $$;
 
 COMMENT ON FUNCTION ob1_takes_thought(jsonb, uuid, uuid) IS
-  'Whether an update event (its diff and its canonical agent id) takes a thought from the agent that captured it: another agent, or none, that records a re-capture (`recaptured`), moves the text, or gives the metadata an `issue` it lacked (board-sync''s adoption) — someone else then holds the text. A metadata move alone, a vector, a pointer and a fingerprint do not. False for a thought nobody attributable captured, and for a diff that is not an object. Read by ob1_thought_taken and the lapse trigger. Migration 081 / SMD-2638.';
+  'Whether an update event (its diff and its canonical agent id) takes a thought from the agent that captured it: another agent, or none, that records a re-capture (`recaptured`) or moves the text, or no agent giving the metadata an `issue` it lacked (board-sync''s adoption) — someone else then holds the text. A key''s metadata edit, a vector, a pointer and a fingerprint do not. False for a thought nobody attributable captured, and for a diff that is not an object. Read by ob1_thought_taken and the lapse trigger. Migration 081 / SMD-2638.';
 
 CREATE OR REPLACE FUNCTION ob1_capturer_of(p_id uuid)
 RETURNS uuid
@@ -303,11 +318,17 @@ BEGIN
   -- the row FOR NO KEY UPDATE, and a taker that comes after waits for this
   -- capture, then lapses the pointer it now sees.
   v_target := (NEW.diff->>'supersedes')::uuid;
+  -- FOR SHARE locks do not conflict with each other, and a concurrent
+  -- capture's pointer is not visible until it commits: without this, N
+  -- captures sent at once all passed the one-superseder rule below (review
+  -- pass 3). Held to the commit, so the second reads the first's row.
+  PERFORM pg_advisory_xact_lock(hashtextextended('ob1:capture-pointer:' || v_target::text, 0));
   PERFORM 1 FROM thoughts WHERE id = v_target FOR SHARE;
   IF NOT FOUND THEN
     RETURN NULL;  -- no such thought: the self-FK refuses it at the projection, as before
   END IF;
-  IF ob1_capturer_of(v_target) IS DISTINCT FROM NEW.canonical_agent_id
+  IF NEW.canonical_agent_id IS NULL
+     OR ob1_capturer_of(v_target) IS DISTINCT FROM NEW.canonical_agent_id
      OR ob1_thought_taken(v_target)
      OR EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = v_target) THEN
     RAISE EXCEPTION USING
@@ -320,7 +341,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_check_capture_pointer() IS
-  'The check at the write (AFTER INSERT on thought_audit, capture events carrying `supersedes` and "scope": "capture"): locks the target FOR SHARE, which waits for any taker, and refuses the capture (SQLSTATE OB004) when the target is not the capturing agent''s alone — captured by another, taken (ob1_thought_taken), or already superseded by any thought. The server drops the pointer and writes again. One superseder per target bounds the lapse to one event. Migration 081 / SMD-2638.';
+  'The check at the write (AFTER INSERT on thought_audit, capture events carrying `supersedes` and "scope": "capture"): takes an advisory lock on the target (two such captures naming one target are serialised), locks it FOR SHARE, which waits for any taker, and refuses the capture (SQLSTATE OB004) when the capture names no agent or the target is not that agent''s alone — captured by another, taken (ob1_thought_taken), or already superseded by any thought. The server drops the pointer and writes again. One superseder per target bounds the lapse to one event. Migration 081 / SMD-2638.';
 
 DROP TRIGGER IF EXISTS thought_audit_check_capture_pointer ON thought_audit;
 CREATE TRIGGER thought_audit_check_capture_pointer

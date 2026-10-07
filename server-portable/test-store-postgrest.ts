@@ -200,6 +200,9 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
     assert((await taken(id)) === true, `${what}: taken`);
   }
   assert((await taken(edited.id)) === false, "a write key's metadata edit alone (a tag) does not take it: the text is still only the hook's");
+  const filed = await capture("[8c] the hook's thought a write key files under a ticket", hook);
+  await store.updateThought({ id: filed.id, metadataPatch: { issue: "TKT-2638" }, actor: writer });
+  assert((await taken(filed.id)) === false, "…nor does a write key filing it under a ticket: `issue` takes a thought only under no agent id, as board-sync adopts");
   const [noopAt] = await sql`SELECT (SELECT updated_at FROM thoughts WHERE id = ${recaptured.id}::uuid) > (SELECT max(created_at) FROM thought_audit WHERE thought_id = ${recaptured.id}::uuid AND action = 'capture') AS moved`;
   assert(noopAt?.moved === true, "…and the noted re-capture moved updated_at, as its projection does");
   // The note is a capture-only key's rows': a write key's re-capture of another write key's thought records nothing and moves nothing.

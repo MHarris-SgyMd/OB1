@@ -12349,6 +12349,7 @@ console.log("\n[72] Migration 081: one rule for when a capture-only key's though
     ["a metadata move under another agent id (a writer's tag)", meta({}, { project: "p" }), Y, X, false],
     ["the metadata gaining `issue`, no agent id", meta({}, { issue: "TKT-1" }), null, X, true],
     ["the metadata gaining `issue` where it held null", meta({ issue: null }, { issue: "TKT-1" }), null, X, true],
+    ["a write key filing it under a ticket (`issue` gained under an agent id)", meta({}, { issue: "TKT-1" }), Y, X, false],
     ["a metadata move with no agent id and no `issue`", meta({}, { enriched: true }), null, X, false],
     ["a diff that is not an object, naming `content`", ["content"], Y, X, false],
     ["a metadata move keeping an `issue` it had, no agent id", meta({ issue: "TKT-1" }, { issue: "TKT-1", status: "Done" }), null, X, false],
@@ -12388,7 +12389,7 @@ console.log("\n[72] Migration 081: one rule for when a capture-only key's though
   await cap(unmarked.text, { metadata: { source: "mcp", project: "72" }, actor: WRITER });
   assert(again.existed === true && noted === true && twice === false && own === false && after === before + 1,
     `the note records a write key's re-capture once — not again on a taken thought, not for the capturer itself (${JSON.stringify({ noted, twice, own, events: [before, after] })})`);
-  assert((await pointerOf(merged.s)) === null && (await pointerOf(noop.s)) === null, "a capture-scoped pointer lapses when a write key's merge, or its noted re-capture, takes the target");
+  assert((await pointerOf(merged.s)) === null && (await pointerOf(noop.s)) === null, "a capture-scoped pointer lapses when a write key's re-capture of its target is noted, the re-capture merging metadata or not");
   assert((await pointerOf(unmarked.s)) === unmarked.t, "…and one whose capture row carries no scope stands");
   const unmarkedNoted = (await one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [unmarked.t, JSON.stringify(WRITER)])).r;
   const OTHER = { name: "other-key", agent_id: await agent("d", "other-key", "write"), via: "test-door" };
@@ -12407,7 +12408,7 @@ console.log("\n[72] Migration 081: one rule for when a capture-only key's though
   const fresh = await chain("checked at the write", HOOK);
   const ownUntouched = await cap("[72] the hook's thought nothing supersedes yet", { metadata: { source: "codex" }, actor: HOOK, recapture: "keep" });
   const cells2: [string, string, RegExp][] = [
-    ["a taken target", merged.t, /ob1_check_capture_pointer/],
+    ["a taken target", noop.t, /ob1_check_capture_pointer/],
     ["a target something already supersedes", fresh.t, /ob1_check_capture_pointer/],
     ["another key's thought", writers.id, /ob1_check_capture_pointer/],
   ];
@@ -12417,6 +12418,12 @@ console.log("\n[72] Migration 081: one rule for when a capture-only key's though
     assert(want.test(msg) && Number(n) === 0, `a capture-scoped capture naming ${what} as supersedes is refused at the write, and writes nothing (${msg.slice(0, 90)})`);
   }
   assert((await refusedWith("[72] the hook names its own untouched thought", ownUntouched.id)) === "written", "…while one naming its own thought, untaken and superseded by nothing, is written");
+  // A capture naming no agent is refused even onto a thought captured without one (both NULL): nothing proves it the key's.
+  const NO_AGENT = { name: "hook-key", via: "test-door", scope: "capture" };
+  const unattributed = await cap("[72] the hook's thought from a registry outage", { metadata: { source: "codex" }, actor: NO_AGENT, recapture: "keep" });
+  let noAgent = "written";
+  try { await cap("[72] the hook names it, still without an agent", { metadata: { source: "codex" }, actor: NO_AGENT, recapture: "keep", supersedes: unattributed.id }); } catch (e) { noAgent = (e as Error).message; }
+  assert(/ob1_check_capture_pointer/.test(noAgent), `a capture-scoped capture naming no agent is refused at the write, even onto a thought captured without one (${noAgent.slice(0, 80)})`);
   let unscopedPointer: string | null = null, unscopedError = "";
   try {
     const unscoped = await cap("[72] a write key names a thought something supersedes", { metadata: { source: "mcp" }, actor: WRITER, supersedes: fresh.t });

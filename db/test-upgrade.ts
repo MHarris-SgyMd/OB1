@@ -3655,7 +3655,7 @@ console.log("\n[20ae] Migration 081: refused by name without 060; onto a populat
   const again = await cap(noop.text, { metadata: { source: "codex" }, actor: WRITER });
   const [{ noted }] = await sql`SELECT ob1_note_recapture(${again.id}::uuid, ${WRITER}::jsonb) AS noted`;
   await cap(unmarked.text, { metadata: { source: "mcp", project: "upgrade" }, actor: WRITER });
-  assert((await pointerOf(merged.s)) === null, "a capture-scoped pointer written before the upgrade lapses when a write key's merge takes its target after it");
+  assert((await pointerOf(merged.s)) === null, "a capture-scoped pointer written before the upgrade lapses when a write key's re-capture of its target is noted after it (a pointer only a server sending the mark writes, onto 080 — a state this leg builds by hand)");
   assert(again.existed === true && noted === true && (await pointerOf(noop.s)) === null, `…and when its re-capture that changed nothing is noted (${noted})`);
   assert((await pointerOf(unmarked.s)) === unmarked.t, "…while a pointer whose capture row carries no scope stands");
   // A re-apply moves nothing.
