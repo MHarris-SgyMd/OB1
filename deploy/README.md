@@ -165,22 +165,37 @@ the repo root, with whatever `-f` files the stack was started with:
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2583), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
-The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
-server per tier, each on loopback by default; its three Postgres services and
-shared Ollama publish nothing, exactly as above. A canary stood beside this
+The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes its
+proxy alone, on this file's `SERVER_BIND` and `SERVER_PORT`, with each tier a path
+on it (SMD-2294): `/mcp` the stable tier's server, `/canary/mcp` and
+`/working/mcp` the others' (a bodiless 404 while that tier is stopped; stable's
+`/mcp` answers 502 then, as compose.yaml's does). Its
+servers, REST cores, three Postgres services and shared Ollama publish nothing.
+Nothing public routes to a REST core, and the root, `/.well-known` and `/api`
+are the proxy's 404: that stack has no legacy window, no authorization server
+and no `/api`. It reads `SERVER_PORT` as this file does, so to run the two side
+by side set `SERVER_PORT` in the shell for one of them, which wins over
+`deploy/.env`. Its proxy waits on no tier and starts in compose's first wave,
+so a canary or working tier whose migration fails is a 404 at its path while
+stable and the origin serve; `up` still exits 1 and names the failed migrator.
+`up proxy` alone therefore brings no tier: name the services, or none.
+Its project is `open-brain-tiers`, the file's `name:`. Leave `COMPOSE_PROJECT_NAME`
+and `-p` alone for it: either one overrides that name, and as `open-brain` the tiers
+would join this stack's project, its `proxy` and its `mesh`, where two servers
+answer as `mcp.ob1.internal`.
+A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own network,
 less the proxy, its server and REST core also on this stack's `mesh` as
 `mcp.canary.ob1.internal` and `api.canary.ob1.internal`, and reached at
 `/canary/mcp` on this stack's port (SMD-2294). Beside a stable from before
-that, `--port` gives it its own proxy on loopback, as before. The tier
-file's servers still publish a port each; SMD-2294 moves them onto proxy paths.
+that, `--port` gives it its own proxy on loopback, as before.
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `stable-server` | `stable-server:8000` | `127.0.0.1:${STABLE_SERVER_PORT:-8010}` | Through a proxy; `STABLE_SERVER_BIND=0.0.0.0` only for a proxy elsewhere |
-| `canary-server` | `canary-server:8000` | `127.0.0.1:${CANARY_SERVER_PORT:-8011}` | Through a proxy; `CANARY_SERVER_BIND=0.0.0.0` only for a proxy elsewhere |
-| `working-server` | `working-server:8000` | `127.0.0.1:${WORKING_SERVER_PORT:-8012}` | Through a proxy; `WORKING_SERVER_BIND=0.0.0.0` only for a proxy elsewhere |
+| `proxy` | dials each tier's server on `mesh`: `mcp.ob1.internal:8000` (stable), `mcp.canary.ob1.internal:8000`, `mcp.working.ob1.internal:8000` | `127.0.0.1:${SERVER_PORT:-8000}`: `/mcp`, `/canary/mcp`, `/working/mcp` | Through a TLS proxy or tunnel, as compose.yaml's proxy; `SERVER_BIND=0.0.0.0` only for a proxy on another machine |
+| `<tier>-server` | `<tier>-server:8000` on the default network; `mcp.<tier>.ob1.internal` (stable: `mcp.ob1.internal`) on `mesh` | Nothing of its own: its path on the proxy's port | Through the proxy |
+| `<tier>-api` | `api.<tier>.ob1.internal:8000` (stable: `api.ob1.internal`) on `mesh`, and `<tier>-api:8000` on the default network — a key is still required for anything but `/health` and `/openapi.json` | Nothing | Nothing |
 
 `docker compose -f deploy/compose.yaml config` renders each mapping with
 `host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.ts` check 13 parses
@@ -448,10 +463,10 @@ without a key, so it adds no name, and expects both headers (check 11).
 | n8n | `http://server:8000/` in a workflow node you built | no change needed: n8n reaches the server on the compose network, not through the proxy |
 | any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge, a dashboard's `MCP_URL` | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
 
-A stack run with `compose.tiers.yaml` publishes its tiers' servers directly
-(stable on 8010), with no proxy in front: there the root has no window, no
-headers and no line, and `/mcp` works too, since the server answers at every
-path. Moving those clients now is harmless and saves doing it later.
+A stack run with `compose.tiers.yaml` has no legacy window: since SMD-2294 its
+proxy answers the root with a 404, and each tier is `/mcp`, `/canary/mcp` or
+`/working/mcp` on the proxy's port. A client of that stack moves from the
+tier's old host port to its path.
 
 Two more things belong here, though neither applies until the stack has a
 public origin and the `auth` profile on (SMD-2382):
@@ -500,7 +515,7 @@ commit and the highest migration from it, and asserts the version is the
 checkout's:
 
 ```bash
-curl -s -H "x-brain-key: $KEY" http://127.0.0.1:8010/health | jq '{version, commit, ledgerStatus, highest: .database.highestMigration}'
+curl -s -H "x-brain-key: $KEY" "http://127.0.0.1:${SERVER_PORT:-8000}/health" | jq '{version, commit, ledgerStatus, highest: .database.highestMigration}'
 ```
 
 **The commit is a build argument.** `server-portable/Dockerfile` bakes
@@ -1083,7 +1098,8 @@ made again, re-run `up`.
 
 A stable from before SMD-2294 has no `/canary` route, and `up` refuses there
 unless `--port N` names a loopback port for the canary's own proxy, the way
-every canary was stood up before (8011 was the default): its server at
+every canary was stood up before (on its old fixed default port, which
+`--port` now names): its server at
 `/mcp` on `127.0.0.1:N`, whatever `SERVER_BIND` says for stable, and its
 servers off stable's mesh. Re-run `up` without `--port` once stable is
 upgraded, and the canary's proxy is removed.
@@ -1207,13 +1223,13 @@ project could be named among them. The second is the canary's life, in three
   configured, run no proxy, hold only its tier's names on stable's mesh, and
   say that stable's public origin reaches it; its probe must pass on a
   thought whose text holds literals, searched for without them;
-- a second `up`, with `--port 8011` under `SERVER_BIND=0.0.0.0`, against a
+- a second `up`, with `--port` under `SERVER_BIND=0.0.0.0`, against a
   provider stub serving another model. The canary's proxy must be on
   loopback, its servers off stable's mesh, `/canary/mcp` the proxy's 404
   again; the thought put on stable just before it must reach the canary, and
   the smoke must fail on the floor;
-- a third `up`, back on stable's origin: the canary's proxy removed, 8011
-  free, and a connector left at 8011 named;
+- a third `up`, back on stable's origin: the canary's proxy removed, its port
+  free, and a connector left at that port named;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope
   connector left alone);
