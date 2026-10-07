@@ -768,9 +768,8 @@ waits for a person. One whose text moved under it (a stale row) is judged
 again by the next pass, which settles it unless the conflict still stands,
 when it waits for a person again (067). `--list` shows the queue.
 `--accept <id>` or `--reject <id>` decides one, with `--note` giving your
-reason. When the
-listing says the judge did not state which thought is current, an accept
-needs `--direction newer` or `--direction older`.
+reason. When the listing says the judge did not state which thought is
+current, an accept needs `--direction newer` or `--direction older`.
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps consolidate bun db/consolidate.ts --list

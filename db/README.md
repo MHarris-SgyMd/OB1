@@ -2212,7 +2212,7 @@ is still unextracted is judged without it, and the pair is not revisited.
 Since a candidate was captured on an earlier UTC date, a pass beside an
 extract follower is safe for captures: their neighbours were almost always
 extracted long before. What it misses is an older side that has no entities
-yet when the newer side is judged:
+or no vector yet when the newer side is judged:
 - **Two captures either side of 00:00 UTC**, the earlier still in hand. One
   extract worker claims in queue order and finishes the earlier first; with
   two or more, the earlier can still be held.
@@ -2228,9 +2228,9 @@ yet when the newer side is judged:
 
 The last three hold however the pass is run, once the newer thoughts have
 been judged; a failed extraction or embedding repaired before that misses
-nothing. k and the
-floor were chosen by measurement (`evals/eval-consolidate.ts`;
-`evals/README.md` has the table) and are the worker's `--k` and `--min-sim`.
+nothing. k and the floor were chosen by measurement
+(`evals/eval-consolidate.ts`; `evals/README.md` has the table) and are the
+worker's `--k` and `--min-sim`.
 
 **The judge.** One call per pair to the judge model — `OB1_JUDGE_MODEL`, else
 the metadata model, so the harder task can run on a stronger model than every
