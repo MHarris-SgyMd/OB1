@@ -111,6 +111,55 @@ const EXPOSURE =
   "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
 const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
 const CATALOG_HINT = "run once as the SQL store (OB1_STORE unset, DATABASE_URL set) against the same database to read the catalog";
+
+// ── The pass rows' leases (SMD-2423) ────────────────────────────────────────
+/**
+ * A pass's claimed rows by lease (SMD-2423): live, and expired by the rule
+ * release_stale_leases and worker_status use (`ttl_expires_at < now()`), so the
+ * three cannot disagree on what a stale lease is — and the latest live
+ * lease's end, for the running row's words. Both pass rows' queries carry the
+ * three columns, written out in each.
+ */
+type LeaseRow = { live: number; expired: number; live_until: string | null };
+type Leases = { live: number; expired: number; liveUntil: string | null };
+const NO_LEASES: Leases = { live: 0, expired: 0, liveUntil: null };
+function leasesByKey(rows: ({ work_type: string } & LeaseRow)[]): Map<string, Leases> {
+  const out = new Map<string, Leases>();
+  for (const r of rows) {
+    const l = out.get(r.work_type) ?? { ...NO_LEASES };
+    l.live += Number(r.live);
+    l.expired += Number(r.expired);
+    // Only the claimed group carries it: grouped by status, there is one.
+    if (r.live_until) l.liveUntil = r.live_until;
+    out.set(r.work_type, l);
+  }
+  return out;
+}
+/** A pass a worker holds a live lease in: running, not stopped. */
+const runningWords = (l: Leases, c: PassCounts) =>
+  `a pass under this key is running: ${l.live} in flight${l.liveUntil ? ` (leases live until ${l.liveUntil} UTC)` : ""}, ${c.pending} pending${l.expired ? `, ${l.expired} left by a worker that died, which a pass reclaims` : ""}`;
+/** A pass whose only claimed rows' leases expired: its worker died holding them. */
+const diedWords = (l: Leases) => `a worker died holding ${l.expired} of the claim(s) in flight, their leases expired`;
+const reclaim = (key: string) => `The next pass reclaims the expired claims (a row on its third expiry is marked failed); the release_stale_leases tool (work_type ${key}) returns them now. `;
+/**
+ * A running pass's failed rows: a worker never retries them on its own (a
+ * follower's --retry-failed runs once, before it follows), so a running row
+ * with failed rows warns, names them, and says how they go back — or a
+ * follower would hide them for as long as it ran (review pass 1). The way back
+ * is the retry_failed tool for the key: it puts them back to pending and the
+ * running worker takes them, any key, no second worker — a CLI --retry-failed
+ * was refused under a key naming another model, and runs a pass of its own
+ * (review pass 2).
+ */
+function runningRow(key: string, c: PassCounts, words: string, tail = ""): { status: Status; detail: string; fix?: string } {
+  if (c.failed === 0) return { status: "ok", detail: `${words}${tail}` };
+  return {
+    status: "warn",
+    detail: `${words}; ${c.failed} failed row(s) the running pass will not retry${tail}`,
+    fix: `Once their cause is fixed, the retry_failed tool (work_type ${key}) puts the failed rows back to pending, and the running worker takes them: no second worker.`,
+  };
+}
+
 // Every check the direct-connection block owns, in the order the SQL path reports them.
 // A throw anywhere in that block lands in one catch, and a check that prints
 // nothing looks like one that passed — so the catch reports each of these
@@ -3687,10 +3736,13 @@ if (configFailed) {
               SELECT work_type, status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted,
                      count(*) FILTER (WHERE last_error IS NOT NULL AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})
                                       AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz)))::int AS accepted,
-                     (SELECT count(*)::int FROM thoughts) AS thoughts
+                     (SELECT count(*)::int FROM thoughts) AS thoughts, count(*) FILTER (WHERE status = 'claimed' AND NOT (ttl_expires_at < now()))::int AS live,
+                     count(*) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now())::int AS expired,
+                     to_char(max(ttl_expires_at) FILTER (WHERE status = 'claimed' AND NOT (ttl_expires_at < now())) AT TIME ZONE 'UTC', 'HH24:MI') AS live_until
               FROM thought_work_claims WHERE work_type LIKE ${REEMBED_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
-              { work_type: string; status: string; c: number; noted: number; accepted: number; thoughts: number }[];
+              ({ work_type: string; status: string; c: number; noted: number; accepted: number; thoughts: number } & LeaseRow)[];
             const byKey = new Map<string, PassCounts>();
+            const leases = leasesByKey(rows);
             for (const r of rows) {
               const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };
               const n = Number(r.c);
@@ -3747,6 +3799,17 @@ if (configFailed) {
             for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
               if (!passUnfinished(c)) continue;
               unfinished++;
+              // A worker holds a live lease: the pass is running, whatever key
+              // it is under — an ok row, no remedy that would start a second
+              // worker (SMD-2423).
+              const l = leases.get(key) ?? NO_LEASES;
+              if (l.live > 0) {
+                // The configured key's pass still leaves two models side by side until it ends.
+                const mixed = key === configuredKey ? "; until it finishes, the rows it has not reached carry what they had before it" : "";
+                const r = runningRow(key, c, `${key}: ${formatPassCounts(c)} — ${runningWords(l, c)}${mixed}`);
+                add("re-embed pass", r.status, r.detail, r.fix);
+                continue;
+              }
               const named = parseReembedKey(key);
               // Superseded: the key names a model or width that is not the
               // current one — the recorded model, or this server's when nothing
@@ -3781,8 +3844,8 @@ if (configFailed) {
                     `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${named.model} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, ${retire}`);
               } else if (key === configuredKey) {
                 add("re-embed pass", "warn",
-                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
-                    finishIt("", "", c, recordDiffers));
+                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two${l.expired > 0 ? `; ${diedWords(l)}` : ""}`,
+                    `${l.expired > 0 ? reclaim(key) : ""}${finishIt("", "", c, recordDiffers)}`);
               } else if (otherWidth) {
                 // The same model at another width. Migration 006 keeps the
                 // recorded width equal to the column's, so no run can finish
@@ -3794,8 +3857,8 @@ if (configFailed) {
               } else {
                 const envPrefix = named && named.model !== embModel ? `OB1_EMBEDDING_MODEL=${named.model} ` : "";
                 add("re-embed pass", "warn",
-                    `${key}: ${formatPassCounts(c)} — a pass under this key stopped before it finished`,
-                    finishIt(envPrefix, ` --job ${key}`, c, recordDiffers && envPrefix === ""));
+                    `${key}: ${formatPassCounts(c)} — ${l.expired > 0 ? diedWords(l) : "a pass under this key stopped before it finished"}`,
+                    `${l.expired > 0 ? reclaim(key) : ""}${finishIt(envPrefix, ` --job ${key}`, c, recordDiffers && envPrefix === "")}`);
               }
             }
             if (unfinished === 0) add("re-embed pass", "ok", "none unfinished");
@@ -3836,9 +3899,12 @@ if (configFailed) {
             // three copies of the rule and made it one).
             const rows = (await sql`
               SELECT work_type, status, count(*)::int AS c,
-                     (SELECT count(*)::int FROM consolidation_pool(NULL)) AS thoughts
+                     (SELECT count(*)::int FROM consolidation_pool(NULL)) AS thoughts, count(*) FILTER (WHERE status = 'claimed' AND NOT (ttl_expires_at < now()))::int AS live,
+                     count(*) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now())::int AS expired,
+                     to_char(max(ttl_expires_at) FILTER (WHERE status = 'claimed' AND NOT (ttl_expires_at < now())) AT TIME ZONE 'UTC', 'HH24:MI') AS live_until
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
-              { work_type: string; status: string; c: number; thoughts: number }[];
+              ({ work_type: string; status: string; c: number; thoughts: number } & LeaseRow)[];
+            const leases = leasesByKey(rows);
             // 063 (SMD-1732): a stale row is a pending verdict whose texts
             // moved; 067 (SMD-2297): the next pass replaces one it finds in
             // conflict again and settles one it does not — said here, since
@@ -3871,9 +3937,44 @@ if (configFailed) {
               // since SMD-1901, so the remedy leaves the extractor where it is.
               const model = /^(.+)@p\d+$/.exec(key.slice(CONSOLIDATE_KEY_PREFIX.length))?.[1];
               const envPrefix = model && model !== judgeModel ? `OB1_JUDGE_MODEL=${model} ` : "";
+              const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts with entities — ");
+              // Running: a worker holds a live lease, or the key's follower
+              // stamped a fresh heartbeat and has not ended — between its polls
+              // it holds none (SMD-2423, SMD-2261 item 7). An ok row, with no
+              // remedy that would start a second worker.
+              const l = leases.get(key) ?? NO_LEASES;
+              const beat = facts.workers?.heartbeats.find((h) => h.worker === "consolidate" && h.job === key);
+              const follower = beat && !beat.stale && !beat.ended ? beat : undefined;
+              // A follower killed outright leaves its claims' leases live until
+              // they lapse (900 s by default) while its heartbeat goes stale: the
+              // heartbeat is the fresher word, so the row says the follower is
+              // gone rather than "running" beside a workers row that says it is
+              // (review pass 3, a walkthrough).
+              if (beat && !follower && l.live > 0) {
+                add("consolidate pass", "warn",
+                    `${key}: ${counts} — its follower is not running (the workers row says so), and ${l.live} claim(s) it held keep live leases until ${l.liveUntil ?? "they lapse"} UTC${queue ? `; ${queue}` : ""}`,
+                    `Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool (work_type ${key}, include_live with the worker_id worker_status names) returns them now.`);
+                continue;
+              }
+              if (l.live > 0 || follower) {
+                const followerWords = follower
+                  ? `a follower is running this key (stamped ${ago(follower.ageS)} ago): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`
+                  : "";
+                const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`, queue ? `; ${queue}` : "");
+                add("consolidate pass", r.status, r.detail, r.fix);
+                continue;
+              }
+              // A follower of this key that stopped or went stale: the workers
+              // row names its restart, which finishes the pass — a one-shot run
+              // here as well would be a second remedy, and a second worker
+              // (review pass 2).
+              const stoppedFollower = facts.workers?.heartbeats.some((h) => h.worker === "consolidate" && h.job === key);
+              const failedNote = c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : "";
               add("consolidate pass", "warn",
-                  `${key}: ${formatPassCounts(c).replace(/ thoughts — /, " thoughts with entities — ")} — a consolidation pass under this key stopped before it finished${queue ? `; ${queue}` : ""}`,
-                  `Finish it: cd db && ${envPrefix}bun consolidate.ts --url $DATABASE_URL${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : ""}; ${envPrefix}bun consolidate.ts --url $DATABASE_URL --status shows where it stands.`);
+                  `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : "a consolidation pass under this key stopped before it finished"}${queue ? `; ${queue}` : ""}`,
+                  `${l.expired > 0 ? reclaim(key) : ""}${stoppedFollower
+                    ? `Its follower is not running: start it again as the workers row says${failedNote}; it finishes the pass.`
+                    : `Finish it: cd db && ${envPrefix}bun consolidate.ts --url $DATABASE_URL${failedNote}; ${envPrefix}bun consolidate.ts --url $DATABASE_URL --status shows where it stands.`}`);
             }
             if (unfinished === 0) add("consolidate pass", "ok", `none unfinished${queue ? `; ${queue}` : ""}`);
           }

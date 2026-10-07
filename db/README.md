@@ -1539,10 +1539,18 @@ the pass over as before 021, since that key cannot judge by label.
 **What preflight sees.** A pass is *unfinished* while any row under its key is
 pending, leased or failed — `passUnfinished` in `config.mjs`, one rule for this
 tool and for `server-portable/preflight.ts`, which reads the claim table on
-every start and warns, in the counts `--status` prints, for every unfinished
+every start and reports, in the counts `--status` prints, every unfinished
 key that starts with `reembed:` (the configured model's key, or a backfill's;
-extraction keys are left out because 016's trigger keeps that pool fed). No
-marker to clear: the claim table is the record of the pass and nothing else.
+extraction keys are left out because 016's trigger keeps that pool fed). A key
+a worker holds a live lease under is *running*, an ok row with no remedy that
+would start a second worker — a warning only for failed rows beside it, which a
+worker never retries, naming the `retry_failed` tool for the key that puts them
+back to pending for the running worker to take; one whose
+only leases expired names a worker that died holding them, which the next pass
+reclaims, a row on its third expiry marked failed (the stale rule is
+`release_stale_leases`' and `worker_status`', `ttl_expires_at < now()`;
+SMD-2423). No marker to clear: the claim table is the record of the pass and
+nothing else.
 Succeeded rows with a caveat are finished; thoughts not yet in the pool —
 since 021, the thoughts not at the key's model with no row under it — are
 detail while a pass is unfinished, and are what the next run adds. The rows
@@ -2363,7 +2371,16 @@ says so and proceeds unattributed.
 thoughts with entities, and the command that finishes it under the key's own
 judge model — and otherwise says `none unfinished`, with the number of
 proposals pending review beside it and the `--list` that shows them: a queue
-is a reviewer's to work, not a defect.
+is a reviewer's to work, not a defect. A key a worker holds a live lease under,
+or whose follower stamped a fresh heartbeat and has not ended (between polls it
+holds none), reads *running*, ok and with no remedy — a warning only for failed
+rows beside it, which a follower never retries, naming the `retry_failed` tool;
+one whose only leases expired names a worker that died holding them. A key
+whose follower stopped or went stale points to the `workers` row's restart,
+which finishes the pass, rather than a one-shot run beside it — even while the
+claims a killed follower held keep live leases until they lapse (SMD-2423,
+SMD-2261). A re-embed run killed outright reads running until its lease ends:
+it has no heartbeat to say otherwise.
 
 **Verified.** `test-schema.ts` [28] holds the candidate rule's every exclusion,
 the one write, the review path's states and refusals with the audit row, the
@@ -3425,12 +3442,12 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2465 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1100 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1130 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts) import with no side effect, refuse through run() — no database
-bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap through worker-bootstrap.ts — no database
+bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -3569,12 +3586,27 @@ and warning when none is set. **Errors and actors:** one `classifyError`
 classifies a provider error into thought / transient / fatal for both workers
 (extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
-`actorPayload` rather than by hand. The module returns its outcome rather than
+`actorPayload` rather than by hand. **Outages** (SMD-2599): a `--follow`
+worker of either kind waits a database outage out — `databaseUnavailable`
+names the errors that mean the database is not answering (a connection
+refused, closed or timed out; SQLSTATE class 08, 57P01–57P03, 53300), and
+`waitOut` checks again after 5 s, doubling to 5 min, until it answers or a stop
+wakes it; a thought in hand records nothing, and its lease is returned when the
+database is back. It waits a provider outage out the same way.
+- **Outages:** a transient error past the pauses, the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
+- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not.
+- **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering. With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
+- **At start:** a follower probes once before it writes anything, the worker key's registration included, and waits for a provider that does not answer only after every other refusal. A model the provider does not serve, a refused key or a wrong base URL exits 2; an unreachable provider is waited for. Extract's escalation model is checked by GET `/models`, which loads nothing, and refused only where the list names models as chat does; one the start could not confirm draws exit 2 at its first 404, and one it saw that goes missing is waited for by name.
+
+A run without `--follow` keeps every exit and failure it had. The module returns its outcome rather than
 exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s,
 `consolidate.ts`'s and `reembed.ts`'s (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
-the `classifyError` rules and the identity cases that refuse before connecting;
-`test-live.ts` [24b] the capped resolve; and `test-cli.ts`'s census checks that
+the `classifyError` rules, the identity cases that refuse before connecting and
+the outage rules and schedule, and the probe against a stub; `test-live.ts` [24b] the capped resolve, and
+[10] and [16] each follower outlasting a database cut through a relay and a
+provider outage (a 503, and in [10] the model missing, a hung provider, a
+thought that fails every time, and the refusal at start); and `test-cli.ts`'s census checks that
 no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
 `resolve_agent(` or `parseKeyRecords`.
 

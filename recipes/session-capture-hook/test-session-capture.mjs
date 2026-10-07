@@ -2023,8 +2023,8 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
     const coded = [
       [{ code: "REFUSED_SUPERSEDES_SHAPE", retryable: false }, 'Refused: `supersedes` must be a thought id (the ID: line of a search result), not "not-an-id".'],
       [{ code: "REFUSED_DERIVED_FROM_SHAPE", retryable: false }, 'Refused: every `derived_from` entry must be a thought id (the ID: line of a search result), not "nope".'],
-      [{ code: "REFUSED_METADATA_SHAPE", retryable: false }, "Refused: `metadata.trust` is set by the server, not the caller — use the `source` argument for the origin label; drop the rest."],
-      [{ code: "REFUSED_METADATA_SHAPE", retryable: false }, "Refused: `metadata` carries 9 keys — at most 8."],
+      [{ code: "REFUSED_METADATA_SHAPE", retryable: false, problem: "reserved_key", key: "trust" }, "Refused: `metadata.trust` is set by the server, not the caller — use the `source` argument for the origin label; drop the rest."],
+      [{ code: "REFUSED_METADATA_SHAPE", retryable: false, problem: "too_many_keys" }, "Refused: `metadata` carries 9 keys — at most 8."],
       [{ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "11111111-1111-4111-8111-111111111111" }, "Thought saved (id 11111111-1111-4111-8111-111111111111) but its embedding failed to attach: the metadata column refused it. It will NOT appear in semantic search until re-captured."],
     ];
     for (const [sc, text] of coded) {
