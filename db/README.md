@@ -3195,10 +3195,12 @@ row's `updated_at`, the database's `now()`.
 A pass is stamped `running` as it starts and every `every_s` while it runs, so
 a follower's first pass over a backlog reads alive, as lease renewal keeps its
 claims. Each stamp writes the whole value, so a restarted follower's row
-carries no malformed block until it judges one: once the model is fixed, a
-restart clears the alarm, and a follower restarted on the same broken model
-trips it again within its first block. There is one row per job, not per process: two followers of one job share
-it, the last to stamp written. A tier refresh deletes the source's rows
+carries no malformed block until it judges its next one (48 answers or more,
+judged once a pass drains the pool). A restart clears the alarm, so fix the
+model first: a follower restarted on the same broken model reads healthy until
+48 new answers trip it again, which on a quiet brain can take days. There is
+one row per job, not per process: two followers of one job share it, the last
+to stamp written. A tier refresh deletes the source's rows
 (`tier.ts`), so a canary never reports stable's workers; a `pg_dump` restored
 onto another host carries them too — alive for up to three intervals, then
 stopped or stale — until deleted. A block the reader cannot trust is left off

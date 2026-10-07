@@ -3717,8 +3717,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     for (let i = 0; i < 80 && backBeat.outcome !== "ok"; i++) { await Bun.sleep(250); backBeat = await beatOf(); }
     ac2.abort();
     await down;
-    assert(downBeat.outcome === "failed" && heldBeat.outcome === "failed" && heldBeat.at > downBeat.at && backBeat.outcome === "ok",
-      `a follower whose provider stays down stamps failed, its idle polls stamp and keep it, and a pass after the provider is back stamps ok (${JSON.stringify([downBeat.outcome, heldBeat.outcome, backBeat.outcome])}, stamped ${downBeat.at} → ${heldBeat.at})`);
+    assert(downBeat.outcome === "failed" && heldBeat.outcome === "failed" && heldBeat.at > downBeat.at && heldBeat.running === false && backBeat.outcome === "ok",
+      `a follower whose provider stays down stamps failed, its idle polls stamp done and keep it, and a pass after the provider is back stamps ok (${JSON.stringify([downBeat.outcome, heldBeat.outcome, backBeat.outcome])}, stamped ${downBeat.at} → ${heldBeat.at})`);
     for (const id of [downNote, backNote]) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
   // Stopping a pass (SMD-2304). Four notes the stub answers with nothing, one
@@ -3968,16 +3968,18 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     let st: PassStop | undefined;
     const r = runExtract({ url: URL_!, env, workers: 1, follow: 30, signal: ac2.signal, onPass: (x) => { st = x; }, writer: { out: () => {}, err: () => {} } });
     await Bun.sleep(1500);
+    const asleep = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
     const at = Date.now();
     stopIt(st, ac2);
     // A stop that does not reach the follower fails here rather than hanging the suite.
     const code = await Promise.race([r, Bun.sleep(10_000).then(() => -1)]);
-    return { code, ms: Date.now() - at };
+    return { code, ms: Date.now() - at, asleep };
   };
   const followSoft = await followRun((_, ac2) => ac2.abort());
-  // One pass, then asleep, then stopped: the row says stopped (SMD-2261).
+  // One pass, stamped done while asleep, then stopped: the row says so (SMD-2261).
   const softBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
-  assert(softBeat.outcome === "stopped" && softBeat.ended === true && softBeat.running === false, `a follower stopped asleep after its first pass stamped stopped (${JSON.stringify(softBeat)})`);
+  assert(followSoft.asleep.outcome === "ok" && followSoft.asleep.running === false && !followSoft.asleep.ended && softBeat.outcome === "stopped" && softBeat.ended === true && softBeat.running === false,
+    `a follower asleep after its first pass has stamped it done, and stopped, stamps stopped (${JSON.stringify(followSoft.asleep)} → ${JSON.stringify(softBeat)})`);
   const followHard = await followRun((st) => { st?.(); void st?.(); });
   assert(followSoft.code === 0 && followSoft.ms < 1500 && followHard.code === 130 && followHard.ms < 1500,
          `a follower asleep wakes on a caller's abort (exit ${followSoft.code} after ${followSoft.ms} ms) and on the hard stop, which is 130 (exit ${followHard.code} after ${followHard.ms} ms)`);
@@ -5600,8 +5602,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       for (let i = 0; i < 80 && backBeat.outcome !== "ok"; i++) { await Bun.sleep(250); backBeat = await beatOf(); }
       ac2.abort();
       await down;
-      assert(downBeat.outcome === "failed" && heldBeat.outcome === "failed" && heldBeat.at > downBeat.at && backBeat.outcome === "ok",
-        `a consolidation follower whose judge stays down stamps failed, its idle polls stamp and keep it, and ok once a pass after it is back has work (${JSON.stringify([downBeat.outcome, heldBeat.outcome, backBeat.outcome])}, stamped ${downBeat.at} → ${heldBeat.at})`);
+      assert(downBeat.outcome === "failed" && heldBeat.outcome === "failed" && heldBeat.at > downBeat.at && heldBeat.running === false && backBeat.outcome === "ok",
+        `a consolidation follower whose judge stays down stamps failed, its idle polls stamp done and keep it, and ok once a pass after it is back has work (${JSON.stringify([downBeat.outcome, heldBeat.outcome, backBeat.outcome])}, stamped ${downBeat.at} → ${heldBeat.at})`);
       // A following pass that throws ends the run as the worker's end, failed.
       await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
       const thrown = await runConsolidate({ url: URL_!, env, workers: 1, follow: 30, writer: { out: (l) => { if (l.startsWith("  before:")) throw new Error("writer boom"); }, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => e.message);

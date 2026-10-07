@@ -3321,7 +3321,7 @@ else {
     const wrong = await run(SQL_ENV);
     assert(/!\s+workers\s+board-sync alive, its last pass failed \(last stamped 60 s ago, every 300 s\); extract:qwen2\.5:7b@p2 alive \(last stamped 10 s ago, every 60 s; 12 of its last 50 answers malformed\)$/m.test(wrong.out),
       `a failed last pass and a malformed alarm each warn on a fresh heartbeat (${row(wrong.out, "workers")})`);
-    assert(/board-sync's last pass failed — errors in its report, or Linear or the database out of reach: its log says why\. extract:qwen2\.5:7b@p2's model answered 12 of 50 malformed: check OB1_METADATA_MODEL.*The row carries the block until the follower judges another of 48 answers, or is restarted once the model is right\./.test(fix(wrong.out, "workers")),
+    assert(/board-sync's last pass failed — errors in its report, or Linear or the database out of reach: its log says why\. extract:qwen2\.5:7b@p2's model answered 12 of 50 malformed: check OB1_METADATA_MODEL.*The row carries the block until the follower judges its next block \(48 answers or more\)\. A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers\./.test(fix(wrong.out, "workers")),
       `…each with its own remedy (${fix(wrong.out, "workers")})`);
 
     // A custom --job: the restart names the job the follower works, not its key (review pass 1).
