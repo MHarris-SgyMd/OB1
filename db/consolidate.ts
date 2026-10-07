@@ -52,10 +52,21 @@
  * that order. What the gate cannot see is the OTHER side of a pair: a newer
  * thought judged while an older neighbour is still unextracted is judged
  * without it, and since a pair is reached from its newer side only, that pair
- * is not revisited — run consolidation after extraction has finished, not
- * beside it. A thought's claim row is terminal once its pairs are judged, so
- * an EDIT does not re-judge it (016's trigger does re-extract it); clear the
- * key's rows to start over, and a pair already proposed is skipped either way.
+ * is not revisited. A candidate was captured on an earlier UTC date (029),
+ * so beside an extract follower a capture's neighbours were almost always
+ * extracted long before it. The exceptions:
+ *  - two captures either side of 00:00 UTC, the earlier still in hand when
+ *    the later is judged — one extract worker claims in queue order and
+ *    finishes the earlier first, but two can hold it;
+ *  - a backlog (a first run or a --switch-key pools every thought at one
+ *    instant, claimed in no order: drain it before consolidating);
+ *  - a failed extraction or embedding (a candidate needs a vector), or an
+ *    import dated older than thoughts already judged, which miss their
+ *    pairs with thoughts judged before they were repaired, however this runs.
+ * (The `workers` compose profile, SMD-2424, deploy/README.md.) A thought's
+ * claim row is terminal once its pairs are judged, so an EDIT does not
+ * re-judge it (016's trigger does re-extract it); clear the key's rows to
+ * start over, and a pair already proposed is skipped either way.
  *
  * A --follow process outlasts the database going away (SMD-2599), as
  * extract-entities.ts's does: an error that says it is not answering is said

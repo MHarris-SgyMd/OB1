@@ -488,14 +488,17 @@ export function malformedAlarm(answers, malformed) {
  * row names it when the worker's heartbeat goes stale (SMD-2261,
  * db/pass-stamp.ts). Built from the worker and its job alone — a heartbeat
  * key's bounded alphabet — never from a command line, which can carry a URL
- * with its password. board-sync runs as a compose profile; the claim workers
- * run from a checkout until SMD-2424 makes them services. Consolidation takes
- * no --job: its key follows the judge model, so the job is named beside it.
+ * with its password. board-sync runs as a compose profile, and so, since
+ * SMD-2424, do the claim workers (`--profile workers`); a checkout's command
+ * follows for a follower run by hand, the one that can carry a custom --job.
+ * Consolidation takes no --job: its key follows the judge model, so the job
+ * is named beside it.
  */
 export function restartCommand(worker, job) {
   if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d --no-deps board-sync, with the -f files and -p the stack was started with (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
-  if (worker === "extract") return `cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
-  return `cd db && bun consolidate.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL)` : ""}`;
+  const service = `podman compose -f deploy/compose.yaml --profile workers up -d --no-deps ${worker}, with the -f files and -p the stack was started with (docker compose alike); from a checkout, `;
+  if (worker === "extract") return `${service}cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
+  return `${service}cd db && bun consolidate.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL)` : ""}`;
 }
 
 /**

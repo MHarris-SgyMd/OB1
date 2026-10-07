@@ -2241,10 +2241,29 @@ first, then consolidation, made structural rather than left to a trigger that
 would judge a capture before
 016's worker reached it and leave a terminal claim row behind. The gate cannot
 see the other side of a pair: a newer thought judged while an older neighbour
-is still unextracted is judged without it, and the pair is not revisited, so
-run the pass after extraction has finished rather than beside it. k and the
-floor were chosen by measurement (`evals/eval-consolidate.ts`;
-`evals/README.md` has the table) and are the worker's `--k` and `--min-sim`.
+is still unextracted is judged without it, and the pair is not revisited.
+Since a candidate was captured on an earlier UTC date, a pass beside an
+extract follower is safe for captures: their neighbours were almost always
+extracted long before. What it misses is an older side that has no entities
+or no vector yet when the newer side is judged:
+- **Two captures either side of 00:00 UTC**, the earlier still in hand. One
+  extract worker claims in queue order and finishes the earlier first; with
+  two or more, the earlier can still be held.
+- **A backlog.** A first run or a `--switch-key` pools every thought at one
+  instant, claimed in no order, so drain it before consolidating (the
+  `workers` compose profile, `deploy/README.md`, SMD-2424).
+- **A failed extraction.** `--retry-failed` extracts it, but the newer
+  thoughts already judged are not judged again.
+- **A failed embedding.** A candidate needs a vector; `reembed.ts` gives it
+  one, and the same holds.
+- **An import dated older than thoughts already judged.** Same: its pairs
+  with them are not judged.
+
+The last three hold however the pass is run, once the newer thoughts have
+been judged; a failed extraction or embedding repaired before that misses
+nothing. k and the floor were chosen by measurement
+(`evals/eval-consolidate.ts`; `evals/README.md` has the table) and are the
+worker's `--k` and `--min-sim`.
 
 **The judge.** One call per pair to the judge model — `OB1_JUDGE_MODEL`, else
 the metadata model, so the harder task can run on a stronger model than every
