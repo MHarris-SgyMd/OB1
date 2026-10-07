@@ -973,9 +973,9 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && custom.job === "my-job" && custom.key === "heartbeat:extract:my-job",
     `three rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given — and twenty not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
   // A malformed block not of the shape is left off and the heartbeat still counts (review pass 3).
-  const blocks = parseHeartbeats([{ answers: 5, bad: 6, alarm: false }, { answers: 50, bad: 1, alarm: "yes" }, null, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: "x", bad: 1, alarm: true }]
+  const blocks = parseHeartbeats([{ answers: 5, bad: 6, alarm: false }, { answers: 50, bad: 1, alarm: "yes" }, null, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: "x", bad: 1, alarm: true }, { answers: 1, bad: "x", alarm: true }]
     .map((malformed, i) => ({ key: `heartbeat:consolidate:b${i}`, value: JSON.stringify({ ...good, malformed }), at, age_s: 1 })));
-  assert(blocks.heartbeats.length === 6 && blocks.ignored === 0 && blocks.heartbeats.every((h) => h.malformed === null),
+  assert(blocks.heartbeats.length === 7 && blocks.ignored === 0 && blocks.heartbeats.every((h) => h.malformed === null),
     `a heartbeat whose block is not of the shape counts, its block left off (${blocks.heartbeats.length}, ${blocks.ignored})`);
   const capped = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 1, total: 53 }]);
   assert(capped.heartbeats.length === 1 && capped.ignored === 52, `rows past the read's bound are counted as ignored (${capped.ignored})`);

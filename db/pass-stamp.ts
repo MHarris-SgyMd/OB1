@@ -28,9 +28,9 @@
  *
  * When. As a pass starts, every `every_s` while it runs, and at its end; and
  * once more, `ended`, when the worker ends. A follower's first pass over a
- * backlog can run for an hour, far past three of its 15-second polls. The timer says the process is alive, as
- * lease renewal does (lease.ts); a model call hung inside a live process is
- * not what it catches. Only the long-running modes stamp — sync-linear.ts
+ * backlog can run for an hour, far past three of its 15-second polls. The
+ * timer says the process is alive, as lease renewal does (lease.ts); a model
+ * call hung inside a live process is not what it catches. Only the long-running modes stamp — sync-linear.ts
  * --loop and the --follow of extract-entities.ts and consolidate.ts — so a
  * one-shot run never leaves a row that goes stale behind it.
  *

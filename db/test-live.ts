@@ -53,7 +53,6 @@ import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, rec
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
-import { parseHeartbeats } from "../server-portable/brain-info.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -9525,17 +9524,6 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
       replacedFrom.push(got !== null && !("malformed" in got) && got.outcome === "ok");
     }
     assert(replacedFrom.every(Boolean), `an old value, a tripped block, a block not of the shape or a value not JSON, is replaced by the stamp whole (${replacedFrom.join(",")})`);
-    // A block of the right JSON types but numbers the reader refuses, or a
-    // field missing or mistyped alone, never hides the worker: it is read with
-    // its block left off (review pass 3).
-    const stillRead = [];
-    for (const m of [{ answers: 10, bad: 20, alarm: true }, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: 1, bad: "x", alarm: true }, { answers: 1, bad: 0, alarm: "yes" }]) {
-      await hsql`INSERT INTO ob1_config (key, value) VALUES (${shapeKey}, ${JSON.stringify({ v: 1, job: "consolidate:shape@p3", every_s: 60, running: false, outcome: "ok", malformed: m })}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
-      const rows = await hsql`SELECT key, value, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at, extract(epoch FROM now() - updated_at)::float8 AS age_s FROM ob1_config WHERE key = ${shapeKey}`;
-      const read = parseHeartbeats(rows as never);
-      stillRead.push(read.heartbeats.length === 1 && read.heartbeats[0].malformed === null && read.ignored === 0);
-    }
-    assert(stillRead.every(Boolean), `a block the reader refuses never hides the worker (${stillRead.join(",")})`);
     // A pass is stamped running as it starts, before the timer's first tick.
     const starting = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:start@p3", intervalS: 15 });
     let atStart: { running?: boolean } | null = null;
