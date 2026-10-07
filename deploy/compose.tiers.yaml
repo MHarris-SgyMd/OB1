@@ -464,7 +464,8 @@ services:
   # three brains). Optional, enabled with `--profile local-models`; the
   # servers' and REST cores' OB1_LLM_BASE_URL falls back to it by name — and
   # since SMD-1875 each one's preflight dials that name once and refuses to
-  # start without the profile or a base URL of its own in deploy/.env.
+  # start without the profile or a base URL of its own in deploy/.env. Both
+  # services are compose.yaml's, key for key, which check 27 holds.
   ollama:
     image: *ollama-image
     profiles: ["local-models"]
@@ -485,12 +486,14 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
       OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
+      OB1_EXTRACT_ESCALATE_MODEL: ${OB1_EXTRACT_ESCALATE_MODEL:-}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         ollama pull ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
         ollama pull ${OB1_METADATA_MODEL:-qwen2.5:7b}
         [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
+        [ -z "$$OB1_EXTRACT_ESCALATE_MODEL" ] || ollama pull "$$OB1_EXTRACT_ESCALATE_MODEL"
     restart: "no"
 
 volumes:

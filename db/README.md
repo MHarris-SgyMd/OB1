@@ -3005,7 +3005,8 @@ adds it as one remote MCP entry, at `/mcp` on the stack's proxy (`SERVER_PORT`,
 8000 unless set; deploy/README.md, "One origin"):
 
 ```bash
-claude mcp add --transport http open-brain-stable http://127.0.0.1:8000/mcp
+claude mcp add --transport http open-brain-stable http://127.0.0.1:8000/mcp \
+  --header "x-brain-key: <key>"
 ```
 
 ## The canary and working tiers — refresh, replay, diff, promote (SMD-1806)
@@ -3115,13 +3116,15 @@ client reaches the working tier as a second remote MCP entry a transcript can
 tell from stable's:
 
 ```bash
-claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working/mcp
+claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working/mcp \
+  --header "x-brain-key: <key>"
 ```
 
 A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers the
 same way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
-deploy/README.md), and `--compare` takes the two URLs as they are:
-`bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
+deploy/README.md), and `--compare` takes the two URLs as they are, with a read
+key in `OB1_COMPARE_KEY` (or `--a-key`/`--b-key`, or `?key=` on a URL):
+`OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
 each labelled by host and path.
 
 **Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
