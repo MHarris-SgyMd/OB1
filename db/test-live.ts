@@ -10058,6 +10058,11 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     const one = await row(st.key);
     assert(one?.v === 1 && one.outcome === "ok" && !("passes" in one) && one.running === false && one.every_s === 60 && one.malformed?.alarm === true && one.malformed.bad === 12 && one.age < 5,
       `a stamp records the outcome, the block and a minute's floor, and no count of passes (${JSON.stringify(one)})`);
+    // Each stamp moves the row's time, which is all that keeps a live worker from reading stale.
+    await hsql`UPDATE ob1_config SET updated_at = now() - interval '1 hour' WHERE key = ${st.key}`;
+    await st.stamp("ok");
+    const restamped = await row(st.key);
+    assert(restamped !== null && restamped.age < 5, `a stamp over an hour-old row moves its time to now (age ${restamped?.age})`);
     await st.end("stopped");
     const two = await row(st.key);
     assert(two?.outcome === "stopped" && two.ended === true && two.malformed?.bad === 12 && two.job === "extract:test@p2", `a stop is the worker's end, the last block stays, and the job is in the value (${JSON.stringify(two)})`);
