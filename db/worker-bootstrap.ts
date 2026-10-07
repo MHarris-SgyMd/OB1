@@ -431,29 +431,21 @@ export function isOut(p: Probe): p is Extract<Probe, { why: string }> {
   return p.state === "out" || p.state === "missing";
 }
 
-/** A probe that found the provider still out, thrown inside waitOut's check. */
-class StillOut extends Error {}
-
 /**
- * Probe on waitOut's schedule until a probe `settles` (SMD-2599), and return
- * that probe — null when `wake` aborted first. An outage settles on anything
+ * Probe on outageWait's schedule until a probe `settles` (SMD-2599), and
+ * return that probe — null when `wake` aborted first. An outage settles on anything
  * but out or missing (`isOut`): up, or refused, which the next real call
  * meets and turns into the run's refusal. The start's wait settles on
  * anything but out, so a model the provider turns out not to serve, once it
  * answers, is refused there rather than waited on for ever (review pass 2).
  */
-export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep?: (ms: number, wake: AbortSignal) => Promise<void>): Promise<Probe | null> {
-  let last: Probe | null = null;
-  const settled = await waitOut({
-    check: async () => {
-      last = await probe();
-      if (!settles(last)) throw new StillOut(isOut(last) ? last.why : last.state);
-    },
-    outage: (e) => e instanceof StillOut,
-    wake,
-    sleep,
-  });
-  return settled ? last : null;
+export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep: (ms: number, wake: AbortSignal) => Promise<void> = sleepUnless): Promise<Probe | null> {
+  for (let step = 0; ; step++) {
+    await sleep(outageWait(step), wake);
+    if (wake.aborted) return null;
+    const p = await probe();
+    if (settles(p)) return p;
+  }
 }
 
 /**

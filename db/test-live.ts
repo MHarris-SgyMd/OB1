@@ -72,6 +72,17 @@ if (!URL_) {
 
 const { assert, skip, total, skipped, docCheck, report } = createAssert();
 
+/**
+ * Cut the pauses before a follower's provider outage to 100 ms in this
+ * process (SMD-2599): the worker reads the exported array as it runs.
+ * Returns the restore, for the case's finally.
+ */
+function shortenPauses(): () => void {
+  const saved = [...TRANSIENT_PAUSES_MS];
+  TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
+  return () => { TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved); };
+}
+
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
 function migrate(...extra: string[]): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
   return runMigrator(URL_!, undefined, ...extra);
@@ -3895,8 +3906,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // refused with exit 2, and a run without --follow records the failure as
   // before.
   {
-    const saved = [...TRANSIENT_PAUSES_MS];
-    TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
+    const restorePauses = shortenPauses();
     const claimRow = async (id: string) => (await sql`SELECT status, attempt_count, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; attempt_count: number; last_error: string | null } | undefined;
     const created: string[] = [];
     try {
@@ -4077,7 +4087,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
              `a run without --follow still records the thought failed after the pauses and exits 1 (exit ${oneShotCode}: ${oneShotRow?.status}, ${oneShotRow?.last_error?.slice(0, 60)})`);
     } finally {
       downUntil = 0;
-      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved);
+      restorePauses();
       for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
     }
   }
@@ -4625,8 +4635,7 @@ console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger m
   // absence proves nothing — is the provider's refusal at its first 404,
   // exit 2, as before this ticket.
   {
-    const saved = [...TRANSIENT_PAUSES_MS];
-    TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
+    const restorePauses = shortenPauses();
     try {
       await sql`DELETE FROM thoughts`;
       await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -4667,7 +4676,7 @@ console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger m
     } finally {
       listedIds = ["stub-meta"];
       goneServed = false;
-      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved);
+      restorePauses();
     }
   }
 
@@ -6095,8 +6104,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   // judge answering 503 for 8 s while a newer thought of a pair is judged,
   // then hanging for 6 s past a 2 s --timeout while another is.
   {
-    const saved = [...TRANSIENT_PAUSES_MS];
-    TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
+    const restorePauses = shortenPauses();
     const lines: string[] = [];
     const ac = new AbortController();
     let settled = false;
@@ -6128,7 +6136,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       judgeDownUntil = 0;
       ac.abort();
       await running;
-      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved);
+      restorePauses();
     }
     assert(followCode === 0, `…and exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
   }

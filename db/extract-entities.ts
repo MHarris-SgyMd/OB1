@@ -94,10 +94,13 @@
  * same schedule until it answers. A thought that draws the error again right
  * after a probe answered is its own fault, and is recorded failed. Before it
  * writes anything, the worker key's registration included, a follower probes
- * once. A model the provider does not serve (OB1_EXTRACT_ESCALATE_MODEL's
- * too, when set), a key it refuses or a wrong base URL exits 2 there, and an
- * unreachable provider is waited for. A run without --follow keeps the
- * pauses, then records the thought failed and stops, as before.
+ * once. A model the provider does not serve, a key it refuses or a wrong
+ * base URL exits 2 there, and an unreachable provider is waited for.
+ * OB1_EXTRACT_ESCALATE_MODEL is checked by GET /models, which loads nothing:
+ * refused where the list plainly leaves it out, waited for by name if the
+ * start saw it and it goes missing, and a refusal at its first 404 if the
+ * start could not confirm it. A run without --follow keeps the pauses, then
+ * records the thought failed and stops, as before.
  *
  * ── Identity ────────────────────────────────────────────────────────────────
  * The worker authenticates like any client: OB1_WORKER_KEY holds a raw access
