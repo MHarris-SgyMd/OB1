@@ -2795,8 +2795,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(ghost.length === 1, "another process holds the one pending row");
   {
     const pf = await preflight();
-    assert(PASS_LINE.exec(pf.out)?.[1] === "40 thoughts — 39 succeeded, 0 failed, 1 in flight, 0 pending, 0 not yet in the pool",
-      `preflight reports the lease another process holds as unfinished work (${PASS_LINE.exec(pf.out)?.[1] ?? "no re-embed pass line"})`);
+    // Its lease is live, so the pass is running, not stopped: ok, no remedy
+    // that would start a second worker (SMD-2423).
+    const running = /re-embed pass\s+reembed:test: (\d+ thoughts — [^\n]*not yet in the pool) — a pass under this key is running: 1 in flight/.exec(pf.out)?.[1];
+    assert(running === "40 thoughts — 39 succeeded, 0 failed, 1 in flight, 0 pending, 0 not yet in the pool",
+      `preflight reports the lease another process holds as unfinished work, running (${running ?? "no running re-embed pass line"})`);
   }
   const ghostStatus = await reembed("--status");
   assert(/held by ghost: 1 rows, earliest lease deadline \d{4}-\d\d-\d\d [^\n]*release_claims_for_worker/.test(ghostStatus.out),
