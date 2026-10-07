@@ -400,6 +400,8 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let prose = false;
   /** Set, a window whose text it matches is answered in prose, and the others as usual (SMD-2260). */
   let proseIf: RegExp | null = null;
+  /** Set, every answer is held this long after the request is counted (the hard stop, SMD-1794). */
+  let holdMs = 0;
   const providerD = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -409,6 +411,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
       const part = /^\[Part [^\]]*\]/.exec(inner)?.[0];
       const text = part ? inner.slice(part.length).trimStart() : inner;
       reqs.push({ text, maxTokens: body.max_tokens, part });
+      if (holdMs) await Bun.sleep(holdMs);
       if (estimateTokens(text) > CEILING) return new Response(JSON.stringify({ error: { message: `input too long: ${estimateTokens(text)} tokens` } }), { status: 400 });
       if (prose || proseIf?.test(text)) return Response.json({ choices: [{ message: { content: "I cannot help with that." } }] });
       // The subject "Open Brain" is in every window; each window also names one
@@ -1250,6 +1253,28 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let refused = "";
   try { await extractEntities(long, cfgWide, undefined, { kind: "extraction" }); } catch (e) { refused = (e as Error).message; }
   assert(/input too long/.test(refused), "under a 1200-token window the 1,320-token thought is two calls or refused — the stub refused one over 700, so the windowing is what [10] measures, not the stub's leniency");
+
+  // The claim worker's hard stop (SMD-1794): a stop aborts the window in hand
+  // and sends no other; one already aborted sends nothing, and counts no call.
+  const { callsMadeBy: madeBy } = await import("./entities.ts");
+  const stopped = new AbortController();
+  stopped.abort();
+  reqs.length = 0;
+  let early: unknown = null;
+  try { await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, stopped.signal); } catch (e) { early = e; }
+  assert(early !== null && reqs.length === 0 && madeBy(early) === 0,
+         `a stop already aborted sends no window and counts no call (${reqs.length} sent, ${madeBy(early)} counted)`);
+  holdMs = 3000;
+  reqs.length = 0;
+  const stop = new AbortController();
+  setTimeout(() => stop.abort(), 200);
+  const stopAt = Date.now();
+  let midStop: unknown = null;
+  try { await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, stop.signal); } catch (e) { midStop = e; }
+  const stopMs = Date.now() - stopAt;
+  holdMs = 0;
+  assert(midStop !== null && stopMs < 1500 && reqs.length === 1 && madeBy(midStop) === 1,
+         `a stop during the first of a long thought's windows aborts that call, not after its 3 s answer, and sends no other window (${stopMs} ms, ${reqs.length} sent, ${madeBy(midStop)} counted)`);
   providerD.stop();
 }
 

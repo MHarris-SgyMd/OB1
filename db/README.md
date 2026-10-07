@@ -3461,7 +3461,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2465 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1130 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1131 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -3556,9 +3556,11 @@ begins, where the script installed its handlers, with the pass's stop
 (`lease.ts`'s `PassStop`): the first call stops after the thought in hand;
 one while it is already stopping (a second, or the first after the provider's
 refusal stopped the workers) returns the release of every worker's leases,
-and the thought in hand is abandoned — nothing written or released for it.
-The CLI installs `lease.ts`'s `stopOnSignals` there, which exits 130 when that
-release settles or after 3 s, and takes it off when run() settles — a signal
+and the thought in hand is abandoned — nothing written or released for it,
+its model call aborted and no further window or retry sent (SMD-1794; a
+`--decide` decider call in hand is waited for). The CLI installs
+`lease.ts`'s `stopOnSignals` there, which exits 130 when that release
+settles or after 3 s, and takes it off when run() settles — a signal
 after that ends the process as one before the pass does.
 `consolidate.ts` is the third (SMD-2304 PR 3), on the same shape: `run({ url,
 sql, env, workers, batch, ttl, heartbeat, timeout, k, minSim, minConfidence,
@@ -3573,7 +3575,7 @@ as `--status` does; a decision (`accept`, `reject`) writes, and stops under
 one as a run does. A decision, like a run, resolves the worker key, so with
 OB1_WORKER_KEY set it needs `url` beside a caller's `sql`. The judge
 takes an AbortSignal, so the hard stop also aborts the call in hand: run()
-returns at once in-process, where extract's waits for its call.
+returns at once in-process, as extract's does.
 `reembed.ts` is the fourth (SMD-2304 PR 4): `run({ url, sql, env, workers,
 batch, ttl, heartbeat, job, retire, acceptFailed, all, status, dryRun,
 switchModel, retryFailed, retryFallbacks, writer, signal, onPass })`, with
