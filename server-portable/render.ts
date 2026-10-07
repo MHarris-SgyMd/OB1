@@ -35,7 +35,7 @@ export type Reply = { content: { type: "text"; text: string }[]; isError?: true;
 type Safe<T> = (v: T) => object;
 /** A tool whose text is its value's JSON: the value itself (the spec's structured-plus-serialized shape). */
 const AS_JSON = Symbol("the value is the text's JSON");
-/** brain_info: its whole record beside the table — the server's and the database's own facts, versions included, so not held to tokens. Its one value from thoughts' metadata, the board-sync watermark, is held to a UTC instant by its read (brain-info.ts's BOARD_SYNC_SQL and boardSyncValue). */
+/** brain_info: its whole record beside the table — the server's and the database's own facts, versions included, so not held to tokens. Its one value from thoughts' metadata, the board-sync watermark, is held to a UTC instant by its read (brain-info.ts's BOARD_SYNC_SQL and boardSyncValue), and the workers' heartbeats, from ob1_config rows a worker role writes, to counts, enums and bounded tokens (parseHeartbeats). */
 const AS_RECORD = Symbol("the value is the server's own record");
 
 /** An outcome in the tool's words — its value's text, or its refusal's — with the text inside the value, last, so no field can stand in for it. */

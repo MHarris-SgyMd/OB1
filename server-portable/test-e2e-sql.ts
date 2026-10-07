@@ -2036,6 +2036,29 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(past === null, `an instant an hour and a quarter ahead by the database's clock is passed over (${past})`);
   await sql`UPDATE thoughts SET metadata = metadata - 'linear_updated_at' WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
 
+  // The workers' heartbeats (SMD-2261, db/pass-stamp.ts): none stamped here,
+  // then a board-sync row a stopped worker left twenty minutes ago — stale
+  // against its five-minute interval, in the keyed body and the tool's row.
+  const noBeats = ((await health("e2e-key")) as Record<string, any>).database ?? {};
+  assert(JSON.stringify(noBeats.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }), `no worker ran here: no heartbeat, none ignored (${JSON.stringify(noBeats.workers)})`);
+  await sql`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:board-sync', ${JSON.stringify({ v: 1, every_s: 300, running: false, outcome: "stopped", passes: 7 })}, now() - interval '20 minutes')`;
+  const beats = ((await health("e2e-key")) as Record<string, any>).database?.workers;
+  const hb = beats?.heartbeats?.[0];
+  assert(beats?.heartbeats?.length === 1 && hb.worker === "board-sync" && hb.job === null && hb.stale === true && hb.outcome === "stopped" && hb.passes === 7 && hb.everyS === 300 && hb.ageS >= 1199 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(hb.at),
+    `keyed /health carries the heartbeat, stale past three intervals (${JSON.stringify(hb)})`);
+  const workersRow = (await call("brain_info")).split("\n").find((l) => l.startsWith("Workers"));
+  assert(/^Workers: +board-sync stopped \(last stamped 20 min ago, every 300 s\)$/.test(workersRow ?? ""), `the tool's Workers row says the same (${workersRow})`);
+  await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+  // Fifty-one rows: the read carries fifty and counts the one past its bound,
+  // from Postgres's own total (review pass 2: only a fake's total was read).
+  for (let n = 0; n < 51; n++) {
+    const job = `consolidate:j${String(n).padStart(2, "0")}@p3`;
+    await sql`INSERT INTO ob1_config (key, value) VALUES (${`heartbeat:${job}`}, ${JSON.stringify({ v: 1, job, every_s: 60, running: false, outcome: "ok", passes: 1 })})`;
+  }
+  const many = ((await health("e2e-key")) as Record<string, any>).database?.workers;
+  await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:consolidate:j%'`;
+  assert(many?.heartbeats?.length === 50 && many.ignored === 1, `fifty-one heartbeats: fifty carried, one counted past the bound (${many?.heartbeats?.length}, ${many?.ignored})`);
+
   // A ledger short of the tree's last file is behind it, by name.
   const last = String(treeLast).padStart(3, "0");
   const [{ name: lastName }] = await sql`SELECT name FROM schema_migrations WHERE name LIKE ${last + "%"}`;
