@@ -178,6 +178,10 @@ by side set `SERVER_PORT` in the shell for one of them, which wins over
 so a canary or working tier whose migration fails is a 404 at its path while
 stable and the origin serve; `up` still exits 1 and names the failed migrator.
 `up proxy` alone therefore brings no tier: name the services, or none.
+Its project is `open-brain-tiers`, the file's `name:`. Leave `COMPOSE_PROJECT_NAME`
+and `-p` alone for it: either one overrides that name, and as `open-brain` the tiers
+would join this stack's project, its `proxy` and its `mesh`, where two servers
+answer as `mcp.ob1.internal`.
 A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own network,

@@ -123,8 +123,9 @@ x-tier-routes: &tier-routes |
 # tier's servers read (this stack runs no typed-decision tier, extraction or
 # authorization server, so their knobs are not here), less DATABASE_URL and
 # OB1_TIER, which are per-tier below, where each tier's server and REST core
-# take one block. Held to the same house form (check 14): each OB1_* value is
-# `${NAME}` or `${NAME:-default}`; check 27 holds every tier to it.
+# take one block. Check 27 holds it to compose.yaml's server environment less
+# those knobs (its TIER_OMITTED_ENV), value for value, so a knob compose.yaml
+# gains fails until it is here or named there.
 x-server-env: &server-env
   MCP_ACCESS_KEYS: ${MCP_ACCESS_KEYS:?set MCP_ACCESS_KEYS in deploy/.env — mint with server-portable/keygen.ts}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -161,7 +162,7 @@ x-server-env: &server-env
   PORT: "8000"
 
 # The migrate one-shot's environment, minus its per-tier DATABASE_URL — the schema
-# contract every tier is built under (must match db/config.mjs, as compose.yaml).
+# contract every tier is built under: compose.yaml's, which check 27 holds.
 x-migrate-env: &migrate-env
   OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}
   OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
