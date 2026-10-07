@@ -84,6 +84,24 @@
  * thought in hand is recorded nothing; its lease is returned when the
  * database is back. A run without --follow still exits 1 on it.
  *
+ * It outlasts the provider going away too. Three things are outages:
+ *   - a rate limit, a server error or a lost connection still failing after
+ *     the pauses;
+ *   - the model missing, as while Ollama pulls it;
+ *   - a timeout after which a one-token probe gets no answer either.
+ * In each case the thought in hand goes back to the pool, not failed, the
+ * other workers stop after theirs, and the follower probes the model on the
+ * same schedule until it answers. A thought that draws the error again right
+ * after a probe answered is its own fault, and is recorded failed. Before it
+ * writes anything, the worker key's registration included, a follower probes
+ * once. A model the provider does not serve, a key it refuses or a wrong
+ * base URL exits 2 there, and an unreachable provider is waited for.
+ * OB1_EXTRACT_ESCALATE_MODEL is checked by GET /models, which loads nothing:
+ * refused where the list plainly leaves it out, waited for by name if the
+ * start saw it and it goes missing, and a refusal at its first 404 if the
+ * start could not confirm it. A run without --follow keeps the pauses, then
+ * records the thought failed and stops, as before.
+ *
  * ── Identity ────────────────────────────────────────────────────────────────
  * The worker authenticates like any client: OB1_WORKER_KEY holds a raw access
  * key whose hash is in MCP_ACCESS_KEYS, and the run resolves it through
@@ -135,7 +153,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
@@ -441,6 +459,89 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     return 2;
   }
 
+  // ── The provider, for a follower (SMD-2599) ─────────────────────────────────
+
+  /**
+   * A follower waits a provider outage out rather than failing the thoughts
+   * it claims meanwhile: one-token chat calls to the model (probeChat, not
+   * GET /models, which Ollama answers while chat does not), bounded by a
+   * minute — the call's own timeout after a timeout, which a busy local
+   * model may need to get to the probe at all — and ended by the pass's stop.
+   * It asks once before it writes anything, the worker key's registration
+   * included: a model the provider does not serve, a key it refuses or a
+   * base URL that is no API is a refusal at start, exit 2, as preflight's
+   * would be (the escalation model is checked by GET /models: below); once
+   * a model has answered, its going missing (Ollama pulling it again) is an
+   * outage. A
+   * provider that does not answer at start is waited for as the run's last
+   * step before it writes the pool, so a refusal of the key or the
+   * configuration is not held behind the wait (review pass 2), and what it
+   * answers then is held to the same refusals.
+   */
+  const probe = (ms = Math.min(TIMEOUT_S, 60) * 1000, wake?: AbortSignal, model = cfg.metadataModel) => probeChat(cfg.chat, model, ms, wake);
+  const outage = new ProviderOutage();
+  /** The model an outage probes: the metadata model, or the escalation model when its 404 began the outage (review pass 2). */
+  let outageModel = cfg.metadataModel;
+  /**
+   * Whether the start saw the escalation model listed. Its 404 later is an
+   * outage only then — a model seen that goes missing is being pulled again,
+   * and is waited for by name; one never confirmed may be a typo the list
+   * could not show, and its 404 is the provider's refusal, exit 2, as before
+   * this ticket (review pass 4: it stalled the follower for good).
+   */
+  let escalationSeen = false;
+  /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
+  async function waitForProvider(wake: AbortSignal): Promise<void> {
+    const down = Date.now();
+    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${outageModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    if (await probeUntil(() => probe(undefined, wake, outageModel), wake, (p) => !isOut(p))) {
+      outage.end();
+      outageModel = cfg.metadataModel;
+      out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+    }
+  }
+  /** The start's refusal of what a probe found — a model unserved, or the endpoint refusing — or null. */
+  function startRefusal(p: Probe, model: string, knob: string): string | null {
+    if (p.state === "missing") {
+      return `\n  ${cfg.chat.base} does not serve ${model}, ${knob}, at start (${p.why.slice(0, 300)}).\n` +
+        `  A --follow worker refuses this before it claims anything (SMD-2599): pull the model, or set ${knob} to one the provider serves${knob === "OB1_EXTRACT_ESCALATE_MODEL" ? ", or unset it for the penalised retry" : ""}. Once running, a model that goes missing is waited for.`;
+    }
+    if (p.state === "refused") {
+      return `\n  ${cfg.chat.base} refuses a one-token call at start (${p.why.slice(0, 300)}).\n` +
+        "  A --follow worker refuses this before it claims anything (SMD-2599): check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1).";
+    }
+    return null;
+  }
+  /**
+   * The escalation model's refusal, or null. Asked at start only (review
+   * pass 1: unasked, a missing one failed every runaway thought, where the
+   * run had exited 2 naming it), and by GET /models, which loads nothing: a
+   * one-token call to it loaded the larger model at every start and evicted
+   * the model the first call needs (review pass 3). A provider whose list
+   * does not answer, or is of another shape, refuses nothing here; the
+   * model's first 404 is then the outage's, probing it by name.
+   */
+  async function escalationRefusal(wake?: AbortSignal): Promise<string | null> {
+    if (!WINDOWING.escalateModel || wake?.aborted) return null;
+    const listed = await modelListed(cfg.chat, WINDOWING.escalateModel, cfg.metadataModel, Math.min(TIMEOUT_S, 60) * 1000, wake);
+    escalationSeen = listed === "listed";
+    if (listed !== "unlisted") return null;
+    return `\n  ${cfg.chat.base} does not serve ${WINDOWING.escalateModel}, OB1_EXTRACT_ESCALATE_MODEL, at start: GET /models does not list it.\n` +
+      "  A --follow worker refuses this before it claims anything (SMD-2599): pull the model, set OB1_EXTRACT_ESCALATE_MODEL to one the provider serves, or unset it for the penalised retry. Once running, a model that goes missing is waited for.";
+  }
+  /** Why the provider did not answer at start, when it did not: waited for below, before the pool. */
+  let startOut: string | null = null;
+  if (FOLLOW && !STATUS_ONLY && !DRY_RUN) {
+    if (stoppedEarly()) return 130;
+    const first = await probe(undefined, opts.signal);
+    const refusal = startRefusal(first, cfg.metadataModel, "OB1_METADATA_MODEL") ?? (first.state === "out" ? null : await escalationRefusal(opts.signal));
+    if (refusal) {
+      err(refusal);
+      return 2;
+    }
+    if (first.state === "out") startOut = first.why;
+  }
+
   // ── Identity ────────────────────────────────────────────────────────────────
 
   /**
@@ -635,6 +736,21 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   // ── The run ─────────────────────────────────────────────────────────────────
 
+  if (startOut !== null) {
+    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
+    const wake = opts.signal ?? new AbortController().signal;
+    const down = Date.now();
+    err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — the follower claims nothing until it does; it calls ${cfg.metadataModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    const answered = await probeUntil(() => probe(undefined, wake), wake, (p) => p.state !== "out");
+    if (answered) {
+      const refusal = startRefusal(answered, cfg.metadataModel, "OB1_METADATA_MODEL") ?? (await escalationRefusal(wake));
+      if (refusal) {
+        err(refusal);
+        return 2;
+      }
+      out(`  the provider answers after ${Math.round((Date.now() - down) / 1000)} s`);
+    }
+  }
   if (stoppedEarly()) return 130;
   if (recordedKey !== JOB) {
     await sql`
@@ -703,13 +819,19 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * sleep (pass 3).
    */
   const onStop = new AbortController();
+  /**
+   * The pass's own wake, a new one for each pass: a transient pause wakes on
+   * the first stop and on another worker's provider outage, which ends the
+   * pass after the thought in hand (SMD-2599).
+   */
+  let halt = new AbortController();
   let done = 0;
   /** Of `done`, the thoughts extracted over a prefix only (SMD-2240), and those with windows left out as malformed, a prefix of one included, with how many windows (SMD-2260). */
   let partial = 0;
   let leftOut = 0;
   let leftOutWindows = 0;
   let failed = 0;
-  /** Workers that stopped on the provider still failing after their pauses — the heartbeat's "failed" (SMD-2261). */
+  /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
   let providerStops = 0;
   /** Whether the last pass found nothing to do: its stamp keeps the word before it. */
   let lastPassIdle = false;
@@ -918,7 +1040,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       onError: (e, consecutive) => { if (consecutive === 1) errAside(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
     });
     try {
-      while (!stopping && !limitReached()) {
+      while (!stopping && outage.reason === null && !limitReached()) {
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
         try {
@@ -951,7 +1073,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           return;
         }
         for (const b of batch) {
-          if (stopping) return;
+          if (stopping || outage.reason !== null) return;
           if (hb.lost.has(b.thought_id)) {
             // A beat found this row no longer ours. Nothing to release, and
             // repeating the provider's work would only race the holder; the row
@@ -983,7 +1105,36 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 }
                 const kind = classifyError(e, { maxTokensFatal: true });
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
-                if (kind === "thought") {
+                // Under --follow, the provider's state rather than the thought's
+                // or the request's (SMD-2599): a transient error past the pauses,
+                // the model missing (Ollama pulling it; the start probe saw it
+                // answer), or a timeout the probe cannot get an answer past
+                // either — given the call's whole timeout, as a model busy with
+                // another worker's call may need it, and ended by a stop or
+                // another worker's outage, which it joins unprobed (review pass 1).
+                const escalationGone = !!WINDOWING.escalateModel && missingModelIs(e, WINDOWING.escalateModel) && !missingModelIs(e, cfg.metadataModel);
+                const down = FOLLOW && (
+                  (kind === "transient" && attempt >= TRANSIENT_PAUSES_MS.length) ||
+                  (kind === "fatal" && modelMissing(e) && (!escalationGone || escalationSeen)) ||
+                  (kind === "thought" && timedOut(e) && !stopping && (outage.reason !== null || isOut(await probe(TIMEOUT_S * 1000, halt.signal)))));
+                if (down) {
+                  // On a stopping pass the thought goes back to the pool, as a transient's does.
+                  if (stopping) return;
+                  const begins = outage.reason === null;
+                  if (outage.begin(msg, b.thought_id) === "outage") {
+                    providerStops++;
+                    // The escalation model gone since the start: the outage probes it (review pass 2).
+                    if (begins && escalationGone && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;
+                    halt.abort();
+                    err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
+                    return;
+                  }
+                  // Again, right after the provider answered a probe: this
+                  // thought's own, recorded failed so it is visible rather than
+                  // cycling through the pool for ever.
+                  outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
+                  stopAfter = true;
+                } else if (kind === "thought") {
                   outcome = { outcome: "failed", error: msg };
                 } else if (kind === "fatal") {
                   // Every thought would fail the same way. Stop everyone, mark
@@ -993,18 +1144,20 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   stopping = true;
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
                   return;
-                } else if (stopping) {
-                  // A transient error on a stopping pass: neither called again
-                  // nor recorded failed — the thought goes back to the pool with
-                  // the leases the finally returns (SMD-2401).
+                } else if (stopping || outage.reason !== null) {
+                  // A transient error on a stopping pass, or one another worker's
+                  // outage has halted: neither called again nor recorded failed —
+                  // the thought goes back to the pool with the leases the finally
+                  // returns (SMD-2401, SMD-2599).
                   return;
                 } else if (attempt < TRANSIENT_PAUSES_MS.length) {
                   err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
                   // A first stop wakes the pause too, and the thought goes back
                   // the same way: main slept the pause out, called again, and
                   // recorded the thought failed "after 3 retries" after one (SMD-2401).
-                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], onStop.signal);
-                  if (stopping) return;
+                  // So does another worker's outage (SMD-2599).
+                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal);
+                  if (stopping || outage.reason !== null) return;
                 } else {
                   // Still failing after the pauses. This row is recorded failed
                   // with the error — if the provider is down it is one row per
@@ -1017,11 +1170,6 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               }
             }
             if (hardStopped) return;
-            if (stopAfter) {
-              // The heartbeat's "failed" (SMD-2261): the provider, not a document.
-              providerStops++;
-              err(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
-            }
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
               let recorded = false;
@@ -1029,9 +1177,22 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 const rows = (await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`) as { ok: boolean }[];
                 recorded = rows[0]?.ok === true;
               } catch (e) {
+                // The database went away under the failure's record: nothing is
+                // recorded, the row is this worker's again for the finally to
+                // return, and it is not counted lost (review pass 3).
+                if (FOLLOW && databaseUnavailable(e)) {
+                  hb.held.add(b.thought_id);
+                  err(`  ${workerId}: the database is not answering (${(e as Error).message}) — recording nothing for ${b.thought_id}; it returns to the pool when the database answers`);
+                  return;
+                }
                 err(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
               }
-              if (recorded) failed++;
+              if (recorded) {
+                failed++;
+                // A suspect no longer once its failure is recorded — not before,
+                // so one the database kept from its record stays one (review pass 4).
+                outage.settled(b.thought_id);
+              }
               // The hard stop's release beat this one: the caller's own stop, not a lapse (SMD-2425).
               else if (hardStopped) return;
               else {
@@ -1040,6 +1201,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 lost++;
                 err(`  ${b.thought_id}: the claim was no longer this worker's at release; the failure below was not recorded`);
               }
+              // Said once the record is settled, not before (review pass 4).
+              err(`  ${workerId}: provider still failing — this worker stops after this thought; ${FOLLOW ? "the next poll goes on" : "re-run when it is back"}`);
               err(`  ${b.thought_id}: ${outcome.error}`);
               return;
             }
@@ -1105,6 +1268,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             done++;
             if (outcome.leftOut) { leftOut++; leftOutWindows += outcome.leftOut; } else if (outcome.caveat) partial++;
           }
+          outage.settled(b.thought_id);
           progress();
         }
       }
@@ -1140,6 +1304,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (stopping) {
       hardStopped = true;
       onStop.abort();
+      halt.abort();
       // Started before the line is written: a Writer that throws does not keep the leases.
       const release = Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
       err(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
@@ -1147,6 +1312,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     }
     stopping = true;
     onStop.abort();
+    halt.abort();
     err("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)");
     return null;
   };
@@ -1156,6 +1322,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (stopping) return;
     stopping = true;
     onStop.abort();
+    halt.abort();
     errAside("\n  stopping after the current thought; unfinished claims go back to the pool");
   };
   if (stoppedEarly()) return 130;
@@ -1239,6 +1406,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   let firstPass = true;
   async function pass(): Promise<Counts> {
+    halt = new AbortController();
     for (const w of unreturned) {
       await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
       unreturned.delete(w);
@@ -1283,7 +1451,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   async function followedPass(): Promise<Counts | null> {
     for (;;) {
       try {
-        return await stampedPass();
+        const c = await stampedPass();
+        // A worker found the provider not answering and ended the pass
+        // (SMD-2599): the heartbeat says so, and stays a running follower's
+        // while it probes, so preflight reads it alive, not stale (SMD-2261).
+        if (outage.reason !== null && !stopping) {
+          await stamper?.stamp("failed", lastBlock);
+          await (stamper ? stamper.during(waitForProvider(onStop.signal)) : waitForProvider(onStop.signal));
+        }
+        return c;
       } catch (e) {
         if (!FOLLOW || !databaseUnavailable(e)) throw e;
         const down = Date.now();

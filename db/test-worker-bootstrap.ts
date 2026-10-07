@@ -14,7 +14,7 @@
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, outageWait, regateMessage, TRANSIENT_PAUSES_MS, waitOut, workerIdentity } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -179,6 +179,148 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   let thrown: unknown = null;
   await waitOut({ check: async () => { throw pg("ERR_POSTGRES_SERVER_ERROR", "28P01"); }, outage: databaseUnavailable, wake: new AbortController().signal, sleep }).catch((e) => { thrown = e; });
   ok((thrown as { errno?: string } | null)?.errno === "28P01", "a check that fails for another reason is thrown, not waited on for ever");
+}
+
+// ---------------------------------------------------------------------------
+// modelMissing, probeChat, probeUntil, ProviderOutage — a follower waits a
+// provider outage out (SMD-2599). A stub on the loopback answers the probe
+// the way each provider does.
+// ---------------------------------------------------------------------------
+{
+  const thrown = (status: number, words: string) => Object.assign(new Error(`Extraction request to http://h:1/v1 failed: ${status} ${words}`), { status });
+  ok(modelMissing(thrown(404, '{"error":{"message":"model \\"qwen2.5:7b\\" not found, try pulling it first"}}')), "Ollama's 404 for a model it has not pulled is the model missing");
+  ok(modelMissing(thrown(404, '{"error":{"message":"The model `gpt-x` does not exist or you do not have access to it.","code":"model_not_found"}}')), "OpenAI's and vLLM's 404 naming the model is the model missing");
+  ok(modelMissing({ status: 404, body: "model_not_found" }), "a ProviderError's body is read too");
+  ok(!modelMissing(thrown(404, "404 page not found")) && !modelMissing(thrown(400, 'model "x" not found')) && !modelMissing(thrown(401, "model not found")),
+    "a bare 404 is a wrong base URL, and a model named under another status is not this — both stay fatal");
+  ok(!modelMissing(Object.assign(new Error("Extraction request to http://model-not-found.example/v1 failed: 404 page not found"), { status: 404 })),
+    "the base URL in the message's lead is not read as the provider's words");
+  ok(timedOut({ name: "TimeoutError" }) && timedOut({ message: "the request timed out" }) && !timedOut({ status: 503, message: "overloaded" }), "timedOut reads classifyError's timeout rule");
+
+  // The probe against a stub that answers as told; it records what it was sent.
+  let answer: () => Response = () => Response.json({ choices: [{ message: { content: "OK" } }] });
+  let sent: { model?: string; max_tokens?: number; messages?: { content: string }[] } = {};
+  const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) { sent = await req.json(); return answer(); } });
+  const at = { base: `http://127.0.0.1:${stub.port}/v1`, headers: { "content-type": "application/json" } };
+  try {
+    const up = await probeChat(at, "stub-model", 2000);
+    ok(up.state === "up" && sent.model === "stub-model" && sent.max_tokens === 1 && sent.messages?.[0]?.content === PROBE_PROMPT, `a 200 is up; the probe is one token of the fixed prompt to the model (${JSON.stringify(sent).slice(0, 120)})`);
+    answer = () => new Response('{"error":{"message":"overloaded"}}', { status: 503 });
+    const out = await probeChat(at, "m", 2000);
+    ok(out.state === "out" && out.why.startsWith("503 "), `a 503 is out (${JSON.stringify(out)})`);
+    answer = () => new Response('{"error":{"message":"model \\"m\\" not found, try pulling it first"}}', { status: 404 });
+    ok((await probeChat(at, "m", 2000)).state === "missing", "a 404 naming the model is missing");
+    answer = () => new Response("404 page not found", { status: 404 });
+    ok((await probeChat(at, "m", 2000)).state === "refused", "a bare 404 is refused (the base URL)");
+    answer = () => new Response('{"error":"invalid api key"}', { status: 401 });
+    ok((await probeChat(at, "m", 2000)).state === "refused", "a 401 is refused (the key)");
+    answer = () => new Response('{"error":"max_tokens is not supported, use max_completion_tokens"}', { status: 400 });
+    ok((await probeChat(at, "m", 2000)).state === "up", "another 4xx is up: the provider answered, and the next real call judges it");
+    answer = () => new Response(new ReadableStream({ start() {} }), { status: 200 });
+    const hung = await probeChat({ ...at }, "m", 300);
+    ok(isOut(hung), `a provider that does not answer within the deadline is out (${JSON.stringify(hung)})`);
+    // A 200 whose body starts and then stalls: hung mid-answer, not up (review pass 2).
+    answer = () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"choices":')); } }), { status: 200 });
+    const stalled = await probeChat({ ...at }, "m", 500);
+    ok(stalled.state === "out", `a 200 whose answer never arrives is out, not up (${JSON.stringify(stalled)})`);
+  } finally {
+    stub.stop(true);
+  }
+  const gone = await probeChat({ base: `http://127.0.0.1:${stub.port}/v1`, headers: {} }, "m", 2000);
+  ok(gone.state === "out", `nothing listening is out (${JSON.stringify(gone).slice(0, 100)})`);
+
+  // probeUntil on the schedule, without the wall clock.
+  const slept: number[] = [];
+  const states: Probe[] = [{ state: "out", why: "503" }, { state: "missing", why: "pulling" }, { state: "up" }];
+  const back = await probeUntil(async () => states.shift() as Probe, new AbortController().signal, (p) => !isOut(p), async (ms: number) => { slept.push(ms); });
+  ok(back?.state === "up" && slept.join(",") === "5000,10000,20000", `an outage's wait goes through out and missing until up (${slept.join(",")})`);
+  const refusedEnds = await probeUntil(async () => ({ state: "refused", why: "401" }), new AbortController().signal, (p) => !isOut(p), async () => {});
+  ok(refusedEnds?.state === "refused", "a refused probe ends an outage's wait too: the next real call meets the refusal and ends the run");
+  // The start's wait settles on anything but out: a model unserved once the provider answers ends it, for the refusal (review pass 2).
+  const startStates: Probe[] = [{ state: "out", why: "ECONNREFUSED" }, { state: "missing", why: "404 model not found" }];
+  const startEnds = await probeUntil(async () => startStates.shift() as Probe, new AbortController().signal, (p) => p.state !== "out", async () => {});
+  ok(startEnds?.state === "missing", `the start's wait ends on a missing model, not waiting on it for ever (${JSON.stringify(startEnds)})`);
+  const woken = new AbortController();
+  ok((await probeUntil(async () => ({ state: "out", why: "x" }), woken.signal, (p) => !isOut(p), async () => { woken.abort(); })) === null, "a stop during the wait is null");
+  ok(missingModelIs(Object.assign(new Error('Extraction request to http://h/v1 failed: 404 {"error":{"message":"model \\"big-model\\" not found"}}'), { status: 404 }), "big-model")
+     && !missingModelIs(Object.assign(new Error('Extraction request to http://h/v1 failed: 404 {"error":{"message":"model \\"big-model\\" not found"}}'), { status: 404 }), "small-model"),
+     "missingModelIs names which model a 404 was for");
+
+  // The outage's rule: back to the pool, unless the same thought fails again right after a probe answered.
+  const o = new ProviderOutage();
+  ok(o.begin("503", "A") === "outage" && o.reason === "503", "a first error past the pauses begins an outage");
+  ok(o.begin("503 again", "B") === "outage" && o.reason === "503", "another worker's thought joins it, keeping the first reason");
+  o.end();
+  ok(o.reason === null, "a probe that answers ends it");
+  ok(o.begin("503", "A") === "thought", "the same thought failing again right after is its own: recorded failed");
+  ok(o.begin("503", "C") === "outage", "another thought's error begins a new outage");
+  o.end();
+  ok(o.begin("503", "B") === "outage", "a thought from an earlier outage is not a suspect after a newer one");
+  o.end();
+  o.settled("B");
+  ok(o.begin("503", "B") === "outage", "a thought that finished meanwhile is a suspect no longer");
+
+  // "Right after" is a window from the probe that answered (review pass 1).
+  let clock = 0;
+  const w = new ProviderOutage(() => clock);
+  w.begin("503", "D");
+  clock = 1_000;
+  w.end();
+  clock = 1_000 + SUSPECT_WINDOW_MS;
+  ok(w.begin("503", "D") === "thought", "a suspect failing again at the window's edge is its own");
+  w.begin("503", "E");
+  w.end();
+  clock += SUSPECT_WINDOW_MS + 1;
+  ok(w.begin("503", "E") === "outage", "a suspect meeting an outage past the window is in an outage like any other thought");
+
+  // A stop ends a probe in flight, as "out" (review pass 1).
+  const hang = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
+  try {
+    const stop = new AbortController();
+    const t0 = Date.now();
+    setTimeout(() => stop.abort(), 100);
+    const stopped = await probeChat({ base: `http://127.0.0.1:${hang.port}/v1`, headers: {} }, "m", 10_000, stop.signal);
+    ok(stopped.state === "out" && Date.now() - t0 < 2000, `a stop ends a probe in flight at once, as out (${JSON.stringify(stopped)} after ${Date.now() - t0} ms)`);
+  } finally {
+    hang.stop(true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Review pass 3: model names compared whole, the escalation model's existence
+// read from GET /models without loading it, and an unreadable 404 out.
+// ---------------------------------------------------------------------------
+{
+  const ollama404 = (name: string) => Object.assign(new Error(`Extraction request to http://h/v1 failed: 404 {"error":{"message":"model \\"${name}\\" not found, try pulling it first"}}`), { status: 404 });
+  ok(missingModelIs(ollama404("qwen3:32b"), "qwen3:32b") && !missingModelIs(ollama404("qwen3:32b"), "qwen3"),
+    "a 404 for qwen3:32b names qwen3:32b, not qwen3 — compared whole, not as a substring");
+  ok(missingModelIs(ollama404("qwen3:latest"), "qwen3") && missingModelIs(ollama404("qwen3"), "qwen3:latest"), "Ollama's implied :latest tag is the same model");
+  ok(missingModelIs(Object.assign(new Error("Judge request to http://h/v1 failed: 404 {\"error\":{\"message\":\"The model `gpt-x` does not exist or you do not have access to it.\",\"code\":\"model_not_found\"}}"), { status: 404 }), "gpt-x"),
+    "OpenAI's backticked name is read too");
+  ok(sameModel("a", "a") && sameModel("a", "a:latest") && !sameModel("a", "a:7b") && !sameModel("a:7b", "a:14b"), "sameModel: equal, or the :latest tag, nothing else");
+
+  let listing: () => Response = () => Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "big:latest" }] });
+  let chats = 0;
+  const lister = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(req) { if (req.method !== "GET") chats++; return listing(); } });
+  const at = { base: `http://127.0.0.1:${lister.port}/v1`, headers: {} };
+  try {
+    ok((await modelListed(at, "big", "stub-meta", 2000)) === "listed" && (await modelListed(at, "absent", "stub-meta", 2000)) === "unlisted" && chats === 0,
+      "GET /models: a listed model (its :latest tag implied) is listed, another unlisted, and no model was called");
+    // Review pass 4: unlisted only where the list names models as chat does.
+    ok((await modelListed(at, "absent", "gemini-2.0-flash", 2000)) === "unknown",
+      "a list that does not name the model chat just answered for (Gemini's models/<name>, llama-server's one alias) proves nothing: unknown");
+    ok((await modelListed(at, "big:32b", "stub-meta", 2000)) === "unknown",
+      "a model sharing a listed id's base (an Ollama tag not pulled, an OpenRouter :nitro variant) is unknown, not refused");
+    listing = () => new Response("404 page not found", { status: 404 });
+    ok((await modelListed(at, "absent", "stub-meta", 2000)) === "unknown", "a provider with no /models is unknown, refusing nothing");
+    listing = () => Response.json({ models: ["absent"] });
+    ok((await modelListed(at, "absent", "stub-meta", 2000)) === "unknown", "a list of another shape is unknown");
+    listing = () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"error":')); } }), { status: 404 });
+    const unread = await probeChat(at, "m", 500);
+    ok(unread.state === "out", `a 404 whose body never arrives is out, not refused (${JSON.stringify(unread)})`);
+  } finally {
+    lister.stop(true);
+  }
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);

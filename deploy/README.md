@@ -1717,7 +1717,10 @@ so the profile builds from a checkout.
   when stopped, so watch its stderr: it says there when the model looks at
   fault, after each pass drains the pool — a follower started on a backlog says
   nothing until the backlog is done, so try a new model with `--limit 48` first
-  (SMD-2266, `db/README.md`). The same goes for
+  (SMD-2266, `db/README.md`). It waits out a database restart, a provider
+  outage or a model being pulled, and says so on stderr, rather than exiting
+  or failing the thoughts it holds (SMD-2599). A model the provider does not
+  serve at start is refused with exit 2. The same goes for
   `db/consolidate.ts`, the pass that proposes supersessions from the entities
   that worker extracts (a per-pair cost; `db/README.md`), and for reviewing
   what it proposes.

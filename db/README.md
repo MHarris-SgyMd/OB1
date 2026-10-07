@@ -3430,12 +3430,12 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2465 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1111 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1130 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts) import with no side effect, refuse through run() — no database
-bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules, through worker-bootstrap.ts — no database
+bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -3580,13 +3580,21 @@ names the errors that mean the database is not answering (a connection
 refused, closed or timed out; SQLSTATE class 08, 57P01–57P03, 53300), and
 `waitOut` checks again after 5 s, doubling to 5 min, until it answers or a stop
 wakes it; a thought in hand records nothing, and its lease is returned when the
-database is back. A run without `--follow` still exits 1 on it. The module returns its outcome rather than
+database is back. It waits a provider outage out the same way.
+- **Outages:** a transient error past the pauses, the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
+- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not.
+- **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering. With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
+- **At start:** a follower probes once before it writes anything, the worker key's registration included, and waits for a provider that does not answer only after every other refusal. A model the provider does not serve, a refused key or a wrong base URL exits 2; an unreachable provider is waited for. Extract's escalation model is checked by GET `/models`, which loads nothing, and refused only where the list names models as chat does; one the start could not confirm draws exit 2 at its first 404, and one it saw that goes missing is waited for by name.
+
+A run without `--follow` keeps every exit and failure it had. The module returns its outcome rather than
 exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s,
 `consolidate.ts`'s and `reembed.ts`'s (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
 the `classifyError` rules, the identity cases that refuse before connecting and
-the outage rules and schedule; `test-live.ts` [24b] the capped resolve, and
-[10] and [16] each follower outlasting a database cut through a relay; and `test-cli.ts`'s census checks that
+the outage rules and schedule, and the probe against a stub; `test-live.ts` [24b] the capped resolve, and
+[10] and [16] each follower outlasting a database cut through a relay and a
+provider outage (a 503, and in [10] the model missing, a hung provider, a
+thought that fails every time, and the refusal at start); and `test-cli.ts`'s census checks that
 no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
 `resolve_agent(` or `parseKeyRecords`.
 

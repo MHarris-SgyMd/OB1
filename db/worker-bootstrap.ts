@@ -19,6 +19,7 @@
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
 import { refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
+// ProviderEndpoint's `headers` are what probeChat sends, as the workers' own calls do.
 import { CLIENT_SCOPES, hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { sleepUnless } from "./lease.ts";
@@ -253,6 +254,254 @@ export function databasePermanent(e: unknown): boolean {
   const { name, errno } = (e ?? {}) as { name?: string; errno?: unknown };
   if (name !== "PostgresError" && name !== "SQLError") return false;
   return typeof errno === "string" && (errno.startsWith("42") || errno.startsWith("28") || errno === "3D000" || errno === "3F000");
+}
+
+/**
+ * The provider's own words in an error, without the message's lead (which
+ * names the base URL): a ProviderError's `body`, or what follows
+ * "failed: <status> " in the workers' own call errors (entities.ts,
+ * judgePair).
+ */
+function providerWords(e: unknown): string {
+  const body = (e as { body?: unknown }).body;
+  if (typeof body === "string" && body) return body;
+  return /\bfailed: \d{3} ([\s\S]*)$/.exec((e as Error).message ?? "")?.[1] ?? "";
+}
+
+/**
+ * Whether a provider error says the MODEL is not there (SMD-2599): a 404
+ * whose own words name a model as not found — Ollama's `model "x" not found,
+ * try pulling it first`, OpenAI's and vLLM's `The model `x` does not exist`
+ * or `model_not_found`. A 404 that names no model is a wrong base URL
+ * (Ollama's `404 page not found`) and stays fatal. classifyError calls both
+ * fatal; a --follow worker that has seen the model answer at start reads
+ * this one as the provider's state — Ollama pulling or swapping the model —
+ * and waits it out.
+ */
+export function modelMissing(e: unknown): boolean {
+  if ((e as { status?: number }).status !== 404) return false;
+  return /model_not_found|\bmodel\b[^\n]{0,160}?\b(not found|does not exist)/i.test(providerWords(e));
+}
+
+/**
+ * Whether a provider error is modelMissing's and its words name `model` — the
+ * model an outage then probes, where the escalation model went missing
+ * after the start (review pass 2).
+ */
+export function missingModelIs(e: unknown, model: string): boolean {
+  return modelMissing(e) && quotedNames(providerWords(e)).some((name) => sameModel(name, model));
+}
+
+/**
+ * Whether two model names are one model: equal, or one the other with
+ * Ollama's implied `:latest` tag. Compared whole — `qwen3` is not
+ * `qwen3:32b`, which a substring test read as one (review pass 3).
+ */
+export function sameModel(a: string, b: string): boolean {
+  return a === b || a === `${b}:latest` || b === `${a}:latest`;
+}
+
+/**
+ * The names a provider's words quote — `model "x" not found`, "The model
+ * `x` does not exist" — read from the error message of a JSON body when it
+ * is one, so the body's own JSON quoting is not read as names.
+ */
+function quotedNames(words: string): string[] {
+  let text = words;
+  try {
+    const body = JSON.parse(words) as { error?: unknown; message?: unknown };
+    const err = body?.error as { message?: unknown } | string | undefined;
+    const message = typeof err === "string" ? err : typeof err?.message === "string" ? err.message : typeof body?.message === "string" ? body.message : undefined;
+    if (typeof message === "string") text = message;
+  } catch {
+    // Not JSON: the words as they came.
+  }
+  return [...text.matchAll(/["'`\u201c\u201d]([^"'`\u201c\u201d\s]+)["'`\u201c\u201d]/g)].map((m) => m[1]);
+}
+
+/** Whether a provider error is a call's deadline passing — classifyError's "thought" for a timeout. */
+export function timedOut(e: unknown): boolean {
+  return (e as Error).name === "TimeoutError" || /timed out/i.test((e as Error).message ?? "");
+}
+
+/**
+ * The probe's whole prompt. Fixed, and no thought's: the probe sends nothing
+ * of the brain's, so the egress gate (which governs a row's text) has nothing
+ * to read in it. The suites' stub providers answer it apart from a real call.
+ */
+export const PROBE_PROMPT = "Reply with the word OK.";
+
+/**
+ * What one probe found. `up`: the model answered, or the provider answered a
+ * way the next real call will judge (a 400 for the probe's own `max_tokens`,
+ * say). `out`: no answer, a timeout, a 429 or a 5xx. `missing`: a 404 naming
+ * the model. `refused`: a 401, 402 or 403 (the key), or a 404 naming no model
+ * (the base URL).
+ */
+export type Probe = { state: "up" } | { state: "out" | "missing" | "refused"; why: string };
+
+/**
+ * One chat call of one token to `model` at `endpoint` (SMD-2599): the check a
+ * --follow worker makes at start and while it waits out an outage. A chat
+ * call, not preflight's GET /models: Ollama answers /models while its chat
+ * endpoint answers 503 (busy) or the model is still being pulled, so only the
+ * call the pass makes says the pass can go on.
+ */
+export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
+  let r: Response;
+  try {
+    r = await fetch(`${endpoint.base}/chat/completions`, {
+      method: "POST",
+      headers: endpoint.headers,
+      body: JSON.stringify({ model, messages: [{ role: "user", content: PROBE_PROMPT }], max_tokens: 1 }),
+      // The probe's deadline is the one deadline, as the workers' calls' are;
+      // `wake` (the pass's stop) ends it sooner, as "out".
+      signal: wake ? AbortSignal.any([AbortSignal.timeout(timeoutMs), wake]) : AbortSignal.timeout(timeoutMs),
+      timeout: false,
+    });
+  } catch (e) {
+    if (wake?.aborted) return { state: "out", why: "the probe was stopped" };
+    return { state: "out", why: timedOut(e) ? `no answer to a one-token call in ${timeoutMs / 1000} s` : (e as Error).message };
+  }
+  let words = "";
+  let unread = false;
+  try {
+    words = (await r.text()).slice(0, 300);
+  } catch {
+    unread = true;
+  }
+  const why = `${r.status} ${words}`.trimEnd();
+  // An answer whose body never arrived is a provider hung mid-answer, not
+  // one that answered (review pass 2) — whatever its status: an unread 404
+  // cannot be told from a wrong URL, nor an unread 401 from a key refused
+  // (review pass 3).
+  if (unread) return { state: "out", why: `${r.status}, and the answer did not arrive` };
+  if (r.ok) return { state: "up" };
+  if (r.status === 429 || r.status >= 500) return { state: "out", why };
+  if (modelMissing({ status: r.status, body: words })) return { state: "missing", why };
+  if (r.status === 404 || r.status === 401 || r.status === 402 || r.status === 403) return { state: "refused", why };
+  return { state: "up" };
+}
+
+/**
+ * A call that failed where the probe after it got no answer either: thrown
+ * by a worker that reads its own timeouts (consolidate's pairs) so the
+ * worker's catch takes it for the outage it is (SMD-2599).
+ */
+export class ProviderDown extends Error {
+  override name = "ProviderDown";
+}
+
+/**
+ * Whether the provider lists `model` (SMD-2599, review pass 3): GET /models,
+ * which loads no model, where a chat probe of a large escalation model loaded
+ * it at every start and evicted the model the first call needs. `listed`
+ * when a listed id is the model (`sameModel`). `unlisted` only when the list
+ * names models by the names chat takes — `reference`, a model chat has just
+ * answered for, is listed by its own name — and no listed id shares the
+ * model's base, the name before its last `:` tag (review pass 4: Gemini
+ * lists `models/<name>`, llama-server one alias for any name, OpenRouter
+ * not its `:nitro` variants, so an unlisted id there proved nothing).
+ * Anything else — another status, another shape, no answer — is `unknown`.
+ */
+export async function modelListed(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, reference: string, timeoutMs: number, wake?: AbortSignal): Promise<"listed" | "unlisted" | "unknown"> {
+  try {
+    const r = await fetch(`${endpoint.base}/models`, {
+      method: "GET",
+      headers: endpoint.headers,
+      signal: wake ? AbortSignal.any([AbortSignal.timeout(timeoutMs), wake]) : AbortSignal.timeout(timeoutMs),
+      timeout: false,
+    });
+    if (!r.ok) return "unknown";
+    const body = (await r.json()) as { data?: unknown };
+    if (!Array.isArray(body?.data) || body.data.length === 0) return "unknown";
+    const ids = body.data.map((m) => (m as { id?: unknown })?.id).filter((id): id is string => typeof id === "string");
+    if (ids.length === 0) return "unknown";
+    if (ids.some((id) => sameModel(id, model))) return "listed";
+    if (!ids.some((id) => sameModel(id, reference))) return "unknown";
+    const base = model.includes(":") ? model.slice(0, model.lastIndexOf(":")) : model;
+    return ids.some((id) => id === base || id.startsWith(`${base}:`)) ? "unknown" : "unlisted";
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Whether a probe found the provider still out: no answer, or the model missing. */
+export function isOut(p: Probe): p is Extract<Probe, { why: string }> {
+  return p.state === "out" || p.state === "missing";
+}
+
+/**
+ * Probe on outageWait's schedule until a probe `settles` (SMD-2599), and
+ * return that probe — null when `wake` aborted first. An outage settles on anything
+ * but out or missing (`isOut`): up, or refused, which the next real call
+ * meets and turns into the run's refusal. The start's wait settles on
+ * anything but out, so a model the provider turns out not to serve, once it
+ * answers, is refused there rather than waited on for ever (review pass 2).
+ */
+export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep: (ms: number, wake: AbortSignal) => Promise<void> = sleepUnless): Promise<Probe | null> {
+  for (let step = 0; ; step++) {
+    await sleep(outageWait(step), wake);
+    if (wake.aborted) return null;
+    const p = await probe();
+    if (settles(p)) return p;
+  }
+}
+
+/**
+ * How long after a probe answered a thought in hand at the outage still
+ * counts as "right after": the pauses (65 s) and a slow model call or two
+ * past the re-claim, which comes first in the pool (the row keeps its
+ * enqueued_at).
+ */
+export const SUSPECT_WINDOW_MS = 15 * 60_000;
+
+/**
+ * A --follow worker's provider outage (SMD-2599): why it began, and the
+ * thoughts in hand when it did. While `reason` is set the pass stops after
+ * the thought in hand and the follower probes; `end()` clears it when a probe
+ * answers. A thought in hand at an outage goes back to the pool, not failed —
+ * but one that draws a provider error again right after the provider has
+ * answered a probe is the thought's own (a document that crashes the server
+ * every time), and `begin` says so, so it is recorded failed and visible
+ * rather than cycling through the pool for ever. "Right after" is within
+ * SUSPECT_WINDOW_MS of the probe that answered: a thought another process
+ * finished meanwhile, and an edit re-queued hours later, meets a later
+ * outage as any other thought does (review pass 1).
+ */
+export class ProviderOutage {
+  reason: string | null = null;
+  private endedAt = 0;
+  /** Thoughts in hand at the latest outage; a new outage clears them, so an earlier one's are no longer "right after". */
+  private suspects = new Set<string>();
+
+  /** `now` is the clock; the suite's own, to run the window without the wall clock. */
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /** Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". */
+  begin(reason: string, thoughtId?: string): "outage" | "thought" {
+    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= SUSPECT_WINDOW_MS) {
+      this.suspects.delete(thoughtId);
+      return "thought";
+    }
+    if (this.reason === null) {
+      this.suspects.clear();
+      this.reason = reason;
+    }
+    if (thoughtId !== undefined) this.suspects.add(thoughtId);
+    return "outage";
+  }
+
+  /** A probe answered. */
+  end(): void {
+    this.reason = null;
+    this.endedAt = this.now();
+  }
+
+  /** A thought finished — succeeded, or recorded failed — and is a suspect no longer. */
+  settled(thoughtId: string): void {
+    this.suspects.delete(thoughtId);
+  }
 }
 
 /** The wait between a follower's checks during an outage: 5 s, doubling, at most 5 min. */
