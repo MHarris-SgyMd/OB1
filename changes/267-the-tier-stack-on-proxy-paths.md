@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2294]
-migrations: []
----
-
-## Changelog
-
-The proxy routes `/canary/mcp` and `/working/mcp` to that tier's MCP server, reached by name on the stack's mesh (`mcp.canary.ob1.internal`, `mcp.working.ob1.internal`), and answers a bodiless 404 while no such tier is up; every other path that starts with either word is a 404 too, never stable's server. The proxy dials stable's own server by its mesh name, `mcp.ob1.internal`, so another project's container on the mesh, which compose also calls `server`, cannot take stable's traffic. `deploy/canary.sh` stands the canary there: its MCP server and REST core join stable's mesh under the canary's names alone (`deploy/compose.canary.yaml`), its connector is `/canary/mcp` on stable's origin, and beside a stable from before this release, `--port N` gives it its own loopback proxy as before. `deploy/compose.tiers.yaml` serves its three tiers the same way, each tier's MCP server and REST core behind one proxy on `SERVER_PORT`: clients of its old ports (8010–8012) move to `/mcp`, `/canary/mcp` and `/working/mcp` there, and its `*_SERVER_PORT`/`*_SERVER_BIND` settings are gone. `--compare` labels a URL by host and path (SMD-2294). The tiers overlay's old ports are the one URL this minor release stops answering: FORK.md counts that as MAJOR, but the overlay is the maintainer's promotion pipeline rather than a client's setup, and the main stack's connector URLs keep answering (SMD-2294).
-
-## FORK
-
-The tier stack on proxy paths — the canary answers at /canary/mcp on stable's origin, its servers on stable's mesh, and a tier's URL never reaches stable (SMD-2294)
+# 267. The tier stack on proxy paths — the canary answers at /canary/mcp on stable's origin, its servers on stable's mesh, and a tier's URL never reaches stable (SMD-2294)
 
 SMD-2294 moves the canary and working tiers from host ports (8010–8012) onto
 paths of stable's one origin, in three cuts. Each tier's MCP server is today's

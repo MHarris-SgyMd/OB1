@@ -1,18 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2382]
-migrations: []
----
-
-## Changelog
-
-On a stack configured for OAuth (`COMPOSE_PROFILES` names `auth`, a sound `OB1_PUBLIC_ORIGIN`), the MCP server serves `/.well-known/oauth-protected-resource/mcp` and answers a keyless request at the public `/mcp` with a 401 challenge while the authorization server answers, and an OAuth token with a 503 while it does not. Any `Host` but the origin's, the root URL and every key keep today's answers, and preflight reports the public origin (SMD-2382).
-The MCP server joins the mesh and the proxy routes its document, so a configured stack advertises OAuth: a claude.ai connector at `/mcp` signs in, a preview until the MCP server accepts the token. Its keyed `/health` names its own view, which `smoke.sh` checks against what reaches it at the origin's `Host` (SMD-2382).
-
-## FORK
-
-The MCP server's half of the public origin — the protected-resource document and the 401 challenge, at the origin alone (SMD-2382)
+# 262. The MCP server's half of the public origin — the protected-resource document and the 401 challenge, at the origin alone (SMD-2382)
 
 **What it answers, and when.** ADR decision 16 keeps two states apart. Configured is static: `COMPOSE_PROFILES` names `auth`. Reachable is dynamic: the authorization server answers its health check. `server-portable/oauth-edge.ts` holds the rules, and `index.ts` applies them:
 

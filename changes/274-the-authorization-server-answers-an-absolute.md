@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2615]
-migrations: []
----
-
-## Changelog
-
-The authorization server answers an absolute-form request target with a 400, where one with an authority the URL parser refuses (`GET http://x:99999/healthz`) used to stop its process, and no longer answers `//x/healthz` as `/healthz`; a throw in a request is now that request's 500, not the process's end. A target holding `#` or whitespace is a 400 too, dot segments are no longer resolved (`/auth/../healthz` is a 404, not `/healthz`), and `/auth?x` is a 404, not a 500. Only a caller on the internal mesh can send an absolute-form target: the proxy rewrites it to its path (SMD-2615).
-
-## FORK
-
-The authorization server answers an absolute-form request target 400 instead of stopping, and a throw in a request is that request's 500 (SMD-2615)
+# 274. The authorization server answers an absolute-form request target 400 instead of stopping, and a throw in a request is that request's 500 (SMD-2615)
 
 **What changed.**
 - **`deploy/auth/target.ts`** (new) holds two things.

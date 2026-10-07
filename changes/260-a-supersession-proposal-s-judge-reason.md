@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2533]
-migrations: []
----
-
-## Changelog
-
-`list_supersession_proposals` and `consolidate.ts --list` now print a proposal's judge reason on one line, behind a label (`Reason:` in the tool, `reason:` in the CLI), and a review note on its status line, each line break a space. Before this fix, the reason started a line of its own, and a line break in the reason or the note could start more. A reason reading `ID: <uuid>` printed as an `ID:` line, and the session-capture hook claimed that id as a thought the session retrieved. The judge reads both thoughts' text, so a captured text can steer what it writes (SMD-2533).
-
-## FORK
-
-A supersession proposal's judge reason and review note print on one line each, so neither can forge an `ID:` line (SMD-2533)
+# 260. A supersession proposal's judge reason and review note print on one line each, so neither can forge an `ID:` line (SMD-2533)
 
 **What changed.**
 - **`renderSupersessionProposals` in `server-portable/render.ts`.**

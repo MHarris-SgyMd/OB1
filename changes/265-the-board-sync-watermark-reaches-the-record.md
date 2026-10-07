@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2261]
-migrations: []
----
-
-## Changelog
-
-The brain's record (the `brain_info` tool, keyed `GET /health`, `GET /v1/brain`) now carries the board-sync watermark, the newest Linear `updatedAt` any thought reflects. `tier.ts --compare` prints it for both brains and names a brain that missed the board's status moves ("open-brain-canary's board-sync watermark is 1 day older"), a gap no thought count, newest capture or migration shows. This closes the last of the compare's deferred limits. board-sync's `--loop` and the extraction and consolidation followers now stamp a heartbeat after every pass; preflight's new `workers` row, the keyed `/health` body and `brain_info` read them, and warn once a worker has not stamped for three of its intervals (naming the command that starts it again), when its last pass failed, or when its last block of answers passed the malformed-answer alarm (SMD-2261).
-
-## FORK
-
-The board-sync watermark reaches the record and the compare, and long-running workers report their liveness (SMD-2261)
+# 265. The board-sync watermark reaches the record and the compare, and long-running workers report their liveness (SMD-2261)
 
 **What changed.**
 - **The record.** `readDatabaseFacts` (`server-portable/brain-info.ts`) gains a guarded read, `boardSync`, taken with the counts: `max(metadata->>'linear_updated_at')`, which `sync-linear.ts` writes. It is normalised to an ISO instant in UTC. It is null when no thought carries a usable one. A read that did not answer is named in `unread`. Preflight's `stats: false` read doesn't take it. The MCP server and the REST core each call the same core reader, so the field appears at once on the `brain_info` tool (a `Board sync` row), keyed `/health` and `GET /v1/brain`.

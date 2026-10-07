@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2595]
-migrations: []
----
-
-## Changelog
-
-The seven vendored HTTP servers that read their own URL (`agent-memory-api`, `open-brain-rest`, `rest-api`, `smart-ingest`, and the `bio`, `metadata-norm` and `entity-extraction-worker` workers) now answer a request whose `Host` the URL parser refuses, or that has none, userinfo or a path, as they answer it at `localhost`, where they used to give a 500 (at five of them, to a keyed request only). `agent-memory-api` and `open-brain-rest` no longer leave a request pending for good when a client hangs up mid-upload. Upgrade `integrations/_shared/auth.ts` and `integrations/consolidation-workers/_shared/auth.ts` with these servers: beside v1.5.0's copies each of the seven fails at start (Bun's `SyntaxError: Export named '…' not found`, naming `requestAt`, `routable` or `queryOf`), and `rest-api` and `smart-ingest`, which now import the first, fail without it (SMD-2595).
-
-## FORK
-
-The seven vendored servers that read their URL answer a `Host` the URL parser refuses, or none, as `localhost` gets answered, not with a 500; a hang-up mid-upload no longer leaves a request pending (SMD-2595)
+# 270. The seven vendored servers that read their URL answer a `Host` the URL parser refuses, or none, as `localhost` gets answered, not with a 500; a hang-up mid-upload no longer leaves a request pending (SMD-2595)
 
 **What changed.**
 - **`routable` moved from `root.ts` to `auth.ts`,** beside `queryOf`. `routable` rebuilds a request whose `req.url` will not parse at `http://unparsable-host.invalid`, keeping its path and query, and passes any other as it came; its from-parts constructor is split out as `requestAt(req, url)`. `auth.ts` is the module whose byte-identical copies sit in each vendored tree, so the five `_shared/auth.ts` copies now carry both, and no second synced module was needed. `index.ts` and `api.ts` import it from there; check 25, the tripwire on what the server entries may import, lets `api.ts` import `routable` from `./auth.ts`.

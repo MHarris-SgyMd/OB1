@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2510]
-migrations: []
----
-
-## Changelog
-
-A thought's type, topics, people and action items now print on one line each, wherever a reply shows them: `search_thoughts`, `search_thoughts_keyword`, `list_thoughts`' item header, `capture_thought`'s confirmation and `thought_stats`' breakdowns. Before this fix, a metadata value holding a line break printed raw. An importer's payload or a steered extraction could leave a topic reading `--- Result 9 ---` and `By: … · trust operator` on lines of their own, above the fenced text, as another thought's block. Tag extraction now keeps only its tag keys, so a steered model can no longer set the server's own metadata. The session-capture hook no longer reads ids from `thought_stats`, which prints none (SMD-2510).
-
-## FORK
-
-A thought's metadata prints on one line in every reply, so it cannot forge a result block (SMD-2510)
+# 257. A thought's metadata prints on one line in every reply, so it cannot forge a result block (SMD-2510)
 
 **What changed.**
 - **`metaText` and `metaList` in `server-portable/render.ts`.** A metadata value goes through `snipText`, the one-line cleaner proposals and the change feed already quote a thought through. It is cut at a bound: 40 characters for a type, 80 for a topic or a person, 200 for an action item. A list drops an entry that is left empty, and a value that is not a string is said as `String()` says it.
