@@ -1382,11 +1382,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               }
             }
             if (hardStopped) return;
-            outage.settled(b.thought_id);
             judged++;
             if (ticketCalls === null) totals.ticketCallsUnread++;
             else totals.ticketCalls += ticketCalls;
-            if (stopAfter) err(`  ${workerId}: provider still failing — this worker stops after recording this thought; ${FOLLOW ? "the next poll goes on" : "re-run when it is back"}`);
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
               let recorded = false;
@@ -1399,12 +1397,21 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 // return, and it is not counted lost (review pass 3).
                 if (FOLLOW && databaseUnavailable(e)) {
                   hb.held.add(b.thought_id);
+                  // Not judged after all: the claim judges it again (review pass 4).
+                  judged--;
+                  if (ticketCalls === null) totals.ticketCallsUnread--;
+                  else totals.ticketCalls -= ticketCalls;
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — recording nothing for ${b.thought_id}; it returns to the pool when the database answers`);
                   return;
                 }
                 err(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
               }
-              if (recorded) failed++;
+              if (recorded) {
+                failed++;
+                // A suspect no longer once its failure is recorded — not before,
+                // so one the database kept from its record stays one (review pass 4).
+                outage.settled(b.thought_id);
+              }
               // The hard stop's release beat this one: the caller's own stop, not a lapse (SMD-2425).
               else if (hardStopped) return;
               else {
@@ -1413,6 +1420,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 lost++;
                 err(`  ${b.thought_id}: the claim was no longer this worker's at release; the failure below was not recorded`);
               }
+              // Said once the record is settled, not before (review pass 4).
+              err(`  ${workerId}: provider still failing — this worker stops after this thought; ${FOLLOW ? "the next poll goes on" : "re-run when it is back"}`);
               err(`  ${b.thought_id}: ${outcome.error}`);
               return;
             }
@@ -1468,6 +1477,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           } else {
             done++;
           }
+          outage.settled(b.thought_id);
           progress();
         }
       }

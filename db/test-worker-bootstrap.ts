@@ -304,12 +304,17 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const lister = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(req) { if (req.method !== "GET") chats++; return listing(); } });
   const at = { base: `http://127.0.0.1:${lister.port}/v1`, headers: {} };
   try {
-    ok((await modelListed(at, "big", 2000)) === "listed" && (await modelListed(at, "absent", 2000)) === "unlisted" && chats === 0,
+    ok((await modelListed(at, "big", "stub-meta", 2000)) === "listed" && (await modelListed(at, "absent", "stub-meta", 2000)) === "unlisted" && chats === 0,
       "GET /models: a listed model (its :latest tag implied) is listed, another unlisted, and no model was called");
+    // Review pass 4: unlisted only where the list names models as chat does.
+    ok((await modelListed(at, "absent", "gemini-2.0-flash", 2000)) === "unknown",
+      "a list that does not name the model chat just answered for (Gemini's models/<name>, llama-server's one alias) proves nothing: unknown");
+    ok((await modelListed(at, "big:32b", "stub-meta", 2000)) === "unknown",
+      "a model sharing a listed id's base (an Ollama tag not pulled, an OpenRouter :nitro variant) is unknown, not refused");
     listing = () => new Response("404 page not found", { status: 404 });
-    ok((await modelListed(at, "absent", 2000)) === "unknown", "a provider with no /models is unknown, refusing nothing");
+    ok((await modelListed(at, "absent", "stub-meta", 2000)) === "unknown", "a provider with no /models is unknown, refusing nothing");
     listing = () => Response.json({ models: ["absent"] });
-    ok((await modelListed(at, "absent", 2000)) === "unknown", "a list of another shape is unknown");
+    ok((await modelListed(at, "absent", "stub-meta", 2000)) === "unknown", "a list of another shape is unknown");
     listing = () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"error":')); } }), { status: 404 });
     const unread = await probeChat(at, "m", 500);
     ok(unread.state === "out", `a 404 whose body never arrives is out, not refused (${JSON.stringify(unread)})`);

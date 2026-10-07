@@ -394,13 +394,17 @@ export class ProviderDown extends Error {
 
 /**
  * Whether the provider lists `model` (SMD-2599, review pass 3): GET /models,
- * read only for an answer of `unlisted` — a 200 whose `data` lists models,
- * none of them this one (`sameModel`). Anything else — another status, a
- * body of another shape, no answer — is `unknown`, and refuses nothing. It
- * loads no model, where a chat probe of a large escalation model loaded it
- * at every start and evicted the model the first call needs.
+ * which loads no model, where a chat probe of a large escalation model loaded
+ * it at every start and evicted the model the first call needs. `listed`
+ * when a listed id is the model (`sameModel`). `unlisted` only when the list
+ * names models by the names chat takes — `reference`, a model chat has just
+ * answered for, is listed by its own name — and no listed id shares the
+ * model's base, the name before its last `:` tag (review pass 4: Gemini
+ * lists `models/<name>`, llama-server one alias for any name, OpenRouter
+ * not its `:nitro` variants, so an unlisted id there proved nothing).
+ * Anything else — another status, another shape, no answer — is `unknown`.
  */
-export async function modelListed(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<"listed" | "unlisted" | "unknown"> {
+export async function modelListed(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, reference: string, timeoutMs: number, wake?: AbortSignal): Promise<"listed" | "unlisted" | "unknown"> {
   try {
     const r = await fetch(`${endpoint.base}/models`, {
       method: "GET",
@@ -413,7 +417,10 @@ export async function modelListed(endpoint: Pick<ProviderEndpoint, "base" | "hea
     if (!Array.isArray(body?.data) || body.data.length === 0) return "unknown";
     const ids = body.data.map((m) => (m as { id?: unknown })?.id).filter((id): id is string => typeof id === "string");
     if (ids.length === 0) return "unknown";
-    return ids.some((id) => sameModel(id, model)) ? "listed" : "unlisted";
+    if (ids.some((id) => sameModel(id, model))) return "listed";
+    if (!ids.some((id) => sameModel(id, reference))) return "unknown";
+    const base = model.includes(":") ? model.slice(0, model.lastIndexOf(":")) : model;
+    return ids.some((id) => id === base || id.startsWith(`${base}:`)) ? "unknown" : "unlisted";
   } catch {
     return "unknown";
   }

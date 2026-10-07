@@ -3908,7 +3908,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 2, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
         .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
       try {
-        await Bun.sleep(1000);
+        await pollUntil(async () => probes >= 1, 10_000);
+        await Bun.sleep(500);
         const startProbes = probes;
         // A 503 past the pauses.
         down = "503";
@@ -3917,7 +3918,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
         created.push(busy);
         const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Extraction request to [^)]*503/.test(l)) && (await claimRow(busy))?.status === "pending", 6000);
         const during = await claimRow(busy);
-        const busyDone = await pollUntil(() => extractedNow(busy), 25_000);
+        const busyDone = await pollUntil(async () => (await claimRow(busy))?.status === "succeeded" && (await extractedNow(busy)), 25_000);
         assert(startProbes >= 1 && pooled && during?.attempt_count === 0 && during.last_error === null && busyDone && (await claimRow(busy))?.status === "succeeded" && !settled,
                `a 503 past the pauses: the thought goes back to the pool (pending, attempt ${during?.attempt_count}, no error), the follower waits, and extracts it when the provider answers — still running (pooled ${pooled}, extracted ${busyDone}, ${probes - startProbes} probe(s) answered)`);
         assert(lines.some((l) => /the follower calls stub-meta at http:\/\/127\.0\.0\.1:\d+\/v1 for one token after 5 s and then twice as long each time, up to 5 min/.test(l)) && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
@@ -3927,7 +3928,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
         downUntil = Date.now() + 3000;
         const pulled = await seed("Uma rebuilt the grafana alerts after the model was pulled again.");
         created.push(pulled);
-        const pulledDone = await pollUntil(() => extractedNow(pulled), 20_000);
+        const pulledDone = await pollUntil(async () => (await claimRow(pulled))?.status === "succeeded" && (await extractedNow(pulled)), 20_000);
         assert(pulledDone && (await claimRow(pulled))?.status === "succeeded" && !settled && lines.some((l) => /the provider is not answering \([^)]*404 \{"error":\{"message":"model \\"stub-meta\\" not found/.test(l)),
                `the model missing mid-run is an outage, not the provider's refusal: no exit, and the thought is extracted once the model answers (extracted ${pulledDone}, settled ${settled})`);
         // A hung provider: the call times out at 2 s, and the probe gets no answer either.
@@ -3935,7 +3936,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
         downUntil = Date.now() + 6000;
         const hung = await seed("Vic moved the grafana panels while the provider hung.");
         created.push(hung);
-        const hungDone = await pollUntil(() => extractedNow(hung), 25_000);
+        const hungDone = await pollUntil(async () => (await claimRow(hung))?.status === "succeeded" && (await extractedNow(hung)), 25_000);
         assert(hungDone && (await claimRow(hung))?.status === "succeeded" && !settled && lines.some((l) => /the provider is not answering \([^)]*timed out/.test(l)),
                `a timeout the probe cannot get past either is an outage: the thought is extracted once the provider answers, not failed (extracted ${hungDone}, claim ${(await claimRow(hung))?.status})`);
         // A thought that draws a 500 every time, the provider otherwise up.
@@ -4564,10 +4565,15 @@ console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger m
   // A runaway on the small model's FIRST call only: the larger model answers
   // whole, and so does the small model's penalised retry (frequency_penalty
   // set), so the control run below converges without escalation.
+  /** What GET /models lists, and whether a gone-stub* escalation model is served, for a follower's cases below (SMD-2599 review pass 4). */
+  let listedIds: string[] = ["stub-meta"];
+  let goneServed = false;
   const escModel = Bun.serve({
     port: 0,
     async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: listedIds.map((id) => ({ id })) });
       const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages?: { role: string; content: string }[] };
+      if (body.model?.startsWith("gone-stub") && !goneServed) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (/runaway/.test(prompt) && body.model === "stub-meta" && body.frequency_penalty === undefined) {
         return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
@@ -4611,6 +4617,59 @@ console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger m
   const ctlLine = await dumpLineFor(dumpCtl, tCtl);
   assert(ctlLine?.retried === true && ctlLine.escalated === undefined, `the dump line records retried and NOT escalated (${JSON.stringify(ctlLine)})`);
   try { unlinkSync(dumpCtl); } catch { /* already gone */ }
+
+  // A follower's escalation model (SMD-2599 review pass 4). One the start
+  // saw listed that goes missing — pulled again — is an outage probed by its
+  // own name, and the runaway is escalated once it is back; one the start
+  // could not confirm — the list names another tag of its base, so its
+  // absence proves nothing — is the provider's refusal at its first 404,
+  // exit 2, as before this ticket.
+  {
+    const saved = [...TRANSIENT_PAUSES_MS];
+    TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
+    try {
+      await sql`DELETE FROM thoughts`;
+      await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+      // Seen at start, then gone, then back.
+      listedIds = ["stub-meta", "gone-stub"];
+      goneServed = false;
+      const seenLines: string[] = [];
+      const seenStop = new AbortController();
+      let seenCode = -1;
+      const seenRun = runExtract({ url: URL_!, env: { ...baseEnv, OB1_EXTRACT_ESCALATE_MODEL: "gone-stub" }, workers: 1, follow: 1, signal: seenStop.signal, writer: { out: (l) => seenLines.push(l), err: (l) => seenLines.push(l) } })
+        .then((c) => { seenCode = c; }, (e) => { seenCode = -2; seenLines.push(`rejected: ${(e as Error).message}`); });
+      await Bun.sleep(1000);
+      const tSeen = await seedOne("The runaway widget report, while the escalation model is pulled again.");
+      const waited = await pollUntil(async () => seenLines.some((l) => /the follower calls gone-stub at /.test(l)), 10_000);
+      goneServed = true;
+      const seenDone = await pollUntil(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${tSeen}::uuid`)[0]?.status === "succeeded", 20_000);
+      seenStop.abort();
+      await seenRun;
+      assert(waited && seenDone && seenCode === 0,
+             `an escalation model seen at start that goes missing is an outage probed by its own name, and the runaway is escalated once it is back (waited ${waited}, extracted ${seenDone}, exit ${seenCode})`);
+      // Never confirmed: the list names gone-stub:latest, not gone-stub:7b, and the 404 is the provider's refusal.
+      await sql`DELETE FROM thoughts`;
+      await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+      listedIds = ["stub-meta", "gone-stub:latest"];
+      goneServed = false;
+      const unseenLines: string[] = [];
+      const unseenStop = new AbortController();
+      const unseenGuard = setTimeout(() => unseenStop.abort(), 20_000);
+      let unseenCode = -1;
+      const unseenRun = runExtract({ url: URL_!, env: { ...baseEnv, OB1_EXTRACT_ESCALATE_MODEL: "gone-stub:7b" }, workers: 1, follow: 1, signal: unseenStop.signal, writer: { out: (l) => unseenLines.push(l), err: (l) => unseenLines.push(l) } })
+        .then((c) => { unseenCode = c; }, (e) => { unseenCode = -2; unseenLines.push(`rejected: ${(e as Error).message}`); });
+      await Bun.sleep(1000);
+      await seedOne("The runaway widget report, with an escalation model never confirmed.");
+      await unseenRun;
+      clearTimeout(unseenGuard);
+      assert(unseenCode === 2 && unseenLines.some((l) => /the provider refuses the request itself \(Extraction request to [^)]*404/.test(l)) && !unseenLines.some((l) => /the follower calls gone-stub/.test(l)),
+             `an escalation model the start could not confirm draws the provider's refusal at its first 404, exit 2, not an outage that waits on it for ever (exit ${unseenCode})`);
+    } finally {
+      listedIds = ["stub-meta"];
+      goneServed = false;
+      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved);
+    }
+  }
 
   escModel.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
