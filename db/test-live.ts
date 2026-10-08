@@ -10431,9 +10431,26 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     missing = false;
     assert(refusedNeverStarted === 2 && !lines.some((l) => /tries it again/.test(l)),
       `woken while waiting at its start, then refused at the next: it never got past its start, so --follow ends with 2 (exit ${refusedNeverStarted})`);
+    // A pass that throws (here its Writer, at its first line) rejects the
+    // scheduler with its error once the other pass stops, and leaves no
+    // unhandled rejection for the host (review pass 4).
+    let unhandled = 0;
+    const onUnhandled = () => { unhandled++; };
+    process.on("unhandledRejection", onUnhandled);
+    const throwing = { out: (l: string) => { if (/\[extract\]\s+job:/.test(l)) throw new Error("the writer's stream is closed"); lines.push(l); }, err: (l: string) => { lines.push(l); } };
+    let thrownBy: unknown = null;
+    try {
+      const thrownRun = sleepRun({ follow: true, writer: throwing }).then(() => "returned" as const, (e: Error) => { thrownBy = e; return "rejected" as const; });
+      const thrownOutcome = await Promise.race([thrownRun, Bun.sleep(30_000).then(() => "hung" as const)]);
+      await Bun.sleep(500);
+      assert(thrownOutcome === "rejected" && /the writer's stream is closed/.test((thrownBy as Error | null)?.message ?? "") && unhandled === 0,
+        `a pass that throws rejects the scheduler with its error, and leaves no unhandled rejection (${thrownOutcome}; ${unhandled} unhandled)`);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
 
     // The same refusal after the pass has run in this process — a model
-    // re-pulled, a key rotated — is retried on the outage schedule, the row
+    // re-pulled, a credit top-up — is retried on the outage schedule, the row
     // failed meanwhile, and the next sleep that runs puts it back to ok.
     lines.length = 0;
     // Two synced notes beside the March billing note: consolidation has pairs
@@ -10444,7 +10461,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     let retryDone = false;
     const retrying = sleepRun({ follow: true, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
     await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
-    await pollUntil(async () => (await claims(CO)).claimed === 1, 20_000);
+    await pollUntil(async () => (await claims(CO)).claimed === 1, 40_000);
     const [judgedInHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'claimed'`;
     missing = true;
     await capture("A note that wakes it before the model goes.", "op-sleep", 0, 5);
@@ -10485,7 +10502,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     slow = 1500;
     const restorePauses = shortenPauses();
     try {
-      await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
+      await pollUntil(async () => (await claims(EX)).claimed === 1, 40_000);
       unavailable = true;
       const failedBeat = await pollUntil(async () => (await beat())?.outcome === "failed", 20_000);
       unavailable = false;

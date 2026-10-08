@@ -9,7 +9,7 @@
  *   bun db/sleep.ts --url … --dry-run               # the idle reading and each pass's pool; writes nothing
  *   await run({ url, follow: true, signal })         # in-process: import { run } from "./sleep.ts" (SMD-2304's engine shape)
  *   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1, for each pass)
- *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, or a pass's refusal (under --follow, only one before that pass has run) · 130 a signal before one sleep ended, or a second signal (at once)
+ *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried — "Refusals" below) · 130 a signal before one sleep ended, or a second signal (at once)
  *
  * ── Quiet ───────────────────────────────────────────────────────────────────
  * The brain is awake while it is used: a read the server logged (query_log,
@@ -67,27 +67,36 @@
  * --poll seconds of a pass beside the live call, and the calls in flight
  * thrown away. The first live call is not spared: it is recorded after the
  * model work it does, so on a one-slot model it can queue behind the call in
- * hand. Awake, it reads again when the brain could first fall asleep — the
- * newest live event's age plus --quiet — at most a minute apart.
+ * hand. Awake, it reads again when the brain could first fall asleep —
+ * --quiet seconds after the newest live event — at most a minute apart.
  *
  * ── Refusals ────────────────────────────────────────────────────────────────
  * Every sleep starts its passes afresh, so each meets its start's refusals
  * again (the model not served, the key refused). One rule, on a fact the
  * scheduler has — whether the pass got past its start (the engines' onPass):
  *  - a refusal at the start of a pass that got past its start earlier in
- *    this process — a key rotated, a model re-pulled — is retried under
- *    --follow on SMD-2599's outage schedule, heartbeat:sleep failed and
- *    re-stamped through the wait, and the next sleep starting from ok;
+ *    this process is retried under --follow on SMD-2599's outage schedule,
+ *    heartbeat:sleep failed and re-stamped through the wait, until a pass of
+ *    a later sleep stamps. What a retry can mend: a model re-pulled, a 402
+ *    cleared by topping up credit, a gateway's passing 401/403/404. What it
+ *    cannot, retried until the scheduler is restarted: a worker key revoked
+ *    (the environment is read once; a revoked key stays so), another
+ *    process's --switch-key (this process's job key is fixed);
  *  - a refusal at a pass's first start, or mid-pass (the provider refusing
  *    the request itself, a key refused on a real call), is the
- *    configuration's, as it is for a follower: it ends the scheduler with 2;
+ *    configuration's, as it is for a follower: it ends the scheduler with 2.
+ *    So the same 402 or 401 ends it when it lands mid-pass, and is retried
+ *    when a sleep's start meets it first;
  *  - any other code a pass ends with ends the scheduler.
  *
  * ── Heartbeat ───────────────────────────────────────────────────────────────
  * `heartbeat:sleep` in ob1_config (db/pass-stamp.ts, SMD-2261): running while
  * asleep, re-stamped at least every minute awake or asleep, `failed` while a
- * pass's last word was (a provider still failing), ended when the scheduler
- * stops — a second signal included. The passes stamp through it, not their
+ * pass's last word was (a provider still failing mid-pass, a refusal) — kept
+ * into the next sleep until one of its passes stamps — ended when the
+ * scheduler stops, a second signal included. A pass waiting at its start for
+ * a provider that does not answer stamps nothing: the row reads running with
+ * the last word until the wait ends. The passes stamp through it, not their
  * own rows, so a wake does not end a follower's row for preflight to warn
  * about, and preflight's consolidate pass row reads it as the scheduler at
  * work. Only --follow stamps: one sleep leaves no row to go stale, as a
@@ -122,23 +131,23 @@ const FLAGS = { url: "one", quiet: "one", poll: "one", workers: "one", follow: "
 const HINTS = { url: "<postgres://…>", quiet: "<SECONDS>", poll: "<SECONDS>", workers: "<N>" };
 
 /** The quiet before a sleep, from the stable brain's logs replayed (the header): 93% of the time asleep, a median sleep of 16.6 min. */
-export const DEFAULT_QUIET_S = 300;
+const DEFAULT_QUIET_S = 300;
 /** How often the logs are read while asleep: the most a pass runs beside a live call. */
-export const DEFAULT_POLL_S = 5;
+const DEFAULT_POLL_S = 5;
 /** The followers' own poll for new work, their bare --follow's. */
-export const PASS_FOLLOW_S = 15;
+const PASS_FOLLOW_S = 15;
 /** How far before a sleep began its wake reads, for a write committed after it in a transaction begun before (asleep()). */
-export const WAKE_SLACK_S = 30;
+const WAKE_SLACK_S = 30;
 /** The longest --poll: the awake wait is at most a minute, the heartbeat's floor, and a poll past it would break that. */
-export const MAX_POLL_S = 60;
+const MAX_POLL_S = 60;
 /** A query log with no row this recent is likely off (OB1_QUERY_LOG unset), and a search does not wake the brain. */
-export const QUERY_LOG_QUIET_S = 86_400;
+const QUERY_LOG_QUIET_S = 86_400;
 /** A pass's own line about the stop the scheduler made it take, not the operator's signal: left out of the scheduler's output. */
 const PASS_STOP_LINE = /^\s*(stopping after the current thought|second signal — exiting now|stopped before the pass began)/;
 
 /** The two passes, in their order. */
-export const PASSES = ["extract", "consolidate"] as const;
-export type PassName = (typeof PASSES)[number];
+const PASSES = ["extract", "consolidate"] as const;
+type PassName = (typeof PASSES)[number];
 
 /**
  * One sleep scheduler's run — the CLI's flags, typed. `url` is required: each
@@ -169,16 +178,16 @@ export interface SleepOptions {
 }
 
 /** A pass's pool: its claim rows by status, and the thoughts a pass would add to it. */
-export type Pool = { pending: number; claimed: number; failed: number; unpooled: number };
+type Pool = { pending: number; claimed: number; failed: number; unpooled: number };
 /** Nothing for the pass to do: no row pending or in flight, and nothing to add. A failed row is the operator's. */
-export const drained = (p: Pool): boolean => p.pending + p.claimed + p.unpooled === 0;
+const drained = (p: Pool): boolean => p.pending + p.claimed + p.unpooled === 0;
 
 /**
  * A pass's pool, read as its own --status reads it: extraction's universe is
  * every thought (enqueue_thoughts adds those with no row under the key);
  * consolidation's is migration 029's consolidation_pool.
  */
-export async function poolOf(sql: SQL, pass: PassName, job: string): Promise<Pool> {
+async function poolOf(sql: SQL, pass: PassName, job: string): Promise<Pool> {
   const rows = (await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${job} GROUP BY status`) as { status: string; c: number }[];
   const by = Object.fromEntries(rows.map((r) => [r.status, Number(r.c)]));
   const [{ n }] = pass === "extract"
@@ -194,7 +203,7 @@ export async function poolOf(sql: SQL, pass: PassName, job: string): Promise<Poo
  * 'ingested' (NULL counts as live). Bounded below, so a brain whose newest
  * audit rows are all sync writes is not read back to its last live one.
  */
-export async function newestLive(sql: SQL, after: Date | number, readsLog: boolean): Promise<{ now: Date; read: Date | null; write: Date | null }> {
+async function newestLive(sql: SQL, after: Date | number, readsLog: boolean): Promise<{ now: Date; read: Date | null; write: Date | null }> {
   const since = typeof after === "number" ? sql`now() - make_interval(secs => ${after})` : sql`${after}::timestamptz`;
   const read = readsLog ? sql`(SELECT max(logged_at) FROM query_log WHERE logged_at > ${since})` : sql`NULL::timestamptz`;
   const [r] = await sql`
@@ -442,6 +451,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       ended.abort();
       throw e;
     });
+    // Handled now, read later: a pass that throws is rejected out of
+    // stopPasses at the next poll, and until then the runtime would report it
+    // unhandled — printed twice, and an in-process host's exit forced to 1
+    // (review pass 4). allSettled still sees the rejection.
+    p.done.catch(() => {});
     running.push(p);
     return p;
   };
@@ -503,11 +517,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
 
   /**
    * Asleep from `since`: extraction alone until its pool drains, then
-   * consolidation beside it. "woken" on a live event, "done" when one sleep
-   * (no --follow) drained both, "stopped" on a stop — the passes stopped
-   * before it returns, inside the heartbeat's `during` — or a pass that ended
-   * by itself (a refusal), with its code and whether it had got past its
-   * start in this sleep.
+   * consolidation beside it. Returns one of: "woken" on a live event; "done"
+   * when one sleep (no --follow) drained both; "stopped" on a stop, the passes
+   * stopped before it returns, inside the heartbeat's `during`; or, for a pass
+   * that ended by itself (a refusal), its name, its code and whether it had
+   * got past its start in this sleep.
    */
   const asleep = async (since: Date): Promise<"woken" | "done" | "stopped" | { pass: PassName; code: number; started: boolean }> => {
     for (const k of PASSES) delete words[k];
@@ -574,7 +588,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   };
 
   try {
-    /** Refusals in a row since a sleep last ran: the next is tried on SMD-2599's outage schedule. */
+    /** Refusals in a row, reset by a sleep that ends without one: the next is tried on SMD-2599's outage schedule. */
     let refusals = 0;
     for (;;) {
       const since = await awaitQuiet();
@@ -589,7 +603,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         // Every sleep starts its passes afresh, so each meets its start's
         // refusals again. One at the start (2 before onPass: the probe, the
         // key) by a pass that got past its start in an earlier sleep is one a
-        // restart could meet as well — a key rotated, a model re-pulled — and
+        // restart could meet as well — a model re-pulled, a 402 cleared — and
         // under --follow it is retried, the row failed meanwhile, rather than
         // ending a scheduler nothing restarts. A pass refusing at its first
         // start, or mid-pass (the provider refusing the request itself, a key

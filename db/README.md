@@ -2474,7 +2474,7 @@ bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ev
 bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, or a pass's refusal (under --follow, only one before that pass has run) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** Until SMD-2678's compose service, on the compose stack (whose
@@ -2513,15 +2513,20 @@ longer than every sleep is never finished while the brain keeps waking, and
 consolidation does not join while it is pending (SMD-2694). A failed row stays
 failed: `--retry-failed` is the operator's. A pass refusing at its start (the
 model not served, the key refused) after it got past its start earlier in this
-process — a model re-pulled, a key rotated — is retried on SMD-2599's schedule
-(5 s, doubling, at most 5 min). A refusal at a pass's first start, or mid-pass
-(the provider refusing the request itself), ends the scheduler with 2, as it
-ends a follower.
+process is retried on SMD-2599's schedule (5 s, doubling, at most 5 min): that
+mends a model re-pulled, a 402 cleared by topping up credit, a gateway's
+passing 401/403/404 — not a revoked worker key or another process's
+`--switch-key`, which are retried until you restart it with the right key. A
+refusal at a pass's first start, or mid-pass (the provider refusing the
+request itself), ends the scheduler with 2, as it ends a follower — so the
+same 402 ends it mid-pass and is retried when a sleep's start meets it first.
 
 **Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute:
 preflight's `workers` row reads "running a pass" while asleep, "alive" while
-awake, "its last pass failed" while a pass's last word was a failure, and
-stopped once it ends. Its `consolidate pass` row reads a fresh one as the
+awake, "its last pass failed" while a pass's last word was a failure (into the
+next sleep, until one of its passes stamps), and stopped once it ends. A pass
+waiting at its start for a provider that does not answer stamps nothing, so the
+row keeps its last word then. Its `consolidate pass` row reads a fresh one as the
 scheduler working the current judge's key, rather than asking for a second
 worker. Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
 
@@ -3540,7 +3545,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2467 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1152 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1153 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

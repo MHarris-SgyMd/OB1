@@ -3386,7 +3386,7 @@ else {
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await beat("heartbeat:sleep", v({ every_s: 60 }), 600);
     const sleepOut = await run(SQL_ENV);
-    assert(/!\s+workers\s+sleep stale \(last stamped 10 min ago, every 60 s\)$/.test(row(sleepOut.out, "workers")) && /sleep has not stamped for 10 min: start it again — from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\./.test(fix(sleepOut.out, "workers")),
+    assert(/!\s+workers\s+sleep stale \(last stamped 10 min ago, every 60 s\)$/.test(row(sleepOut.out, "workers")) && /sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile workers run --rm --no-deps extract bun db\/sleep\.ts --follow, .*; from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\./.test(fix(sleepOut.out, "workers")),
       `a stale heartbeat:sleep reads as the sleep scheduler's and names its restart (${row(sleepOut.out, "workers")} | ${fix(sleepOut.out, "workers")})`);
 
     // Each claim worker's restart, and a stale row with an alarm told its restart first.
