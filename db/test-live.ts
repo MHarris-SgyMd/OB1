@@ -10180,7 +10180,8 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     await fast.alive();
     const idle = await row(fast.key);
     let inPass: { running?: boolean; outcome?: string } | null = null;
-    await fast.during((async () => { await fast.alive("failed"); inPass = await row(fast.key); })());
+    // The pass function runs as it is made, before during() marks the row inside a pass: it waits first.
+    await fast.during((async () => { await Bun.sleep(100); await fast.alive("failed"); inPass = await row(fast.key); })());
     assert(idle?.running === false && (idle?.age ?? 9) < 1 && idle.outcome === "ok"
            && (inPass as { running?: boolean } | null)?.running === true && (inPass as { outcome?: string } | null)?.outcome === "failed",
       `alive() re-stamps the row, running only inside a pass, its outcome kept unless given (${JSON.stringify(idle)} → ${JSON.stringify(inPass)})`);
