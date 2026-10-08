@@ -332,7 +332,11 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   app.on(["GET", "POST", "PATCH", "DELETE"], "/v1/plugins/*", async (c) => {
     const method = (c.req.method === "HEAD" ? "GET" : c.req.method) as Method;
     const found = pluginRoutes().find((r) => r.method === method && r.pattern.test(c.req.path));
-    if (!found) return c.notFound();
+    if (!found) {
+      // No operation's route: the request line says so as any unrouted one does, not the wildcard's template.
+      c.set("template", "-");
+      return c.notFound();
+    }
     const { op } = found;
     c.set("template", op.path);
     const p = await caller(c);
@@ -359,7 +363,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     }
     if (outcome.ok) return c.json(outcome.value, 200);
     const { status, ...facts } = outcome.refusal;
-    return c.json({ ...facts, retryable: false }, status);
+    return c.json(facts, status);
   });
 
   // A path a route serves, sent with another method, is a 405 naming the

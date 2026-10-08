@@ -1,6 +1,6 @@
 # Plugins
 
-A plugin adds operations to the brain itself (SMD-2310). It runs inside the REST core's process, and its operations join the brain's one contract. The REST core serves them under `/v1/plugins/<name>/`, the MCP server lists them as tools named `<name>_<operation>`, and the OpenAPI document describes them. Each one sits behind the same scope gate as a core operation. A plugin has no server, keys or database connection of its own.
+A plugin adds operations to the brain itself (SMD-2310). It runs inside the brain's own servers (the REST core and the MCP server), and its operations join the brain's one contract. The REST core serves them under `/v1/plugins/<name>/`, the MCP server lists them as tools named `<name>_<operation>`, and the OpenAPI document describes them. Each one sits behind the same scope gate as a core operation. A plugin has no server, keys or database connection of its own.
 
 | Plugin | What it does |
 | --- | --- |
@@ -23,8 +23,18 @@ A directory, `plugins/<name>/`, with:
 
 ## The rules a plugin is held to
 
-- **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own files, nothing else. zod comes from the SDK.
-- **The brain's thoughts are reached through `ctx.call(name, input)` alone.** That is a core operation called as the caller, behind the caller's own scope: a read operation called with a read key cannot capture or update. The audit row names the caller.
-- **Names are checked when the server starts.** No two operations share a tool name, and none takes a core tool's name. A malformed manifest stops the server.
+Checked when the server starts, so a malformed manifest stops it:
+
+- No two operations share a tool name, and none takes a core tool's name.
+- No two operations of a plugin have routes that one request could match (`/items/{id}` beside `/items/latest`).
+- A path field is a string field.
+- An output schema does not transform: MCP holds the answer to it a second time.
+- A refusal is 400, 403, 404, 409 or 422 with an `UPPER_CASE` code, and is never retryable.
+
+Held by the maintainer's review:
+
+- **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own files, nothing else; zod comes from the SDK.
+- **The brain's thoughts are reached through `ctx.call(name, input)` alone.** That is a core operation called as the caller, behind the caller's own scope: a read operation called with a read key cannot capture or update. A write through it names the caller on its audit row.
+- **An output says only what the caller may see.** `ctx.call` hands back the core operation's whole value: for `capture_thought`, more than the REST core tells a key that cannot read (`rest/app.ts`'s `capturedFor`). What reaches the caller is what the output schema declares, so it should not declare more.
 
 Plugins are **curated**: they run in the brain's process with its privileges, so a new one needs maintainer review.

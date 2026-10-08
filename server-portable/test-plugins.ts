@@ -77,7 +77,20 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
     a: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/items/{x}", input: { x: z.string() }, output: {}, handler: async () => ok({}) }),
     b: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/items/{y}", input: { y: z.string() }, output: {}, handler: async () => ok({}) }),
   } });
-  assert(/another operation of the plugin takes GET \/items\/\{\}/.test(manifestProblems([twoRoutes]).join()), "two operations on one method and path shape are refused");
+  assert(/its route GET \/items\/\{y\} matches a request operation "a"'s does/.test(manifestProblems([twoRoutes]).join()), "two operations on one method and path shape are refused");
+  const shadowed = definePlugin({ name: "crm", title: "T", description: "D", operations: {
+    by_id: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/items/{id}", input: { id: z.string() }, output: {}, handler: async () => ok({}) }),
+    latest: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/items/latest", input: {}, output: {}, handler: async () => ok({}) }),
+    other_method: operation({ title: "t", description: "d", scope: "write", method: "POST", path: "/items/latest", input: {}, output: {}, handler: async () => ok({}) }),
+    deeper: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/items/latest/old", input: {}, output: {}, handler: async () => ok({}) }),
+  } });
+  const shadow = manifestProblems([shadowed]);
+  assert(shadow.length === 1 && /"latest".*GET \/items\/latest matches a request operation "by_id"'s does/.test(shadow[0]), `a static segment a {field} would hide is refused, and only that: another method or depth is its own route (${shadow.join("; ")})`);
+  const numberPath = withOp("crm", "get", { path: "/items/{n}", input: { n: z.number().int() } });
+  assert(/its path's \{n\} is not a string field/.test(manifestProblems([numberPath]).join()), "a path field that is not a string is refused: a segment is text, and REST could never reach it");
+  const transformed = withOp("crm", "len", { output: { len: z.string().transform((s) => s.length) } });
+  assert(/its output schema transforms/.test(manifestProblems([transformed]).join()), "an output schema that transforms is refused: MCP holds the answer to it again");
+  assert(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.string().uuid() }, output: { at: z.string().default("now") } })]).length === 0, "a string path field with a format, and an output default, are sound");
   assert(toolNameOf("meal-planning", "add_recipe") === "meal_planning_add_recipe", "a tool name reads the plugin's hyphens as underscores");
 }
 
@@ -234,6 +247,11 @@ const probe = definePlugin({
       input: {}, output: {},
       async handler() { return refuse(500 as never, "lower case"); },
     }),
+    busy: operation({
+      title: "Busy", description: "Refuses, claiming a retry would help.", scope: "read", method: "POST", path: "/busy",
+      input: {}, output: {},
+      async handler() { return refuse(409, "TRY_AGAIN", { retryable: true, message: "later" }); },
+    }),
   },
 });
 
@@ -282,6 +300,11 @@ console.log("\n[6] Over REST: a path field decoded and held to the schema, a bod
   assert(r.status === 500 && r.body.code === "FAILED" && /output schema refuses/.test(String(r.body.message)), "an answer its schema refuses → 500 FAILED");
   r = await json(await hit(app, "/v1/plugins/probe-kit/wrong-shape", { key: "read-raw", method: "POST" }));
   assert(r.status === 403 && r.body.needs === "write", "a write operation refuses a read key: 403 needs write");
+  r = await json(await hit(app, "/v1/plugins/probe-kit/busy", { key: "read-raw", method: "POST" }));
+  assert(r.status === 409 && r.body.code === "TRY_AGAIN" && r.body.retryable === false && r.body.message === "later", `a refusal is never retryable, whatever the plugin's facts say (${JSON.stringify(r.body)})`);
+  lines.length = 0;
+  await hit(app, "/v1/plugins/probe-kit/nothing-here", { key: "read-raw" });
+  assert(lines.at(-1)?.startsWith("api GET - 404 ") ?? false, `a plugin path no operation takes logs as any unrouted request, not the wildcard (${lines.at(-1)})`);
 }
 
 console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for the keys whose scope reaches it");
@@ -308,6 +331,45 @@ console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for t
   const call = await rpc("cap-raw", "tools/call", { name: "example_recent", arguments: {} });
   const refused = JSON.stringify(call);
   assert(/example_recent/.test(refused) && (call.error !== undefined || (call.result as { isError?: boolean })?.isError === true), `a capture key calling it is refused: the tool is not its (${refused.slice(0, 160)})`);
+  // A read key's call reaches the operation, and its ctx.call reaches the
+  // core: with no store configured, the core's own fault comes back as the
+  // tool's error — the operation ran, through the server's registration.
+  const ran = (await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 2 } })).result as { isError?: boolean; content?: { text: string }[] } | undefined;
+  assert(ran?.isError === true && /^Error: .*DATABASE_URL/.test(ran.content?.[0]?.text ?? ""), `a read key's call runs the operation through to the core, whose fault is the tool's error (${ran?.content?.[0]?.text?.slice(0, 120)})`);
+  const bad = await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 50 } });
+  assert(JSON.stringify(bad).includes("limit") && (bad.error !== undefined || (bad.result as { isError?: boolean })?.isError === true), "an argument past its schema is refused before the operation runs");
+}
+
+console.log("\n[9] The MCP reply: the value as JSON text and as structured content the SDK holds to the output schema; a refusal its code and facts");
+{
+  const { renderPlugin } = await import("./render.ts");
+  const okReply = renderPlugin({ ok: true, value: { item_id: "a", verbose: false } });
+  assert(okReply.isError === undefined && okReply.content[0].text === '{"item_id":"a","verbose":false}' && JSON.stringify(okReply.structuredContent) === '{"item_id":"a","verbose":false}', "a success: the value's JSON, and the value as structured content");
+  const no = renderPlugin({ ok: false, refusal: { status: 404, code: "ITEM_GONE", retryable: false, message: "gone", item_id: "a" } });
+  assert(no.isError === true && no.content[0].text === "Refused: ITEM_GONE — gone" && JSON.stringify(no.structuredContent) === '{"code":"ITEM_GONE","retryable":false,"message":"gone","item_id":"a","text":"Refused: ITEM_GONE — gone"}', `a refusal: its code and message in the text, its facts beside it, no status (${JSON.stringify(no.structuredContent)})`);
+  // The SDK's own check, as index.ts registers a tool: the answer runOperation
+  // held to the output schema passes the SDK's second hold, a default filled.
+  const { McpServer, WebStandardStreamableHTTPServerTransport } = await import("@modelcontextprotocol/server");
+  const defaulted = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: {
+    stamp: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/stamp", input: {}, output: { at: z.string().default("never"), n: z.number() }, async handler() { return ok({ n: 1 }); } }),
+  } });
+  const [op] = loadPlugins("probe-kit", [defaulted])[0].operations;
+  const server = new McpServer({ name: "probe", version: "1" });
+  (server.registerTool as unknown as (n: string, s: unknown, h: (i: unknown) => Promise<unknown>) => unknown)(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output },
+    async (input) => renderPlugin(await runOperation(op, { core, principal: { name: "r", scope: "read" } as Principal }, input)));
+  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  await server.connect(transport);
+  const send = async (id: number, method: string, params: unknown) => (await (await transport.handleRequest(new Request("http://probe/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" }, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) }))).json()) as { result?: { isError?: boolean; structuredContent?: Record<string, unknown> } };
+  await send(0, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } });
+  const stamped = await send(1, "tools/call", { name: "probe_kit_stamp", arguments: {} });
+  assert(stamped.result?.isError !== true && JSON.stringify(stamped.result?.structuredContent) === '{"at":"never","n":1}', `the SDK takes the held answer, its default filled (${JSON.stringify(stamped.result)})`);
+}
+
+console.log("\n[10] Each server refuses to start on a name in OB1_PLUGINS that is no plugin");
+for (const entry of ["index.ts", "api.ts"]) {
+  const p = Bun.spawnSync(["bun", "--no-env-file", entry], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_PLUGINS: "example,nope" }, stdout: "pipe", stderr: "pipe", timeout: 20_000 });
+  const said = p.stderr.toString() + p.stdout.toString();
+  assert(p.exitCode !== 0 && p.exitCode !== null && /"nope", which is no plugin/.test(said), `${entry} exits at its start, naming the name (exit ${p.exitCode}: ${said.match(/OB1_PLUGINS[^\n]*/)?.[0] ?? said.slice(0, 120)})`);
 }
 
 console.log("\n[8] Preflight: a name in OB1_PLUGINS that is no plugin fails the gate; a sound one is reported");

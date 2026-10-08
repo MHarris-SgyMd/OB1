@@ -47,7 +47,10 @@ export interface PluginContext {
    * A core operation, as the caller: the same scope gate a REST route or an
    * MCP tool asks (a read operation's caller with a read key cannot capture
    * through it), the operation's own schema, and the caller's principal on
-   * the audit row. The only way a plugin reaches the brain's thoughts.
+   * the audit row. The only way a plugin reaches the brain's thoughts. Its
+   * answer is the operation's whole value — capture_thought's carries more
+   * than the REST core tells a key that cannot read — so an operation's
+   * output schema should declare no more than its caller may see.
    */
   call<K extends ToolName>(name: K, input: CoreInput<K>): Promise<CoreAnswer<K> | CallForbidden | CallRefusedInput>;
 }

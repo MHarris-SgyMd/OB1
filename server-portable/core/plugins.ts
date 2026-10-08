@@ -61,6 +61,15 @@ export function pluginNames(raw: string | undefined): string[] {
   return (raw ?? "").split(",").map((n) => n.trim()).filter(Boolean);
 }
 
+/** A field's JSON-schema type on one side of the parse, or null when it has none or cannot be stated. */
+function jsonSchemaType(field: z.ZodType, io: "input" | "output"): string | null {
+  try {
+    return ((z.toJSONSchema(field, { io }) as { type?: unknown }).type as string) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * What is wrong with a set of manifests, one sentence each — every manifest in
  * the tree, enabled or not, so a broken plugin fails the suites rather than
@@ -79,7 +88,8 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
     if (!m.title?.trim() || !m.description?.trim()) problems.push(`${at}: a title and a description are required`);
     const keys = Object.keys(m.operations ?? {});
     if (keys.length === 0) problems.push(`${at}: no operations`);
-    const routes = new Set<string>();
+    // Each route taken so far, as its method and segments: two that one request could match are refused, not ordered.
+    const routes: { key: string; method: string; segments: string[] }[] = [];
     for (const key of keys) {
       const op = m.operations[key];
       const where = `${at} operation ${JSON.stringify(key)}`;
@@ -91,12 +101,25 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
       if (!SCOPES.includes(op.scope)) problems.push(`${where}: scope ${JSON.stringify(op.scope)} is not read, capture or write`);
       if (!METHODS.includes(op.method)) problems.push(`${where}: method ${JSON.stringify(op.method)} is not GET, POST, PATCH or DELETE`);
       if (!OPERATION_PATH.test(op.path ?? "")) problems.push(`${where}: path ${JSON.stringify(op.path)} is not segments of lower-case words and hyphens, or {field}`);
-      const route = `${op.method} ${(op.path ?? "").replace(/\{[a-z_]+\}/g, "{}")}`;
-      if (routes.has(route)) problems.push(`${where}: another operation of the plugin takes ${route}`);
-      routes.add(route);
+      // A {field} matches any segment, so `/items/{id}` and `/items/latest`
+      // both match /items/latest: refused, rather than one hiding the other.
+      const segments = (op.path ?? "").split("/").slice(1);
+      const clash = routes.find((r) => r.method === op.method && r.segments.length === segments.length && r.segments.every((s, i) => s === segments[i] || s.startsWith("{") || segments[i].startsWith("{")));
+      if (clash) problems.push(`${where}: its route ${op.method} ${op.path} matches a request operation ${JSON.stringify(clash.key)}'s does`);
+      routes.push({ key, method: op.method, segments });
       if (!op.title?.trim() || !op.description?.trim()) problems.push(`${where}: a title and a description are required`);
       for (const f of pathFields(op.path ?? "")) {
-        if (!(f in (op.input ?? {}))) problems.push(`${where}: its path's {${f}} is no input field`);
+        const field = (op.input ?? {})[f];
+        if (!field) problems.push(`${where}: its path's {${f}} is no input field`);
+        // A path segment is text: a field of another type could never be reached over REST.
+        else if (jsonSchemaType(field, "input") !== "string") problems.push(`${where}: its path's {${f}} is not a string field`);
+      }
+      // The output is held to its schema once, here, and the MCP SDK holds the
+      // held value to it again: a transform would answer REST and fail MCP.
+      try {
+        z.toJSONSchema(z.object(op.output ?? {}), { io: "output" });
+      } catch {
+        problems.push(`${where}: its output schema transforms or cannot be stated as JSON Schema`);
       }
       if (typeof op.handler !== "function") problems.push(`${where}: no handler`);
     }
@@ -179,7 +202,10 @@ export async function runOperation(op: LoadedOp, deps: OpDeps, input: unknown): 
   if (!out.ok) {
     const { status, code } = out.refusal;
     if (!REFUSAL_STATUSES.has(status) || !REFUSAL_CODE.test(code)) throw new Error(`${op.tool} refused with status ${status} and code ${JSON.stringify(code)}: a refusal is 400, 403, 404, 409 or 422 with an UPPER_CASE code`);
-    return out;
+    // Never retryable, on either transport: a refusal is the plugin's answer
+    // to this input, and the statuses it may use all say so. Last, so a fact
+    // of the plugin's own cannot say otherwise.
+    return { ok: false, refusal: { ...out.refusal, retryable: false } };
   }
   const value = op.output.safeParse(out.value);
   if (!value.success) throw new Error(`${op.tool} answered a value its output schema refuses: ${value.error.issues.map((i) => `${i.path.map(String).join(".") || "(value)"} ${i.message}`).join("; ")}`);
