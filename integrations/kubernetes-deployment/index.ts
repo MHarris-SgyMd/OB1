@@ -149,12 +149,19 @@ async function getEmbedding(text: string): Promise<number[]> {
       }),
       ...deadline,
     });
-    if (!r.ok) {
-      const msg = await r.text().catch(() => "");
-      throw new Error(`Embedding API failed: ${r.status} ${msg}`);
+    // As the chat call's below: a body that fails to arrive is an empty one,
+    // unless the deadline passed during it, and an error body is capped (review pass 3).
+    const body = await r.text().catch((e: Error) => { if (e.name === "TimeoutError") throw e; return ""; });
+    if (!r.ok) throw new Error(`Embedding API failed: ${r.status} ${body.slice(0, 500)}`);
+    let d: { data?: [{ embedding?: unknown }] } | null;
+    try {
+      d = JSON.parse(body);
+    } catch {
+      throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} answered a body that is not JSON`);
     }
-    const d = await r.json();
-    return d.data[0].embedding;
+    const embedding = d?.data?.[0]?.embedding;
+    if (!Array.isArray(embedding)) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} answered no embedding`);
+    return embedding as number[];
   });
 }
 
@@ -170,7 +177,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     console.error(`extractMetadata: ${why}`);
     return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: reason };
   };
-  let answer: { status: number; text: string };
+  let answer: { ok: boolean; status: number; text: string };
   try {
     answer = await withDeadline("Chat completion", CHAT_API_BASE, async (deadline) => {
       const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
@@ -201,13 +208,13 @@ Only extract what's explicitly there.`,
       // The status is known from here on: a body that fails to arrive is an
       // empty one, unless the deadline passed during it (embed.ts providerCall).
       const body = await r.text().catch((e: Error) => { if (e.name === "TimeoutError") throw e; return ""; });
-      return { status: r.status, text: body };
+      return { ok: r.ok, status: r.status, text: body };
     });
   } catch (e) {
     if (e instanceof ProviderTimeout) return fallback("provider_timeout", e.message);
     throw e;
   }
-  if (answer.status < 200 || answer.status > 299) return fallback(`provider_${answer.status}`, `Chat completion request to ${CHAT_API_BASE} failed: ${answer.status} ${answer.text.slice(0, 500)}`);
+  if (!answer.ok) return fallback(`provider_${answer.status}`, `Chat completion request to ${CHAT_API_BASE} failed: ${answer.status} ${answer.text.slice(0, 500)}`);
   let d: { choices?: [{ message?: { content?: unknown } }] } | null;
   try {
     d = JSON.parse(answer.text);

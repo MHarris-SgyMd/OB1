@@ -235,6 +235,13 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.SUPABASE_HOUSEHOLD_KEY = "stub";
 process.env.DEFAULT_USER_ID = "00000000-0000-4000-8000-000000000001";
 process.env.DB_PASSWORD = "stub";
+// kubernetes-deployment's provider and database, read at import (SMD-2692 review pass 3): the
+// provider at its defaults, which the cases below name; its deadline unset, the cases below
+// setting their own; and its database on a port nothing listens on, so no case writes to a
+// Postgres the shell happens to have on 5432.
+for (const name of ["EMBEDDING_API_BASE", "CHAT_API_BASE", "OB1_LLM_TIMEOUT"]) delete process.env[name];
+process.env.DB_HOST = "127.0.0.1";
+process.env.DB_PORT = "1";
 process.env.MCP_ACCESS_KEYS = KEYS; // work-operating-model-activation refuses to start without a key configured
 process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
 try {
@@ -588,8 +595,8 @@ console.log(`\n[${K8S.file}: a search slower than the idle timeout is answered, 
 // read), and the tool fails naming the knob. capture_thought's chat call fails
 // each way the core's extractMetadata names (review passes 1 and 2): each is
 // logged, and the capture goes on to its write without tags. Here the write is
-// refused, there being no database, and a control capture whose tags arrive
-// shows which answer the write gives, whatever this machine has on its port.
+// refused, the database being on a closed port (set above), and a control
+// capture whose tags arrive shows which answer the refusal gives.
 // Until then Bun's 300 s fetch cut was the only bound, and SMD-2001's keepalive
 // let a client sit through it.
 console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1_LLM_TIMEOUT, naming it (SMD-2692)]`);
@@ -615,14 +622,22 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
       prose: () => choice("here are your tags: none"),
       array: () => choice("[1, 2]"),
     };
-    let embedStalls = true;
+    const stalled = (status: number, start: string) => new Response(new ReadableStream({ start(ctl) { ctl.enqueue(enc.encode(start)); } }), { status, headers: { "content-type": "application/json" } });
+    /** The embedding endpoint's answers, by case: each but `ok` is a search's; every capture's embedding is `ok`. */
+    const EMBED: Record<string, () => Response> = {
+      stall: () => stalled(200, '{"data":'),
+      "503 stalled": () => stalled(503, '{"error":'),
+      "503": () => new Response("x".repeat(2_000), { status: 503 }),
+      html: () => new Response("<html>a proxy's page</html>", { headers: { "content-type": "text/html" } }),
+      empty: () => Response.json({ data: [] }),
+      ok: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] }),
+    };
+    let embed = "stall";
     let chat = "stall";
     const provider = Bun.serve({
       port: 0,
       fetch(req) {
-        if (new URL(req.url).pathname !== "/embeddings") return CHAT[chat]();
-        if (!embedStalls) return Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
-        return new Response(new ReadableStream({ start(ctl) { ctl.enqueue(enc.encode('{"data":')); } }), { headers: { "content-type": "application/json" } });
+        return new URL(req.url).pathname === "/embeddings" ? EMBED[embed]() : CHAT[chat]();
       },
     });
     // A body cut off: 200 and a length of 100, six bytes, and the socket closed, so the body read rejects (review pass 2).
@@ -654,21 +669,26 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
       const logged: string[] = [];
       const realError = console.error;
       console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const reply = await Promise.race([Promise.resolve(handler(req)).then(parse), Bun.sleep(8_000).then(() => null)]);
+        const reply = await Promise.race([Promise.resolve(handler(req)).then(parse), new Promise<null>((res) => { timer = setTimeout(() => res(null), 8_000); })]);
         return { ms: performance.now() - t0, lines: logged.filter((l) => l.startsWith("extractMetadata: ")),
           error: reply?.json?.result?.isError === true ? String(reply.json.result.content?.[0]?.text) : `no error reply (${reply ? reply.text.slice(0, 80) : "none in 8 s"})` };
       } finally {
+        clearTimeout(timer);
         console.error = realError;
       }
     };
     process.env.OB1_LLM_TIMEOUT = "2";
-    let search: Outcome = { ms: 0, lines: [], error: "not run" };
+    const searches: Record<string, Outcome> = {};
     const captures: Record<string, Outcome> = {};
     try {
-      search = await tool(READ_KEY, 60, "search_thoughts", { query: "a query whose embedding never finishes" });
-      embedStalls = false;
-      let id = 61;
+      let id = 60;
+      for (const name of Object.keys(EMBED).filter((n) => n !== "ok")) {
+        embed = name;
+        searches[name] = await tool(READ_KEY, id++, "search_thoughts", { query: `a query whose embedding is ${name}` });
+      }
+      embed = "ok";
       for (const name of Object.keys(CHAT)) {
         chat = name;
         captures[name] = await tool(WRITE_KEY, id++, "capture_thought", { content: `a thought whose chat answer is ${name}` });
@@ -680,8 +700,21 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
       cut.stop(true);
     }
     const BASE = "https://openrouter.ai/api/v1";
-    assert(search.error === `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)` && search.ms >= 1_900 && search.ms < 6_000,
-      `an embedding whose body stalls fails search_thoughts at OB1_LLM_TIMEOUT=2, naming it (${Math.round(search.ms)} ms: ${search.error})`);
+    const timedOut = `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`;
+    for (const name of ["stall", "503 stalled"]) {
+      const s = searches[name];
+      assert(s.error === timedOut && s.ms >= 1_900 && s.ms < 6_000,
+        `an embedding answered ${name === "stall" ? "200" : "503"} whose body stalls fails search_thoughts at OB1_LLM_TIMEOUT=2, naming it (${Math.round(s.ms)} ms: ${s.error})`);
+    }
+    // The embedding's other failures fail the search too, each named (review pass 3).
+    const embedWhy: Record<string, string> = {
+      "503": `Error: Embedding API failed: 503 ${"x".repeat(500)}`,
+      html: `Error: Embeddings request to ${BASE} answered a body that is not JSON`,
+      empty: `Error: Embeddings request to ${BASE} answered no embedding`,
+    };
+    for (const [name, error] of Object.entries(embedWhy)) {
+      assert(searches[name].error === error, `an embedding answered ${name} fails search_thoughts saying so (${searches[name].error.slice(0, 100)})`);
+    }
     const control = captures.tags;
     assert(control.lines.length === 0 && control.error.length > 0, `the control: a capture whose tags arrive logs nothing from the extractor, and its write answers "${control.error.slice(0, 60)}"`);
     const why: Record<string, string> = {
