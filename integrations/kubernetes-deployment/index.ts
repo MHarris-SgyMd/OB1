@@ -13,6 +13,7 @@
  *   CHAT_API_BASE - Base URL for OpenAI-compatible chat API (defaults to EMBEDDING_API_BASE)
  *   CHAT_API_KEY - API key for chat service (defaults to EMBEDDING_API_KEY)
  *   CHAT_MODEL - Model name for metadata extraction (default: gpt-4o-mini)
+ *   OB1_LLM_TIMEOUT - seconds each embedding or chat call may take (default 120, the core server's)
  *   MCP_ACCESS_KEYS - name:scope:sha256 access keys (the older single MCP_ACCESS_KEY still works);
  *                     capture_thought is registered only for a write-scoped key
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
@@ -108,52 +109,78 @@ function thoughtUrl(id: string): string {
 
 // --- Embedding & Metadata Extraction ---
 
-async function getEmbedding(text: string): Promise<number[]> {
-  const r = await fetch(`${EMBEDDING_API_BASE}/embeddings`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${EMBEDDING_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: EMBEDDING_MODEL,
-      input: text,
-    }),
-  });
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "");
-    throw new Error(`Embedding API failed: ${r.status} ${msg}`);
+/**
+ * A provider call under the core server's deadline (SMD-2692): OB1_LLM_TIMEOUT
+ * seconds, 120 unless set to a positive number (server-portable/embed.ts
+ * DEFAULT_LLM_TIMEOUT_S), over the answer's headers and body both. Until then
+ * Bun's own 300 s fetch cut was the only bound, and since SMD-2001 keeps the
+ * reply alive a client sat through all of it. Read per call, as the keys are.
+ */
+async function withDeadline<T>(what: string, base: string, call: (deadline: { signal: AbortSignal; timeout: false }) => Promise<T>): Promise<T> {
+  const raw = Number(process.env.OB1_LLM_TIMEOUT || NaN);
+  const seconds = Number.isFinite(raw) && raw > 0 ? raw : 120;
+  try {
+    // `timeout: false` makes this the one deadline: Bun's fetch would otherwise
+    // cut the call at its 300 s idle timeout, so a longer value never applied (embed.ts).
+    return await call({ signal: AbortSignal.timeout(seconds * 1000), timeout: false });
+  } catch (e) {
+    if ((e as Error).name === "TimeoutError") throw new Error(`${what} request to ${base} timed out after ${seconds} s (OB1_LLM_TIMEOUT)`);
+    throw e;
   }
-  const d = await r.json();
-  return d.data[0].embedding;
+}
+
+async function getEmbedding(text: string): Promise<number[]> {
+  return withDeadline("Embeddings", EMBEDDING_API_BASE, async (deadline) => {
+    const r = await fetch(`${EMBEDDING_API_BASE}/embeddings`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${EMBEDDING_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: EMBEDDING_MODEL,
+        input: text,
+      }),
+      ...deadline,
+    });
+    if (!r.ok) {
+      const msg = await r.text().catch(() => "");
+      throw new Error(`Embedding API failed: ${r.status} ${msg}`);
+    }
+    const d = await r.json();
+    return d.data[0].embedding;
+  });
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${CHAT_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: CHAT_MODEL,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
+  const d = await withDeadline("Chat completion", CHAT_API_BASE, async (deadline) => {
+    const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CHAT_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: CHAT_MODEL,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: `Extract metadata from the user's captured thought. Return JSON with:
 - "people": array of people mentioned (empty if none)
 - "action_items": array of implied to-dos (empty if none)
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
 - "topics": array of 1-3 short topic tags (always at least one)
 - "type": one of "observation", "task", "idea", "reference", "person_note"
 Only extract what's explicitly there.`,
-        },
-        { role: "user", content: text },
-      ],
-    }),
+          },
+          { role: "user", content: text },
+        ],
+      }),
+      ...deadline,
+    });
+    return r.json();
   });
-  const d = await r.json();
   try {
     return JSON.parse(d.choices[0].message.content);
   } catch {

@@ -165,6 +165,8 @@ To use a local model (e.g., Ollama, BitNet, llama.cpp) for embeddings and chat, 
 
 If your embedding model produces a different vector dimension than 1536, update the `vector(1536)` in the init SQL to match.
 
+Each embedding or chat call may take `OB1_LLM_TIMEOUT` seconds — 120 unless set, the core server's knob and default — and a call that runs past it fails the tool with an error naming it: `Embeddings request to … timed out after 120 s (OB1_LLM_TIMEOUT)`. Raise it for a model slower than that. Before SMD-2692 the only bound was Bun's own 300 s fetch cut.
+
 ## Expected Outcome
 
 After deployment you should see:
@@ -173,7 +175,7 @@ After deployment you should see:
 - PostgreSQL with `thoughts` table and `match_thoughts` function
 - MCP endpoint responding to `tools/list` with 4 tools: `search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought` (3 for a `read` key — `capture_thought` is registered only for `write`)
 - Thoughts captured via any MCP client are stored in your self-hosted database
-- A pod deletion or rollout stops the server in well under a second when it is idle: on SIGTERM it stops accepting, waits for the requests in flight to be answered (up to `OB1_STOP_GRACE` less 2 s — whole seconds, 10 unless set; `k8s/openbrain.yml` sets 30 beside the pod's `terminationGracePeriodSeconds: 30`, so 28 s: change the two together), closes its pool and exits 0, and the log says `SIGTERM: stopped in …`. Before SMD-2250 it ignored SIGTERM, as the container's PID 1 with no handler, so every stop waited the full 30 s and was killed, cutting off any request in flight. Two limits: a tool call silent for about 10 s is closed by Bun's idle timeout (this server has no keepalive), and that stop still exits 0; and the pod's `db` container is signalled at the same moment, so during the drain a call that needs a new database connection is refused one — and if the runtime uses the Postgres image's stop signal (SIGINT, fast shutdown), open sessions are ended too — and answers with the error (SMD-2259)
+- A pod deletion or rollout stops the server in well under a second when it is idle: on SIGTERM it stops accepting, waits for the requests in flight to be answered (up to `OB1_STOP_GRACE` less 2 s — whole seconds, 10 unless set; `k8s/openbrain.yml` sets 30 beside the pod's `terminationGracePeriodSeconds: 30`, so 28 s: change the two together), closes its pool and exits 0, and the log says `SIGTERM: stopped in …`. Before SMD-2250 it ignored SIGTERM, as the container's PID 1 with no handler, so every stop waited the full 30 s and was killed, cutting off any request in flight. Two limits: a call still waiting on its provider at the bound — which `OB1_LLM_TIMEOUT` allows for up to 120 s — is cut off there, and the stop exits 1; and the pod's `db` container is signalled at the same moment, so during the drain a call that needs a new database connection is refused one — and if the runtime uses the Postgres image's stop signal (SIGINT, fast shutdown), open sessions are ended too — and answers with the error (SMD-2259)
 
 > **Tool hygiene:** This integration adds MCP tools to your AI's context window. As your deployment grows, the total tool count grows — and with it, the context cost and risk of your AI picking the wrong tool. See the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for strategies on auditing, merging, and scoping your tools.
 

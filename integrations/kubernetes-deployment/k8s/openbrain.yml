@@ -160,6 +160,9 @@ spec:
                   key: chat-api-key
             - name: CHAT_MODEL
               value: "openai/gpt-4o-mini"
+            # Seconds each embedding or chat call may take (120 unless set); raise it for a slow local model.
+            - name: OB1_LLM_TIMEOUT
+              value: "120"
           readinessProbe:
             tcpSocket:
               port: 8000
