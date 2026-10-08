@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2261]
-migrations: []
----
-
-## Changelog
-
-The brain's record (the `brain_info` tool, keyed `GET /health`, `GET /v1/brain`) now carries the board-sync watermark, the newest Linear `updatedAt` any thought reflects. `tier.ts --compare` prints it for both brains and names a brain that missed the board's status moves ("open-brain-canary's board-sync watermark is 1 day older"), a gap no thought count, newest capture or migration shows. This closes the last of the compare's deferred limits. board-sync's `--loop` and the extraction and consolidation followers now stamp a heartbeat after every pass; preflight's new `workers` row, the keyed `/health` body and `brain_info` read them, and warn once a worker has not stamped for three of its intervals (naming the command that starts it again), when its last pass failed, or when its last block of answers passed the malformed-answer alarm (SMD-2261).
-
-## FORK
-
-The board-sync watermark reaches the record and the compare, and long-running workers report their liveness (SMD-2261)
+# 265. The board-sync watermark reaches the record and the compare, and long-running workers report their liveness (SMD-2261)
 
 **What changed.**
 - **The record.** `readDatabaseFacts` (`server-portable/brain-info.ts`) gains a guarded read, `boardSync`, taken with the counts: `max(metadata->>'linear_updated_at')`, which `sync-linear.ts` writes. It is normalised to an ISO instant in UTC. It is null when no thought carries a usable one. A read that did not answer is named in `unread`. Preflight's `stats: false` read doesn't take it. The MCP server and the REST core each call the same core reader, so the field appears at once on the `brain_info` tool (a `Board sync` row), keyed `/health` and `GET /v1/brain`.
@@ -83,10 +70,10 @@ Then the tidy-ups the passes had cut for space, while the files were open: `Brai
 
 **PR 2 — the heartbeats (items 4–6).**
 - **The write.** `db/pass-stamp.ts`'s `passStamper` upserts one `ob1_config` row per worker and job: `heartbeat:board-sync`, `heartbeat:<extract job>`, `heartbeat:<consolidate job>` (a custom `--job` prefixed with its worker).
-  - The value is `{v, job?, every_s, running, outcome, ended?, passes, malformed?}`, and the time is the row's `updated_at`, the database's `now()`. `job` is the claim job as given, so the restart works that pool.
+  - The value is `{v, job?, every_s, running, outcome, ended?, malformed?}`, and the time is the row's `updated_at`, the database's `now()`. `job` is the claim job as given, so the restart works that pool.
   - It is stamped `running` as a pass starts and every `every_s` while it runs, and done after it. `every_s` is the worker's interval, from a minute up to what a timer holds (2,147,483 s, the most the reader takes).
   - Writes go one after another, so a timer stamp in flight cannot land after the pass's own.
-  - A stamp with no judged block of its own keeps the row's (only one of the shape it writes), so a follower restarted on the same broken model does not clear its alarm. Its own block replaces it.
+  - Each stamp writes the whole value: a restarted follower's row carries no malformed block until it judges one, so a restart clears the alarm: fix the model first, since one restarted on a broken model reads healthy until 48 new answers trip it again.
   - A failed write is said once (again only after one succeeds); a reporter that throws breaks no later stamp; the work goes on.
   - There is one row per job, not per process: two followers of one job share it, and the last to stamp wins.
 - **Who stamps.** Only the long-running modes:
@@ -112,7 +99,7 @@ Then the tidy-ups the passes had cut for space, while the files were open: `Brai
 - **A tier refresh** deletes the source's `heartbeat:` rows (`tier.ts`'s `settleRefreshed`), so a canary never reports stable's workers, nor names a restart for them.
 - **Grants.** The `worker` group already holds INSERT and UPDATE on `ob1_config`; the README's grants table now names the heartbeat beside the job key. No migration.
 - **Verified:**
-  - test-live [37] and the follower sections, 1100 on the tree merged with main at 395f83f7 (a down provider through the real 5/15/45 s pauses, for each engine, idle polls holding it, then back; a following pass that throws, in each engine): `stampKey`; a stamp's fields, job and floors, an oversized interval at the cap; a restart keeping the row's block until its own replaces it; `running` as a pass starts and on the timer, then done; a failed write said once, a throwing reporter harmless; board-sync's loop stamping `running`, then `failed, failed, ok, stopped`; a refresh's settle leaving no heartbeat; each follower's one row, `stopped`, passes counted, none from a one-shot run; a first pass counted before a stop; a provider refusal `failed`; failing passes `failed` through the empty polls, with the tripped block; a `--limit` stop carrying the final block.
+  - test-live [37] and the follower sections, 1100 on the tree merged with main at 395f83f7 (a down provider through the real 5/15/45 s pauses, for each engine, idle polls holding it, then back; a following pass that throws, in each engine): `stampKey`; a stamp's fields, job and floors, an oversized interval at the cap; a restart's first stamp carrying no block, an old value of any shape replaced whole; `running` as a pass starts and on the timer, then done; a failed write said once, a throwing reporter harmless; board-sync's loop stamping `running`, then `failed, failed, ok, stopped`; a refresh's settle leaving no heartbeat; each follower's one row, `stopped`, none from a one-shot run; a first pass then a stop reading `stopped`; a provider refusal `failed`; failing passes `failed` through the empty polls, with the tripped block; a `--limit` stop carrying the final block.
   - test-preflight 640 (an ended follower, a stopped one with an alarm, a down provider): none, fresh, stale, alive inside three intervals, stopped at a minute, each claim worker's restart and row and a custom job's, a failed pass and an alarm with their remedies, ob1_config refused, rows not of the shape never printed, PostgREST skips 21. test-server [13a] 637 (699 on the tree merged with main at ab2a4ff4): `parseHeartbeats`' full rows and eighteen refusals (each guard alone), the bound, the stale edge, `heartbeatState`, `ago`, the row's three states. test-e2e-sql [14] 470: empty, then a stopped row, in the body and the tool; fifty-one rows, fifty carried and one counted from Postgres's own total. test-engines 472, test-rest-sql 149, test-brain-compare 123, `check-fork-consistency`, `tsc`.
   - Mutants, all killed: 15 at the first commit (/tmp/smd2261-pr2-mutants.py); 13 after review pass 1 (/tmp/smd2261-pr2-pass1-mutants.py); 5 of pass 1's run-it survivors re-run against the tests that close them (/tmp/smd2261-pr2-pass1-survivors.py); 17 after review pass 2 (/tmp/smd2261-pr2-pass2-mutants.py), the provider-stop signal and idle rule in both engines among them; 5 after review pass 3 (/tmp/smd2261-pr2-pass3-mutants.py).
   - **Live, three real workers** on a throwaway brain (2026-10-06): board-sync syncing SMD-2261 from Linear, extraction and consolidation on local Ollama. All three read ok within 3 s. Each of consolidation and board-sync, stopped by SIGTERM, warned "stopped" at once with its own restart, and read ok again once restarted. Extraction killed with SIGKILL stayed "running a pass" while fresh, warned "stale" at 3 minutes (three intervals of 60 s) with its restart, and read ok on restart. At the end every row was `ended`, `stopped`.
@@ -142,3 +129,5 @@ Then the tidy-ups the passes had cut for space, while the files were open: `Brai
 | 3 | a document drawing a repeatable 5xx reads failed while another worker finished; rows failing for another reason read ok; a restored dump reads alive at first; the start-up race after `up`; two stale README counts; the remedy lead overclaimed | cold read | the residues named in db/README and deploy/README; counts and wording |
 
 Then the tidy-ups PR 2's passes had cut for space, while the files were open: `db/pass-stamp.ts`'s header names the value's `job` and `ended` and the stamp as a pass starts; deploy/README's board-sync paragraph re-wrapped. No behaviour changed.
+
+Then two cuts after the merge: the value's `passes` count, which nothing read, and the merge that kept a row's malformed block across a follower's restart. The merge had needed three review passes of shape guards, and its alarm then outlived a fixed model until the restarted follower's first block of 48 answers, or until the row was deleted. Now each stamp writes the whole value.

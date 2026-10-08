@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-2448]
-migrations: [079]
----
-
-## Changelog
-
-Migration 079 stops the consolidation pass from asking whether one ticket supersedes another that Linear already relates to it (parent, child, blocker, related): `consolidation_candidates` leaves such pairs out, which made 107 of the stable brain's 128 proposals, all rejected, while unlinked tickets are still judged; `db/consolidate.ts` says how many judge calls a run saved (SMD-2448).
-
-## FORK
-
-Two tickets Linear links are never paired for judgement (SMD-2448)
+# 263. Two tickets Linear links are never paired for judgement (SMD-2448)
 
 **What changed.** Migration 079 adds `consolidation_tickets_linked(a, b)`:
 two thoughts filed under two different tickets — `coalesce(metadata->>'ticket',

@@ -635,6 +635,20 @@ export class SqlStore implements ThoughtStore {
     const r = rows[0]?.r as { id?: string; existed?: unknown; supersedes?: unknown } | undefined;
     const id = r?.id;
     if (!id) throw new Error("upsert_thought returned no id.");
+    // 082: a key that can read landed on a row that already held the text —
+    // recorded, so the row stops being its capturer's (SMD-2638), even when
+    // the merge changed nothing and wrote no event. A second statement: a
+    // pooler in statement mode passes it, and a failure here throws after the
+    // capture landed, so the caller's retry lands on the row again and the
+    // note is made then. A database before 082 has no such function, and the
+    // capture stands without it.
+    if (r?.existed === true && opts.recapture !== "keep") {
+      try {
+        await this.sql`SELECT ob1_note_recapture(${id}::uuid, ${actorPayload(opts.actor)}::jsonb)`;
+      } catch (e) {
+        if (String((e as { errno?: unknown }).errno ?? "") !== "42883") throw e;
+      }
+    }
     // 035: `existed` says the text was already there and the envelope's
     // provenance was not written. Passed on only when the body said (a
     // database before 035 returns none, and a guess would be a lie).
@@ -721,6 +735,12 @@ export class SqlStore implements ThoughtStore {
       WHERE thought_id = ${id}::uuid AND action = 'capture' ORDER BY created_at ASC, id ASC LIMIT 1`; // id is a uuid (008): the tiebreak is stable, not chronological — a thought has one capture row by construction (035), so the tie is theory
     const r = rows[0] as { actor_name?: string | null; agent_id?: string | null } | undefined;
     return r ? { actorName: r.actor_name ?? null, agentId: r.agent_id ?? null } : null;
+  }
+
+  async takenFromCapturer(id: string): Promise<boolean> {
+    if (!UUID_RE.test(id)) return true;
+    const rows = await this.sql`SELECT ob1_thought_taken(${id}::uuid) AS taken`;
+    return (rows[0] as { taken?: boolean } | undefined)?.taken !== false;
   }
 
   async existingIds(ids: string[]): Promise<Set<string>> {

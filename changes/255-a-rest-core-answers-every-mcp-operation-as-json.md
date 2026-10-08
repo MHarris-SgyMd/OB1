@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2284]
-migrations: ["078"]
----
-
-## Changelog
-
-A REST core, the stack's `api` service (`bun server-portable/api.ts`), answers every operation the MCP tools expose as JSON over the same core: resource routes from the tools' own schemas, an OpenAPI document at `/openapi.json`, `/v1/whoami`, header keys only with 401/403/503 by scope and registry, refusals as their code and declared facts, and a log with no query, key or content; a contract suite holds that the MCP reply to every success is what the REST answer renders to. It is internal (`api.ob1.internal` on the mesh) unless the operator names `deploy/compose.api-public.yaml`, which routes `/api` to it. Migration 078 records which server started a job, so each server's restart marks only its own jobs lost. The MCP server's process root moved to `root.ts` and its keepalive to `sse.ts` first, so both servers build on one copy. A fourth key scope, `forward` (`bun keygen.ts --scope forward`), grants nothing — every server refuses it as a caller; beside a caller's key in the REST core's `x-brain-forwarder` header it names who carried the request, recorded on the audit row as `act` (SMD-2284).
-
-## FORK
-
-A REST core answers every MCP operation as JSON over the same core, authorized by the key, internal unless the operator opens /api (SMD-2284)
+# 255. A REST core answers every MCP operation as JSON over the same core, authorized by the key, internal unless the operator opens /api (SMD-2284)
 
 **PR 1 (#292) — a move.** `server-portable/root.ts` takes `type Env`,
 `initEnv()`/`env()`, the store's wiring (`db()` builds it and wires the

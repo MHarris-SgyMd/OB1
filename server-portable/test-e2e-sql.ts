@@ -1534,6 +1534,18 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   } finally {
     await sql`ALTER TABLE thought_audit_away RENAME TO thought_audit`;
   }
+  // …and so is one whose taken read cannot be made (082's ob1_thought_taken
+  // missing — a brain before 082 under this server): the same retry, never a
+  // target read as not taken (SMD-2638 review pass 2: a swallowed read passed).
+  await sql`ALTER FUNCTION ob1_thought_taken(uuid) RENAME TO ob1_thought_taken_away`;
+  try {
+    const untaken = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — with the taken read away", source: "claude-code", supersedes: ownId } });
+    const [none] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = 'Session summary — claude-code — with the taken read away'`;
+    assert(untaken.result?.isError === true && /could not be checked/.test(textOf(untaken)) && /ob1_thought_taken/.test(textOf(untaken)) && sc(untaken)?.code === "SUPERSEDES_UNJUDGED" && sc(untaken)?.retryable === true && none?.n === 0,
+      `a supersedes whose taken read fails is the same retry, SUPERSEDES_UNJUDGED, and writes nothing (${sc(untaken)?.code}; ${none?.n})`);
+  } finally {
+    await sql`ALTER FUNCTION ob1_thought_taken_away(uuid) RENAME TO ob1_thought_taken`;
+  }
   // The check-then-write race — a source deleted between the trim and the
   // write — is the one path to the catch's derived_from branch, driven here by
   // a validator that refuses everything: a key that cannot read is told no
@@ -1592,7 +1604,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     await sql`DROP SEQUENCE race_seq`;
   }
   // [13b] What a capture key's `supersedes` tells it, cell by cell (SMD-2473):
-  // eight targets × four registry states. One cell writes the pointer — its
+  // ten targets × four registry states (SMD-2638 added the two another key took). One cell writes the pointer — its
   // own thought, still standing, with the registry answering — and every other
   // cell lands without it, answering word for word as that one does (ids
   // aside), save the registry away for now, where every target is the same
@@ -1632,6 +1644,11 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const t: Record<string, string> = { missing: "00000000-0000-4000-8000-0000000000cc" };
     const ownFresh = await K({ content: "[13b] hook-two's summary, attributed", source: "codex" });
     t.attributedOwn = await landedId(ownFresh, "hook-two's own thought");
+    // 082 lets a capture-only key point at a thought nothing yet supersedes
+    // (SMD-2638): each leg below that writes a pointer names its own target.
+    const ownForSources = await landedId(await K({ content: "[13b] hook-two's summary, named with a source beside it", source: "codex" }), "hook-two's thought for the sourced leg");
+    const ownForUpper = await landedId(await K({ content: "[13b] hook-two's summary, named in upper case", source: "codex" }), "hook-two's thought for the upper-case leg");
+    const ownForUnsourced = await landedId(await K({ content: "[13b] hook-two's summary, named with no source", source: "codex" }), "hook-two's thought for the unsourced leg");
     t.attributedForeign = retrieved!;
     t.deletedOwn = await landedId(await K({ content: "[13b] hook-two's summary an operator deletes", source: "codex" }), "hook-two's thought to delete");
     t.deletedForeign = idIn(await call("capture_thought", { content: "[13b] the writer's thought it deletes" }))!;
@@ -1645,6 +1662,43 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     t.recapturedForeign = await landedId(recaptured, "the capture key's re-capture of the writer's text");
     assert(t.recapturedForeign === sharedId, "…handing it the writer's row's id");
     assert(seen(recaptured) === seen(ownFresh), `…in the words a fresh capture gets, ids aside (${seen(recaptured).slice(0, 120)} vs ${seen(ownFresh).slice(0, 120)})`);
+    // Its own text that another has since written onto is no longer its own
+    // (SMD-2638). A write key's capture of the same text merges its metadata
+    // onto the row, an update under the writer's agent id; board-sync adopts
+    // a row holding a ticket's text in place, an update under its own actor
+    // and no agent id.
+    const mergedText = "[13b] hook-two's text the writer captures again, filed under TKT-9638";
+    t.mergedOwn = await landedId(await K({ content: mergedText, source: "codex" }), "hook-two's thought the writer merges onto");
+    const mergedBack = idIn(await call("capture_thought", { content: mergedText, metadata: { issue: "TKT-9638", status_type: "started" } }));
+    assert(mergedBack === t.mergedOwn, "[13b] setup: the writer's capture of the same text lands on hook-two's row");
+    t.adoptedOwn = await landedId(await K({ content: "[13b] hook-two's text board-sync adopts as TKT-9639", source: "codex" }), "hook-two's thought board-sync adopts");
+    // board-sync's adoption as db/sync-linear.ts writes it: updateThought with the facets, under its actor.
+    await sql`SELECT update_thought(p_id := ${t.adoptedOwn}::uuid, p_metadata_patch := ${{ issue: "TKT-9639", status: "In Progress", status_type: "started" }}::jsonb, p_actor := ${{ name: "board-sync", via: "db/sync-linear.ts", session: "e2e-13b" }}::jsonb)`;
+    const [mergedEdit] = await sql`SELECT count(*)::int AS n FROM thought_audit u JOIN thought_audit c ON c.thought_id = u.thought_id AND c.action = 'capture'
+      WHERE u.thought_id = ${t.mergedOwn}::uuid AND u.action = 'update' AND u.diff ? 'metadata' AND u.canonical_agent_id IS NOT NULL AND u.canonical_agent_id <> c.canonical_agent_id`;
+    const [adoptedEdit] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = ${t.adoptedOwn}::uuid AND action = 'update' AND diff ? 'metadata' AND canonical_agent_id IS NULL`;
+    assert(mergedEdit?.n === 1 && adoptedEdit?.n === 1, `[13b] setup: the merge is a metadata row under the writer's agent id, the adoption one under none (${mergedEdit?.n}, ${adoptedEdit?.n})`);
+    // …while a vector arriving under no agent (db/reembed.ts's shape) and its
+    // pointer cleared by another key's delete leave its own thought its own:
+    // neither moves the text or the metadata.
+    const revectoredOwn = await landedId(await K({ content: "[13b] hook-two's summary a worker re-embeds", source: "codex" }), "hook-two's thought to re-embed");
+    await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${revectoredOwn}::uuid`;
+    await sql`UPDATE thoughts SET embedding = (SELECT embedding FROM thoughts WHERE id = ${t.attributedOwn}::uuid) WHERE id = ${revectoredOwn}::uuid`;
+    const relinkBase = await landedId(await K({ content: "[13b] hook-two's summary its next one replaces", source: "codex" }), "hook-two's earlier summary");
+    const relinkedOwn = await landedId(await K({ content: "[13b] hook-two's next summary, its pointer cleared by a delete", source: "codex", supersedes: relinkBase }), "hook-two's next summary");
+    const [linked] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${relinkedOwn}::uuid`;
+    // …nor does an operator's metadata backfill, which writes with no agent id
+    // and no `issue` (backfill_thought_actors' shape): 082's rule leaves it out.
+    const restampedOwn = await landedId(await K({ content: "[13b] hook-two's summary an operator's backfill restamps", source: "codex" }), "hook-two's thought to restamp");
+    await sql`SELECT update_thought(p_id := ${restampedOwn}::uuid, p_metadata_patch := ${{ enriched: true }}::jsonb, p_actor := ${{ name: "backfill", via: "backfill_thought_actors" }}::jsonb)`;
+    await call("delete_thought", { id: relinkBase });
+    const [quietEdits] = await sql`SELECT
+        count(*) FILTER (WHERE thought_id = ${revectoredOwn}::uuid AND canonical_agent_id IS NULL AND diff ? 'embedding_present')::int AS vector,
+        count(*) FILTER (WHERE thought_id = ${relinkedOwn}::uuid AND canonical_agent_id IS NOT NULL AND diff ? 'supersedes')::int AS pointer,
+        count(*) FILTER (WHERE diff ?| ARRAY['content', 'metadata'])::int AS moved
+      FROM thought_audit WHERE action = 'update' AND thought_id = ANY(${sql.array([revectoredOwn, relinkedOwn], "TEXT")}::uuid[])`;
+    assert(linked?.s === relinkBase && quietEdits?.vector === 2 && quietEdits?.pointer === 1 && quietEdits?.moved === 0,
+      `[13b] setup: two vector rows under no agent, the delete's pointer row under the writer's, and neither text nor metadata moved (${linked?.s === relinkBase}; ${JSON.stringify(quietEdits)})`);
     await withRegistry("unmigrated", async () => {
       t.unattributedOwn = await landedId(await K({ content: "[13b] hook-two's summary from an outage of the registry", source: "codex" }), "hook-two's outage-time thought");
       t.unattributedForeign = await landedId(await captureAs(CAPTURE_KEY)({ content: "[13b] session-hook's summary from the same outage", source: "claude-code" }), "session-hook's outage-time thought");
@@ -1698,6 +1752,10 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const unprovable: Record<string, Cell> = {};
     let upper: Cell | undefined;
     let bare: Cell | undefined;
+    let capped: Cell | undefined;
+    let revectored: Cell | undefined;
+    let relinked: Cell | undefined;
+    let restamped: Cell | undefined;
     try {
       for (const state of STATES) {
         cells[state] = {};
@@ -1711,10 +1769,18 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
       // `source` at all, so a check gated on a caller's claim fails; a thought
       // with no audit row; and the unprovable states with a source beside the
       // pointer, which must still drop it, not retry for ever.
-      for (const [name, target] of Object.entries(t)) withSources[name] = await cell(`[13b] hook-two names ${name} as supersedes, with a source beside it`, target, { derived_from: [t.attributedOwn] });
-      upper = await cell("[13b] hook-two names its own thought as supersedes, in upper case", t.attributedOwn.toUpperCase());
-      for (const [name, target] of [["attributedOwn", t.attributedOwn], ["attributedForeign", t.attributedForeign]] as const) unsourced[name] = await cell(`[13b] hook-two names ${name} as supersedes, no source`, target, { source: undefined });
+      for (const [name, target] of Object.entries({ ...t, attributedOwn: ownForSources })) withSources[name] = await cell(`[13b] hook-two names ${name} as supersedes, with a source beside it`, target, { derived_from: [t.attributedOwn] });
+      upper = await cell("[13b] hook-two names its own thought as supersedes, in upper case", ownForUpper.toUpperCase());
+      // Its own thought once more, now that the writing cell supersedes it: the
+      // server's reads find it its own and untaken, and 082's check at the
+      // write refuses the second superseder — the capture lands without it,
+      // in the writing cell's words.
+      capped = await cell("[13b] hook-two names its own thought something already supersedes", t.attributedOwn);
+      for (const [name, target] of [["attributedOwn", ownForUnsourced], ["attributedForeign", t.attributedForeign]] as const) unsourced[name] = await cell(`[13b] hook-two names ${name} as supersedes, no source`, target, { source: undefined });
       bare = await cell("[13b] hook-two names a thought with no audit row as supersedes", unaudited);
+      revectored = await cell("[13b] hook-two names its own re-embedded thought as supersedes", revectoredOwn);
+      relinked = await cell("[13b] hook-two names its own thought whose pointer a delete cleared as supersedes", relinkedOwn);
+      restamped = await cell("[13b] hook-two names its own thought an operator's backfill restamped as supersedes", restampedOwn);
       for (const state of ["refusing", "unmigrated"] as Registry[]) {
         await withRegistry(state, async () => {
           for (const [name, target] of [["attributedOwn", t.attributedOwn], ["attributedForeign", t.attributedForeign]] as const) unprovable[`${state}/${name}`] = await cell(`[13b] hook-two names ${name} with a source beside it, the registry ${state}`, target, { derived_from: [t.attributedOwn] });
@@ -1731,7 +1797,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const writing = cells.answering.attributedOwn;
     assert(writing.landed && writing.wrote === t.attributedOwn, `its own standing thought, the registry answering: the pointer is written (${table()})`);
     const quiet = STATES.filter((s) => s !== "away").flatMap((s) => Object.entries(cells[s]).filter(([n]) => !(s === "answering" && n === "attributedOwn")).map(([n, c]) => ({ at: `${s}/${n}`, c })));
-    assert(quiet.length === 23 && Object.keys(cells.away).length === 8, `the table is whole: 23 quiet cells and 8 away (${quiet.length}, ${Object.keys(cells.away).length})`);
+    assert(quiet.length === 29 && Object.keys(cells.away).length === 10, `the table is whole: 29 quiet cells and 10 away (${quiet.length}, ${Object.keys(cells.away).length})`);
     const loud = quiet.filter(({ c }) => !c.landed || c.wrote !== null);
     assert(loud.length === 0, `every other cell, the registry answering, refusing or unmigrated, lands without the pointer — ${quiet.length} cells (${loud.map((l) => l.at).join(", ") || "none off"}; ${table()})`);
     const unlike = quiet.filter(({ c }) => c.seen !== writing.seen);
@@ -1748,13 +1814,24 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     // Its own target, named in upper case, is still its own: ids are compared
     // as Postgres hands them back, not as typed.
     const sourced = Object.entries(withSources).map(([n, c]) => `${n}=${c.landed ? (c.wrote ? "wrote" : "dropped") : c.code ?? "?"}`).join(" ");
-    assert(withSources.attributedOwn?.wrote === t.attributedOwn && upper?.wrote === t.attributedOwn, `its own thought is written with a source beside it, and named in upper case (${sourced}; upper ${upper?.wrote})`);
+    assert(withSources.attributedOwn?.wrote === ownForSources && upper?.wrote === ownForUpper, `its own thought is written with a source beside it, and named in upper case (${sourced}; upper ${upper?.wrote})`);
     const sourcedOthers = Object.entries(withSources).filter(([n]) => n !== "attributedOwn");
-    assert(sourcedOthers.length === 7 && sourcedOthers.every(([, c]) => c.landed && c.wrote === null) && sourcedOthers.every(([, c]) => c.seen === withSources.attributedOwn.seen) && upper?.seen === writing.seen,
-      `…and none of the other seven targets is, a source beside it or not, each answering as the writing cell (${sourced})`);
-    assert(unsourced.attributedOwn?.wrote === t.attributedOwn && unsourced.attributedForeign?.landed === true && unsourced.attributedForeign.wrote === null && unsourced.attributedForeign.seen === unsourced.attributedOwn.seen,
+    assert(sourcedOthers.length === 9 && sourcedOthers.every(([, c]) => c.landed && c.wrote === null) && sourcedOthers.every(([, c]) => c.seen === withSources.attributedOwn.seen) && upper?.seen === writing.seen,
+      `…and none of the other nine targets is, a source beside it or not, each answering as the writing cell (${sourced})`);
+    assert(unsourced.attributedOwn?.wrote === ownForUnsourced && unsourced.attributedForeign?.landed === true && unsourced.attributedForeign.wrote === null && unsourced.attributedForeign.seen === unsourced.attributedOwn.seen,
       `with no \`source\` at all, its own thought is written and another key's is not, alike in words (${unsourced.attributedOwn?.wrote}, ${unsourced.attributedForeign?.wrote})`);
     assert(bare?.landed === true && bare.wrote === null && bare.seen === writing.seen, `a thought with no capture audit row is no key's: dropped, answering as the writing cell (${bare?.wrote ?? bare?.code})`);
+    assert(capped?.landed === true && capped.wrote === null && capped.seen === writing.seen, `its own thought something already supersedes: the check at the write refuses the second pointer, and the capture lands without it, answering as the writing cell (${capped?.wrote ?? capped?.code})`);
+    assert(revectored?.wrote === revectoredOwn && relinked?.wrote === relinkedOwn && revectored.seen === writing.seen && relinked.seen === writing.seen,
+      `its own thought stays its own after a vector arrived under no agent, and after another key's delete cleared its pointer (${revectored?.wrote ?? revectored?.code ?? "dropped"}, ${relinked?.wrote ?? relinked?.code ?? "dropped"})`);
+    assert(restamped?.wrote === restampedOwn && restamped.seen === writing.seen, `…and after an operator's metadata backfill with no agent id (${restamped?.wrote ?? restamped?.code ?? "dropped"})`);
+    // The ticket's reading (SMD-2638): after every cell above, nothing
+    // supersedes the thoughts the writer and board-sync wrote onto, on the
+    // row or in 068's projection, which search reads.
+    const written = sql.array([t.mergedOwn, t.adoptedOwn], "TEXT");
+    const [after] = await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE supersedes = ANY(${written}::uuid[])) AS pointers,
+      (SELECT count(*)::int FROM ob1_superseded_by WHERE old_id = ANY(${written}::uuid[])) AS projected`;
+    assert(after?.pointers === 0 && after?.projected === 0, `the writer's merged thought and board-sync's adopted one read unsuperseded (${JSON.stringify(after)})`);
     const stuck = Object.entries(unprovable).filter(([, c]) => !c.landed || c.wrote !== null);
     assert(Object.keys(unprovable).length === 4 && stuck.length === 0, `refused or unattributable with a source beside it: every pointer dropped, none retried (${stuck.map(([n, c]) => `${n}=${c.code ?? c.wrote}`).join(", ") || "all dropped"})`);
 
@@ -1782,11 +1859,13 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // refuses the first insert naming a supersedes with the constraint's words.
   // The write goes again without the pointer and lands, as the check would
   // have answered (SMD-2473); unmended it is the one cell that said UNKNOWN.
+  // A target of its own that nothing supersedes, so 082's check at the write passes and the self-FK is the refusal met.
+  const raceTarget = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — a summary deleted between the check and the write", source: "claude-code" } })));
   await sql`CREATE SEQUENCE fk_race_seq`;
   await sql.unsafe(`CREATE FUNCTION fk_race() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.supersedes IS NOT NULL AND nextval('fk_race_seq') = 1 THEN RAISE EXCEPTION 'insert or update on table "thoughts" violates foreign key constraint "thoughts_supersedes_fkey"'; END IF; RETURN NEW; END $$`);
   await sql`CREATE TRIGGER fk_race BEFORE INSERT ON thoughts FOR EACH ROW EXECUTE FUNCTION fk_race()`;
   try {
-    const raced = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — its own thought deleted between the check and the write", source: "claude-code", supersedes: id } });
+    const raced = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — its own thought deleted between the check and the write", source: "claude-code", supersedes: raceTarget } });
     const racedId = idIn(textOf(raced));
     const [racedRow] = racedId ? await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${racedId}::uuid` : [];
     const [{ is_called: fkFired }] = await sql`SELECT is_called FROM fk_race_seq`;
@@ -1890,6 +1969,58 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
       `the head is still the writer's row, its ticket row and both notes read started and open, the session summary references nothing settled (${JSON.stringify({ head, states, refs })})`);
     const ranked = await result("search_thoughts", { query: `"the writer's summary of the work on the ticket"`, limit: 10, threshold: -1, prefer_current: true });
     assert(ranked.text.includes(summary) && !/references settled work \(TKT-2617\)/.test(ranked.text), "…and prefer_current does not demote the summary");
+  }
+
+  // [13e] The reverse order (SMD-2638, migration 082): the capture key
+  // supersedes its own thought first, while it is still only its own, and a
+  // write key or board-sync lands on that thought after. The pointer lapses,
+  // an event on the pointing thought under the key whose write took the
+  // target, and the writer's thought reads current. A write key's re-capture
+  // that changes nothing is recorded, and lapses it too. The hook's own
+  // pointer stands through an operator's backfill and a worker's vector, and
+  // a write key's pointer is never lapsed.
+  {
+    const K = (args: Record<string, unknown>) => rpc("tools/call", { name: "capture_thought", arguments: { source: "codex", ...args } });
+    const chain = async (what: string) => {
+      const text = `[13e] the hook's text ${what}`;
+      const t = idIn(textOf(await K({ content: text })));
+      const n = idIn(textOf(await K({ content: `[13e] the hook's next summary, after the text ${what}`, supersedes: t })));
+      const [p] = t && n ? await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${n}::uuid` : [];
+      assert(t !== undefined && n !== undefined && p?.s === t, `[13e] setup: the hook supersedes its own text ${what} (${p?.s})`);
+      return { t: t ?? "", s: n ?? "", text };
+    };
+    const pointerOf = async (id: string) => ((await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0] as { s: string | null } | undefined)?.s ?? null;
+    const projected = async (id: string) => ((await sql`SELECT count(*)::int AS n FROM ob1_superseded_by WHERE old_id = ${id}::uuid`)[0] as { n: number }).n;
+    const merged = await chain("a write key then captures with its ticket");
+    assert(idIn(await call("capture_thought", { content: merged.text, metadata: { issue: "TKT-9640", status_type: "started" } })) === merged.t, "[13e] setup: the writer's capture lands on the hook's row");
+    const noop = await chain("a write key then captures again, changing nothing");
+    assert(idIn(await call("capture_thought", { content: noop.text, source: "codex" })) === noop.t, "[13e] setup: the writer's second capture lands on the hook's row");
+    const adopted = await chain("board-sync then adopts");
+    await sql`SELECT update_thought(p_id := ${adopted.t}::uuid, p_metadata_patch := ${{ issue: "TKT-9641", status: "In Progress", status_type: "started" }}::jsonb, p_actor := ${{ name: "board-sync", via: "db/sync-linear.ts", session: "e2e-13e" }}::jsonb)`;
+    const [noopRow] = await sql`SELECT count(*) FILTER (WHERE diff ? 'recaptured')::int AS noted, count(*) FILTER (WHERE diff ? 'metadata')::int AS merged FROM thought_audit WHERE thought_id = ${noop.t}::uuid AND action = 'update'`;
+    assert(noopRow?.noted === 1 && noopRow?.merged === 0, `the writer's re-capture that changed nothing is recorded: an event saying so, and no metadata move (${JSON.stringify(noopRow)})`);
+    for (const [what, c] of [["the write key's merge", merged], ["its re-capture that changed nothing", noop], ["board-sync's adoption", adopted]] as const) {
+      assert((await pointerOf(c.s)) === null && (await projected(c.t)) === 0, `after ${what}, the hook's earlier pointer onto that thought has lapsed: nothing supersedes it, on the row or in 068's projection`);
+    }
+    const [lapse] = await sql`SELECT diff, canonical_agent_id::text AS agent FROM thought_audit WHERE thought_id = ${merged.s}::uuid AND action = 'update'`;
+    const [took] = await sql`SELECT canonical_agent_id::text AS agent FROM thought_audit WHERE thought_id = ${merged.t}::uuid AND action = 'update' AND diff ? 'metadata'`;
+    assert(lapse !== undefined && took?.agent != null && lapse.agent === took.agent && (lapse.diff as { supersedes?: { before?: string } })?.supersedes?.before === merged.t,
+      `…an event on the hook's thought, under the agent whose write took the target (${JSON.stringify({ lapse, took })})`);
+    const again = idIn(textOf(await K({ content: "[13e] the hook names the writer's thought again", supersedes: merged.t })));
+    assert(again !== undefined && (await pointerOf(again)) === null, "…and the capture key cannot point at it again: the thought is taken");
+    const restamped = await chain("an operator's backfill then restamps");
+    await sql`SELECT update_thought(p_id := ${restamped.t}::uuid, p_metadata_patch := ${{ enriched: true }}::jsonb, p_actor := ${{ name: "backfill", via: "backfill_thought_actors" }}::jsonb)`;
+    const revectored = await chain("a worker then re-embeds");
+    await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${revectored.t}::uuid`;
+    await sql`UPDATE thoughts SET embedding = (SELECT embedding FROM thoughts WHERE id = ${merged.s}::uuid) WHERE id = ${revectored.t}::uuid`;
+    assert((await pointerOf(restamped.s)) === restamped.t && (await pointerOf(revectored.s)) === revectored.t, "the hook's own pointer stands through an operator's metadata backfill and a worker's vector");
+    const wt = idIn(await call("capture_thought", { content: "[13e] the writer's earlier note" }));
+    const ws = idIn(await call("capture_thought", { content: "[13e] the writer's next note", supersedes: wt }));
+    await sql`SELECT update_thought(p_id := ${wt}::uuid, p_metadata_patch := ${{ issue: "TKT-9642" }}::jsonb, p_actor := ${{ name: "board-sync", via: "db/sync-linear.ts", session: "e2e-13e" }}::jsonb)`;
+    assert(ws !== undefined && (await pointerOf(ws)) === wt, "a write key's pointer stands when board-sync takes its target");
+    const marks = await sql`SELECT thought_id::text AS id, actor_context->>'scope' AS scope FROM thought_audit WHERE action = 'capture' AND thought_id = ANY(${sql.array([merged.s, ws ?? merged.s], "TEXT")}::uuid[])`;
+    const scopeOf = (id: string | undefined) => (marks as { id: string; scope: string | null }[]).find((m) => m.id === id)?.scope;
+    assert(scopeOf(merged.s) === "capture" && scopeOf(ws) === null, `…the capture key's capture row says its scope, the write key's says none (${JSON.stringify(marks)})`);
   }
 
   // A derived_from that names a ghost: the positions that name no thought are
@@ -2041,10 +2172,10 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // against its five-minute interval, in the keyed body and the tool's row.
   const noBeats = ((await health("e2e-key")) as Record<string, any>).database ?? {};
   assert(JSON.stringify(noBeats.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }), `no worker ran here: no heartbeat, none ignored (${JSON.stringify(noBeats.workers)})`);
-  await sql`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:board-sync', ${JSON.stringify({ v: 1, every_s: 300, running: false, outcome: "stopped", passes: 7 })}, now() - interval '20 minutes')`;
+  await sql`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:board-sync', ${JSON.stringify({ v: 1, every_s: 300, running: false, outcome: "stopped" })}, now() - interval '20 minutes')`;
   const beats = ((await health("e2e-key")) as Record<string, any>).database?.workers;
   const hb = beats?.heartbeats?.[0];
-  assert(beats?.heartbeats?.length === 1 && hb.worker === "board-sync" && hb.job === null && hb.stale === true && hb.outcome === "stopped" && hb.passes === 7 && hb.everyS === 300 && hb.ageS >= 1199 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(hb.at),
+  assert(beats?.heartbeats?.length === 1 && hb.worker === "board-sync" && hb.job === null && hb.stale === true && hb.outcome === "stopped" && !("passes" in hb) && hb.everyS === 300 && hb.ageS >= 1199 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(hb.at),
     `keyed /health carries the heartbeat, stale past three intervals (${JSON.stringify(hb)})`);
   const workersRow = (await call("brain_info")).split("\n").find((l) => l.startsWith("Workers"));
   assert(/^Workers: +board-sync stopped \(last stamped 20 min ago, every 300 s\)$/.test(workersRow ?? ""), `the tool's Workers row says the same (${workersRow})`);
@@ -2053,7 +2184,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // from Postgres's own total (review pass 2: only a fake's total was read).
   for (let n = 0; n < 51; n++) {
     const job = `consolidate:j${String(n).padStart(2, "0")}@p3`;
-    await sql`INSERT INTO ob1_config (key, value) VALUES (${`heartbeat:${job}`}, ${JSON.stringify({ v: 1, job, every_s: 60, running: false, outcome: "ok", passes: 1 })})`;
+    await sql`INSERT INTO ob1_config (key, value) VALUES (${`heartbeat:${job}`}, ${JSON.stringify({ v: 1, job, every_s: 60, running: false, outcome: "ok" })})`;
   }
   const many = ((await health("e2e-key")) as Record<string, any>).database?.workers;
   await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:consolidate:j%'`;

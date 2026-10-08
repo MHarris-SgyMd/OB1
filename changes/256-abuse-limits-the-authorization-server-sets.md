@@ -1,18 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2309]
-migrations: []
----
-
-## Changelog
-
-The authorization server limits abuse before its pages go public: password checks across every client (ten at once, then one a second; a right password costs none) and five wrong passwords per sign-in, always; and with `OB1_AUTH_TRUSTED_PROXY` naming the proxy in front, per client address, five wrong passwords free and then a lockout of a minute doubling to fifteen, twenty failed authentications of one client in fifteen minutes, and `OB1_AUTH_REGISTRATIONS_PER_HOUR` registrations an hour (30 unless set). Each refusal is a 429, with `Retry-After` where waiting helps (SMD-2309).
-`/mcp`, the REST core and the proxy take no rate limit, by design: a key `keygen.ts` mints cannot be guessed, and a limit could only lock out the right key. Preflight now refuses a raw `MCP_ACCESS_KEY` under 32 characters; it used to warn. A request with no valid key has its body read to 64 KiB for its refusal, and past that is refused with `id: null` (SMD-2309).
-
-## FORK
-
-Abuse limits: the authorization server sets its own, and `/mcp` takes none by design (SMD-2309)
+# 256. Abuse limits: the authorization server sets its own, and `/mcp` takes none by design (SMD-2309)
 
 **The authorization server's own limits (PR 1, #293).** SMD-2285's third cut capped registration across all addresses. Nothing limited sign-in: once the proxy routes `/auth`, the operator's password page is public, and each guess costs one argon2id verify, 52 to 63 ms on the host.
 

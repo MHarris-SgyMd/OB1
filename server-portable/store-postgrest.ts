@@ -399,6 +399,14 @@ export class PostgrestStore implements ThoughtStore {
       const r = atomic as { id?: string; existed?: unknown; supersedes?: unknown } | null;
       const id = r?.id;
       if (!id) throw new Error("upsert_thought returned no id.");
+      // 082: a key that can read landed on a row that already held the text —
+      // recorded, as the SQL store records it (SMD-2638). A second call: a
+      // failure throws after the capture landed, and the caller's retry makes
+      // the note. A database before 082 has no such function.
+      if (r?.existed === true && opts.recapture !== "keep") {
+        const { error: noteError } = await this.client.rpc("ob1_note_recapture", { p_id: id, p_actor: actorPayload(opts.actor) });
+        if (noteError && !(noteError.code === "PGRST202" || noteError.code === "42883" || /Could not find the function/i.test(noteError.message ?? ""))) throw new Error(noteError.message);
+      }
       // 035: `existed` — the text was already there, the envelope's provenance
       // not written. Passed on only when the body said; the two-step fallback
       // below goes through the 2-argument form, which does not say.
@@ -525,6 +533,13 @@ export class PostgrestStore implements ThoughtStore {
     if (data == null) return null;
     const r = data as Record<string, unknown>;
     return { actorName: typeof r.actor_name === "string" ? r.actor_name : null, agentId: typeof r.canonical_agent_id === "string" ? r.canonical_agent_id : null };
+  }
+
+  async takenFromCapturer(id: string): Promise<boolean> {
+    if (!UUID_RE.test(id)) return true;
+    const { data, error } = await this.client.rpc("ob1_thought_taken", { p_id: id });
+    if (error) throw new Error(error.message);
+    return data !== false;
   }
 
   async existingIds(ids: string[]): Promise<Set<string>> {
