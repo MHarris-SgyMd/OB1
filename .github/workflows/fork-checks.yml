@@ -315,7 +315,10 @@ jobs:
 
       # The authorization server's fetch guard, the POC's proxy route table and
       # resource policy, and the deploy's two layout settings (SMD-2285), with
-      # no stack; the auth-poc job runs the stack.
+      # no stack; the auth-poc job runs the stack. The guard's reading of an
+      # answer runs against peers on loopback (SMD-2665: a status outside
+      # 200-599 and a 101 refused, where one stopped the server and the other
+      # left the fetch hanging).
       - name: Authorization POC rules
         working-directory: evals
         run: bun eval-auth.ts --self-check
@@ -332,8 +335,13 @@ jobs:
       # the client a request names, the address rule, the proxy's resolution
       # and the bounded maps); and the request target (SMD-2615: the path read
       # as the library reads it, held against parseurl itself, and a throw or
-      # rejection in a request answered 500 with the server still up). The
-      # full-stack job runs the service.
+      # rejection in a request answered 500 with the server still up); and the
+      # functions it hands on (SMD-2665: a throw in a guarded timer or
+      # response handler logged with the process kept, and each function
+      # server.ts and the files it imports hand on, in the spellings a walk
+      # with the TypeScript checker reads, wrapped, run at once, chained or
+      # exempt by a pinned key with a reason). The full-stack job runs the
+      # service.
       - name: Install the authorization server's pinned packages
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
