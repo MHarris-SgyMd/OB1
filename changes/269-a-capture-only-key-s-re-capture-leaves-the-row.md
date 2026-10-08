@@ -1,17 +1,4 @@
----
-type: security
-bump: minor
-tickets: [SMD-2539]
-migrations: [080]
----
-
-## Changelog
-
-A capture-only key can no longer alter another key's thought by re-capturing its text. Before, the re-capture merged the key's metadata and `source` into the existing row, appended an update event in its name and moved `updated_at`, so a key that could guess a thought's text could relabel it. Migration 080 adds `p_payload.recapture` to all three `upsert_thought` forms, and the server sends `"keep"` for a capture-only key: a capture that lands on an existing row writes nothing to it, except a vector onto a row that has none (one update event, the metadata untouched, and the windows such a row may hold dropped unless its label is the vector's). A write key's re-capture still merges, as before. The reply still carries the id the session hook supersedes its own summary with; four of its notes no longer tell a capture key that a re-capture regenerates or merges anything, since its re-capture does neither. The fix needs the server and the migration both, in either order: until both are in, a capture key's re-capture still merges (SMD-2539).
-
-## FORK
-
-A capture-only key's re-capture leaves the row it lands on (SMD-2539)
+# 269. A capture-only key's re-capture leaves the row it lands on (SMD-2539)
 
 **What changed.**
 - **Migration 080.** `p_payload.recapture` on all three `upsert_thought` forms:

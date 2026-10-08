@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2536]
-migrations: []
----
-
-## Changelog
-
-The consolidation pass now stores the judge's reason as one line: every line break is a space, the C1 controls and bidi marks are dropped, and the cut at 400 characters never splits a character in half (an emoji is kept or dropped whole, though a sequence of several, a flag or a family, can still be cut between its parts). Before this fix, a NEL, a C1 control or a bidi mark in the model's reason was stored and written to `consolidate.ts --dump`'s JSON lines. `evals/eval-consolidate.ts`'s grading sheet prints the reason and both thoughts' text on one line each by the same rule (SMD-2536).
-
-## FORK
-
-The judge's reason is stored on one line, by the rule the replies print it with (SMD-2536)
+# 261. The judge's reason is stored on one line, by the rule the replies print it with (SMD-2536)
 
 **What changed.**
 - **The rule moved.** `LINE_BREAK`, `UNSHOWN`, a `oneLine(text)` cleaner and a `cutByCodePoint(text, max)` helper now live in `server-portable/consolidate.ts`, beside `cleanForDisplay`. They were `render.ts`' private regexes and `snipText`'s body. `render.ts` imports `cleanForDisplay`'s module, so `parseJudgement` could not use `snipText` without an import cycle. `snipText` is now `oneLine`, then `cutByCodePoint`, then an ellipsis when it cut. `fenceText` uses the moved regexes. Neither changes behaviour; test-server's [16h]–[16j] pass unchanged.

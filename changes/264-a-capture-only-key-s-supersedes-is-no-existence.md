@@ -1,17 +1,4 @@
----
-type: security
-bump: patch
-tickets: [SMD-2473]
-migrations: []
----
-
-## Changelog
-
-A capture-only key's `supersedes` no longer tells it anything about the thought it names. The pointer is written only when the target is the key's own thought, attributed to its agent id and still present (not deleted); any other target is dropped before the write, the capture lands, and the reply is the same either way. `REFUSED_SUPERSEDES_OWNERSHIP` is gone, and while the agent registry is unreachable every target gets the same `SUPERSEDES_UNJUDGED` retry. A server whose registry cannot attribute its keys (logged as `agent registry: … cannot attribute` or `… refused`) no longer links a capture key's summaries by name; fix the grant, the search_path or the migration the line names; preflight reports the migration, the search_path and a missing SELECT on the registry tables, and only the log a missing INSERT or UPDATE on them. Before upgrading, check that the hook's capture key is attributed today, as the record's What changed says. The session hook's log names the pointer a post sent as `supersedes_sent=`, where it said `supersedes=`. One channel stays open, filed as a follow-up: a re-capture returns the id of the row now holding the text, so a key that has seen a thought's id can tell whether that thought was since deleted or edited. No schema change (SMD-2473).
-
-## FORK
-
-A capture-only key's supersedes is no existence oracle — a pointer it cannot prove its own is dropped, not refused (SMD-2473)
+# 264. A capture-only key's supersedes is no existence oracle — a pointer it cannot prove its own is dropped, not refused (SMD-2473)
 
 **What changed.**
 - **One rule in `core/writes.ts` `capture`.** For a key that cannot read, the pointer stands only when the target's capture audit row carries the key's agent id and the thought still exists. Otherwise it is dropped before the write, as `derived_from`'s ids are trimmed (SMD-1298), and the reply says nothing of it. The row's `supersedes` is the record of what was kept. Both reads (the audit row and the thought) run for every target, so a deleted own thought costs no failed write the others don't.
