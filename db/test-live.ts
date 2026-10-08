@@ -10286,12 +10286,14 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     // One sleep: extraction alone, drained, then consolidation, then done.
     lines.length = 0;
     const auditBefore = await auditRows();
-    const sessions = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE datname = current_database()`)[0].c);
+    // Client sessions only: an autovacuum worker on the database is not a
+    // follower's; and a closed pool's connections take a moment to go.
+    const sessions = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`)[0].c);
     const sessionsBefore = await sessions();
     slowExtract = 1500;
     const once = await sleepRun();
     slowExtract = 0;
-    await Bun.sleep(300);
+    await pollUntil(async () => (await sessions()) === sessionsBefore, 3_000);
     const sessionsAfter = await sessions();
     const onceText = lines.join("\n");
     const lastExtract = Math.max(...modelCalls.filter((c) => c.kind === "extract").map((c) => c.at));
