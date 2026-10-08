@@ -99,7 +99,7 @@
         throw new Error(response?.error || 'Failed to save configuration');
       }
 
-      showResult('Saved. You can close this tab and use the extension popup.', 'success');
+      showResult(response.warning || 'Saved. You can close this tab and use the extension popup.', response.warning ? '' : 'success');
     } catch (err) {
       showResult(err.message, 'error');
     } finally {

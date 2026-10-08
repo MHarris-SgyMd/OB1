@@ -1,17 +1,4 @@
----
-type: security
-bump: patch
-tickets: [SMD-2657]
-migrations: []
----
-
-## Changelog
-
-A capture-only key can no longer file a thought under a ticket with `metadata.ticket`. The brain reads a thought's ticket from `ticket` ahead of `issue`, and a write key's later capture of the same text kept the key's `ticket`, so the writer's thought read another ticket's status (SMD-2657).
-
-## FORK
-
-A capture-only key is refused `metadata.ticket` (SMD-2657)
+# 279. A capture-only key is refused `metadata.ticket` (SMD-2657)
 
 **What changed.**
 - **The refusal.** `ticket` joins `TICKET_META_KEYS` in `core/refusal.ts`, after `issue`, so a key that cannot read is refused it as it is the other four (SMD-2617): `REFUSED_METADATA_SHAPE`, problem `ticket_key`, the key named, before either model call, at both doors.

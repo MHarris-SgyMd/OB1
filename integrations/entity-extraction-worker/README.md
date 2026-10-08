@@ -174,7 +174,7 @@ After completing setup and running the worker, you should be able to:
 1. See entities extracted from your thoughts in the `entities` table
 2. See relationships between entities in the `edges` table
 3. Query `thought_entities` to find which thoughts mention which entities
-4. Use the `graph_search` and `entity_detail` MCP tools (if the enhanced MCP server is deployed)
+4. Query the tables directly (the enhanced MCP server's `graph_search` and `entity_detail` tools retired with SMD-1931; a core entity-graph read is SMD-2280's)
 5. Observe the queue draining — items move from `pending` → `processing` → `complete`
 
 ## Troubleshooting
