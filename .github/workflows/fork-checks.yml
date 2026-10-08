@@ -2021,8 +2021,8 @@ jobs:
       # SMD-1801. The three dashboards build from their pinned installs, with no
       # Supabase package among them (check 22 holds the imports; this holds the
       # builds). The two Next dashboards are built, not run: they speak to the
-      # open-brain-rest gateway, which this stack does not serve
-      # (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP to
+      # open-brain-rest gateway, which SMD-1931 retired; they retire with
+      # SMD-2280's harvest. The SvelteKit one speaks MCP to
       # the server this stack serves, so it is driven too, below.
       # They build in the background from the job's start (SMD-2251); this step
       # waits for that and reports it — each dashboard's log folded when it

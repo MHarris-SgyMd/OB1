@@ -9,7 +9,7 @@
   "version": "1.1.1",
   "requires": {
     "open_brain": true,
-    "services": ["REST API gateway (integrations/open-brain-rest)"],
+    "services": ["REST core of the brain, at /api (SMD-1931)"],
     "tools": ["Chrome 120+ or Chromium-based browser"]
   },
   "tags": ["chrome-extension", "capture", "claude", "chatgpt", "gemini", "gemini-bulk-sync", "client-side"],

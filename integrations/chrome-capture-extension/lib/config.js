@@ -35,11 +35,9 @@
     syncStateChatGPT: 'ob_capture_sync_state_chatgpt'
   };
 
-  // No default endpoint. Users MUST supply their own Open Brain REST API URL.
-  // Shape example (Supabase-hosted):
-  //   https://<your-project-ref>.supabase.co/functions/v1
-  // Self-hosted alternative:
-  //   https://brain.example.com
+  // No default endpoint. Users MUST supply their own brain's REST core URL
+  // (SMD-1931): the stack's opt-in public route, e.g.
+  //   https://brain.example.com/api
   const DEFAULT_SETTINGS = {
     apiEndpoint: '',
     apiKey: '',
@@ -132,7 +130,8 @@
         'Open Brain API URL is not configured. Click the extension icon and complete the Configure Open Brain screen.'
       );
     }
-    return trimmed.endsWith('/open-brain-rest') ? trimmed : `${trimmed}/open-brain-rest`;
+    // The REST core's routes (`/v1/...`) sit under the URL as given.
+    return trimmed;
   }
 
   function getPlatformDefinition(platformId) {

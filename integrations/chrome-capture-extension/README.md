@@ -10,7 +10,7 @@
 
 A client-side Chrome (or Chromium-based browser) extension that sits on top of Claude.ai, chatgpt.com, and gemini.google.com. When you finish an interesting exchange, click the extension icon and the extension extracts the latest user + assistant turn from the page DOM, runs local sensitivity and duplicate filters, and POSTs the result to your Open Brain REST API gateway. It also supports bulk backfill from Claude and ChatGPT using their internal conversation APIs so you can import your existing chat history in one pass.
 
-This is a **client-side** integration — unlike the other integrations in this repo (Slack, Discord, email capture) which run as servers under Bun, a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call the REST API gateway's `/ingest` endpoint with standard `x-brain-key` auth. Every user installs it locally against their own Open Brain.
+This is a **client-side** integration — unlike the other integrations in this repo (Slack, Discord, email capture) which run as servers under Bun, a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call your brain's REST core — `POST /v1/thoughts` (the `capture_thought` operation) with an `x-brain-key` header, and `GET /v1/whoami` to check the key (SMD-1931). Every user installs it locally against their own Open Brain.
 
 ## Screenshots
 
@@ -24,8 +24,8 @@ Placeholder. See [`docs/screenshots/README.md`](docs/screenshots/README.md) for 
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- The [`integrations/open-brain-rest`](../open-brain-rest/) gateway deployed and reachable — the extension POSTs to `/open-brain-rest/ingest` and pings `/open-brain-rest/health`
-- An `MCP_ACCESS_KEY` (or equivalent `x-brain-key` token) issued by your Open Brain for this device
+- The REST core reachable at `/api` — the stack's opt-in route, on when `deploy/compose.api-public.yaml` is named ([`deploy/README.md`](../../deploy/README.md), "The REST core and its opt-in `/api`")
+- A capture-scoped key for this device: `cd server-portable && bun keygen.ts --name chrome --scope capture`, its line added to `MCP_ACCESS_KEYS` ([`SETUP.md`](../../SETUP.md)). A capture key can add a thought and cannot read, edit or delete one; a write key works too, but gives the browser more than it needs
 - Chrome 120+, or any Chromium-based browser that supports MV3 (Edge 120+, Brave, Arc, Opera)
 
 ## Credential Tracker
@@ -37,10 +37,10 @@ CHROME CAPTURE EXTENSION -- CREDENTIAL TRACKER
 --------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  REST API base URL:     ____________
-    (e.g. https://brain.example.com — the HTTPS proxy in front of the gateway,
-     or http://127.0.0.1:8787 for a gateway on this machine)
-  x-brain-key API key:   ____________
+  REST core URL:         ____________
+    (e.g. https://brain.example.com/api — your brain's public origin,
+     or http://127.0.0.1:8000/api for the stack on this machine)
+  x-brain-key (capture): ____________
 
 BROWSER INFO
   Browser + version:     ____________
@@ -62,10 +62,10 @@ BROWSER INFO
 
 The extension ships with **no hardcoded server URLs**. On first install it opens `popup/config.html` and asks for two things:
 
-1. **Open Brain REST API URL** — the base URL of your REST API gateway. Examples:
-   - On this machine: `http://127.0.0.1:8787`
-   - Hosted: `https://brain.example.com` (the HTTPS proxy in front of the gateway)
-2. **API Key** — the `x-brain-key` (`MCP_ACCESS_KEY`) you configured when deploying the REST API integration
+1. **Open Brain REST core URL** — your brain's origin with `/api`. Examples:
+   - On this machine: `http://127.0.0.1:8000/api` (the proxy's port, `SERVER_PORT`)
+   - Hosted: `https://brain.example.com/api`
+2. **API Key** — the capture-scoped key minted for this device (Prerequisites). **Test connection** calls `GET /v1/whoami` and says so if the key cannot capture
 
 When you click **Save & Grant Permission**, Chrome shows a native permission prompt asking whether the extension may access the specific origin you entered. Approve it. This is a one-time grant — Chrome remembers it and the extension can now talk to your Open Brain without asking again. You can revoke the grant any time from `chrome://extensions → Open Brain Capture → Details → Site access`.
 
@@ -86,7 +86,7 @@ When you click **Save & Grant Permission**, Chrome shows a native permission pro
 
 **Bulk backfill (Claude, ChatGPT, and Gemini):**
 
-Switch to the Sync tab and click **Sync All** under the platform you want to import. For Claude and ChatGPT the extension walks each platform's internal conversation API using your existing logged-in session; for Gemini it uses a `chrome.debugger`-based history capture (see "Gemini bulk history sync (Phase B/C)" below). Every path funnels through the same ingest pipeline, and dedup is handled via SHA-256 content fingerprints — running Sync All twice is safe. Incremental **Sync New** imports only conversations not yet captured. Optionally turn on **Auto-sync** to keep new conversations flowing in hands-free (15 min cadence for Claude/ChatGPT, 4 h for Gemini).
+Switch to the Sync tab and click **Sync All** under the platform you want to import. For Claude and ChatGPT the extension walks each platform's internal conversation API using your existing logged-in session; for Gemini it uses a `chrome.debugger`-based history capture (see "Gemini bulk history sync (Phase B/C)" below). Every path funnels through the same capture pipeline, and dedup is handled via SHA-256 content fingerprints — running Sync All twice is safe. Incremental **Sync New** imports only conversations not yet captured. Optionally turn on **Auto-sync** to keep new conversations flowing in hands-free (15 min cadence for Claude/ChatGPT, 4 h for Gemini).
 
 ## Supported Sites
 
@@ -117,9 +117,9 @@ Switch to the Sync tab and click **Sync All** under the platform you want to imp
            │ fetch() with x-brain-key header
            ▼
 ┌──────────────────────────┐
-│ Open Brain REST API      │
-│ /open-brain-rest/ingest  │
-│ (one server under Bun)   │
+│ Open Brain REST core     │
+│ POST /api/v1/thoughts    │
+│ (capture_thought)        │
 └──────────────────────────┘
 ```
 
@@ -129,7 +129,7 @@ The service worker is the only network caller. Content scripts never touch the n
 
 Google does not expose a public conversation API for Gemini, so bulk backfill uses a two-part flow that observes Gemini's own internal traffic instead of scraping the DOM.
 
-**Phase B — chrome.debugger history capture.** When a Gemini tab is open, the extension attaches the MV3 debugger protocol (`chrome.debugger.attach`) and watches `Network.requestWillBeSent`/`loadingFinished` for exactly one URL pattern: `batchexecute` requests with `rpcids=hNvQHb` (Gemini's history-load RPC). Other batchexecute rpcids (`MaZiqc`, `ESY5D`, `L5adhe`, and so on — sidebar, settings, status) are ignored. On `loadingFinished` the service worker fetches the response body via `Network.getResponseBody`, parses the framed positional JSON, and funnels every user+assistant turn in the conversation through the existing capture pipeline (retry queue, sensitivity filter, fingerprint dedup, session metrics). No DOM scraping, no parallel `/ingest` path.
+**Phase B — chrome.debugger history capture.** When a Gemini tab is open, the extension attaches the MV3 debugger protocol (`chrome.debugger.attach`) and watches `Network.requestWillBeSent`/`loadingFinished` for exactly one URL pattern: `batchexecute` requests with `rpcids=hNvQHb` (Gemini's history-load RPC). Other batchexecute rpcids (`MaZiqc`, `ESY5D`, `L5adhe`, and so on — sidebar, settings, status) are ignored. On `loadingFinished` the service worker fetches the response body via `Network.getResponseBody`, parses the framed positional JSON, and funnels every user+assistant turn in the conversation through the existing capture pipeline (retry queue, sensitivity filter, fingerprint dedup, session metrics). No DOM scraping, no parallel capture path.
 
 **Phase C — Sync All orchestrator.** The Sync tab exposes three Gemini controls:
 
@@ -199,13 +199,13 @@ Alternatively, host the packed `.crx` on a maintainer-owned update URL and let u
 - **DOM extraction is fragile.** Claude, ChatGPT, and Gemini all ship UI rewrites without notice. When a platform shuffles its selectors, manual capture returns "No conversation turns found" until the extractor is updated. The Gemini extractor is especially exposed — Google ships new Gemini UIs every few months. Expect occasional maintenance PRs. Bulk sync (Claude + ChatGPT) uses stable internal JSON APIs and is far less fragile than DOM extraction.
 - **No passive/ambient capture.** The extension only captures when the user explicitly clicks Capture or runs Sync. A previous "observe every turn" design was retired because keeping up with selector churn on every render was not sustainable. The Settings panel has no Auto/Manual capture-mode toggle — that UI was dropped in the initial public release because it controlled only the ambient path. If ambient capture ever ships, the toggle comes back with it.
 - **Gemini bulk sync relies on the debugger protocol.** Google does not expose a public conversation history API. The extension observes Gemini's own internal `batchexecute` history-load RPC via `chrome.debugger`, which requires Chrome to show the "Open Brain Capture started debugging this browser" banner while a run is live — dismissing the banner detaches the debugger and pauses the sync. See "Gemini bulk history sync (Phase B/C)" for the full flow.
-- **Large conversations.** The REST API `/ingest` endpoint accepts a single payload per request. A 400-turn Claude thread becomes one very large POST. If your gateway has a request size cap (Supabase default is 10MB), Sync All may dead-letter the longest conversations. Check the activity log and trim in your dashboard if that happens.
+- **Large conversations.** Each conversation is one capture, one `POST /v1/thoughts`. A 400-turn Claude thread becomes one very large POST, which the brain chunks for search. If a proxy in front of it caps the request size, Sync All may dead-letter the longest conversations; check the activity log.
 - **Sensitivity filter is regex-only.** It's deliberately conservative — false negatives are possible. Treat it as a guardrail, not a vault. For truly sensitive content, don't paste it into an AI chat in the first place.
 
 ## Troubleshooting
 
 **Issue: Extension icon has a yellow `!` badge and captures fail**
-Solution: The extension is not configured. Click the icon, then click **Open Configure screen** in the yellow banner, and supply your Open Brain REST API URL + API key.
+Solution: The extension is not configured. Click the icon, then click **Open Configure screen** in the yellow banner, and supply your Open Brain REST core URL + API key.
 
 **Issue: "Missing x-brain-key API key" error when I click Capture**
 Solution: Either the API key was never saved, or Chrome's local storage got cleared (this can happen after a browser profile reset). Open the Settings tab → **Reconfigure API URL & Key** and re-enter.
@@ -217,7 +217,7 @@ Solution: The content script isn't loaded on this tab. Refresh the tab and retry
 Solution: The site DOM has changed and the extractor selectors are stale. Check the repo for a newer version of the extension; if there isn't one yet, open an issue with a sample of the current DOM and the `chrome://extensions → errors` output.
 
 **Issue: Sync All reports every conversation as `existing` but your Open Brain is empty**
-Solution: The SHA-256 fingerprint cache is populated but the ingest POSTs are silently rejected. Open the Activity log on the Overview tab and look for `queued_retry` or `dead_letter` entries — those will show the actual API error. Common cause: the REST API gateway is deployed but `MCP_ACCESS_KEY` was rotated and you didn't update the extension.
+Solution: The SHA-256 fingerprint cache is populated but the ingest POSTs are silently rejected. Open the Activity log on the Overview tab and look for `queued_retry` or `dead_letter` entries — those will show the actual API error. Common causes: the key was revoked or rotated and you didn't update the extension, or `/api` is off (the proxy answers 404 until `compose.api-public.yaml` is named).
 
 **Issue: I configured the extension but Test Connection says "fetch failed"**
 Solution: Your browser doesn't have host permission for that origin. Open the Configure screen and save again — Chrome will re-prompt. If it still fails, verify the URL is reachable from your browser (paste it directly into the address bar, expect a 401 or similar from the gateway).
