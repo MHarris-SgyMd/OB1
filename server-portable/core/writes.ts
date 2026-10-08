@@ -33,10 +33,13 @@ import type { Input } from "./schemas.ts";
 // capture-only key could set the status every thought filed under the ticket
 // reads; and on a pasted ticket header, with Linear's status, the watermark
 // would have board-sync call the ticket unchanged, so Linear's edits to its
-// text never reach the brain (changes/smd-2617.md). A write key keeps them:
+// text never reach the brain (changes/smd-2617.md). `ticket` files a thought
+// under a ticket and is read ahead of `issue`; a write key's later merge onto
+// the key's row kept it, so that writer's thought read another ticket's status
+// (SMD-2657). A write key keeps them:
 // it can edit any thought through update_thought anyway.
 const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
-const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed"]);
+export const RESERVED_META: ReadonlySet<string> = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed"]);
 const TICKET_META = new Set<string>(TICKET_META_KEYS);
 
 /** The refusal for a bad `metadata` argument, or null when it is clean (or absent). Checked before the model calls, as the other shape refusals are. */

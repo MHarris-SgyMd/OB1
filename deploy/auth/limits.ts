@@ -57,6 +57,7 @@
 import { lookup } from "node:dns/promises";
 import type { IncomingMessage } from "node:http";
 import { isIP } from "node:net";
+import { guard } from "./target.ts";
 
 const MIN = 60_000;
 /** The most entries any per-address map keeps; the oldest go first past it. */
@@ -364,8 +365,10 @@ export function trustedProxy(name: string | undefined, find: Lookup = lookupAll,
         console.error(`OB1_AUTH_TRUSTED_PROXY ${name} did not resolve (${e.message}); the per-address limits are off until it does`);
       },
     );
-  void resolve();
-  setInterval(resolve, everyMs).unref();
+  // Guarded (target.ts): a throw in a pass is logged, never the process's end (SMD-2665).
+  const pass = guard(`resolving OB1_AUTH_TRUSTED_PROXY ${name}`, resolve);
+  pass();
+  setInterval(pass, everyMs).unref();
   return { set, resolve };
 }
 

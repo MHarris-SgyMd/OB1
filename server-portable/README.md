@@ -585,8 +585,9 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `REFUSED_CURSOR`. Capture's: the pointer and metadata shapes
   (`REFUSED_SUPERSEDES_SHAPE`, `REFUSED_DERIVED_FROM_SHAPE`,
   `REFUSED_METADATA_SHAPE` with its `problem`, and the `key` unless the key itself
-  is malformed; a capture-only key is refused a ticket's lifecycle keys, `issue`,
-  `status`, `status_type` and `linear_updated_at`, SMD-2617), SMD-1978's pointer
+  is malformed; a capture-only key is refused the keys a ticket's lifecycle is read
+  from, `issue`, `ticket`, `status`, `status_type` and `linear_updated_at`,
+  SMD-2617, SMD-2657), SMD-1978's pointer
   codes (`DERIVED_FROM_MISSING` with a reader's `positions`, a reader's `REFUSED_SUPERSEDES_UNKNOWN`,
   `SUPERSEDES_UNJUDGED`; a capture-only key's `supersedes` it cannot prove its
   own is dropped, not refused, SMD-2473, and a thought another key or board-sync
@@ -698,13 +699,13 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 699 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, and a `Host` the URL parser refuses, or none
-bun test-auth.ts          # 165 — scoped, hashed, named keys
-bun test-rest.ts          # 272 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
+bun test-server.ts        # 832 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, and a `Host` the URL parser refuses, or none
+bun test-auth.ts          # 187 — scoped, hashed, named keys
+bun test-rest.ts          # 292 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
 bun run test:local        # 199 — fully local provider, no credential
 bun run test:sql          # 237 — store conformance, real Postgres in a container
-bun run test:e2e          # 519 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 153 — the REST core beside the MCP server on one database: every operation through both
+bun run test:e2e          # 524 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+../db/with-postgres.sh bun test-rest-sql.ts  # 154 — the REST core beside the MCP server on one database: every operation through both
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 

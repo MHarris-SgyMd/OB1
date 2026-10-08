@@ -131,7 +131,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 
 **401 on every request**
 - The URL or header must carry the **key**, the environment its **hash**. An entry that is not `name:read|write|capture|forward:<64 hex characters>` is ignored, and the vendored servers do not log it (a `capture` or `forward` key, well formed, is no key to them either — they admit read and write): check each entry is three fields, the scope lower-case, the digest 64 hex characters. `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem.
-- A `read`-scoped key authenticates but is given no writing tool; a server whose only tools write (`delete-thought-mcp`, `update-thought-mcp`) shows a read key nothing to call.
+- A `read`-scoped key authenticates but is given no writing tool; a server whose only tools write shows a read key nothing to call.
 
 **`relation "…" does not exist`**
 - Step 1 was skipped, or ran against another database than `SUPABASE_URL` names. Re-run the extension's `schema.sql` against that database.

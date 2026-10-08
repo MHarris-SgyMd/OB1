@@ -138,7 +138,7 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 bun integrations/smart-ingest/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). Beside the [rest-api gateway](../rest-api/) on 8787, give this server a port of its own (`PORT=8788`) and point the gateway's `SMART_INGEST_URL` at it (`http://127.0.0.1:8788`); the gateway forwards its `MCP_ACCESS_KEY`, so the two hold the same key (SMD-2110). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). Give it a port the core server does not hold. The `rest-api` gateway that proxied `/ingest` to it is retired (SMD-1931); this server is called directly until it becomes a REST-core plugin (SMD-2690). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 ### 2. Set the environment
 
@@ -246,7 +246,7 @@ Execute a previously dry-run job.
 
 **Planned (not yet built):**
 
-- **Claude Desktop via MCP:** `integrations/enhanced-mcp` is intended to expose `ingest_document` and `execute_ingestion_job` tools so Claude Desktop users can ingest documents through MCP without a terminal. The folder currently ships empty.
+- **Claude Desktop via MCP:** ingest as MCP tools comes with smart-ingest's move into the REST core as a plugin, whose operations both surfaces expose (SMD-2690). The `integrations/enhanced-mcp` server this line once named retired with SMD-1931.
 
 For guidance on managing tool count and token overhead as you add more integrations, see the [tool audit guide](../../docs/05-tool-audit.md).
 

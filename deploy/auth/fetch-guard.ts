@@ -21,14 +21,19 @@
  * The check runs inside the socket's own DNS lookup, so the address checked is
  * the address dialled, and a name that rebinds between two lookups gains
  * nothing. No redirect is followed (the provider refuses a non-200 anyway), the
- * body is capped, and the provider's own 2.5 s abort signal is honoured.
+ * body is capped, and the provider's own 2.5 s abort signal is honoured. An
+ * answer a Response cannot carry (a status outside 200–599, a switch of
+ * protocol) is refused, and a throw in any of its handlers rejects the fetch
+ * rather than ending the process (answerOf, SMD-2665).
  *
  * Dependency-free (node: built-ins only), so `eval-auth.ts --self-check` holds
  * the classifier without a stack.
  */
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import { request } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
+import type { Duplex } from "node:stream";
 
 /** What the provider may read from one fetch at most, whatever the purpose's own limit (jwks_uri has none). */
 export const BODY_CAP = 64 * 1024;
@@ -149,9 +154,19 @@ export function guardedLookup(log: Log, url: string, resolve: typeof dnsLookup =
     resolve(host, { all: true, family: options.family ?? 0 }, (err, answers) => {
       if (err) return done(err);
       const list = answers as LookupAddress[];
-      const why = list.length ? list.map((a) => specialUse(a.address)).find((w) => w !== null) : `${host} resolved to nothing`;
+      // A throw in this callback would be uncaught, and end the process (SMD-2665): an answer that cannot be checked is refused.
+      let why: string | null | undefined;
+      try {
+        why = list.length ? list.map((a) => specialUse(a.address)).find((w) => w !== null) : `${host} resolved to nothing`;
+      } catch (e) {
+        why = `an answer could not be checked (${e instanceof Error ? e.message : "a throw"})`;
+      }
       if (why) {
-        log(`fetch-guard: refused ${url} — ${why}`);
+        try {
+          log(`fetch-guard: refused ${url} — ${why}`);
+        } catch {
+          // the refusal stands without its log line
+        }
         return done(Object.assign(new Error(`fetch refused: ${why}`), { code: "EREFUSED_BY_GUARD" }));
       }
       if (options.all) return done(null, list);
@@ -172,29 +187,70 @@ export function guardedFetch(log: Log = (l) => console.log(l)) {
     }
     const headers: Record<string, string> = {};
     new Headers(init.headers).forEach((v, k) => { if (v !== "") headers[k] = v; });
-    return new Promise<Response>((resolve, reject) => {
-      const req = request(url, { method: "GET", headers, lookup: guardedLookup(log, url.href), signal: init.signal ?? undefined, agent: false }, (res) => {
-        const chunks: Buffer[] = [];
-        let size = 0;
-        res.on("data", (chunk: Buffer) => {
-          size += chunk.length;
-          if (size > BODY_CAP) {
-            log(`fetch-guard: cut ${url.href} — body over ${BODY_CAP} bytes`);
-            res.destroy(new Error(`fetch refused: body over ${BODY_CAP} bytes`));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on("error", reject);
-        res.on("end", () => {
-          const out = new Headers();
-          for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out.set(k, Array.isArray(v) ? v.join(", ") : v);
-          const status = res.statusCode ?? 502;
-          resolve(new Response([204, 205, 304].includes(status) ? null : Buffer.concat(chunks), { status, headers: out }));
-        });
-      });
-      req.on("error", reject);
-      req.end();
-    });
+    const req = request(url, { method: "GET", headers, lookup: guardedLookup(log, url.href), signal: init.signal ?? undefined, agent: false });
+    const answer = answerOf(req, url.href, log);
+    req.end();
+    return answer;
   };
+}
+
+/**
+ * The peer's answer to `req` as a Response, or a refusal. A status a Response
+ * cannot carry (outside 200–599) is refused before the body is read, and so is
+ * a switch of protocol (101), which otherwise left the fetch unsettled past the
+ * provider's abort (measured). The peer chooses what reaches these handlers,
+ * and Bun 1.4.0 ends the process on a throw in any of them: one `client_id`
+ * naming a host that answered 999 stopped the server, `new Response` throwing
+ * in the end handler (SMD-2665). So each is made by `settling`, which turns a
+ * throw into the fetch's rejection; target.ts's self-check holds this file to
+ * that.
+ */
+export function answerOf(req: ClientRequest, href: string, log: Log): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    const settling =
+      <A extends unknown[]>(fn: (...args: A) => void) =>
+      (...args: A) => {
+        try {
+          fn(...args);
+        } catch (e) {
+          reject(e);
+          try {
+            req.destroy();
+          } catch {
+            // the request is gone already
+          }
+        }
+      };
+    req.on("response", settling((res: IncomingMessage) => {
+      const status = res.statusCode ?? 502;
+      if (status < 200 || status > 599) {
+        log(`fetch-guard: refused ${href} — status ${status}`);
+        res.destroy();
+        return reject(new Error(`fetch refused: status ${status} is not one a Response can carry`));
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on("data", settling((chunk: Buffer) => {
+        size += chunk.length;
+        if (size > BODY_CAP) {
+          log(`fetch-guard: cut ${href} — body over ${BODY_CAP} bytes`);
+          res.destroy(new Error(`fetch refused: body over ${BODY_CAP} bytes`));
+          return;
+        }
+        chunks.push(chunk);
+      }));
+      res.on("error", reject);
+      res.on("end", settling(() => {
+        const out = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out.set(k, Array.isArray(v) ? v.join(", ") : v);
+        resolve(new Response([204, 205, 304].includes(status) ? null : Buffer.concat(chunks), { status, headers: out }));
+      }));
+    }));
+    req.on("upgrade", settling((_res: IncomingMessage, socket: Duplex) => {
+      log(`fetch-guard: refused ${href} — the peer switched protocols`);
+      socket.destroy();
+      reject(new Error("fetch refused: the peer switched protocols"));
+    }));
+    req.on("error", reject);
+  });
 }

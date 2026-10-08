@@ -8,9 +8,10 @@
  * calendar, job-hunt and ob-graph, held there by a grouped `.or()`, a
  * three-level `!inner` embed, an `in.(…)` list and a `!fk_name` hint the shim
  * did not read until that change — so a shim gap in any of those shapes fails
- * a named assertion here too. (enhanced-mcp, agent-memory-api and the
- * metadata worker, the other three that moved, need the model provider
- * stubbed and the fork's own tables; test-writes.ts drives them.)
+ * a named assertion here too. (Of the other three that moved, agent-memory-api
+ * and the metadata worker need the model provider stubbed and the fork's own
+ * tables, and test-writes.ts drives them; the third, enhanced-mcp, retired
+ * with SMD-1931.)
  *
  * SMD-1588 (FORK.md change 77). Fix 13 moved these servers onto
  * compat/supabase-sql by changing one import line and never drove them; change

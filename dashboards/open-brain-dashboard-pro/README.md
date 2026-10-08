@@ -1,5 +1,8 @@
 # Open Brain Dashboard Pro
 
+> [!NOTE]
+> **Retired gateway (SMD-1931).** This dashboard talks to `integrations/open-brain-rest`, which SMD-1931 retired: every route it called has a fate against the REST core in [`docs/vendored-disposition.md`](../../docs/vendored-disposition.md), "The brain's outward surface". It is deployed nowhere, CI only builds it, and it retires with SMD-2280's harvest into the operator GUI.
+
 > A Next.js 16 + Tailwind + iron-session dashboard for browsing, searching, auditing, and ingesting content in your Open Brain. A third flavor alongside the SvelteKit `open-brain-dashboard` and the Next.js `open-brain-dashboard-next`.
 
 ## What It Does
@@ -24,7 +27,7 @@ Screenshots go in `docs/screenshots/` and should be referenced from this README 
 ## Prerequisites
 
 - A working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- The **REST API gateway** ([`integrations/open-brain-rest`](../../integrations/open-brain-rest/), one server under Bun) running and reachable
+- The **REST API gateway** (`integrations/open-brain-rest`, retired by SMD-1931; the note above) running and reachable
 - **Node.js 20+**
 - A host for the dashboard: Vercel or Netlify free tier works; self-hosting on a Node.js 20+ runtime is also fine
 
@@ -34,7 +37,7 @@ All configuration is through environment variables. **The app refuses to start i
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `NEXT_PUBLIC_API_URL` | Yes | Base URL of your Open Brain REST API — `open-brain-rest`, `http://127.0.0.1:8787` when run under Bun from a checkout ([its README](../../integrations/open-brain-rest/README.md#deploy)). |
+| `NEXT_PUBLIC_API_URL` | Yes | Base URL of your Open Brain REST API — `open-brain-rest`, `http://127.0.0.1:8787` when run under Bun from a checkout. |
 | `SESSION_SECRET` | Yes | 32+ character secret used by `iron-session` to encrypt the session cookie. Generate with `openssl rand -hex 32`. |
 | `RESTRICTED_PASSPHRASE_HASH` | No | SHA-256 hash of a passphrase that unlocks restricted/sensitive content. Only meaningful if your brain has a `sensitivity_tier` column on `public.thoughts`. There is no official sensitivity-tiers primitive upstream yet — either add your own migration (see PR #192 for pattern) or wait for the primitive to land. On stock OB1, this dashboard's restricted-content toggle is hidden at startup. Generate with `echo -n "your-passphrase" \| shasum -a 256`. |
 
@@ -140,5 +143,5 @@ The app listens on port 3000 by default; use `PORT=4000 npm start` to override.
 2. **Login says "Could not reach API"** — verify `NEXT_PUBLIC_API_URL` is correct and the REST gateway is live. Test with `curl -H "x-brain-key: YOUR_KEY" $NEXT_PUBLIC_API_URL/health`.
 3. **Login says "Invalid API key or service unavailable"** — the REST gateway reached but rejected the key. Check that the key's SHA-256 hash is an entry in the `MCP_ACCESS_KEYS` in your `open-brain-rest` server's environment (the request carries the key, the secret its hash; the older single `MCP_ACCESS_KEY` still works), and that the entry is `write`-scoped — the dashboard edits and deletes.
 4. **Search returns nothing** — semantic search needs embeddings. Verify `OPENROUTER_API_KEY` is set in the gateway's environment (it embeds through OpenRouter at 1536 dimensions; its README names the brain width it needs) and that the `embedding` column is populated.
-5. **Ingest page never finishes extracting** — the `open-brain-rest` gateway's `/ingest` captures the text as one thought with no extraction stage, and its `/ingestion-jobs` routes are stubs; nothing separate to start. The `rest-api` gateway (`integrations/rest-api`) is the one that proxies to smart-ingest, through its `SMART_INGEST_URL` (SMD-2110).
+5. **Ingest page never finishes extracting** — the `open-brain-rest` gateway's `/ingest` captures the text as one thought with no extraction stage, and its `/ingestion-jobs` routes are stubs; nothing separate to start. The `rest-api` gateway that proxied to smart-ingest is retired too (SMD-1931).
 6. **Connections panel empty on Detail page** — the panel requires `topics` or `people` in `metadata`. Thoughts enriched through classification have these; raw captures do not.

@@ -174,7 +174,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**275 numbered changes** on top of the pin: 1–17 are the table above; 18–275 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**279 numbered changes** on top of the pin: 1–17 are the table above; 18–279 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -436,6 +436,10 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 273 | [A `--follow` worker outlasts a database or provider outage](changes/273-a-follow-worker-outlasts-a-database-or-provider.md) | SMD-2599 |
 | 274 | [The authorization server answers an absolute-form request target 400 instead of stopping, and a throw in a request is that request's 500](changes/274-the-authorization-server-answers-an-absolute.md) | SMD-2615 |
 | 275 | [Extraction and consolidation run as opt-in services](changes/275-extraction-and-consolidation-run-as-opt.md) | SMD-2424 |
+| 276 | [A capture-only key's thought stops being its own once another key or board-sync takes it, a pointer it wrote onto it lapses, and its pointer is re-checked at its own write](changes/276-a-capture-only-key-s-thought-stops-being-its-own.md) | SMD-2638 |
+| 277 | [A peer's odd status can no longer stop the authorization server, and a throw in a function its own code hands on is logged, not the process's end](changes/277-a-peer-s-odd-status-can-no-longer-stop.md) | SMD-2665 |
+| 278 | [The MCP tools and the REST core's operations are two projections of one contract, held by a test that reads both surfaces as a client does, and the REST gateways and three vendored MCP servers retire against it](changes/278-the-mcp-tools-and-the-rest-core-s-operations-are.md) | SMD-1931 |
+| 279 | [A capture-only key is refused `metadata.ticket`](changes/279-a-capture-only-key-is-refused-metadata-ticket.md) | SMD-2657 |
 
 Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->

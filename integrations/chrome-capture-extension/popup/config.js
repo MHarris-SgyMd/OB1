@@ -99,7 +99,7 @@
         throw new Error(response?.error || 'Failed to save configuration');
       }
 
-      showResult('Saved. You can close this tab and use the extension popup.', 'success');
+      showResult(response.warning || 'Saved. You can close this tab and use the extension popup.', response.warning ? '' : 'success');
     } catch (err) {
       showResult(err.message, 'error');
     } finally {
@@ -127,7 +127,7 @@
       if (!response || !response.ok) {
         throw new Error(response?.error || 'Health check failed');
       }
-      showResult(`Connected: ${response.result?.service || 'open-brain-rest'} is healthy`, 'success');
+      showResult(`Connected as ${response.result?.name || 'this key'}, which can capture`, 'success');
     } catch (err) {
       showResult(err.message, 'error');
     } finally {

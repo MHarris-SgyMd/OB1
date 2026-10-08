@@ -322,7 +322,10 @@ jobs:
 
       # The authorization server's fetch guard, the POC's proxy route table and
       # resource policy, and the deploy's two layout settings (SMD-2285), with
-      # no stack; the auth-poc job runs the stack.
+      # no stack; the auth-poc job runs the stack. The guard's reading of an
+      # answer runs against peers on loopback (SMD-2665: a status outside
+      # 200-599 and a 101 refused, where one stopped the server and the other
+      # left the fetch hanging).
       - name: Authorization POC rules
         working-directory: evals
         run: bun eval-auth.ts --self-check
@@ -339,8 +342,13 @@ jobs:
       # the client a request names, the address rule, the proxy's resolution
       # and the bounded maps); and the request target (SMD-2615: the path read
       # as the library reads it, held against parseurl itself, and a throw or
-      # rejection in a request answered 500 with the server still up). The
-      # full-stack job runs the service.
+      # rejection in a request answered 500 with the server still up); and the
+      # functions it hands on (SMD-2665: a throw in a guarded timer or
+      # response handler logged with the process kept, and each function
+      # server.ts and the files it imports hand on, in the spellings a walk
+      # with the TypeScript checker reads, wrapped, run at once, chained or
+      # exempt by a pinned key with a reason). The full-stack job runs the
+      # service.
       - name: Install the authorization server's pinned packages
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
@@ -842,15 +850,11 @@ jobs:
         working-directory: extensions
         run: bun install --frozen-lockfile
 
-      # TZ: the enhanced-mcp block holds that a zone-less date bound is read as
-      # UTC, never the process's zone — an arm that proves nothing on a UTC
-      # runner, so the suite runs west of UTC here (SMD-1986).
       - name: Vendored writers leave what update_thought leaves
         working-directory: extensions
         run: bun test-writes.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          TZ: America/Chicago
 
       # Every tool of the eight servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
@@ -2020,8 +2024,8 @@ jobs:
       # SMD-1801. The three dashboards build from their pinned installs, with no
       # Supabase package among them (check 22 holds the imports; this holds the
       # builds). The two Next dashboards are built, not run: they speak to the
-      # open-brain-rest gateway, which this stack does not serve
-      # (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP to
+      # open-brain-rest gateway, which SMD-1931 retired; they retire with
+      # SMD-2280's harvest. The SvelteKit one speaks MCP to
       # the server this stack serves, so it is driven too, below.
       # They build in the background from the job's start (SMD-2251); this step
       # waits for that and reports it — each dashboard's log folded when it
