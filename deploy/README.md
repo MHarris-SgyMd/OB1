@@ -851,8 +851,9 @@ unattended waits on a judge that can tell conflicts apart (SMD-1873).
 This is the baseline for the sleep scheduler (SMD-1794): always on, at low
 concurrency. `db/sleep.ts` runs these passes only while the logs are quiet
 and stops them on a live call; until its compose service (SMD-2678) it runs
-from a checkout — `db/README.md`, "Sleep", says how, and how to move off this
-profile, whose followers do not yield. Its budgets are SMD-2679's.
+in this profile's `extract` container — `db/README.md`, "Sleep", gives the
+command and how to move off this profile, whose followers do not yield. It
+has no budget yet (SMD-2679).
 
 ## Refreshing a tier
 

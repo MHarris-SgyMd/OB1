@@ -10220,10 +10220,14 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   let slow = 0;
   /** Extraction calls only: a judge started beside extraction would judge before it ends. */
   let slowExtract = 0;
+  /** Judge calls only: a wake with a judgement in hand. */
+  let slowJudge = 0;
   /** Every request, probes too: the model not served (a 404 naming it) — a refusal at a pass's start. */
   let missing = false;
   /** Every request, probes too: the provider unavailable (503) — an outage a follower waits out. */
   let unavailable = false;
+  /** Extraction calls only, the probe answered: the provider refuses the request itself (a 400) — the engines' configError, mid-pass. */
+  let badRequest = false;
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -10234,9 +10238,11 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       const judging = /<thought_a>/.test(prompt);
+      if (badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
       modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
       if (slow) await Bun.sleep(slow);
       if (!judging && slowExtract) await Bun.sleep(slowExtract);
+      if (judging && slowJudge) await Bun.sleep(slowJudge);
       if (judging) {
         const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
         const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
@@ -10282,6 +10288,12 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const dryText = lines.join("\n");
     assert(dry === 0 && /awake: a sleep would begin in (29\d|300) s with no live call/.test(dryText) && new RegExp(`extract \\(${EX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\): 0 in flight, 0 pending, 3 not yet in the pool`).test(dryText) && (await claims(EX)).pending === undefined,
       `--dry-run reads the brain awake, a capture just made, and the extraction pool unbuilt; nothing pooled (exit ${dry}: ${lines.filter((l) => /awake|extract \(/.test(l)).join(" | ").trim().slice(0, 200)})`);
+    // An empty query log is said: with OB1_QUERY_LOG off a search never wakes it.
+    // --poll past a minute is refused: the awake wait is at most a minute.
+    lines.length = 0;
+    const longPoll = await sleepRun({ poll: 61, dryRun: true });
+    assert(/query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
+      `an empty query log is said at the start, and --poll 61 is refused with 2 (exit ${longPoll})`);
 
     // One sleep: extraction alone, drained, then consolidation, then done.
     lines.length = 0;
@@ -10384,25 +10396,64 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const firstBeat = await beat();
     assert(refusedFirst === 2 && firstBeat?.ended === true && firstBeat.outcome === "failed" && lines.some((l) => /extract ended by itself \(exit 2\)/.test(l)),
       `a model not served at the first sleep's start ends --follow with 2, the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
+    // The provider refusing the request itself on the first pass — past the
+    // start's probe, before any pass finished — is the configuration's too:
+    // it ends the run, not a retry for ever (review pass 2).
+    lines.length = 0;
+    await capture("A note the model refuses to be asked about.", "sync-sleep", 0, 8);
+    badRequest = true;
+    const acBad = new AbortController();
+    const badRun = sleepRun({ follow: true, signal: acBad.signal, minStampEveryS: 1 });
+    const refusedMidPass = await Promise.race([badRun, Bun.sleep(30_000).then(() => "hung" as const)]);
+    if (refusedMidPass === "hung") { acBad.abort(); await badRun; }
+    badRequest = false;
+    assert(refusedMidPass === 2 && lines.some((l) => /refuses the request itself/.test(l)) && !lines.some((l) => /tries it again/.test(l)),
+      `a 400 on the first pass ends --follow with 2, not retried (exit ${refusedMidPass})`);
 
     // The same refusal after the pass has run in this process — a model
     // re-pulled, a key rotated — is retried on the outage schedule, the row
     // failed meanwhile, and the next sleep that runs puts it back to ok.
     lines.length = 0;
+    // Two synced notes beside the March billing note: consolidation has pairs
+    // to judge once extraction drains, and a slow judge holds one in hand.
+    for (let i = 0; i < 2; i++) await capture(`A synced billing note, number ${i}.`, "sync-sleep", 0, 0);
+    slowJudge = 5000;
     const ac3 = new AbortController();
     let retryDone = false;
     const retrying = sleepRun({ follow: true, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
     await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
+    await pollUntil(async () => (await claims(CO)).claimed === 1, 20_000);
+    const [judgedInHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'claimed'`;
     missing = true;
     await capture("A note that wakes it before the model goes.", "op-sleep", 0, 5);
     const refusedLater = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 20_000);
+    slowJudge = 0;
+    const coOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
+    assert(judgedInHand?.id !== undefined && coOrder.at(-1) === judgedInHand.id && !(await claims(CO)).claimed,
+      `a wake with a judgement in hand returns it and moves it to the back of consolidation's queue too (${coOrder.indexOf(judgedInHand?.id)} of ${coOrder.length})`);
     const laterBeat = await beat();
+    // Still refused at the next try: the wait doubles (5 s, then 10 s).
+    const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 10 s/.test(l)), 30_000);
+    // Four seconds into the 10 s wait the row is fresh — re-stamped through
+    // the wait — not three of its 1 s intervals old (review pass 2).
+    await Bun.sleep(4000);
+    const waitAge = Number((await sql`SELECT extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = 'heartbeat:sleep'`)[0]?.age ?? 99);
     const stillRunning = !retryDone;
     missing = false;
     const at = lines.length;
-    const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 30_000);
-    assert(refusedLater && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered,
-      `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed, then ok once a sleep runs (${JSON.stringify(laterBeat)}; recovered ${recovered})`);
+    const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 40_000);
+    assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 3,
+      `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed and stamped through the wait, the wait doubling, then ok once a sleep runs (${JSON.stringify(laterBeat)}; ${waitAge.toFixed(1)} s old mid-wait; doubled ${backedOff}, recovered ${recovered})`);
+    // A sleep that ran resets the schedule: the next refusal waits 5 s again.
+    missing = true;
+    const at2 = lines.length;
+    await capture("A note that wakes it before the model goes again.", "op-sleep", 0, 5);
+    const resetWait = await pollUntil(async () => lines.slice(at2).some((l) => /tries it again in (\d+) s/.test(l)), 20_000);
+    const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in \d+ s/.test(l))?.match(/in (\d+) s/)?.[1];
+    missing = false;
+    const at3 = lines.length;
+    const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 30_000);
+    assert(resetWait && firstWaitAgain === "5" && recoveredAgain, `…and a sleep that ran resets the wait: the next refusal waits 5 s again (${firstWaitAgain} s; recovered ${recoveredAgain})`);
 
     // A provider outage mid-sleep: the follower waits it out (SMD-2599), the
     // row reads failed while it does and ok once a pass runs again — the
@@ -10426,6 +10477,28 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     }
     ac3.abort();
     await retrying;
+
+    // The CLI, signalled twice while asleep with a call in hand: it exits 130
+    // at once, and the row reads ended, not running until it goes stale — the
+    // second stop ends it before stopOnSignals exits (review pass 2).
+    await capture("A note the CLI is asleep over.", "sync-sleep", 0, 7);
+    slow = 8000;
+    const cliEnv = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined)) as Record<string, string>;
+    const cli = Bun.spawn(["bun", join(HERE, "sleep.ts"), "--url", URL_!, "--follow", "--quiet", "1", "--poll", "1"], { env: cliEnv, cwd: HERE, stdout: "pipe", stderr: "pipe" });
+    try {
+      await pollUntil(async () => (await beat())?.running === true && (await claims(EX)).claimed === 1, 30_000);
+      cli.kill("SIGINT");
+      await Bun.sleep(300);
+      cli.kill("SIGINT");
+      const cliCode = await Promise.race([cli.exited, Bun.sleep(15_000).then(() => "hung" as const)]);
+      const cliBeat = await beat();
+      assert(cliCode === 130 && cliBeat?.ended === true && cliBeat.outcome === "stopped" && !(await claims(EX)).claimed,
+        `the CLI signalled twice while asleep exits 130 with its lease returned and heartbeat:sleep ended (exit ${cliCode}; ${JSON.stringify(cliBeat)})`);
+    } finally {
+      slow = 0;
+      cli.kill("SIGKILL");
+      await cli.exited;
+    }
   } finally {
     stub.stop(true);
     await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;

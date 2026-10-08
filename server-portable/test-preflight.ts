@@ -1639,10 +1639,22 @@ else {
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
   const consSlept = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
   const consOtherJudge = await run(SQL_ENV);
+  // Only the stopped case is the scheduler's (review pass 2): a dead worker's
+  // expired lease keeps its warning and remedy beside a fresh heartbeat:sleep,
+  // and a scheduler whose last pass failed warns, with no second worker.
+  await claims`SELECT claim_thoughts(${CONS}, 'preflight-dead-beside-sleep', 1)`;
+  await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
+  const consSleptDied = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "failed" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSleptFailed = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
   await claims`DELETE FROM ob1_config WHERE key IN (${`heartbeat:${CONS}`}, 'heartbeat:sleep')`;
   assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 20 s ago; awake, its passes waiting for the brain to go quiet\); 1 proposal/.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
       && /stopped before it finished/.test(row(consOtherJudge.out, "consolidate pass")),
          `a fresh heartbeat:sleep makes the current judge's key the scheduler's, no remedy; another judge's key reads stopped (${row(consSlept.out, "consolidate pass")} | ${row(consOtherJudge.out, "consolidate pass")})`);
+  assert(/a worker died holding 1 of the claim\(s\) in flight/.test(row(consSleptDied.out, "consolidate pass")) && !/the sleep scheduler runs this key/.test(row(consSleptDied.out, "consolidate pass"))
+      && /!\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key .*, and its last pass failed/.test(consSleptFailed.out) && !/Finish it|Start it again/.test(fix(consSleptFailed.out, "consolidate pass")),
+         `…but a dead worker's expired lease keeps its warning beside it, and a failed last pass warns with no second worker (${row(consSleptDied.out, "consolidate pass")} | ${row(consSleptFailed.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
   const consFailed = await run(SQL_ENV);
   assert(/consolidate pass\s+[^\n]* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool/.test(consFailed.out) && /\(--retry-failed for the 1 failed row\(s\) once their cause is fixed\)/.test(consFailed.out),
