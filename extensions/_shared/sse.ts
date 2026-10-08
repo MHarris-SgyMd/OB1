@@ -164,7 +164,11 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
  * with abandonedRequestLine, named by requestLabel. `c` is the route's Hono
  * context, typed by the two members read here: `c.req.raw`, the request as it
  * came (its signal is the client's), and `c.req.text()`, its body — Hono caches
- * it, so the transport's own read sees the same text. `respond` is the
+ * it, so the transport's own read sees the same text — which holds for
+ * @hono/mcp, whose transport reads `ctx.req.json()`. The SDK v2 transport
+ * these servers move to (SMD-2279) reads the raw Request stream, which this
+ * read will have drained: that move must hand it a Request rebuilt from the
+ * text, as the core route does (SMD-2278). `respond` is the
  * transport's handleRequest. The watch starts here, after the key check and the
  * server's build: these servers do nothing before it that takes long. Its
  * listener is registered before the body is read, as at the core route, so a

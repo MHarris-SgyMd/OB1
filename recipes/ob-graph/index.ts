@@ -34,7 +34,8 @@
 // works, compared by digest), and a read-scoped key is never given the tools
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 // The _shared import below is this file's first from outside its own directory: deploy
-// it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
+// it with _shared/auth.ts and _shared/sse.ts (the reply keepalive, SMD-2001) beside it
+// (supabase/functions/_shared/), as the README says.
 import { Hono, type Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
