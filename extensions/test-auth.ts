@@ -577,11 +577,34 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
       `…and the server logs it once, in sse.ts's line naming the method and the tool (${lines.length} of ${warned.length} warnings)`);
     assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
     assert(![...warned, ...errored].some((w) => /needle-the-line-must-not-carry/.test(w)), `…and never the thought, in a warning or an error (${warned.length + errored.length} lines)`);
+  }
+}
+{
+  // mcpReply's two edges, on a context as a route hands it: `c.req.raw` and a body reader.
+  const ctx = (req: Request) => ({ req: { raw: req, text: () => req.text() } });
+  const warned: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  try {
     // Only a POST carries a call (review pass 1): ob-graph hands a GET to the
-    // transport, whose stream only the client ends, so its reply passes as it is.
+    // transport, whose stream only the client ends, so its reply passes as it
+    // is and its close is no abandoned call.
+    const leaving = new AbortController();
     const stream = new Response(new ReadableStream(), { headers: { "content-type": "text/event-stream" } });
-    assert(await mcpReply(new Request("http://extension.test/mcp", { method: "GET" }), null, () => stream) === stream,
-      "a GET's event stream is not kept alive or watched: mcpReply hands it back as the transport made it");
+    const get = await mcpReply(ctx(new Request("http://extension.test/mcp", { method: "GET", signal: leaving.signal })), () => stream);
+    leaving.abort();
+    await Bun.sleep(10);
+    assert(get === stream && warned.length === 0,
+      `a GET's event stream is neither kept alive nor watched: mcpReply hands it back as the transport made it, and the client's leaving logs nothing (${warned.length} lines)`);
+    // A client gone before the call starts (review pass 2): the line, a 408, and no call, as at the core route.
+    let calls = 0;
+    const gone = AbortSignal.abort();
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "brain_capture_thought", arguments: { content: "x" } } });
+    const early = await mcpReply(ctx(new Request("http://extension.test/mcp", { method: "POST", body, signal: gone })), () => { calls++; return stream; });
+    assert(early?.status === 408 && calls === 0 && warned.length === 1 && warned[0].startsWith("request abandoned by the client after ") && warned[0].includes(": tools/call brain_capture_thought — "),
+      `a POST whose client is already gone is logged once and answered 408, and the tool never runs (${early?.status}, ${calls} calls, ${warned.length} lines)`);
+  } finally {
+    console.warn = realWarn;
   }
 }
 
@@ -994,7 +1017,7 @@ const builtPerRequest = (text: string) =>
  * (SMD-1864); mcpReply keeps it alive and logs a client that leaves. The
  * enhanced-mcp probe below is the proof; this holds every server to the shape.
  */
-const KEPT_ALIVE = /mcpReply\(c\.req\.raw, await c\.req\.text\(\)\.catch\(\(\) => null\), \(\) => transport\.handleRequest\(c\)\)/;
+const KEPT_ALIVE = /mcpReply\(c, \(\) => transport\.handleRequest\(c\)\)/;
 const repliesKeptAlive = (text: string) =>
   text.includes('import { mcpReply } from "../_shared/sse.ts";') && KEPT_ALIVE.test(text) && text.split("transport.handleRequest(").length === 2;
 const KEPT_ALIVE_SAYS = "…its reply leaves through ../_shared/sse.ts's mcpReply and no other way: kept alive while the tool runs, a client that leaves logged (SMD-2001)";

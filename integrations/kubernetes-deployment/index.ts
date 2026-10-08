@@ -602,7 +602,7 @@ app.all("*", async (c) => {
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
   // The reply kept alive while the tool runs, and a client that leaves logged (SMD-2001, _shared/sse.ts).
-  const response = await mcpReply(c.req.raw, await c.req.text().catch(() => null), () => transport.handleRequest(c));
+  const response = await mcpReply(c, () => transport.handleRequest(c));
   if (!response) return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
   response.headers.delete("mcp-session-id");
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);

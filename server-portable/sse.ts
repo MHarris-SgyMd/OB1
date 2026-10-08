@@ -148,34 +148,42 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
  * A vendored MCP server's reply, given the two things the core route gives its
  * own (SMD-2001): the stream kept alive by withSseKeepalive for as long as the
  * tool runs, and a client that leaves before the reply is complete logged once
- * with abandonedRequestLine, named by requestLabel. `req` is the request as it
- * came (its signal is the client's), `bodyText` its body as read
- * (`await c.req.text()` — Hono caches it, so the transport's own read sees the
- * same body), and `respond` the transport's handleRequest. The watch starts
- * here, after the key check: these servers do nothing before it that takes
- * long. A reply that is not an event stream (a JSON reply, a 202, a refusal)
- * comes back as it is; a respond() that throws settles the request and throws.
+ * with abandonedRequestLine, named by requestLabel. `c` is the route's Hono
+ * context, typed by the two members read here: `c.req.raw`, the request as it
+ * came (its signal is the client's), and `c.req.text()`, its body — Hono caches
+ * it, so the transport's own read sees the same text. `respond` is the
+ * transport's handleRequest. The watch starts here, after the key check: these
+ * servers do nothing before it that takes long. A reply that is not an event
+ * stream (a JSON reply, a 202, a refusal) comes back as it is; a respond() that
+ * throws settles the request and throws.
+ *
  * Only a POST carries a call: any other method's reply is respond()'s as it
- * is, unwatched. ob-graph hands a GET to the transport, which opens a stream
- * that only the client ends, so keeping that stream alive would hold it for
- * the whole ceiling, and its close is no abandoned call (review pass 1).
+ * is, its body unread and its close unwatched. ob-graph hands a GET to the
+ * transport, which opens a stream that only the client ends, so keeping that
+ * stream alive would hold it for the whole ceiling, and its close is no
+ * abandoned call (review pass 1). A client already gone when the call would
+ * start gets the line and a 408, as at the core route, and the tool never runs
+ * for no one to read (review pass 2).
  */
 export async function mcpReply(
-  req: Request,
-  bodyText: string | null,
+  c: { req: { raw: Request; text(): Promise<string> } },
   respond: () => Promise<Response | undefined> | Response | undefined,
 ): Promise<Response | undefined> {
+  const req = c.req.raw;
   if (req.method !== "POST") return respond();
   const started = performance.now();
-  const label = requestLabel(bodyText);
+  const label = requestLabel(await c.req.text().catch(() => null));
   let settled = false;
   const settle = () => { settled = true; };
   const abandoned = () => {
     if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
   };
-  // A listener added to a signal already aborted never fires, so that case is checked by hand.
+  if (req.signal.aborted) {
+    // A listener added to a signal already aborted never fires: the line by hand, and no call.
+    abandoned();
+    return new Response(null, { status: 408 });
+  }
   req.signal.addEventListener("abort", abandoned, { once: true });
-  if (req.signal.aborted) abandoned();
   let response: Response | undefined;
   try {
     response = await respond();

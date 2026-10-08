@@ -707,7 +707,7 @@ app.post("*", async (c) => {
   });
   await server.connect(transport);
   // The reply kept alive while the tool runs, and a client that leaves logged (SMD-2001, _shared/sse.ts).
-  return mcpReply(c.req.raw, await c.req.text().catch(() => null), () => transport.handleRequest(c));
+  return mcpReply(c, () => transport.handleRequest(c));
 });
 
 app.get("*", (c) => c.json({ status: "ok", service: "Professional CRM", version: "1.1.0" }));

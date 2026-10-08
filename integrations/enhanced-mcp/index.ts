@@ -1830,7 +1830,7 @@ app.all("*", async (c) => {
   // The reply kept alive while the tool runs — a capture here pays an embedding
   // and a classification, past Bun's silent-stream close (SMD-1864) — and a
   // client that leaves logged (SMD-2001, _shared/sse.ts).
-  return mcpReply(c.req.raw, await c.req.text().catch(() => null), () => transport.handleRequest(c));
+  return mcpReply(c, () => transport.handleRequest(c));
 });
 
 export default {

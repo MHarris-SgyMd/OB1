@@ -555,7 +555,7 @@ app.all("*", async (c) => {
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
   // The reply kept alive while the tool runs, and a client that leaves logged (SMD-2001, _shared/sse.ts).
-  return mcpReply(c.req.raw, await c.req.text().catch(() => null), () => transport.handleRequest(c));
+  return mcpReply(c, () => transport.handleRequest(c));
 });
 
 export default {
