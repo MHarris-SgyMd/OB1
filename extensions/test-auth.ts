@@ -230,16 +230,15 @@ for (const [module, copies, script] of [["auth.ts", COPIES, "sync-auth"], ["sse.
 // configured — the clean "past the gate" signal this test wants; the shell's
 // keys must not reach them. The servers read their access keys per request, so
 // they can be set and unset from here; the rest is read once, at import.
-for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL"]) delete process.env[name]; // the two URL knobs (SMD-2110): a shell's non-http value would fail a server's start here for reasons of its own
+for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "EMBEDDING_API_BASE", "CHAT_API_BASE", "OB1_LLM_TIMEOUT"]) delete process.env[name]; // the two URL knobs (SMD-2110): a shell's non-http value would fail a server's start here for reasons of its own; the last three, kubernetes-deployment's provider (below)
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.SUPABASE_HOUSEHOLD_KEY = "stub";
 process.env.DEFAULT_USER_ID = "00000000-0000-4000-8000-000000000001";
 process.env.DB_PASSWORD = "stub";
 // kubernetes-deployment's provider and database, read at import (SMD-2692 review pass 3): the
-// provider at its defaults, which the cases below name; its deadline unset, the cases below
-// setting their own; and its database on a port nothing listens on, so no case writes to a
-// Postgres the shell happens to have on 5432.
-for (const name of ["EMBEDDING_API_BASE", "CHAT_API_BASE", "OB1_LLM_TIMEOUT"]) delete process.env[name];
+// provider at its defaults (unset above), which the cases below name, its deadline left to the
+// cases; and its database on a port nothing listens on, so no case writes to a Postgres the
+// shell happens to have on 5432.
 process.env.DB_HOST = "127.0.0.1";
 process.env.DB_PORT = "1";
 process.env.MCP_ACCESS_KEYS = KEYS; // work-operating-model-activation refuses to start without a key configured
@@ -630,6 +629,8 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
       "503": () => new Response("x".repeat(2_000), { status: 503 }),
       html: () => new Response("<html>a proxy's page</html>", { headers: { "content-type": "text/html" } }),
       empty: () => Response.json({ data: [] }),
+      "a vector of nothing": () => Response.json({ data: [{ embedding: [] }] }),
+      "a vector of strings": () => Response.json({ data: [{ embedding: ["0.1"] }] }),
       ok: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] }),
     };
     let embed = "stall";
@@ -708,15 +709,19 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
     }
     // The embedding's other failures fail the search too, each named (review pass 3).
     const embedWhy: Record<string, string> = {
-      "503": `Error: Embedding API failed: 503 ${"x".repeat(500)}`,
+      "503": `Error: Embeddings request to ${BASE} failed: 503 ${"x".repeat(500)}`,
       html: `Error: Embeddings request to ${BASE} answered a body that is not JSON`,
       empty: `Error: Embeddings request to ${BASE} answered no embedding`,
+      "a vector of nothing": `Error: Embeddings request to ${BASE} answered no embedding`,
+      "a vector of strings": `Error: Embeddings request to ${BASE} answered no embedding`,
     };
     for (const [name, error] of Object.entries(embedWhy)) {
       assert(searches[name].error === error, `an embedding answered ${name} fails search_thoughts saying so (${searches[name].error.slice(0, 100)})`);
     }
     const control = captures.tags;
-    assert(control.lines.length === 0 && control.error.length > 0, `the control: a capture whose tags arrive logs nothing from the extractor, and its write answers "${control.error.slice(0, 60)}"`);
+    // Its answer is the database's refusal, not a provider's, so a capture that matches it reached the write (review pass 4).
+    assert(control.lines.length === 0 && /connect/i.test(control.error) && !/Embeddings? |Chat completion|OB1_LLM_TIMEOUT/.test(control.error),
+      `the control: a capture whose tags arrive logs nothing from the extractor, and its write is refused by the closed database port ("${control.error.slice(0, 60)}")`);
     const why: Record<string, string> = {
       stall: `Chat completion request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
       "502": `Chat completion request to ${BASE} failed: 502 model not found`,

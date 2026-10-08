@@ -111,6 +111,9 @@ function thoughtUrl(id: string): string {
 
 /** server-portable/embed.ts's, held equal by extensions/test-auth.ts. */
 const DEFAULT_LLM_TIMEOUT_S = 120;
+// Read per call below; a value it cannot use is said once here, as OB1_STOP_GRACE's is (review pass 4).
+const llmTimeoutText = process.env.OB1_LLM_TIMEOUT?.trim() ?? "";
+if (llmTimeoutText && !(Number(llmTimeoutText) > 0)) console.warn(`OB1_LLM_TIMEOUT="${llmTimeoutText}" is not a positive number of seconds, with no unit; provider calls are given ${DEFAULT_LLM_TIMEOUT_S} s (SMD-2692)`);
 
 /** A provider call that ran past OB1_LLM_TIMEOUT, its message naming the knob. */
 class ProviderTimeout extends Error {}
@@ -152,7 +155,7 @@ async function getEmbedding(text: string): Promise<number[]> {
     // As the chat call's below: a body that fails to arrive is an empty one,
     // unless the deadline passed during it, and an error body is capped (review pass 3).
     const body = await r.text().catch((e: Error) => { if (e.name === "TimeoutError") throw e; return ""; });
-    if (!r.ok) throw new Error(`Embedding API failed: ${r.status} ${body.slice(0, 500)}`);
+    if (!r.ok) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} failed: ${r.status} ${body.slice(0, 500)}`);
     let d: { data?: [{ embedding?: unknown }] } | null;
     try {
       d = JSON.parse(body);
@@ -160,7 +163,8 @@ async function getEmbedding(text: string): Promise<number[]> {
       throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} answered a body that is not JSON`);
     }
     const embedding = d?.data?.[0]?.embedding;
-    if (!Array.isArray(embedding)) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} answered no embedding`);
+    // A vector of numbers, or Postgres refuses it later with a cast error that names no provider (review pass 4).
+    if (!Array.isArray(embedding) || embedding.length === 0 || !embedding.every((x) => typeof x === "number" && Number.isFinite(x))) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} answered no embedding`);
     return embedding as number[];
   });
 }
