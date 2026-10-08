@@ -129,12 +129,12 @@ export function numbersIn(text: string): string[] {
   return text.match(/\d+/g) ?? [];
 }
 
-export type StubJudgement = { verdict: "conflict" | "agree"; supersedes: "B" | "unknown"; confidence: number; reason: string };
+export type StubJudgement = { verdict: "outdates" | "related"; supersedes: "B" | "unknown"; confidence: number; reason: string };
 
 /**
  * The stub judge's one rule: two texts that both carry numbers, and not the
  * same numbers, conflict, and the newer (B) is taken as current; anything
- * else agrees. Deliberately blunt — it fires on two true facts of one subject
+ * else is related. Deliberately blunt — it fires on two true facts of one subject
  * that happen to carry different numbers, which is the false positive the
  * corpus plants so the judge arm can HURT. It reads no ground truth.
  */
@@ -142,9 +142,9 @@ export function judgeRule(a: string, b: string): StubJudgement {
   const na = numbersIn(a), nb = numbersIn(b);
   const same = na.length === nb.length && na.every((n, i) => n === nb[i]);
   if (na.length && nb.length && !same) {
-    return { verdict: "conflict", supersedes: "B", confidence: 0.9, reason: `the numbers differ: ${na.join(",")} against ${nb.join(",")}` };
+    return { verdict: "outdates", supersedes: "B", confidence: 0.9, reason: `the numbers differ: ${na.join(",")} against ${nb.join(",")}` };
   }
-  return { verdict: "agree", supersedes: "unknown", confidence: 0.8, reason: "no differing numbers" };
+  return { verdict: "related", supersedes: "unknown", confidence: 0.8, reason: "no differing numbers" };
 }
 
 /**
@@ -674,7 +674,7 @@ export function corpusProblems(items: readonly Item[] = ITEMS, specs: readonly D
     }
     if (it.planted.kind === "wrong_number") {
       const correct = items[ids.get(it.planted.correct) ?? -1];
-      if (correct && judgeRule(correct.text, it.text).verdict !== "conflict") out.push(`${it.id} and ${correct.id} do not differ in their numbers; the judge stub would not read a conflict`);
+      if (correct && judgeRule(correct.text, it.text).verdict !== "outdates") out.push(`${it.id} and ${correct.id} do not differ in their numbers; the judge stub would not read a conflict`);
       if (it.writer !== "op") out.push(`${it.id} is a wrong number by ${it.writer}; the plant is the operator's own slip`);
     }
     if (it.planted.kind === "inference") {
@@ -695,7 +695,7 @@ export function corpusProblems(items: readonly Item[] = ITEMS, specs: readonly D
     const sb = sessionOf(b.id);
     if (sb < 0) { out.push(`${b.id} is in no session; every item is captured in one`); continue; }
     const earlier = items.filter((a) => a.subject === b.subject && sessionOf(a.id) < sb);
-    if (earlier.length > DEFAULT_CANDIDATES && earlier.some((a) => judgeRule(a.text, b.text).verdict === "conflict")) {
+    if (earlier.length > DEFAULT_CANDIDATES && earlier.some((a) => judgeRule(a.text, b.text).verdict === "outdates")) {
       out.push(`${b.id} conflicts with an earlier item and has ${earlier.length} earlier neighbours on ${b.subject}, more than the shipped ${DEFAULT_CANDIDATES} candidates; the pair may not be judged`);
     }
   }
