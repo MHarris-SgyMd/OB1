@@ -606,12 +606,15 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
     const early = await mcpReply(ctx(new Request("http://extension.test/mcp", { method: "POST", body, signal: gone })), () => { calls++; return stream; });
     assert(early?.status === 408 && calls === 0 && warned.length === 1 && warned[0] === abandonedRequestLine("?", Number(/after (\d+\.\d) s/.exec(warned[0])?.[1]) * 1000),
       `a POST whose client is already gone is logged once and answered 408, and the tool never runs (${early?.status}, ${calls} calls, ${warned.length} lines)`);
-    // A client that leaves mid-upload (review pass 3): the listener is registered before the body is
-    // read, so the leaving is logged once, whether the read fails first or the signal aborts first.
+    // A client that leaves mid-upload (review passes 3 and 4), at enhanced-mcp's real route and
+    // transport: logged once. On Bun 1.4.0 the signal aborts before the body read rejects (20 of 20
+    // measured), so the listener registered before the read is what logs it; a read that failed first
+    // would reach the transport's 400, which settles the request, and the abort after it would log nothing.
     warned.length = 0;
-    const upload = Bun.serve({ port: 0, fetch: (req) => mcpReply(ctx(req), () => new Response(new ReadableStream(), { headers: { "content-type": "text/event-stream" } })) as Promise<Response> });
+    const enhanced = await importServer("integrations/enhanced-mcp/index.ts");
+    const upload = Bun.serve({ port: 0, fetch: (req) => enhanced(req) });
     try {
-      await leaveMidUpload(upload, "/mcp", "127.0.0.1", ["accept: application/json, text/event-stream"], '{"jsonrpc":"2.0","id":1,"method":"tools/ca');
+      await leaveMidUpload(upload, "/mcp", "127.0.0.1", ["accept: application/json, text/event-stream", `x-brain-key: ${LEGACY_KEY}`], '{"jsonrpc":"2.0","id":1,"method":"tools/ca');
       const pending = await pendingSettled(upload);
       for (let i = 0; i < 20 && warned.length === 0; i++) await Bun.sleep(50);
       assert(warned.length === 1 && warned[0].startsWith("request abandoned by the client after ") && pending === 0,
