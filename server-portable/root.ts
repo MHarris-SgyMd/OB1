@@ -8,6 +8,7 @@ import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from 
 import { tierProblem, trimmedEnv } from "../db/config.mjs";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { setJobSink } from "./jobs.ts";
+import { loadPlugins, type LoadedPlugin } from "./core/plugins.ts";
 
 /**
  * Runtime-portable env access.
@@ -195,6 +196,12 @@ export type Env = {
    * list itself, as it does to the authorization server.
    */
   COMPOSE_PROFILES?: string;
+  /**
+   * The plugins this brain runs (SMD-2310): comma-separated names from
+   * plugins/registry.ts. Unset, none. A name that is no plugin refuses to
+   * start — preflight first, then the entry (plugins.ts).
+   */
+  OB1_PLUGINS?: string;
 };
 
 let ENV: Env | null = null;
@@ -245,6 +252,8 @@ export function serveHere(door: string): void {
   // review pass 1). A store that fails to build here fails again, and says
   // so, at the first request.
   initEnv();
+  // A name in OB1_PLUGINS that is no plugin stops the server here, not at its first request (SMD-2310).
+  plugins();
   void db().catch(() => {});
 }
 
@@ -307,4 +316,13 @@ export function agents(): AgentResolver {
   // PostgREST store) a fetch belongs to the request that started it.
   if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS), Date.now, storeKind(env()) === "sql");
   return _agents;
+}
+
+// The enabled plugins (SMD-2310), read once from the seeded environment: both
+// entries serve the same set, and a serving entry asks at its start so a name
+// that is no plugin stops it there rather than at its first request.
+let _plugins: LoadedPlugin[] | null = null;
+export function plugins(): LoadedPlugin[] {
+  if (!_plugins) _plugins = loadPlugins(env().OB1_PLUGINS);
+  return _plugins;
 }

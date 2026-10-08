@@ -34,6 +34,7 @@ import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
+import { pluginNames, pluginProblem } from "./core/plugins.ts";
 import { restartCommand, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -766,6 +767,19 @@ if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
   add("access key strength", "fail",
       `${env.MCP_ACCESS_KEY.length} chars — this key alone opens the endpoint with write scope, and nothing limits guessing it`,
       "Generate 32 bytes: openssl rand -hex 32 (or move to MCP_ACCESS_KEYS with bun keygen.ts --name laptop --scope write, and unset MCP_ACCESS_KEY)");
+}
+
+// ── Plugins ──────────────────────────────────────────────────────────────────
+
+// The plugins OB1_PLUGINS enables (SMD-2310). A name that is no plugin in this
+// build, or a manifest the tree should not hold, is refused: the server would
+// not start on it (root.ts's plugins), so the gate says why first. Silent when
+// unset.
+{
+  const problem = pluginProblem(env.OB1_PLUGINS);
+  const names = pluginNames(env.OB1_PLUGINS);
+  if (problem) add("plugins", "fail", problem, "Name plugins from plugins/registry.ts in OB1_PLUGINS, comma-separated, or unset it");
+  else if (names.length) add("plugins", "ok", `${names.join(", ")} — enabled`);
 }
 
 // ── Public origin ────────────────────────────────────────────────────────────

@@ -80,7 +80,15 @@ export const scopeOf = (name: ToolName): ToolScope => {
  * core refuses a route with FORBIDDEN where it does not, so a tool's scope is
  * stated once, here, and not again beside either registration.
  */
-export const mayCall = ({ scope }: { scope: Scope }, name: ToolName): boolean => (UNLOCKS[scope] ?? []).includes(scopeOf(name));
+export const mayCall = (caller: { scope: Scope }, name: ToolName): boolean => unlocks(caller, scopeOf(name));
+
+/**
+ * Whether a key's scope unlocks a group — mayCall's rule, for an operation the
+ * manifest does not list: a plugin's (SMD-2310), whose group its own manifest
+ * states. One rule, so a plugin operation and a core tool of the same group are
+ * reached by the same keys.
+ */
+export const unlocks = ({ scope }: { scope: Scope }, group: ToolScope): boolean => (UNLOCKS[scope] ?? []).includes(group);
 
 /** Every tool name a write-scoped key sees, sorted — derived from UNLOCKS, not restated (eleventh review pass: it was every manifest entry, a second statement of the hierarchy). */
 export const TOOL_NAMES: ToolName[] = namesIn(UNLOCKS.write);

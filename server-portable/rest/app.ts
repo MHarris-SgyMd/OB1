@@ -12,7 +12,8 @@ import { authenticate, canRead, CLIENT_SCOPES, queryOf, type AuthConfig, type Pr
 import type { AgentOutcome } from "../agents.ts";
 import { SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
-import { mayCall, scopeOf, visibleToolNames, type ToolName } from "../tools.ts";
+import { mayCall, scopeOf, unlocks, visibleToolNames, type ToolName } from "../tools.ts";
+import { runOperation, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
 import { subscribe as subscribeJob } from "../jobs.ts";
 import { labelPart, withSseKeepalive } from "../sse.ts";
 import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOptions, type Method } from "./routes.ts";
@@ -35,6 +36,8 @@ export interface RestDeps {
   track: CallOptions["track"];
   /** Where the one line per request goes; console.log unless a suite listens. */
   log?: (line: string) => void;
+  /** The enabled plugins (root.ts's plugins), read at the first request that needs them; none when absent (SMD-2310). */
+  plugins?: () => readonly LoadedPlugin[];
 }
 
 /** How long a caller told to retry is told to wait: the busy registry (agents.ts), and every refusal or fault answered 503. */
@@ -64,9 +67,9 @@ export function headerKeys(req: Request): string[] {
 export const FORWARDER_HEADER = "x-brain-forwarder";
 
 /** Each field's JSON-schema type, for reading it from a query string: "number", "integer", "boolean", "array", or anything else as text. */
-function queryTypes(name: ToolName): Map<string, string> {
+function queryTypes(shape: Record<string, z.ZodType>): Map<string, string> {
   const out = new Map<string, string>();
-  for (const [field, schema] of Object.entries(SPECS[name].inputSchema)) {
+  for (const [field, schema] of Object.entries(shape)) {
     const js = z.toJSONSchema(schema as z.ZodType, { io: "input", unrepresentable: "any" }) as { type?: string };
     out.set(field, js.type ?? "string");
   }
@@ -80,7 +83,12 @@ function queryTypes(name: ToolName): Map<string, string> {
  * twice, it is refused. The schema then holds the result as it holds a body.
  */
 export function inputFromQuery(name: ToolName, params: URLSearchParams): { input: Record<string, unknown> } | { problem: string } {
-  const types = queryTypes(name);
+  return inputFromQueryShape(SPECS[name].inputSchema, params);
+}
+
+/** inputFromQuery over an input's shape: a core tool's, or a plugin operation's (SMD-2310). */
+function inputFromQueryShape(shape: Record<string, z.ZodType>, params: URLSearchParams): { input: Record<string, unknown> } | { problem: string } {
+  const types = queryTypes(shape);
   // No prototype: a `__proto__` key is a key like any other, which the strict
   // schema then refuses, rather than an assignment that drops it unseen.
   const input: Record<string, unknown> = Object.create(null);
@@ -109,16 +117,33 @@ const ROUTE_METHODS: [RegExp, Method | "GET"][] = [
   ...Object.values(ROUTES).map((r) => [new RegExp(`^${r.path.replace(/\{[a-z_]+\}/g, "[^/]+")}$`), r.method] as [RegExp, Method]),
   [/^\/v1\/whoami$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
 ];
-const allowedOn = (path: string): string[] => {
-  const methods = new Set<string>(ROUTE_METHODS.filter(([re]) => re.test(path)).map(([, m]) => m));
+const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[] => {
+  const methods = new Set<string>([...ROUTE_METHODS, ...plugins].filter(([re]) => re.test(path)).map(([, m]) => m));
   if (methods.has("GET")) methods.add("HEAD");
   return [...methods].sort();
 };
 
-export function createRestApp(deps: RestDeps): Hono {
-  const app = new Hono();
+/** `template`: a plugin operation's route, for the request line — its Hono route is the one wildcard. */
+type RestEnv = { Variables: { template?: string } };
+
+export function createRestApp(deps: RestDeps): Hono<RestEnv> {
+  const app = new Hono<RestEnv>();
   const log = deps.log ?? ((line: string) => console.log(line));
-  const doc = openApiDocument();
+
+  // The enabled plugins' operations (SMD-2310), read at the first request that
+  // needs them — the environment is seeded by then — and the document with
+  // them.
+  type PluginRoute = { op: LoadedOp; method: Method; pattern: RegExp; fields: string[] };
+  let pluginRouteList: PluginRoute[] | null = null;
+  const pluginRoutes = (): PluginRoute[] =>
+    (pluginRouteList ??= (deps.plugins?.() ?? []).flatMap((pl) => pl.operations).map((op) => ({
+      op,
+      method: op.method,
+      // A manifest's path is lower-case words, hyphens and {field} (plugins.ts), so nothing in it needs escaping.
+      pattern: new RegExp(`^${op.path.replace(/\{[a-z_]+\}/g, "([^/]+)")}$`),
+      fields: pathFields(op.path),
+    })));
+  let doc: Record<string, unknown> | null = null;
 
   // One line per request: the method, the route's template — never the path
   // it was given (an id), the query string, a key or a body — the status and
@@ -130,7 +155,7 @@ export function createRestApp(deps: RestDeps): Hono {
     deps.init();
     const started = performance.now();
     await next();
-    const template = c.req.routePath === "*" || c.req.routePath === "/*" ? "-" : c.req.routePath;
+    const template = c.get("template") ?? (c.req.routePath === "*" || c.req.routePath === "/*" ? "-" : c.req.routePath);
     if (template === "/health" && c.res.status === 200) return;
     log(`api ${c.req.method} ${template} ${c.res.status} ${Math.round(performance.now() - started)}ms`);
   });
@@ -142,7 +167,7 @@ export function createRestApp(deps: RestDeps): Hono {
   // through the proxy's opt-in route, the root on the mesh — so a client
   // generated from it calls this server, not the origin's root, which is the
   // MCP server's (review pass 1).
-  app.get("/openapi.json", (c) => c.json({ ...doc, servers: [{ url: linkBase(c) || "/" }] }));
+  app.get("/openapi.json", (c) => c.json({ ...(doc ??= openApiDocument(pluginRoutes().map((r) => r.op))), servers: [{ url: linkBase(c) || "/" }] }));
 
   const refuse = (c: Context, status: 400 | 401 | 403 | 404 | 405 | 503, body: { code: TransportCode } & Record<string, unknown>, headers: Record<string, string> = {}) =>
     c.json(body, status, headers);
@@ -204,7 +229,7 @@ export function createRestApp(deps: RestDeps): Hono {
   app.get("/v1/whoami", async (c) => {
     const p = await caller(c);
     if (p instanceof Response) return p;
-    return c.json({ name: p.name, scope: p.scope, ...(p.agentId ? { agentId: p.agentId } : {}), operations: visibleToolNames(p), ...(p.act ? { act: p.act } : {}) });
+    return c.json({ name: p.name, scope: p.scope, ...(p.agentId ? { agentId: p.agentId } : {}), operations: [...visibleToolNames(p), ...pluginRoutes().filter((r) => unlocks(p, r.op.scope)).map((r) => r.op.tool)].sort(), ...(p.act ? { act: p.act } : {}) });
   });
 
   // A job's event stream (SMD-2273): its progress and its end as SSE, kept
@@ -223,54 +248,61 @@ export function createRestApp(deps: RestDeps): Hono {
     return withSseKeepalive(response, { signal: c.req.raw.signal, label: `api jobs/${labelPart(id)}/stream` });
   });
 
+  /**
+   * An operation's input, held to its schema, or the answer that refuses it:
+   * the path's fields, then the query string or the body — and only the one
+   * the route reads: input sent the other way is refused, not dropped (a
+   * DELETE's body `detach_citations` would otherwise be ignored).
+   */
+  async function inputFor(c: Context, method: Method, shape: Record<string, z.ZodType>, path: Record<string, string>): Promise<{ input: unknown } | Response> {
+    let rest: Record<string, unknown>;
+    const query = queryOf(c.req.url);
+    if (readsQuery(method)) {
+      // Bun hands a GET's handler no body, whatever was sent: the headers
+      // that announced one are what is left of it (review pass 2).
+      // Any length but zero counts: Bun joins a repeated Content-Length
+      // into "11, 11", which is no number (review pass 3).
+      const length = c.req.header("content-length");
+      const announced = c.req.method !== "DELETE" && ((length !== undefined && !/^\s*0+\s*$/.test(length)) || c.req.header("transfer-encoding") !== undefined);
+      if (announced || (await c.req.text()).trim() !== "") return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${method} reads its input from the query string, not a body` }] });
+      const read = inputFromQueryShape(shape, query);
+      if ("problem" in read) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: read.problem }] });
+      rest = read.input;
+    } else {
+      if (query.size > 0) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${method} reads its input from a JSON body, not the query string` }] });
+      const text = await c.req.text();
+      let body: unknown = {};
+      try {
+        body = text.trim() === "" ? {} : JSON.parse(text);
+      } catch {
+        return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: "the body is not JSON" }] });
+      }
+      if (body === null || typeof body !== "object" || Array.isArray(body)) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: "the body is not a JSON object" }] });
+      rest = body as Record<string, unknown>;
+    }
+    for (const f of Object.keys(path)) {
+      if (f in rest) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: f, message: `${f} comes from the path` }] });
+    }
+    const parsed = z.object(shape).strict().safeParse({ ...rest, ...path });
+    if (!parsed.success) return refuse(c, 400, { code: "REFUSED_INPUT", issues: issuesOf(parsed.error) });
+    return { input: parsed.data };
+  }
+
   for (const name of Object.keys(ROUTES) as ToolName[]) {
     const route = ROUTES[name];
     const fields = pathFields(route.path);
-    const schema = z.object(SPECS[name].inputSchema).strict();
     app.on(route.method, honoPath(route.path), async (c) => {
       const p = await caller(c);
       if (p instanceof Response) return p;
       if (!mayCall(p, name)) return refuse(c, 403, { code: "FORBIDDEN", needs: scopeOf(name) });
-
-      // The input: the path's fields, then the query string or the body — and
-      // only the one the route reads: input sent the other way is refused, not
-      // dropped (a DELETE's body `detach_citations` would otherwise be ignored).
-      let rest: Record<string, unknown>;
-      const query = queryOf(c.req.url);
-      if (readsQuery(route.method)) {
-        // Bun hands a GET's handler no body, whatever was sent: the headers
-        // that announced one are what is left of it (review pass 2).
-        // Any length but zero counts: Bun joins a repeated Content-Length
-        // into "11, 11", which is no number (review pass 3).
-        const length = c.req.header("content-length");
-        const announced = c.req.method !== "DELETE" && ((length !== undefined && !/^\s*0+\s*$/.test(length)) || c.req.header("transfer-encoding") !== undefined);
-        if (announced || (await c.req.text()).trim() !== "") return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${route.method} reads its input from the query string, not a body` }] });
-        const read = inputFromQuery(name, query);
-        if ("problem" in read) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: read.problem }] });
-        rest = read.input;
-      } else {
-        if (query.size > 0) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${route.method} reads its input from a JSON body, not the query string` }] });
-        const text = await c.req.text();
-        let body: unknown = {};
-        try {
-          body = text.trim() === "" ? {} : JSON.parse(text);
-        } catch {
-          return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: "the body is not JSON" }] });
-        }
-        if (body === null || typeof body !== "object" || Array.isArray(body)) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: "the body is not a JSON object" }] });
-        rest = body as Record<string, unknown>;
-      }
-      for (const f of fields) {
-        if (f in rest) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: f, message: `${f} comes from the path` }] });
-      }
-      const parsed = schema.safeParse({ ...rest, ...Object.fromEntries(fields.map((f) => [f, c.req.param(f)])) });
-      if (!parsed.success) return refuse(c, 400, { code: "REFUSED_INPUT", issues: issuesOf(parsed.error) });
+      const read = await inputFor(c, route.method, SPECS[name].inputSchema, Object.fromEntries(fields.map((f) => [f, c.req.param(f)!])));
+      if (read instanceof Response) return read;
       const head = headOnly(c);
       if (head) return head;
 
       let outcome;
       try {
-        outcome = await route.call(deps.core, p, parsed.data as never, { track: deps.track });
+        outcome = await route.call(deps.core, p, read.input as never, { track: deps.track });
       } catch (err) {
         // A fault: FAILED with what was thrown, as the MCP tool's text says it
         // to the same key; no `retryable` until SMD-2461 classifies faults —
@@ -290,10 +322,50 @@ export function createRestApp(deps: RestDeps): Hono {
     });
   }
 
+  // The enabled plugins' operations (SMD-2310), under /v1/plugins/<name>: one
+  // route that finds the operation, since which plugins are enabled is read
+  // from the environment at the first request and Hono takes no route after
+  // its first match. Then as a core route: the caller, the gate (a plugin
+  // operation's group, by the rule mayCall applies — tools.ts's unlocks), the
+  // input held to its schema, and its answer — a value its output schema
+  // holds, a refusal at its status, a fault as FAILED.
+  app.on(["GET", "POST", "PATCH", "DELETE"], "/v1/plugins/*", async (c) => {
+    const method = (c.req.method === "HEAD" ? "GET" : c.req.method) as Method;
+    const found = pluginRoutes().find((r) => r.method === method && r.pattern.test(c.req.path));
+    if (!found) return c.notFound();
+    const { op } = found;
+    c.set("template", op.path);
+    const p = await caller(c);
+    if (p instanceof Response) return p;
+    if (!unlocks(p, op.scope)) return refuse(c, 403, { code: "FORBIDDEN", needs: op.scope });
+    const values = found.pattern.exec(c.req.path)!.slice(1);
+    const path: Record<string, string> = {};
+    for (const [i, field] of found.fields.entries()) {
+      try {
+        path[field] = decodeURIComponent(values[i]);
+      } catch {
+        return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: field, message: `${field} is not a well-formed path segment` }] });
+      }
+    }
+    const read = await inputFor(c, op.method, op.shape, path);
+    if (read instanceof Response) return read;
+    const head = headOnly(c);
+    if (head) return head;
+    let outcome;
+    try {
+      outcome = await runOperation(op, { core: deps.core, principal: p, track: deps.track }, read.input);
+    } catch (err) {
+      return c.json(failure(err), 500);
+    }
+    if (outcome.ok) return c.json(outcome.value, 200);
+    const { status, ...facts } = outcome.refusal;
+    return c.json({ ...facts, retryable: false }, status);
+  });
+
   // A path a route serves, sent with another method, is a 405 naming the
   // ones it takes; any other path is NO_ROUTE.
   app.notFound((c) => {
-    const allow = allowedOn(c.req.path);
+    const allow = allowedOn(c.req.path, pluginRoutes().map((r) => [r.pattern, r.method]));
     return allow.length
       ? refuse(c, 405, { code: "METHOD_NOT_ALLOWED" }, { Allow: allow.join(", ") })
       : refuse(c, 404, { code: "NO_ROUTE" });

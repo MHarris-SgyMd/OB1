@@ -545,6 +545,11 @@ services:
       # same `public origin` row, naming the MCP server.
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
       COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      # The plugins the brain runs (SMD-2310): names from plugins/registry.ts,
+      # comma-separated; unset, none. The REST core below takes this block, so
+      # both servers serve the same set; preflight refuses a name that is no
+      # plugin. The three-tier stack leaves it out (check 27's TIER_OMITTED_ENV).
+      OB1_PLUGINS: ${OB1_PLUGINS:-}
       # No `:-10` here any more: store-sql.ts owns the default and reads "" as
       # unset (it read Number("") = 0 until SMD-1843's first review pass found
       # the copy and the reader together — Bun's SQL refuses a pool of 0 at

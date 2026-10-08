@@ -1,13 +1,13 @@
 
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
-import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";
+import { agents, closeStore, db, env, initEnv, plugins, serveHere, type Env } from "./root.ts";
 import { authenticateRequest, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
-import { createCore, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
-import { mayCall, type ToolName } from "./tools.ts";
+import { createCore, runOperation, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
+import { mayCall, unlocks, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
 import { labelPart, withSseKeepalive } from "./sse.ts";
@@ -241,6 +241,24 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
     const o = await core.scanThoughts(principal, input, { track: toolCalls.track });
     return say.renderJobHandle(o.ok ? { ...o, value: atEndpoint(o.value, endpoint) } : o);
   });
+
+  // The enabled plugins' operations (SMD-2310), each a tool named
+  // `<plugin>_<operation>` behind the gate a core tool of its group is
+  // (tools.ts's unlocks) — absent from a key's tools/list where it does not
+  // hold — with the SDK holding the input to the operation's schema and the
+  // answer to its output schema. The REST core serves the same operations
+  // (rest/app.ts), over the same runOperation.
+  const registerPlugin = server.registerTool as unknown as (name: string, spec: unknown, handler: (input: unknown) => Promise<say.Reply>) => unknown;
+  for (const op of plugins().flatMap((p) => p.operations)) {
+    if (!unlocks(principal, op.scope)) continue;
+    registerPlugin(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (input) => {
+      try {
+        return say.renderPlugin(await runOperation(op, { core, principal, track: toolCalls.track }, input));
+      } catch (err: unknown) {
+        return say.failed(err);
+      }
+    });
+  }
 
   return server;
 }
