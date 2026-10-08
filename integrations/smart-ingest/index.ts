@@ -769,7 +769,7 @@ const withoutTrust = (m: Record<string, unknown> | null | undefined): Record<str
  * A capture through the 3-argument upsert_thought — the fork's shape for every server (SMD-1228; db/migrations/004,
  * last redefined by 046): the vector as p_embedding, its model's label (021) and the actor (008, SMD-1541) in the
  * envelope, and the enhanced-thoughts columns by an update carrying neither content nor vector, on a fresh row only —
- * a re-capture of text already there keeps that row's own, as rest-api and enhanced-mcp leave it. Upstream's
+ * a re-capture of text already there keeps that row's own (as the retired rest-api and enhanced-mcp did). Upstream's
  * 2-argument call put the vector inside the payload, where the fork's function does not look: every thought this
  * server wrote landed without a vector, unlabelled, the enhanced columns at their defaults (SMD-2128). `envelope` is what a
  * caller adds to the payload beyond these — a revision's `supersedes`, the pointer 025 made the one mechanism for it.
@@ -1006,8 +1006,8 @@ async function handleExecuteJob(req: Request): Promise<Response> {
   let body: Record<string, unknown>;
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
 
-  // A number, or a numeric string — rest-api's proxy sent the route's captured `\d+` as a string until SMD-2110's second
-  // review pass, and every proxied execute was a 400 here.
+  // A number, or a numeric string: lenient on the one field a caller may have read from a URL. (rest-api's proxy
+  // sent its route's `\d+` as a string until SMD-2110; that proxy retired with SMD-1931.)
   const jobId = typeof body.job_id === "number" || typeof body.job_id === "string" ? Number(body.job_id) : 0;
   if (!Number.isInteger(jobId) || jobId <= 0) return json({ error: "job_id is required" }, 400);
 

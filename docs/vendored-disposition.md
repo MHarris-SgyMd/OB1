@@ -328,8 +328,9 @@ are the *audit record*, not a live dependency, and do not block a removal.
 > The seed list in SMD-1924 predates the SMD-1228 / SMD-1524 / SMD-1544 / SMD-1798
 > audit that wired the vendored Edge-Function workers into the CI parity harness and
 > the SQL shim. `entity-extraction-worker`, `consolidation-workers`, and
-> `delete-thought-mcp` are all load-bearing today (CI drives them; recipes and a skill
-> wire to them), so they fail the "verified no references" gate. The fork's *own-runtime*
+> `delete-thought-mcp` were all load-bearing then (CI drove them; recipes and a skill
+> wired to them), so they failed the "verified no references" gate. (`delete-thought-mcp`
+> retired with SMD-1931, its skill repointed at the core's `delete_thought`.) The fork's *own-runtime*
 > rebuilds (`db/` migrations 009 / 016 / 029) run **beside** the vendored community
 > Edge Functions; they do not make them dead. Details in each row below.
 

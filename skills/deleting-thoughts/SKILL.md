@@ -7,7 +7,7 @@ description: |
   thought that is merely outdated or wrong. To edit or deprecate instead of
   removing, see updating-thoughts.
 author: Ezana Azene
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Deleting Thoughts
@@ -84,8 +84,10 @@ If the thought is merely outdated, wrong, or superseded, **update it or tag it**
 
 ## Output
 
-A receipt naming the deleted id and its prior content length. Always report it
-so there is a record of what was removed.
+The core's reply names the deleted id and says its previous content is kept in
+the audit trail (and, with `detach_citations`, what was detached). Always report
+it, with the content you showed at confirmation, so there is a record of what
+was removed.
 
 ## Notes
 

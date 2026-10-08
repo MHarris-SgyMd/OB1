@@ -31,6 +31,16 @@
     }
   }
 
+  /** The REST core's refusal code in a response body, or '' when the body is not one of its refusals. */
+  function refusalCode(text) {
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed.code === 'string' ? parsed.code : '';
+    } catch {
+      return '';
+    }
+  }
+
   async function apiFetch(path, options) {
     const opts = options || {};
     const apiKey = String(opts.apiKey || '').trim();
@@ -72,6 +82,10 @@
       if (!response.ok) {
         const httpError = new Error(`HTTP ${response.status}: ${parseErrorBody(responseText)}`);
         httpError.status = response.status;
+        // The REST core answers every refusal as JSON `{ code, ... }`; a body
+        // without one is some other server's (the MCP endpoint at the
+        // origin's root, a proxy's 404) — failureKind reads the difference.
+        httpError.code = refusalCode(responseText);
         throw httpError;
       }
 
@@ -170,7 +184,12 @@
     };
   }
 
-  /** Captures a queued payload; the answer's `status` is `existing` when the text was already a thought. */
+  /**
+   * Captures a queued payload. The answer's `status` is `existing` when the
+   * brain says the text was already a thought — which it tells only a key
+   * that can read (a write key): a capture-scoped key's re-capture lands on
+   * the existing row all the same, and is reported as `captured`.
+   */
   async function ingestDocument(payload, options) {
     const result = await apiFetch('/v1/thoughts', {
       apiKey: options.apiKey,
@@ -187,18 +206,83 @@
   // key that can read — a capture-scoped key cannot.
 
   /**
-   * Whether a failed capture should be given up on rather than retried: a
-   * refusal of the capture itself (4xx). Not a 429, which says retry, and not
-   * a 404, which says the URL is wrong (an old gateway URL, or `/api` off) —
-   * the capture waits in the retry queue for a URL that works.
+   * What a failed capture is, for what to do with it:
+   *   - `refused` — the REST core refused this capture itself (one of its
+   *     refusal codes, or a 413 for its size): every retry would fail the same
+   *     way, so it is rejected and logged;
+   *   - `setup` — the URL or the key is wrong: the key refused (401/403), or
+   *     an answer that is not the REST core's (no refusal code: the MCP
+   *     endpoint a bare origin reaches, a proxy's 404 while `/api` is off),
+   *     or a path it does not serve. Nothing about the capture is wrong, so it
+   *     waits in the queue, its attempts not counted, until the setup is fixed;
+   *   - `transient` — a timeout, a network failure, a 429 or a 5xx: retried
+   *     with backoff, then dead-lettered.
    */
-  function isPermanentError(error) {
+  function failureKind(error) {
     const status = Number(error && error.status);
-    return status >= 400 && status < 500 && status !== 429 && status !== 404;
+    const code = (error && error.code) || '';
+    if (!status || status === 429 || status >= 500) return 'transient';
+    if (status === 413) return 'refused';
+    if (status === 401 || status === 403) return 'setup';
+    if (!code || code === 'NO_ROUTE' || code === 'METHOD_NOT_ALLOWED') return 'setup';
+    return 'refused';
+  }
+
+  /** Whether a failed capture is given up on (see failureKind). */
+  function isPermanentError(error) {
+    return failureKind(error) === 'refused';
+  }
+
+  /** Minutes until a setup failure is tried again: the retry alarm's own cadence. */
+  const SETUP_RETRY_MINUTES = 5;
+
+  /**
+   * The queue's next state for a failure that is not a refusal: a setup
+   * failure keeps its attempt count (it waits, however long the setup takes),
+   * a transient one spends an attempt and backs off — 1, 2, 4 … minutes, at
+   * most 60 — and is dead-lettered once `maxAttempts` are spent.
+   */
+  function retryPlan(attempts, kind, maxAttempts) {
+    if (kind === 'setup') return { attempts, delayMinutes: SETUP_RETRY_MINUTES, deadLetter: false };
+    const next = attempts + 1;
+    return { attempts: next, delayMinutes: Math.min(Math.pow(2, Math.max(1, next) - 1), 60), deadLetter: next >= maxAttempts };
+  }
+
+  /** What a failure is, in words for the activity log and the popup. */
+  function describeFailure(error) {
+    const status = Number(error && error.status);
+    const kind = failureKind(error);
+    if (kind === 'setup' && (status === 401 || status === 403)) {
+      return `API key refused (HTTP ${status}) — check the key in the Configure screen; captures wait until it works. ${error.message}`;
+    }
+    if (kind === 'setup') {
+      return `This URL did not answer as the brain's REST core (HTTP ${status}) — check the URL in the Configure screen (the brain's origin with /api) and that /api is on; captures wait until it works.`;
+    }
+    return error && error.message ? error.message : String(error);
+  }
+
+  /**
+   * Whether a settings change may be saved: when it changes the URL or the
+   * key, the pair must reach the REST core and be able to capture (the key
+   * check), so a URL that answers as something else is refused at the
+   * Configure screen rather than found out capture by capture.
+   */
+  async function verifyForSave(current, next) {
+    const changed = String(next.apiEndpoint || '') !== String(current.apiEndpoint || '') || String(next.apiKey || '') !== String(current.apiKey || '');
+    if (!changed || !String(next.apiEndpoint || '').trim() || !String(next.apiKey || '').trim()) return;
+    try {
+      await healthCheck({ apiKey: next.apiKey, endpoint: next.apiEndpoint });
+    } catch (error) {
+      throw new Error(`Not saved: ${failureKind(error) === 'setup' && Number(error.status) ? describeFailure(error).replace(/; captures wait until it works\./, '.') : error.message}`);
+    }
   }
 
   global.OBApiClient = {
+    failureKind,
     isPermanentError,
+    retryPlan,
+    describeFailure,
+    verifyForSave,
     REQUEST_TIMEOUT_MS,
     INGEST_TIMEOUT_MS,
     apiFetch,

@@ -4,13 +4,13 @@
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
 
-> Chrome MV3 extension that captures conversations from Claude, ChatGPT, and Gemini into your Open Brain via the REST API gateway.
+> Chrome MV3 extension that captures conversations from Claude, ChatGPT, and Gemini into your Open Brain through its REST core.
 
 ## What It Does
 
-A client-side Chrome (or Chromium-based browser) extension that sits on top of Claude.ai, chatgpt.com, and gemini.google.com. When you finish an interesting exchange, click the extension icon and the extension extracts the latest user + assistant turn from the page DOM, runs local sensitivity and duplicate filters, and POSTs the result to your Open Brain REST API gateway. It also supports bulk backfill from Claude and ChatGPT using their internal conversation APIs so you can import your existing chat history in one pass.
+A client-side Chrome (or Chromium-based browser) extension that sits on top of Claude.ai, chatgpt.com, and gemini.google.com. When you finish an interesting exchange, click the extension icon and the extension extracts the latest user + assistant turn from the page DOM, runs local sensitivity and duplicate filters, and POSTs the result to your Open Brain's REST core. It also supports bulk backfill from Claude and ChatGPT using their internal conversation APIs so you can import your existing chat history in one pass.
 
-This is a **client-side** integration — unlike the other integrations in this repo (Slack, Discord, email capture) which run as servers under Bun, a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call your brain's REST core — `POST /v1/thoughts` (the `capture_thought` operation) with an `x-brain-key` header, and `GET /v1/whoami` to check the key (SMD-1931). Every user installs it locally against their own Open Brain.
+This is a **client-side** integration — unlike the capture integrations in this repo that run as servers (Slack, Telegram, Readwise), a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call your brain's REST core — `POST /v1/thoughts` (the `capture_thought` operation) with an `x-brain-key` header, and `GET /v1/whoami` to check the key (SMD-1931). Every user installs it locally against their own Open Brain.
 
 ## Screenshots
 
@@ -216,8 +216,11 @@ Solution: The content script isn't loaded on this tab. Refresh the tab and retry
 **Issue: "No conversation turns found" on Claude / ChatGPT / Gemini**
 Solution: The site DOM has changed and the extractor selectors are stale. Check the repo for a newer version of the extension; if there isn't one yet, open an issue with a sample of the current DOM and the `chrome://extensions → errors` output.
 
-**Issue: Sync All reports every conversation as `existing` but your Open Brain is empty**
-Solution: The SHA-256 fingerprint cache is populated but the ingest POSTs are silently rejected. Open the Activity log on the Overview tab and look for `queued_retry` or `dead_letter` entries — those will show the actual API error. Common causes: the key was revoked or rotated and you didn't update the extension, or `/api` is off (the proxy answers 404 until `compose.api-public.yaml` is named).
+**Issue: captures are queued, not sent**
+Solution: Open the Activity log on the Overview tab: a `queued_retry` entry says why. "This URL did not answer as the brain's REST core" means the URL is wrong (it is the brain's origin with `/api`) or `/api` is off (the proxy answers 404 until `compose.api-public.yaml` is named); "API key refused" means the key was revoked or rotated. Either way the captures wait — they spend no retry attempts — and send once the setup is fixed in the Configure screen. A `rejected` entry is the brain refusing that one capture (its reason is in the entry); a `dead_letter` one ran out of retries on a timeout or a server error.
+
+**Issue: re-synced conversations count as `captured`, not `existing`**
+Solution: The brain tells only a key that can read whether a text was already a thought, so with a capture-scoped key a re-capture is reported as `captured` (it still lands on the existing thought, not a copy). A write key reports `existing`.
 
 **Issue: I configured the extension but Test Connection says "fetch failed"**
 Solution: Your browser doesn't have host permission for that origin. Open the Configure screen and save again — Chrome will re-prompt. If it still fails, verify the URL is reachable from your browser: paste the URL with `/openapi.json` on the end into the address bar and expect the REST core's OpenAPI document. An empty 404 there means `/api` is off on the brain.
