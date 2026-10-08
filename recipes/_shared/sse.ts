@@ -159,31 +159,30 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
 
 /**
  * A vendored MCP server's reply, given the two things the core route gives its
- * own (SMD-2001): the stream kept alive by withSseKeepalive for as long as the
- * tool runs, and a client that leaves before the reply is complete logged once
- * with abandonedRequestLine, named by requestLabel. `c` is the route's Hono
- * context, typed by the two members read here: `c.req.raw`, the request as it
- * came (its signal is the client's), and `c.req.text()`, its body — Hono caches
- * it, so the transport's own read sees the same text — which holds for
- * @hono/mcp, whose transport reads `ctx.req.json()`. The SDK v2 transport
- * these servers move to (SMD-2279) reads the raw Request stream, which this
- * read will have drained: that move must hand it a Request rebuilt from the
- * text, as the core route does (SMD-2278). `respond` is the
- * transport's handleRequest. The watch starts here, after the key check and the
- * server's build: these servers do nothing before it that takes long. Its
- * listener is registered before the body is read, as at the core route, so a
- * client that leaves mid-upload is logged (label `?`) (review pass 3). A reply
- * that is not an event stream (a JSON reply, a 202, a refusal) comes back as
- * it is; a respond() that throws settles the request and throws. A stream held
- * to the ceiling is logged with vendoredStalledLine.
+ * own (SMD-2001): the stream kept alive by withSseKeepalive while the tool
+ * runs, and a client that leaves before the reply is complete logged once with
+ * abandonedRequestLine, named by requestLabel.
  *
- * Only a POST carries a call: any other method's reply is respond()'s as it
- * is, its body unread and its close unwatched. ob-graph hands a GET to the
- * transport, which opens a stream that only the client ends, so keeping that
- * stream alive would hold it for the whole ceiling, and its close is no
- * abandoned call (review pass 1). A client already gone when the call would
- * start gets the line and a 408, and the tool never runs for no one to read
- * (review pass 2) — though, unlike at the core route, the server was built.
+ * `c` is the route's Hono context, typed by the two members read here:
+ * `c.req.raw`, the request as it came (its signal is the client's), and
+ * `c.req.text()`, its body. Hono caches the text, and @hono/mcp's transport
+ * reads `ctx.req.json()` from that cache, so it sees the same body. The SDK v2
+ * transport (SMD-2279) reads the raw Request stream instead, which this read
+ * will have drained: that move must hand it a Request rebuilt from the text,
+ * as the core route does (SMD-2278). `respond` is the transport's
+ * handleRequest.
+ *
+ * The watch starts after the key check and the server's build, which take
+ * nothing long, and its listener comes before the body read, so a client that
+ * leaves mid-upload is logged, as `?`. Then:
+ * - a method other than POST carries no call: its reply is respond()'s as it
+ *   is, body unread, close unwatched — ob-graph hands a GET to the transport,
+ *   whose stream only the client ends;
+ * - a client already gone gets the line and a 408, and the tool never runs
+ *   (unlike at the core route, the server has been built);
+ * - a reply that is not an event stream (JSON, a 202, a refusal) comes back as
+ *   it is, and a respond() that throws settles the request and throws;
+ * - a stream held to the ceiling is logged with vendoredStalledLine.
  */
 export async function mcpReply(
   c: { req: { raw: Request; text(): Promise<string> } },

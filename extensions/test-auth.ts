@@ -582,7 +582,7 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
   }
 }
 {
-  // mcpReply's two edges, on a context as a route hands it: `c.req.raw` and a body reader.
+  // mcpReply's edges, on a context as a route hands it: `c.req.raw` and a body reader.
   const ctx = (req: Request) => ({ req: { raw: req, text: () => req.text() } });
   const warned: string[] = [];
   const realWarn = console.warn;
