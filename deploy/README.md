@@ -270,7 +270,10 @@ The routes are `x-proxy-routes` at the top of `compose.yaml`, which compose
 hands the proxy as an inline config (`routes.yaml` in the directory Traefik's
 file provider reads), so a release's `compose.yaml` carries them and there is no
 second file to fetch; an overlay may add a file beside it, as
-`compose.api-public.yaml` does. The same text is a label on the proxy, so
+`compose.api-public.yaml` does. Such a file is a `ROUTE_FILES` entry with its
+table built in `scripts/check-fork-consistency.ts` (check 28) and a
+combination in CI's "The proxy loads only the held route tables"; no compose
+file defines a config that is not a route table (SMD-2658). The same text is a label on the proxy, so
 an `up` after a route changed recreates it: compose does not recreate a
 container for a changed inline config alone (docker/compose#11900, measured on
 5.5).
@@ -294,7 +297,12 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 
 **Adding a service** is two edits in `compose.yaml`: the service, with no
 `ports:`, and a router for its path in `x-proxy-routes`, at a priority above
-`legacy` (1). Not container labels: Traefik's label-driven registry reads them
+`legacy` (1). The same router, and its backend under `services:`, go in
+`PROXY_ROUTE_TABLE` in `scripts/check-fork-consistency.ts`, whose check 28
+holds the table byte for byte. A note on a route goes in the YAML comments
+above the block, never in it: Traefik renders a route file as a Go template
+before it reads the YAML, so a comment line in the table is not inert
+(SMD-2658). Not container labels: Traefik's label-driven registry reads them
 through the container engine's socket, which is root on the host, and the
 proxy is the one process a client on the network reaches —
 `docs/orchestration-tool.md` declined the same socket for n8n. The

@@ -13,6 +13,18 @@ fragments.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-08
+
+### Removed
+- A tool's scope is stated once, in the manifest: the MCP server registers a tool, the REST core admits its route and the MCP server's keyed HTTP mirrors (`/health`, `/worker-*`, `/jobs/`) admit a key through the same gate, and a test holds MCP `tools/list` and the REST core's OpenAPI document to one contract — names, titles, descriptions, input fields and which keys reach each. The two REST gateways, `integrations/open-brain-rest` and `integrations/rest-api`, are retired against the REST core, each route given its fate in `docs/vendored-disposition.md`; the Chrome capture extension (0.7.0) and the `ob1-local-http` skill call the REST core at `/api`, and an upgraded extension asks for that URL once. `enhanced-mcp`, `delete-thought-mcp`, `update-thought-mcp` and `discord-capture` retire too: the core's tools do what the first three did, and the fourth was a README with no code (SMD-1931). Their removal ships in a minor release: a vendored integration is not in the release's images or compose, so it is outside the contract a version names; an operator running one keeps it until they update the repo, and moves its clients to the REST core's `/api` first (SMD-1931).
+
+### Fixed
+- One unauthenticated request could stop the authorization server: an authorization request naming a client ID metadata document whose host answered with a status outside 200–599 made the server's fetch throw where nothing caught it. Such an answer is now refused, and so is a 101, which left the request hanging. A throw in a registration's handlers, the purge and re-resolution timers, or the provider's event handlers is now logged, and the process keeps serving; one on the way out still ends it, and one in a function the library itself runs is still that request's error answer (SMD-2665).
+
+### Security
+- A capture-only key can no longer mark superseded a thought that another key or board-sync has taken — a key that can read captured the same text, someone edited its text, or board-sync adopted it as a ticket's row: a pointer the key names after the taking is dropped, and one it wrote before lapses. Migration 082 holds the rule in the database and re-checks the key's pointer at its own write, where it is also dropped if something already supersedes the target; a vector filled in later or a key's metadata edit (a tag, an operator's backfill) does not take a thought, so the session hook still supersedes its own earlier summaries, and a write key's pointers are never touched (SMD-2638).
+- A capture-only key can no longer file a thought under a ticket with `metadata.ticket`. The brain reads a thought's ticket from `ticket` ahead of `issue`, and a write key's later capture of the same text kept the key's `ticket`, so the writer's thought read another ticket's status (SMD-2657).
+
 ## [1.6.0] - 2026-10-07
 
 ### Added
@@ -253,7 +265,8 @@ fragments.
 ### Fixed
 - `db/` and `evals/` are type-checked in CI: each gains a `tsconfig.json` mirroring the server's, the four type-checked directories pin `@types/bun`, `typescript` and `@types/node` at one version (check 18 holds them in step), two `Typecheck` steps run in the portable-server job, `db/ci-parity.sh` runs the four typechecks, and the findings a first strict pass over the two directories turned up are fixed — none a runtime defect (SMD-1932).
 
-[Unreleased]: https://github.com/MHarris-SgyMd/OB1/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/MHarris-SgyMd/OB1/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/MHarris-SgyMd/OB1/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/MHarris-SgyMd/OB1/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/MHarris-SgyMd/OB1/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/MHarris-SgyMd/OB1/compare/v1.3.0...v1.4.0

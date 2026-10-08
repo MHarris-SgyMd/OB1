@@ -5,7 +5,7 @@
 
 import { z } from "zod";
 import { SPECS } from "../core/index.ts";
-import { TOOLS, type ToolName } from "../tools.ts";
+import { scopeOf, type ToolName } from "../tools.ts";
 import { FORK_VERSION } from "../version.ts";
 import { pathFields, readsQuery, REFUSAL_STATUS, ROUTES } from "./routes.ts";
 
@@ -65,7 +65,7 @@ export function openApiDocument(): Json {
       // The tool's own words, but a job's links: an MCP client polls the
       // MCP server's /jobs, a REST client this server's /v1/jobs.
       description: spec.description.replace(/GET \/jobs\//g, "GET /v1/jobs/"),
-      "x-ob1-scope": TOOLS.find((t) => t.name === name)!.scope,
+      "x-ob1-scope": scopeOf(name),
       ...(parameters.length ? { parameters } : {}),
       ...(readsQuery(route.method) ? {} : { requestBody: { required: required.size > 0, content: { "application/json": { schema: input } } } }),
       responses: {

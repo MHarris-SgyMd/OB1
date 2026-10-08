@@ -12315,6 +12315,132 @@ console.log("\n[71] Migration 080: p_payload.recapture = 'keep' — a capture-on
   await db.exec(`DELETE FROM thoughts`);
 }
 
+console.log("\n[72] Migration 082: one rule for when a capture-only key's thought is taken from it — a re-capture by a key that can read, a text edit, the metadata gaining a ticket's issue; not a metadata move alone, a vector, a pointer — the re-capture note on a capture-only key's rows, the lapse of a capture-scoped pointer no one has re-pointed, and the check at the write (SMD-2638)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
+  await restoreShipped("upsert_thought", "update_thought");
+  await db.exec(`DELETE FROM thoughts`);
+
+  // The shape: five functions, the trigger, the sentinel, the comments.
+  const [shape] = await q<{ fns: number; trg: string | null; chk: string | null }>(`SELECT
+      (SELECT count(*)::int FROM pg_proc WHERE proname IN ('ob1_takes_thought', 'ob1_capturer_of', 'ob1_thought_taken', 'ob1_note_recapture', 'ob1_lapse_capture_pointers', 'ob1_check_capture_pointer')) AS fns,
+      (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers' AND tgrelid = 'thought_audit'::regclass) AS trg,
+      (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_audit_check_capture_pointer' AND tgrelid = 'thought_audit'::regclass) AS chk`);
+  const body = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'ob1_lapse_capture_pointers'`)).s);
+  const checkBody = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'ob1_check_capture_pointer'`)).s);
+  assert(shape.fns === 6 && /AFTER INSERT ON (public\.)?thought_audit FOR EACH ROW WHEN/.test(shape.trg ?? "") && /AFTER INSERT ON (public\.)?thought_audit FOR EACH ROW WHEN/.test(String(shape.chk ?? "")) && /ob1:capture-pointer-lapses/.test(body) && /ob1:capture-pointer-checked-at-write/.test(checkBody),
+    `082's six functions, the lapse and the check AFTER INSERT row triggers on thought_audit with their WHENs, each sentinel in its body (${shape.fns}; ${shape.trg}; ${shape.chk})`);
+  for (const sig of ["ob1_takes_thought(jsonb, uuid, uuid)", "ob1_capturer_of(uuid)", "ob1_thought_taken(uuid)", "ob1_note_recapture(uuid, jsonb)", "ob1_lapse_capture_pointers()", "ob1_check_capture_pointer()"]) {
+    const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
+    assert(/082/.test(c) && /SMD-2638/.test(c), `${sig}'s comment names 082 and the ticket`);
+  }
+
+  // The rule, cell by cell.
+  const X = "00000000-0000-4000-8000-0000000000a1", Y = "00000000-0000-4000-8000-0000000000b2";
+  const takes = async (diff: unknown, by: string | null, capturer: string | null) =>
+    (await one<{ t: boolean }>(`SELECT ob1_takes_thought($1::jsonb, $2::uuid, $3::uuid) AS t`, [JSON.stringify(diff), by, capturer])).t;
+  const meta = (before: Record<string, unknown>, after: Record<string, unknown>) => ({ metadata: { before, after } });
+  const cells: [string, unknown, string | null, string | null, boolean][] = [
+    ["a re-capture by another agent", { recaptured: true }, Y, X, true],
+    ["a re-capture with no agent id", { recaptured: true }, null, X, true],
+    ["a text edit with no agent id", { content: { before: "a", after: "b" } }, null, X, true],
+    ["a metadata move under another agent id (a writer's tag)", meta({}, { project: "p" }), Y, X, false],
+    ["the metadata gaining `issue`, no agent id", meta({}, { issue: "TKT-1" }), null, X, true],
+    ["the metadata gaining `issue` where it held null", meta({ issue: null }, { issue: "TKT-1" }), null, X, true],
+    ["a write key filing it under a ticket (`issue` gained under an agent id)", meta({}, { issue: "TKT-1" }), Y, X, false],
+    ["a metadata move with no agent id and no `issue`", meta({}, { enriched: true }), null, X, false],
+    ["a diff that is not an object, naming `content`", ["content"], Y, X, false],
+    ["a metadata move keeping an `issue` it had, no agent id", meta({ issue: "TKT-1" }, { issue: "TKT-1", status: "Done" }), null, X, false],
+    ["a vector arriving with no agent id", { embedding_present: true }, null, X, false],
+    ["a pointer set by another agent", { supersedes: { before: null, after: Y } }, Y, X, false],
+    ["its capturer's own metadata move", meta({}, { project: "p" }), X, X, false],
+    ["its capturer's own text edit", { content: { before: "a", after: "b" } }, X, X, false],
+    ["anything, on a thought nobody attributable captured", { recaptured: true }, Y, null, false],
+  ];
+  for (const [what, diff, by, capturer, want] of cells) assert((await takes(diff, by, capturer)) === want, `${what}: ${want ? "takes" : "does not take"} the thought`);
+
+  // The lapse and the note, through the write functions.
+  const HOOK = { name: "hook-key", agent_id: await agent("e", "hook-key", "capture"), via: "test-door", scope: "capture" };
+  const OLD_HOOK = { name: "hook-key", agent_id: HOOK.agent_id, via: "test-door" };
+  const WRITER = { name: "writer-key", agent_id: await agent("f", "writer-key", "write"), via: "test-door" };
+  const cap = async (content: string, payload: Record<string, unknown>) =>
+    (await one<{ r: { id: string; existed: boolean } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(payload), unit(3)])).r;
+  const pointerOf = async (id: string) => (await one<{ s: string | null }>(`SELECT supersedes::text AS s FROM thoughts WHERE id = $1::uuid`, [id])).s;
+  const chain = async (what: string, actor: Record<string, unknown>) => {
+    const t = await cap(`[72] the hook's summary ${what}`, { metadata: { source: "codex" }, actor, recapture: "keep" });
+    const n = await cap(`[72] the hook's next summary ${what}`, { metadata: { source: "codex" }, actor, recapture: "keep", supersedes: t.id });
+    return { t: t.id, s: n.id, text: `[72] the hook's summary ${what}` };
+  };
+  const merged = await chain("a write key merges onto", HOOK);
+  const noop = await chain("a write key re-captures unchanged", HOOK);
+  const unmarked = await chain("from a server that marks no scope", OLD_HOOK);
+  await cap(merged.text, { metadata: { source: "mcp", project: "72" }, actor: WRITER });
+  // The stores note every capture of a key that can read that lands on a row; the merge's metadata row alone does not take it.
+  assert((await one<{ t: boolean }>(`SELECT ob1_thought_taken($1::uuid) AS t`, [merged.t])).t === false, "a write key's merge moving the metadata does not take the thought by itself");
+  await one(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [merged.t, JSON.stringify(WRITER)]);
+  const again = await cap(noop.text, { metadata: { source: "codex" }, actor: WRITER });
+  const before = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid`, [noop.t])).n;
+  const noted = (await one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [noop.t, JSON.stringify(WRITER)])).r;
+  const twice = (await one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [noop.t, JSON.stringify(WRITER)])).r;
+  const own = (await one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [noop.s, JSON.stringify(HOOK)])).r;
+  const after = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid`, [noop.t])).n;
+  await cap(unmarked.text, { metadata: { source: "mcp", project: "72" }, actor: WRITER });
+  assert(again.existed === true && noted === true && twice === false && own === false && after === before + 1,
+    `the note records a write key's re-capture once — not again on a taken thought, not for the capturer itself (${JSON.stringify({ noted, twice, own, events: [before, after] })})`);
+  assert((await pointerOf(merged.s)) === null && (await pointerOf(noop.s)) === null, "a capture-scoped pointer lapses when a write key's re-capture of its target is noted, the re-capture merging metadata or not");
+  assert((await pointerOf(unmarked.s)) === unmarked.t, "…and one whose capture row carries no scope stands");
+  const unmarkedNoted = (await one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [unmarked.t, JSON.stringify(WRITER)])).r;
+  const OTHER = { name: "other-key", agent_id: await agent("d", "other-key", "write"), via: "test-door" };
+  const writers = await cap("[72] the writer's own note another write key re-sends", { metadata: { source: "mcp" }, actor: WRITER });
+  await cap("[72] the writer's own note another write key re-sends", { metadata: { source: "mcp" }, actor: OTHER });
+  const writersNoted = (await one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [writers.id, JSON.stringify(OTHER)])).r;
+  assert(unmarkedNoted === false && writersNoted === false, `the note records nothing on a row whose capture row carries no capture scope — a write key's own thought, a capture key's from before the mark (${unmarkedNoted}, ${writersNoted})`);
+  // A pointer a key set since the capture is not the capture's: it stands when the target is taken again.
+  await one(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, $2::jsonb, NULL, $3::jsonb, NULL)`, [merged.s, JSON.stringify(WRITER), JSON.stringify({ supersedes: merged.t })]);
+  await one(`SELECT update_thought($1::uuid, '[72] the writer''s text now', NULL, NULL, NULL, NULL, $2::jsonb, NULL, NULL, NULL)`, [merged.t, JSON.stringify(OTHER)]);
+  assert((await pointerOf(merged.s)) === merged.t, "a write key's pointer, set on the hook's thought after the lapse, stands when another key takes the target again");
+  // The check at the write: a capture-scoped capture naming a target that is not its own alone is refused, and writes nothing.
+  const refusedWith = async (content: string, target: string) => {
+    try { await cap(content, { metadata: { source: "codex" }, actor: HOOK, recapture: "keep", supersedes: target }); return "written"; } catch (e) { return (e as Error).message; }
+  };
+  const fresh = await chain("checked at the write", HOOK);
+  const ownUntouched = await cap("[72] the hook's thought nothing supersedes yet", { metadata: { source: "codex" }, actor: HOOK, recapture: "keep" });
+  const cells2: [string, string, RegExp][] = [
+    ["a taken target", noop.t, /ob1_check_capture_pointer/],
+    ["a target something already supersedes", fresh.t, /ob1_check_capture_pointer/],
+    ["another key's thought", writers.id, /ob1_check_capture_pointer/],
+  ];
+  for (const [what, target, want] of cells2) {
+    const msg = await refusedWith(`[72] the hook names ${what}`, target);
+    const [{ n }] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM thoughts WHERE content = $1`, [`[72] the hook names ${what}`]);
+    assert(want.test(msg) && Number(n) === 0, `a capture-scoped capture naming ${what} as supersedes is refused at the write, and writes nothing (${msg.slice(0, 90)})`);
+  }
+  assert((await refusedWith("[72] the hook names its own untouched thought", ownUntouched.id)) === "written", "…while one naming its own thought, untaken and superseded by nothing, is written");
+  // A capture naming no agent is refused even onto a thought captured without one (both NULL): nothing proves it the key's.
+  const NO_AGENT = { name: "hook-key", via: "test-door", scope: "capture" };
+  const unattributed = await cap("[72] the hook's thought from a registry outage", { metadata: { source: "codex" }, actor: NO_AGENT, recapture: "keep" });
+  let noAgent = "written";
+  try { await cap("[72] the hook names it, still without an agent", { metadata: { source: "codex" }, actor: NO_AGENT, recapture: "keep", supersedes: unattributed.id }); } catch (e) { noAgent = (e as Error).message; }
+  assert(/ob1_check_capture_pointer/.test(noAgent), `a capture-scoped capture naming no agent is refused at the write, even onto a thought captured without one (${noAgent.slice(0, 80)})`);
+  let unscopedPointer: string | null = null, unscopedError = "";
+  try {
+    const unscoped = await cap("[72] a write key names a thought something supersedes", { metadata: { source: "mcp" }, actor: WRITER, supersedes: fresh.t });
+    unscopedPointer = await pointerOf(unscoped.id);
+  } catch (e) { unscopedError = (e as Error).message; }
+  assert(unscopedPointer === fresh.t, `the check is a capture-only key's: a write key's capture naming the same target is written (${unscopedError.slice(0, 80) || unscopedPointer})`);
+  const taken = async (id: string) => (await one<{ t: boolean }>(`SELECT ob1_thought_taken($1::uuid) AS t`, [id])).t;
+  assert((await taken(merged.t)) === true && (await taken(noop.t)) === true && (await taken(merged.s)) === false && (await taken(writers.id)) === false,
+    "ob1_thought_taken reads the two targets taken, the hook's thought whose pointer lapsed still its own, and a write key's re-captured note not taken");
+
+  // A re-apply moves nothing.
+  await reapply("082");
+  const [{ trg }] = await q<{ trg: number }>(`SELECT count(*)::int AS trg FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers'`);
+  assert(trg === 1 && (await pointerOf(unmarked.s)) === unmarked.t, "082 re-applied: one trigger, and the standing pointer still stands");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

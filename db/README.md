@@ -171,8 +171,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2467 assertions: 2467 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-one (81) migrations applied, and
+`bun test-schema.ts` prints `2507 assertions: 2507 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-three (83) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +213,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -225,7 +225,8 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.3.0+upstream.9543c29`, the fourth (`058..062`), and 072 writes
 `1.4.0+upstream.9543c29`, the fifth (`063..072`), and 076 writes
 `1.5.0+upstream.9543c29`, the sixth (`073..076`), and 081 writes
-`1.6.0+upstream.9543c29`, the seventh (`077..081`). `preflight` prints the
+`1.6.0+upstream.9543c29`, the seventh (`077..081`), and 083 writes
+`1.7.0+upstream.9543c29`, the eighth (`082..083`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -1109,6 +1110,48 @@ reads to warn naming 080 when 073 or an earlier file is re-applied by hand over
 it. It refuses to apply without 060, 061 or 073. The fix needs this file and a
 server that sends the word: either alone, a capture key's re-capture merges.
 test-schema [71], test-upgrade [20ad], test-e2e-sql [13c].
+
+Migration 082 has a capture-only key's thought stop being its own once
+another key or board-sync takes it, lapses a pointer the key had already
+written onto it, and re-checks the key's pointer at its own write (SMD-2638).
+A capture-only key may set `supersedes` only on a thought it captured
+(SMD-2473), and capturing a text first was enough: a write key that later
+captured the same text landed on that row, board-sync adopted a row holding a
+ticket's text, and the capture key could still mark it superseded. One rule,
+`ob1_takes_thought`, says when an update event takes a thought from the agent
+that captured it — someone else then holds the text: another agent, or none,
+that records a re-capture or moves the text, or no agent giving the metadata
+an `issue` it lacked (board-sync's adoption, which writes without one). A
+key's metadata edit does not take it, whatever it adds — a writer's tag, a
+writer filing it under a ticket, `backfill_thought_actors` (which this README
+tells operators to run after `set_agent_kind`), a recipe — nor does a
+vector, a pointer or a fingerprint: a lapse puts a summary the hook superseded
+back to current, so only a write that puts another's text on the row may
+cause one. `ob1_thought_taken` reads the rule for one thought; the server reads
+it beside the capture row for every target of a capture-only key's
+`supersedes`. A write key's re-capture that changes nothing writes no event, so
+the stores call `ob1_note_recapture` after a capture without `recapture: 'keep'`
+lands on an existing row: when the row's capture row says it was a
+capture-only key's (`actor_context` `"scope": "capture"`, which the server
+writes from SMD-2638 on), the row is not yet taken and the caller is another
+agent, it appends one update event, diff `{"recaptured": true}`, and projects
+it (only `updated_at` moves); any other row is left as 060 leaves it. The
+lapse, an AFTER INSERT trigger on `thought_audit`, clears the pointer onto a
+taken thought of each thought its capturer captured with that pointer under
+the capture scope and no update has re-pointed since — an update event of its
+own under the actor of the write that took the target. The check at the
+write, a second AFTER INSERT trigger on a capture-scoped capture event that
+names `supersedes`, takes an advisory lock on the target (two such captures
+naming one target are serialised), locks it `FOR SHARE` (which waits for any
+taker) and refuses the capture, SQLSTATE `OB004`, when it names no agent or the
+target is another's, taken, or already superseded; the server drops the
+pointer and writes again. One superseder per target bounds a lapse to one
+event. A pointer a write key set never lapses; a pointer written before the
+server sent the scope mark never lapses, and a capture-only key's row from
+before then is never noted. Apply it before running the server that reads it: without
+`ob1_thought_taken` every capture-only key's `supersedes` is the server's error
+to retry. It refuses to apply without 060 or 061. test-schema [72],
+test-upgrade [20ae], test-e2e-sql [13b] and [13e].
 
 ## What changed relative to the guide
 
@@ -2272,14 +2315,37 @@ capture's tagging (SMD-1901) — and only for a pair BOTH rows of which the
 egress gate lets reach the chat endpoint (SMD-1903; the more restricted row
 decides for the pair, a refused pair is recorded on the claim like a timeout,
 and the banner's `egress:` line says what the run will do). `server-portable/consolidate.ts` holds the prompt: thought A (older) and B
-(newer), dated, and one question — agree, unrelated, or conflict, and for a
-conflict which is current, decided from what the texts say and not from the
-dates. A conflict whose texts do not say is recorded `conflict_undirected` for
-the reviewer to direct. Only conflicts become rows; the verdict rides with its
-confidence, the judge's one-sentence reason (what a reviewer reads first), the
-cosine, and the pass key `consolidate:<model>@p<prompt version>` — the judge
-model on the row as 021 puts the embedding model beside the vector. The
-worker's agent id rides along as 016's mentions carry theirs.
+(newer), dated, and one question — are they unrelated, related, does one
+evolve from the other, are they a duplicate, or does one outdate the other
+(prompt version 4, SMD-1873; p3 asked agree, unrelated or conflict, and called
+119 of the 126 pairs a reviewer had rejected on the dogfood brain conflicts
+again) — and when one outdates the other, which is current, decided from what
+the texts say and not from the dates, with the words that show it quoted. A
+supersession whose texts do not say is recorded `conflict_undirected` for the
+reviewer to direct. Only `outdates` becomes a row; `related`, `evolves` and
+`duplicate` relate two thoughts that both stand (a relation edge, SMD-1873's
+next PR) — a proposed duplicate would hand one writer's near-copy the
+standing of another's thought, which three review passes each found a way to
+do. The verdict rides
+with its confidence, the judge's one-sentence reason (what a reviewer reads
+first), the cosine, and the pass key `consolidate:<model>@p<prompt version>` —
+the judge model on the row as 021 puts the embedding model beside the vector.
+The confidence is the model's own token probability of `outdates` when the
+endpoint returns logprobs (Ollama does for qwen2.5:7b, where the number the
+model wrote was 0.80 on most pairs; whether the token probability ranks real
+proposals is SMD-2705's to measure), else the number it wrote — also when the
+alternatives naming a verdict held
+under half the token's mass. The proposal's recipe in
+`derivations` says which source (`judged.confidence_source`), with the judge's
+verdict word, its token distributions, and whether its quote was found in the
+side it named and not the other; the run summary counts proposals scored each
+way. An endpoint and model that refuse `logprobs` with a 400 or a 422 and
+then answer without it are asked without it for the rest of the run; an error
+the retry gets too is the pair's own. A brain upgraded from p3 keeps p3's
+pending rows, at their written 0.80, for a reviewer: the pass never re-judges
+a pair that has one. `evals/eval-judge.ts` measures all of this on a
+brain's own labels. The worker's agent id rides along as 016's mentions carry
+theirs.
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -2358,12 +2424,12 @@ row is the next pass's work whatever key wrote it: every run re-pools each
 stale row's newer thought under its own key (a pair both sides of which have a
 vector, with no live or failed claim there — a failed claim is
 `--retry-failed`'s), judges the thought's pairs
-again — up to `--k` model calls per re-pooled thought, since its agree and
-unrelated pairs left no record, plus one per stale pair the top-k left out
+again — up to `--k` model calls per re-pooled thought, since its unrelated,
+related and evolves pairs left no record, plus one per stale pair the top-k left out
 that still meets the candidate rule, judged anyway — and either **replaces** the
-row in place (a conflict at
+row in place (an outdates at
 the floor: `record_supersession_proposal`, back to pending under this key) or
-**settles** it (agree, unrelated, a conflict under the floor, or a pair the
+**settles** it (unrelated, related, evolves, duplicate, an outdates under the floor, or a pair the
 rule no longer admits — the note names which term: a side superseded, a
 lineage pair (066: one side derived from the other), no shared entity, under
 this run's similarity floor with the cosine; a stricter
@@ -3462,8 +3528,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2467 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1131 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2507 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1136 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

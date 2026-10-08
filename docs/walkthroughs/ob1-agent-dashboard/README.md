@@ -70,4 +70,4 @@ The seed data intentionally covers:
 - Duplicate review pairs
 - Low-quality audit rows that demonstrate memory hygiene
 
-This is demo infrastructure, not a production data source. The REST shim keeps the visual walkthrough repeatable while the production dashboard REST gateway remains separate from the Agent Memory API.
+This is demo infrastructure, not a production data source. The REST shim keeps the visual walkthrough repeatable; the dashboard REST gateway it stands in for retired with SMD-1931.

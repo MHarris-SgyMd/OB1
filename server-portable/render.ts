@@ -580,7 +580,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     const phrase = (v: string) =>
       v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
       : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
-      : "conflict, direction not stated — accepting needs --direction newer or older";
+      : "one is out of date, which not stated — accepting needs --direction newer or older";
     const results = data.map((p, i) => {
       const edited = p.older.edited || p.newer.edited;
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
@@ -830,7 +830,7 @@ function metadataShape(r: Extract<Refusal, { code: "REFUSED_METADATA_SHAPE" }>):
     case "too_many_keys": return `Refused: \`metadata\` carries ${r.count} keys — at most ${META_KEYS_MAX}.`;
     case "bad_key": return `Refused: the \`metadata\` key "${k.slice(0, 40)}" must be lower-case letters, digits and underscores, 2–40 characters, starting with a letter.`;
     case "reserved_key": return `Refused: \`metadata.${k}\` is set by the server, not the caller — use the \`source\` argument for the origin label; drop the rest.`;
-    case "ticket_key": return `Refused: \`metadata.${k}\` states a ticket's lifecycle, which a capture-only key may not set (${TICKET_META_KEYS_TEXT}) — drop it, or capture with a key that can write.`;
+    case "ticket_key": return `Refused: \`metadata.${k}\` is one of the keys a ticket's lifecycle is read from, which a capture-only key may not set (${TICKET_META_KEYS_TEXT}) — drop it, or capture with a key that can write.`;
     case "bad_value": return `Refused: \`metadata.${k}\` must be a string, number or boolean.`;
     case "value_too_long": return `Refused: \`metadata.${k}\` is ${r.length} characters — at most ${META_VALUE_MAX}.`;
   }

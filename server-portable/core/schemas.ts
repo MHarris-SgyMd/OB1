@@ -190,7 +190,7 @@ export const SPECS = {
   list_supersession_proposals: {
     title: "List Supersession Proposals",
     description:
-      "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070).",
+      "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged one to OUTDATE the other — a later state of the same thing, a decision and its reversal, a value and its update — or to DUPLICATE it, with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070).",
     annotations: {
       readOnlyHint: true,
     },
@@ -291,7 +291,7 @@ export const SPECS = {
       derived_from: z.array(z.string()).optional()
         .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result). Recorded when the thought is new; if this text was already captured, the existing thought's provenance is left as it is."),
       supersedes: z.string().optional()
-        .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead (a key that can write). A capture-only key may replace only a thought it captured itself, attributed to its agent id, that still exists; any other id is left out without a word and the capture lands without it (while the server cannot check — its agent registry unreachable, or the target's capture record unreadable — it asks for a retry instead)."),
+        .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead (a key that can write). A capture-only key may replace only a thought it captured itself, attributed to its agent id, that still exists, that no other key or board-sync has taken since (a key that can read captured the same text, its text was edited, or board-sync adopted it as a ticket's row), and that nothing supersedes yet; a pointer it wrote before such a taking lapses (migration 082); any other id is left out without a word and the capture lands without it (while the server cannot check — its agent registry unreachable, or the target's capture record unreadable — it asks for a retry instead)."),
       // SMD-1298. Where the capture comes from, for metadata.source — "mcp"
       // when absent, as every capture before it. A session-end hook says
       // `claude-code` or `codex`; a per-source weight (SMD-1297) and the
@@ -313,7 +313,7 @@ export const SPECS = {
       // and a per-source weight (SMD-1297) can tell a model summary from the
       // derived one.
       metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
-        .describe(`Extra metadata keys to store on the thought (e.g. \`{"summary_model": "llama3.1:8b"}\`). Lower-case keys, string/number/boolean values; at most ${META_KEYS_MAX} keys. Keys the server owns — \`source\` (use the \`source\` argument), \`type\`, \`topics\`, \`people\` and the like — are refused, and so, for a capture-only key, are a ticket's lifecycle keys (${TICKET_META_KEYS_TEXT}). Returned to readers alongside the server's own metadata.`),
+        .describe(`Extra metadata keys to store on the thought (e.g. \`{"summary_model": "llama3.1:8b"}\`). Lower-case keys, string/number/boolean values; at most ${META_KEYS_MAX} keys. Keys the server owns — \`source\` (use the \`source\` argument), \`type\`, \`topics\`, \`people\` and the like — are refused, and so, for a capture-only key, are the keys a ticket's lifecycle is read from (${TICKET_META_KEYS_TEXT}). Returned to readers alongside the server's own metadata.`),
     },
   },
   update_thought: {
