@@ -583,7 +583,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     const names = (opts.plugins ?? "").split(",").map((n) => n.trim()).filter(Boolean);
     const found: PluginMigrations[] = [];
     for (const name of names) {
-      if (!PLUGIN_NAME_RE.test(name) || !existsSync(join(dir, name, "index.ts"))) {
+      if (!PLUGIN_NAME_RE.test(name) || name.length > 32 || !existsSync(join(dir, name, "index.ts"))) {
         err(`OB1_PLUGINS names ${JSON.stringify(name)}, which is no plugin in ${dir}`);
         return null;
       }
@@ -1304,20 +1304,33 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     let pluginRan = 0;
     let pluginSkipped = 0;
     let pluginDrifted = 0;
+    /** The session's path as the run set it, restored after each plugin file. */
+    const [{ sessionPath }] = (await sql`SELECT current_setting('search_path') AS "sessionPath"`) as { sessionPath: string }[];
     for (const p of plugins as PluginMigrations[]) {
       out(`  plugin ${p.name}  (schema ${p.schema}, role ${p.role})`);
       if (p.files.length === 0) {
         out("  ·  no migrations");
         continue;
       }
-      const pending = p.files.some((m) => !recorded.has(`${p.name}/${m.name}`));
-      if (pending && !dryRun) {
-        // The role and its schema before the first file: the role to own what
-        // the plugin makes, the schema to hold it. Neither is ever dropped.
+      if (!dryRun) {
+        // The role and its schema, on every run that names the plugin — not
+        // only before a pending file: a brain restored into a new cluster
+        // (roles are not in a dump) records every file and has no role, and
+        // the run that names the plugin makes it again (review pass 1). The
+        // role to own what the plugin makes, the schema to hold it; neither
+        // is ever dropped. A migrator that is no superuser takes membership
+        // in what it made, so it may SET ROLE to it: on PG 16 a CREATEROLE
+        // role's own grant has ADMIN alone (createrole_self_grant unset), and
+        // CREATE SCHEMA … AUTHORIZATION and SET ROLE both need SET.
         try {
           await begin(async (tx: SQL) => {
             const [{ present }] = (await tx`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${p.role}) AS present`) as { present: boolean }[];
             if (!present) await tx.unsafe(`CREATE ROLE ${quoteIdent(p.role)} NOLOGIN`);
+            const [me] = (await tx`SELECT rolsuper AS superuser, current_setting('server_version_num')::int AS version FROM pg_roles WHERE rolname = current_user`) as { superuser: boolean; version: number }[];
+            if (!me.superuser) {
+              const [{ can }] = (await tx.unsafe(`SELECT pg_has_role(current_user, $1, '${me.version >= 160000 ? "SET" : "MEMBER"}') AS can`, [p.role])) as { can: boolean }[];
+              if (!can) await tx.unsafe(`GRANT ${quoteIdent(p.role)} TO CURRENT_USER${me.version >= 160000 ? " WITH SET TRUE, INHERIT FALSE" : ""}`);
+            }
             await tx.unsafe(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(p.schema)} AUTHORIZATION ${quoteIdent(p.role)}`);
           });
         } catch (caught) {
@@ -1357,6 +1370,13 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
           err(`  ✗  ${p.name}/${m.name}  FAILED: ${message}`);
           if (/permission denied/.test(message)) err(`  A plugin's migration runs as ${p.role}, which holds its own schema alone: a core table, or a schema not its own, is refused.`);
           return 1;
+        } finally {
+          // What the file may have left on the session past its transaction —
+          // a temp table, which Postgres searches before any schema, or a
+          // session search_path — goes, so the next plugin's file meets the
+          // session the run set (review pass 1).
+          await sql.unsafe("DISCARD TEMP");
+          await sql`SELECT set_config('search_path', ${sessionPath}, false)`;
         }
         out(`  ✓  ${m.name}  applied`);
         pluginRan++;

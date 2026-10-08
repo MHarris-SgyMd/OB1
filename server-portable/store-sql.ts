@@ -108,15 +108,30 @@ export function poolSizeFrom(raw: string | undefined, fallback = DEFAULT_PG_POOL
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+/** Connections in each plugin's own pool (SMD-2310): its handlers' transactions queue past two. */
+const PLUGIN_POOL_SIZE = 2;
+
 export class SqlStore implements ThoughtStore {
   readonly kind = "sql" as const;
   private sql: SQL;
+
+  /**
+   * Each plugin's own pool (SMD-2310), made at its first transaction: what a
+   * plugin's SQL leaves on a session — a temp table, which Postgres searches
+   * before any schema and so would stand in for `thoughts` in a core query
+   * that later used the connection, a session setting, an advisory lock, a
+   * cursor held past commit — stays on connections no core query and no
+   * other plugin uses (review pass 1).
+   */
+  private readonly pluginPools = new Map<string, SQL>();
+  private readonly url: string;
 
   constructor(url: string, opts: { max?: number } = {}) {
     // A bounded pool. PostgREST was stateless HTTP, so nothing upstream limits
     // concurrency for us any more — an unbounded pool would let a burst of
     // captures exhaust the server's connection slots.
     this.sql = new SQL({ url, max: opts.max ?? poolSizeFrom(process.env.OB1_PG_POOL) });
+    this.url = url;
   }
 
   async matchThoughts(opts: {
@@ -939,9 +954,14 @@ export class SqlStore implements ThoughtStore {
    * not a boundary against code that undoes it; plugins are curated).
    */
   pluginTx<T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T> {
-    if (!PLUGIN_NAME_RE.test(plugin)) return Promise.reject(new Error(`${JSON.stringify(plugin)} is not a plugin name`));
+    if (!PLUGIN_NAME_RE.test(plugin) || plugin.length > 32) return Promise.reject(new Error(`${JSON.stringify(plugin)} is not a plugin name`));
     const { schema, role } = pluginIdents(plugin);
-    return this.sql.begin(async (tx: SQL) => {
+    let pool = this.pluginPools.get(plugin);
+    if (!pool) {
+      pool = new SQL({ url: this.url, max: PLUGIN_POOL_SIZE });
+      this.pluginPools.set(plugin, pool);
+    }
+    return pool.begin(async (tx: SQL) => {
       await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(role)}`);
       await tx.unsafe(`SET LOCAL search_path TO ${quoteIdent(schema)}, public`);
       const query: PluginSql = (strings, ...values) => tx(strings, ...values) as never;
@@ -950,6 +970,6 @@ export class SqlStore implements ThoughtStore {
   }
 
   async close(): Promise<void> {
-    await this.sql.close();
+    await Promise.all([this.sql.close(), ...[...this.pluginPools.values()].map((pool) => pool.close())]);
   }
 }

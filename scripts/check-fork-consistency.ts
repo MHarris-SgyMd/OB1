@@ -47,7 +47,7 @@
  *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
- *  12. a .sql file under db/ or any of the seven category directories runs
+ *  12. a .sql file under db/ or any of the eight category directories runs
  *      nothing that needs Supabase — no `service_role`, `authenticated` or
  *      `anon`, no `auth.uid()`, `auth.role()` or `auth.users`, no
  *      `supabase_`-prefixed name, no RLS or policy — comments excepted by a

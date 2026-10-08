@@ -45,7 +45,7 @@ Checked when the server starts, so a malformed manifest stops it:
 Held by the maintainer's review:
 
 - **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own files, nothing else; zod comes from the SDK.
-- **No role or search-path change in its SQL.** `SET ROLE` holds a plugin's SQL to its own tables only while that SQL does not undo it. A `RESET ROLE`, `SET ROLE`, `SET SESSION AUTHORIZATION` or `search_path` change in a migration or a handler is refused in review.
+- **No role, session or transaction change in its SQL.** `SET ROLE` holds a plugin's SQL to its own tables only while that SQL does not undo it. These are refused in review: `RESET ROLE`, `SET ROLE` or `SET SESSION AUTHORIZATION`; a `search_path` change or `set_config`; `COMMIT`, `ROLLBACK` or `BEGIN` (a migration file that commits leaves the rest running as the migrator); and temp objects, session advisory locks or held cursors.
 - **The brain's thoughts are reached through `ctx.call(name, input)` alone.** That is a core operation called as the caller, behind the caller's own scope: a read operation called with a read key cannot capture or update. A write through it names the caller on its audit row.
 - **An output says only what the caller may see.** `ctx.call` hands back the core operation's whole value: for `capture_thought`, more than the REST core tells a key that cannot read (`rest/app.ts`'s `capturedFor`). What reaches the caller is what the output schema declares, so it should not declare more.
 

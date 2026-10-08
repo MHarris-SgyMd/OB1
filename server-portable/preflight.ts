@@ -53,6 +53,14 @@ const results: Check[] = [];
 const add = (name: string, status: Status, detail: string, fix?: string) =>
   results.push({ name, status, detail, fix });
 
+/** A plugin's migrations directory, in the image's plugins/ as in a checkout (SMD-2310). */
+const pluginMigrationsDir = (name: string) => join(import.meta.dir, "..", "plugins", name, "migrations");
+/** A plugin's migration files, in order; none for a plugin with no tables. */
+const pluginMigrationFiles = (name: string): string[] => {
+  const dir = pluginMigrationsDir(name);
+  return existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".sql")).sort() : [];
+};
+
 /**
  * What an enabled plugin's tables lack (SMD-2310), one phrase each: its role,
  * its schema, this connection's right to SET ROLE to the role, a migration
@@ -67,17 +75,29 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
     ledger ? ((await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations`) as { plugin: string; name: string; sha256: string }[]).map((r) => [`${r.plugin}/${r.name}`, r.sha256]) : []
   );
   for (const name of names) {
-    const dir = join(import.meta.dir, "..", "plugins", name, "migrations");
-    const files = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".sql")).sort() : [];
+    const dir = pluginMigrationsDir(name);
+    const files = pluginMigrationFiles(name);
     if (files.length === 0) continue;
     const { schema, role } = pluginIdents(name);
+    // SET ROLE needs the SET option from PG 16, which MEMBER does not read: a
+    // `GRANT … WITH SET FALSE` is membership a SET ROLE refuses (review pass 1).
     const [r] = (await sql`
       SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) AS role_present,
              EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${schema}) AS schema_present,
-             CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) THEN pg_has_role(current_user, ${role}, 'MEMBER') ELSE false END AS member`) as { role_present: boolean; schema_present: boolean; member: boolean }[];
+             CASE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) THEN false
+                  WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(current_user, ${role}, 'SET')
+                  ELSE pg_has_role(current_user, ${role}, 'MEMBER') END AS can_set,
+             (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner,
+             (SELECT string_agg(c.relname || ' (' || pg_get_userbyid(c.relowner) || ')', ', ' ORDER BY c.relname)
+                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = ${schema} AND c.relkind IN ('r', 'p', 'v', 'm', 'S') AND pg_get_userbyid(c.relowner) <> ${role}) AS foreign_owned`) as { role_present: boolean; schema_present: boolean; can_set: boolean; schema_owner: string | null; foreign_owned: string | null }[];
     if (!r.role_present) { problems.push(`${name}: no role ${role}`); continue; }
     if (!r.schema_present) { problems.push(`${name}: no schema ${schema}`); continue; }
-    if (!r.member) problems.push(`${name}: this server's role cannot SET ROLE ${role} (GRANT ${role} TO the server's role)`);
+    if (!r.can_set) problems.push(`${name}: this server's role cannot SET ROLE ${role} (GRANT ${role} TO the server's role, WITH SET TRUE on PG 16 and later)`);
+    // Owned by another role — a restore with --no-owner, say — the plugin's
+    // role reaches none of it, and every ctx.db call is refused.
+    if (r.schema_owner !== role) problems.push(`${name}: schema ${schema} is owned by ${r.schema_owner}, not ${role} (ALTER SCHEMA ${schema} OWNER TO ${role})`);
+    if (r.foreign_owned) problems.push(`${name}: in ${schema}, not owned by ${role}: ${r.foreign_owned} (ALTER TABLE … OWNER TO ${role})`);
     const pending = files.filter((f) => !recorded.has(`${name}/${f}`));
     const drifted = files.filter((f) => recorded.has(`${name}/${f}`) && recorded.get(`${name}/${f}`) !== migrationSha(readFileSync(join(dir, f), "utf8")));
     if (pending.length) problems.push(`${name}: ${pending.length} migration(s) not applied (${pending.join(", ")})`);
@@ -207,7 +227,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log", "tier", "workers",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -815,7 +835,14 @@ if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
 {
   const problem = pluginProblem(env.OB1_PLUGINS);
   const names = pluginNames(env.OB1_PLUGINS);
+  // A plugin with tables reaches them through the SQL store alone: on the
+  // PostgREST store its operations would fail at their first call, and the
+  // plugin tables row below runs only on the SQL path (review pass 1).
+  const tabled = names.filter((n) => pluginMigrationFiles(n).length > 0);
   if (problem) add("plugins", "fail", problem, "Name plugins from plugins/registry.ts in OB1_PLUGINS, comma-separated, or unset it");
+  else if (store === "postgrest" && tabled.length)
+    add("plugins", "fail", `${tabled.join(", ")} keep${tabled.length === 1 ? "s" : ""} tables, which need the SQL store; this server runs OB1_STORE=postgrest`,
+        "Run the SQL store (unset OB1_STORE), or leave the plugin out of OB1_PLUGINS");
   else if (names.length) add("plugins", "ok", `${names.join(", ")} — enabled`);
 }
 

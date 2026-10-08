@@ -140,11 +140,13 @@ console.log("\n[4] A plugin migration that reaches for a core table fails, and r
 
 console.log("\n[5] A plugin not named is left as it is: no line, its schema and rows kept");
 {
+  await sql`INSERT INTO plugin_example.notes (thought_id, note, written_by) VALUES (gen_random_uuid(), 'kept while off', 'suite')`;
   const r = await runMigrate({});
   assert(r.code === 0 && !/plugins:/.test(r.out), "a run with no plugin named says nothing of plugins");
-  const kept = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_example.notes`);
+  const kept = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_example.notes WHERE note = 'kept while off'`);
   const ledger = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM public.plugin_migrations WHERE plugin = 'example'`);
-  assert(kept.n >= 0 && ledger.n === 1, "its table and its ledger row are still there");
+  assert(kept.n === 1 && ledger.n === 1, "its row, its table and its ledger row are still there");
+  await sql`DELETE FROM plugin_example.notes WHERE note = 'kept while off'`;
 }
 
 // ── Both servers, the example enabled, over this database ────────────────────
@@ -230,6 +232,14 @@ console.log("\n[7] The plugin's handle: its own table, named bare; a core table 
     said = "";
     try { await store.pluginTx("Example", async () => 1); } catch (e) { said = (e as Error).message; }
     assert(/is not a plugin name/.test(said), "a name that is no plugin's shape is refused before it reaches SQL");
+    // What a plugin's SQL leaves on its session — a temp table, which Postgres
+    // searches before any schema, a session search_path — is on the plugin's
+    // own connections: the core's queries, on a pool of one connection here,
+    // never meet it.
+    const before = await store.countThoughts();
+    await store.pluginTx("example", (q) => q`CREATE TEMP TABLE thoughts AS SELECT generate_series(1, 50) AS id`);
+    await store.pluginTx("example", (q) => q`SELECT set_config('search_path', 'plugin_example', false)`);
+    assert((await store.countThoughts()) === before && before >= 1, `a temp table named thoughts and a session path, left by a plugin, do not reach the core's queries (${before} thoughts, as before)`);
   } finally {
     await store.close();
   }
@@ -250,7 +260,66 @@ console.log("\n[8] Preflight: the enabled plugin's tables in place; a migration 
   r = await runScript(["bun", join(HERE, "preflight.ts")], { env: env("example"), cwd: HERE });
   assert(/✗\s+plugin tables\s+example: 1 migration\(s\) not applied \(001_notes.sql\)/.test(row(r.out)), `a migration the ledger lacks: fail, named (${row(r.out)})`);
   await sql`INSERT INTO public.plugin_migrations (plugin, name, sha256) VALUES ('example', '001_notes.sql', ${NOTES_SHA})`;
+  // A table owned by another role (a restore with --no-owner, say) is one the plugin's role cannot reach.
+  await sql`ALTER TABLE plugin_example.notes OWNER TO postgres`;
+  r = await runScript(["bun", join(HERE, "preflight.ts")], { env: env("example"), cwd: HERE });
+  assert(/✗\s+plugin tables\s+example: in plugin_example, not owned by ob1_plugin_example: notes \(postgres\)/.test(row(r.out)), `a table owned by another role: fail, named (${row(r.out)})`);
+  await sql`ALTER TABLE plugin_example.notes OWNER TO ob1_plugin_example`;
   localStub.stop(true);
+}
+
+console.log("\n[9] A migrator that is no superuser, with CREATEROLE: it takes the SET membership PG 16 does not give it, and the plugin's schema is the plugin role's");
+{
+  const migrator = "smd2310_migrator";
+  const [{ db }] = (await sql`SELECT current_database() AS db`) as { db: string }[];
+  await sql.unsafe(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${migrator}') THEN CREATE ROLE ${migrator} LOGIN CREATEROLE PASSWORD 'smd2310-pw'; END IF; END $$`);
+  await sql.unsafe(`GRANT CREATE ON DATABASE "${db}" TO ${migrator}`);
+  await sql.unsafe(`GRANT USAGE, CREATE ON SCHEMA public TO ${migrator}`);
+  await sql.unsafe(`GRANT SELECT ON schema_migrations TO ${migrator}`);
+  await sql.unsafe(`GRANT SELECT, INSERT ON public.plugin_migrations TO ${migrator}`);
+  const asMigrator = new URL(URL_);
+  asMigrator.username = migrator;
+  asMigrator.password = "smd2310-pw";
+  const dir = mkdtempSync(join(tmpdir(), "smd2310-plugins-"));
+  try {
+    mkdirSync(join(dir, "second", "migrations"), { recursive: true });
+    writeFileSync(join(dir, "second", "index.ts"), "export default {};\n");
+    writeFileSync(join(dir, "second", "migrations", "001_items.sql"), "CREATE TABLE IF NOT EXISTS items (id int PRIMARY KEY);\n");
+    const out: string[] = [];
+    const errs: string[] = [];
+    const code = await migrate({ url: asMigrator.toString(), plugins: "second", pluginsDir: dir, writer: { out: (l: string) => out.push(l), err: (l: string) => errs.push(l) } });
+    assert(code === 0 && out.join("\n").includes("  ✓  001_items.sql  applied"), `applied as a CREATEROLE role (${code}: ${errs.join(" | ").slice(0, 300)})`);
+    const owner = await one<{ schema_owner: string; table_owner: string }>(sql`
+      SELECT (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'plugin_second') AS schema_owner,
+             (SELECT tableowner FROM pg_tables WHERE schemaname = 'plugin_second' AND tablename = 'items') AS table_owner`);
+    assert(owner.schema_owner === "ob1_plugin_second" && owner.table_owner === "ob1_plugin_second", `the schema and table are the plugin role's, not the migrator's (${JSON.stringify(owner)})`);
+    const again = await migrate({ url: asMigrator.toString(), plugins: "second", pluginsDir: dir, writer: { out: () => {}, err: () => {} } });
+    assert(again === 0, "and a second run as that role is clean");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("\n[10] A run that names a plugin makes its role and schema though nothing is pending; one plugin file's temp table never meets the next plugin's");
+{
+  const dir = mkdtempSync(join(tmpdir(), "smd2310-plugins-"));
+  try {
+    for (const [name, body] of [["restored", "CREATE TABLE IF NOT EXISTS kept (id int);\n"], ["aa", "CREATE TEMP TABLE shadow_me (x int);\n"], ["bb", "CREATE TABLE IF NOT EXISTS shadow_me (x int);\nINSERT INTO shadow_me VALUES (1);\n"]] as const) {
+      mkdirSync(join(dir, name, "migrations"), { recursive: true });
+      writeFileSync(join(dir, name, "index.ts"), "export default {};\n");
+      writeFileSync(join(dir, name, "migrations", "001_x.sql"), body);
+    }
+    // Recorded, with no role and no schema: a brain restored into a cluster that never had them.
+    await sql`INSERT INTO public.plugin_migrations (plugin, name, sha256) VALUES ('restored', '001_x.sql', ${migrationSha("CREATE TABLE IF NOT EXISTS kept (id int);\n")})`;
+    const r = await runMigrate({ plugins: "restored,aa,bb", pluginsDir: dir });
+    assert(r.code === 0, `exit 0 (${r.code}: ${r.err.slice(0, 200)})`);
+    const made = await one<{ role: boolean; schema: boolean }>(sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_plugin_restored') AS role, EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'plugin_restored') AS schema`);
+    assert(made.role && made.schema, `the recorded plugin's role and schema are made again (${JSON.stringify(made)})`);
+    const landed = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_bb.shadow_me`);
+    assert(landed.n === 1, `the next plugin's row lands in its own table, not the temp table the one before left (${landed.n})`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 mcpServer.stop(true);

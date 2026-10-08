@@ -179,8 +179,14 @@ only when the core's are clean:
 
 - **The role and the schema.** Each plugin gets its own Postgres role,
   `ob1_plugin_<name>` (NOLOGIN), and a schema it owns, `plugin_<name>` (a
-  hyphen in the name reads as `_`). Both are made at its first pending file and
-  never dropped.
+  hyphen in the name reads as `_`). Both are made by any run that names the
+  plugin, even with nothing pending (a brain restored into a new cluster has
+  no roles), and are never dropped. A migrator that is no superuser takes
+  membership in the role it made (`WITH SET TRUE, INHERIT FALSE` on PG 16),
+  so it may hand it the schema and run as it.
+- **Between files.** After each file the migrator discards the session's temp
+  tables and restores its search path, so one plugin's leftovers never meet
+  the next plugin's SQL.
 - **How a file runs.** Each file runs in its own transaction under
   `SET LOCAL ROLE ob1_plugin_<name>`, with the plugin's schema first on the
   path. A table the plugin creates is its own, named bare. The role holds
@@ -205,12 +211,17 @@ OB1_PLUGINS=example bun migrate.ts --url "$DATABASE_URL" --dry-run
 The migrating role must be able to `CREATE ROLE` and `CREATE SCHEMA`, and to
 `SET ROLE` to what it creates; the compose stack's `postgres` can. The server
 reaches a plugin's tables as the same role (`ctx.db`), so its own role must be
-able to `SET ROLE` to it; preflight's `plugin tables` row checks that, the
-role, the schema and every file recorded at its sha (`--grant` does not yet
-give a non-superuser server role that membership: SMD-2728). `SET ROLE` holds a
-plugin's SQL to its own tables only while that SQL does not undo the role:
-the consistency checker refuses a role or search-path change in a plugin's
-code, and a plugin is curated.
+able to `SET ROLE` to it (the `SET` option on PG 16). Preflight's `plugin
+tables` row checks that, the role, the schema, that both the schema and every
+table in it are the plugin role's (a restore with `--no-owner` leaves them
+another's), and every file recorded at its sha. `--grant` does not yet give a
+non-superuser server role that membership: SMD-2728. The server runs each
+plugin's transactions on a small pool of their own, so what a plugin's SQL
+leaves on a session, such as a temp table (which Postgres searches before any
+schema) or a session setting, never meets a core query. `SET ROLE` holds a
+plugin's SQL to its own tables only while that SQL does not undo the role, so
+role changes, transaction control and session settings in a plugin's code are
+the consistency checker's to refuse, and a plugin is curated.
 
 ## Expected outcome
 
