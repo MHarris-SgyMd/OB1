@@ -67,7 +67,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
-import { abandonedRequestLine } from "./_shared/sse.ts";
+import { abandonedRequestLine, mcpReply } from "./_shared/sse.ts";
 import { askRaw, createAssert, leaveMidUpload, PACKAGES, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
@@ -515,6 +515,7 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
   assert(handler !== null, "the module imports, as above");
   if (handler) {
     const realFetch = globalThis.fetch;
+    let embeddings = 0;
     // The provider, stubbed: the classification answers after SLOW_CLASSIFY_MS, the embedding at once.
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -523,8 +524,10 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
         await Bun.sleep(SLOW_CLASSIFY_MS);
         return Response.json({ choices: [{ message: { content: JSON.stringify({ type: "observation", topics: ["keepalive"] }) } }] });
       }
+      embeddings++;
       return Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
     }) as typeof fetch;
+    const priorKey = process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_API_KEY = "stub";
     const server = Bun.serve({ port: 0, fetch: handler });
     type Read = { ok: boolean; status: number; text: string; error: string; ms: number };
@@ -541,20 +544,24 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
       }
     };
     const warned: string[] = [];
+    const errored: string[] = []; // the refused write's own log, read for the thought below
     const quiet = { error: console.error, warn: console.warn };
     console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
-    console.error = () => {}; // the refused write's own log
+    console.error = (...args: unknown[]) => { errored.push(args.map(String).join(" ")); };
     let slow: Read, gone: Read;
     try {
       [slow, gone] = await Promise.all([
         capture(50, "a thought whose classification outlives the idle timeout"),
         capture(51, "needle-the-line-must-not-carry", AbortSignal.timeout(1500)),
       ]);
-      await Bun.sleep(500); // the abandoned call's tool runs on behind it, and settles
+      // The abandoned call's tool runs on behind it: held until it has embedded too, then its refused write settles.
+      for (let i = 0; i < 40 && embeddings < 2; i++) await Bun.sleep(50);
+      await Bun.sleep(300);
     } finally {
       Object.assign(console, quiet);
       globalThis.fetch = realFetch;
-      delete process.env.OPENROUTER_API_KEY;
+      if (priorKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = priorKey;
       server.stop(true);
     }
     const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
@@ -569,7 +576,12 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
     assert(lines.length === 1 && m !== null && lines[0] === abandonedRequestLine("tools/call brain_capture_thought", Number(m[1]) * 1000),
       `…and the server logs it once, in sse.ts's line naming the method and the tool (${lines.length} of ${warned.length} warnings)`);
     assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
-    assert(!warned.some((w) => /needle-the-line-must-not-carry/.test(w)), "…and never the thought");
+    assert(![...warned, ...errored].some((w) => /needle-the-line-must-not-carry/.test(w)), `…and never the thought, in a warning or an error (${warned.length + errored.length} lines)`);
+    // Only a POST carries a call (review pass 1): ob-graph hands a GET to the
+    // transport, whose stream only the client ends, so its reply passes as it is.
+    const stream = new Response(new ReadableStream(), { headers: { "content-type": "text/event-stream" } });
+    assert(await mcpReply(new Request("http://extension.test/mcp", { method: "GET" }), null, () => stream) === stream,
+      "a GET's event stream is not kept alive or watched: mcpReply hands it back as the transport made it");
   }
 }
 

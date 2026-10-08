@@ -155,12 +155,17 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
  * here, after the key check: these servers do nothing before it that takes
  * long. A reply that is not an event stream (a JSON reply, a 202, a refusal)
  * comes back as it is; a respond() that throws settles the request and throws.
+ * Only a POST carries a call: any other method's reply is respond()'s as it
+ * is, unwatched. ob-graph hands a GET to the transport, which opens a stream
+ * that only the client ends, so keeping that stream alive would hold it for
+ * the whole ceiling, and its close is no abandoned call (review pass 1).
  */
 export async function mcpReply(
   req: Request,
   bodyText: string | null,
   respond: () => Promise<Response | undefined> | Response | undefined,
 ): Promise<Response | undefined> {
+  if (req.method !== "POST") return respond();
   const started = performance.now();
   const label = requestLabel(bodyText);
   let settled = false;
