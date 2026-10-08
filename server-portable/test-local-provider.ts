@@ -381,6 +381,26 @@ console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_M
   assert(extract.model === META_MODEL, `…while the entity extractor's, on the same configuration, names OB1_METADATA_MODEL (${extract.model})`);
   assert(consolidateKey(split.judgeModel) !== consolidateKey(shared.judgeModel), "a judge-model change is a new pass key, so an earlier model's judgements are not reused as this one's");
   providerC.stop();
+
+  // SMD-1873: an endpoint that refuses `logprobs` with a 400 is asked again
+  // without it, once, and not asked with it again in this process.
+  const asked: boolean[] = [];
+  const strict = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { logprobs?: boolean };
+      asked.push(body.logprobs === true);
+      if (body.logprobs) return Response.json({ error: { message: "Unrecognized request argument supplied: logprobs" } }, { status: 400 });
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "related", supersedes: "unknown", confidence: 0.8, reason: "r" }) } }] });
+    },
+  });
+  const strictCfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${strict.port}/v1`, OB1_METADATA_MODEL: META_MODEL });
+  const first = await judgePair(older, newer, strictCfg, undefined, undefined, { logprobs: 10 });
+  const second = await judgePair(older, newer, strictCfg, undefined, undefined, { logprobs: 10 });
+  assert(first.verdict === "related" && !first.malformed && !first.probabilities && second.verdict === "related",
+         "a judge call asking for logprobs from an endpoint that refuses them with a 400 still returns the judgement, without probabilities");
+  assert(JSON.stringify(asked) === JSON.stringify([true, false, false]), `…asked once with logprobs, then without, and without for the rest of the process (${JSON.stringify(asked)})`);
+  strict.stop();
 }
 
 console.log("\n[10] A long thought is extracted in windows of the metadata model's size, each call budgeted, and the windows' answers merged (SMD-1879)");

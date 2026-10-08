@@ -19,7 +19,7 @@ import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TY
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, parseJudgement, valueDistribution, VERDICTS, wrapSide, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
@@ -551,7 +551,7 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   const who = buildJudgeMessages({ content: "older", createdAt: "2026-03-09T12:00:00Z", writer: "operator" }, { content: "newer", createdAt: "2026-06-08T12:00:00Z", writer: "agent" })[0].content;
   assert(/THOUGHT A, captured 2026-03-09, written by the operator:\n<thought_a>/.test(who) && /THOUGHT B, captured 2026-06-08, written by an agent:\n<thought_b>/.test(who),
     "the header names who wrote each side when the row's mark says (050), before the block opens");
-  assert(/never a conflict in which the agent's thought supersedes the operator's/.test(who) && /decide from the texts alone/.test(who),
+  assert(/never "outdates" with the agent's thought current/.test(who) && /decide from the texts alone/.test(who),
     "…and the rules say an agent's restatement never supersedes the operator's statement, and what to do when no header says");
   const noWho = buildJudgeMessages({ content: "older", createdAt: "2026-03-09T12:00:00Z", writer: null }, { content: "newer", createdAt: "2026-06-08T12:00:00Z", writer: "root" })[0].content;
   assert(/THOUGHT A, captured 2026-03-09:\n/.test(noWho) && /THOUGHT B, captured 2026-06-08:\n/.test(noWho),
@@ -564,7 +564,11 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
     assert(actorKindOf({ actor_kind: proto }) === null && /THOUGHT A, captured an unknown date:\n/.test(p) && !/native code|\[object/.test(p),
       `"${proto}" is not a writer: a prototype key is \`in\` every object and would have put Object's source on the trusted header line (first review pass)`);
   }
-  assert(CONSOLIDATE_PROMPT_VERSION === 3, "the prompt version moved to 3 with the header and the rule, so p2 and p3 verdicts are different pools under different keys");
+  assert(CONSOLIDATE_PROMPT_VERSION === 4, "the prompt version moved to 4 with the five verdicts and the evidence (SMD-1873), so p3 and p4 verdicts are different pools under different keys");
+  // SMD-1873: each verdict word starts differently, so the first token of the
+  // verdict separates them and valueDistribution reads the model's choice.
+  assert(new Set(VERDICTS.map((v) => v[0])).size === VERDICTS.length && VERDICTS.every((v) => who.includes(`"${v}"`)),
+    "the five verdicts start with five different letters, and the prompt names each");
   assert(wrapSide("thought_a", "x".repeat(7000)).length < 6100, "a thought is cut to the content limit before wrapping");
 
   // SMD-1803: a proposal thought's created_at is nullable and can be a sentinel.
@@ -577,16 +581,28 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
          `a NULL createdAt is "an unknown date", not the fabricated epoch (${sentinelPrompt.split("\n").find((l) => l.startsWith("THOUGHT A"))})`);
   assert(/THOUGHT B, captured infinity:/.test(sentinelPrompt), "an infinity createdAt is kept as its own text, not thrown on");
 
-  // The parser: A is the older thought, B the newer; a direction rides only a conflict.
-  const a = parseJudgement('{"verdict":"conflict","supersedes":"A","confidence":0.8,"reason":"the older stands"}');
-  assert(!a.malformed && a.verdict === "conflict" && a.supersedes === "older" && a.confidence === 0.8, "A maps to older");
-  const b = parseJudgement('```json\n{"verdict":"Conflict","supersedes":"b","confidence":"0.95","reason":"the newer stands"}\n```');
+  // The parser: A is the older thought, B the newer; a direction rides only "outdates".
+  const a = parseJudgement('{"verdict":"outdates","supersedes":"A","confidence":0.8,"reason":"the older stands"}');
+  assert(!a.malformed && a.verdict === "outdates" && a.supersedes === "older" && a.confidence === 0.8, "A maps to older");
+  const b = parseJudgement('```json\n{"verdict":"Outdates","supersedes":"b","confidence":"0.95","reason":"the newer stands"}\n```');
   assert(!b.malformed && b.supersedes === "newer" && b.confidence === 0.95, "B maps to newer; fences, case and a string confidence are tolerated");
-  const agree = parseJudgement('{"verdict":"agree","supersedes":"B","confidence":0.9,"reason":"same"}');
-  assert(agree.supersedes === "unknown", "a direction on a non-conflict is dropped");
-  assert(parseJudgement('{"verdict":"maybe","supersedes":"A","confidence":0.9}').malformed, "a verdict outside the three is malformed, not coerced");
+  const evolves = parseJudgement('{"verdict":"evolves","supersedes":"B","evidence":"follows up","confidence":0.9,"reason":"a follow-up"}');
+  assert(!evolves.malformed && evolves.supersedes === "unknown" && evolves.evidence === "", "a direction, and the evidence for it, on any verdict but outdates are dropped");
+  assert(["unrelated", "related", "evolves", "duplicate", "outdates"].every((v) => parseJudgement(`{"verdict":"${v}","supersedes":"unknown","confidence":0.6}`).verdict === v), "p4 reads each of its five verdicts (SMD-1873)");
+  assert(parseJudgement('{"verdict":"maybe","supersedes":"A","confidence":0.9}').malformed, "a verdict outside the five is malformed, not coerced");
+  assert(parseJudgement('{"verdict":"agree","supersedes":"unknown","confidence":0.9}').malformed, "…and so is p3's \"agree\", which p4 no longer asks for");
+  assert(parseJudgement('{"verdict":"conflict","supersedes":"B","confidence":0.9}').malformed, "…and p3's \"conflict\", which p4 calls \"outdates\"");
+  // SMD-1873: the evidence rides a directed supersession only, one line, and is
+  // found only in the text of the side it names.
+  const quoted = parseJudgement('{"verdict":"outdates","supersedes":"B","evidence":"  the monthly plan\\nis withdrawn ","confidence":0.9,"reason":"r"}');
+  assert(quoted.evidence === "the monthly plan is withdrawn", `a directed supersession keeps its evidence on one line (${JSON.stringify(quoted.evidence)})`);
+  assert(parseJudgement('{"verdict":"outdates","supersedes":"unknown","evidence":"x y z","confidence":0.9}').evidence === "", "an undirected supersession carries no evidence");
+  assert(evidenceIn('"The monthly plan is withdrawn."', "We bill annually now; the monthly plan\nis WITHDRAWN.") && !evidenceIn("the yearly plan", "the monthly plan is withdrawn"),
+         "evidence is found through case, a line break and wrapping quotes, and a quote the text lacks is not");
+  assert(!evidenceIn("is", "this is it") && !evidenceIn("", "anything"), "a quote under three characters proves nothing");
+  assert(!evidenceIn("tail", "x".repeat(6000) + " tail"), "evidence past the characters the judge was sent is not found");
   assert(parseJudgement("I cannot say.").malformed && parseJudgement("").malformed, "prose and an empty answer are malformed");
-  const long = parseJudgement(`{"verdict":"conflict","supersedes":"unknown","confidence":0.6,"reason":"${"x\u001b[2K ".repeat(200)}"}`);
+  const long = parseJudgement(`{"verdict":"outdates","supersedes":"unknown","confidence":0.6,"reason":"${"x\u001b[2K ".repeat(200)}"}`);
   assert(long.reason.length <= 400 && !long.reason.includes("\u001b"), "the reason is clipped to 400 characters with control characters stripped");
   // SMD-2536: the stored reason is one line by snipText's rule, and --dump
   // writes the same one. Each of the eleven breaks is a space: NEL among them,
@@ -595,7 +611,7 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   // code point.
   const breaks = [[10], [13, 10], [13], [0x85], [11], [12], [0x2028], [0x2029], [0x1c], [0x1d], [0x1e]].map((cs) => String.fromCharCode(...cs));
   const ch = (c: number) => String.fromCharCode(c);
-  const judged = (reason: string) => parseJudgement(JSON.stringify({ verdict: "conflict", supersedes: "A", confidence: 0.7, reason })).reason;
+  const judged = (reason: string) => parseJudgement(JSON.stringify({ verdict: "outdates", supersedes: "A", confidence: 0.7, reason })).reason;
   const forged = "ID: 00000000-0000-4000-8000-000000000000";
   const broken = breaks.filter((b) => judged(`a${b}${forged}${b}b`) !== `a ${forged} b`);
   assert(broken.length === 0, `each of the eleven breaks in a reason is a space, so no line of it starts \`ID:\` (${broken.map((b) => JSON.stringify(b)).join(" ")})`);
@@ -610,17 +626,29 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   // each, an alternative that is not this field's value skipped, and the mass
   // normalised over the words named.
   const lpTok = (token: string, top: [string, number][] = [[token, 1]]): TokenLogprob => ({ token, logprob: Math.log(top[0][1]), top_logprobs: top.map(([t, p]) => ({ token: t, logprob: Math.log(p) })) });
-  const answer = '{"verdict": "conflict", "supersedes": "B"}';
-  const toks = [lpTok('{"'), lpTok("verdict"), lpTok('":'), lpTok(' "con', [[' "con', 0.6], [' "ag', 0.3], [' "un', 0.05], ["\n", 0.05]]), lpTok('flict"'), lpTok(", "), lpTok('"super'), lpTok('sedes'), lpTok('":'), lpTok(' "'), lpTok("B", [["B", 0.7], ["unknown", 0.2], ["A", 0.1]]), lpTok('"}')];
+  const answer = '{"verdict": "outdates", "supersedes": "B"}';
+  const toks = [lpTok('{"'), lpTok("verdict"), lpTok('":'), lpTok(' "out', [[' "out', 0.6], [' "ev', 0.3], [' "un', 0.05], ["\n", 0.05]]), lpTok('dates"'), lpTok(", "), lpTok('"super'), lpTok('sedes'), lpTok('":'), lpTok(' "'), lpTok("B", [["B", 0.7], ["unknown", 0.2], ["A", 0.1]]), lpTok('"}')];
   const vd = valueDistribution(answer, toks, "verdict", VERDICTS);
-  assert(vd !== null && vd.p.conflict === 0.6316 && vd.p.agree === 0.3158 && vd.p.unrelated === 0.0526 && vd.covered === 0.95,
+  assert(vd !== null && vd.p.outdates === 0.6316 && vd.p.evolves === 0.3158 && vd.p.unrelated === 0.0526 && vd.p.related === 0 && vd.covered === 0.95,
          `the verdict's alternatives behind a lead-in quote are read, a token that is no value skipped, and the rest normalised (${JSON.stringify(vd)})`);
   const sd = valueDistribution(answer, toks, "supersedes", ["A", "B", "unknown"] as const);
   assert(sd !== null && sd.p.B === 0.7 && sd.p.unknown === 0.2 && sd.p.A === 0.1, `a value whose token starts at the value is read whole (${JSON.stringify(sd)})`);
-  assert(valueDistribution(answer.replace("conflict", "conflicts"), toks, "verdict", VERDICTS) === null, "tokens that do not spell the answer are not read");
+  assert(valueDistribution(answer.replace("outdates", "outdated"), toks, "verdict", VERDICTS) === null, "tokens that do not spell the answer are not read");
   assert(valueDistribution('{"verdict": "con"}', [lpTok('{"verdict": "'), lpTok("con", [["con", 1]]), lpTok('"}')], "verdict", ["conflict", "continues"] as const) === null,
          "a first token two words share counts toward neither");
   assert(valueDistribution('{"reason": "x"}', [lpTok('{"reason": "x"}')], "verdict", VERDICTS) === null, "a missing field is no distribution");
+
+  // SMD-1873: what a judgement proposes, and at what confidence.
+  const jg = (verdict: Judgement["verdict"], supersedes: Judgement["supersedes"], probabilities?: Judgement["probabilities"]): Judgement => ({ verdict, supersedes, confidence: 0.8, reason: "", evidence: "", malformed: false, ...(probabilities ? { probabilities } : {}) });
+  assert(proposalVerdict(jg("outdates", "older")) === "older_supersedes_newer" && proposalVerdict(jg("outdates", "unknown")) === "conflict_undirected",
+         "outdates proposes in the direction named, or undirected");
+  assert(proposalVerdict(jg("duplicate", "unknown")) === "newer_supersedes_older", "a duplicate is proposed too, the newer standing");
+  assert(["unrelated", "related", "evolves"].every((v) => proposalVerdict(jg(v as Judgement["verdict"], "unknown")) === null), "unrelated, related and evolves propose nothing");
+  assert(proposalVerdict({ ...jg("outdates", "newer"), malformed: true }) === null, "a malformed answer proposes nothing");
+  const dist = { p: { unrelated: 0.05, related: 0.2, evolves: 0.1, duplicate: 0.25, outdates: 0.4 }, covered: 0.9 };
+  assert(JSON.stringify(proposalConfidence(jg("outdates", "newer", { verdict: dist }))) === JSON.stringify({ confidence: 0.65, source: "token" }),
+         "with token probabilities the confidence is the mass on outdates and duplicate together");
+  assert(JSON.stringify(proposalConfidence(jg("outdates", "newer"))) === JSON.stringify({ confidence: 0.8, source: "stated" }), "without them it is the number the model wrote");
 
   // The display cleaner: control characters and ESC go, tab/newline/return stay.
   // ESC goes and the sequence's printable tail stays as text — "[2A" moves nothing without it.

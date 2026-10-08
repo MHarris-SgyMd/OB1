@@ -93,10 +93,16 @@ export type AnswerLine = { pair: string; ms: number; judgement: Judgement | null
  */
 export function rightFor(gold: Gold, verdict: string): boolean | null {
   if (gold.source === "candidate") return null;
-  if (gold.source === "proposal") return gold.label === "accepted" ? verdict === "conflict" : verdict !== "conflict";
-  if (gold.source === "pointer") return verdict === "conflict";
-  return verdict !== "unrelated" && verdict !== "conflict";
+  const sup = proposes(verdict);
+  if (gold.source === "proposal") return gold.label === "accepted" ? sup : !sup;
+  if (gold.source === "pointer") return sup;
+  return verdict !== "unrelated" && !sup;
 }
+
+/** The verdict that names a current side: p3's "conflict", p4's "outdates" — so one harness scores both. */
+export const superseding = (verdict: string) => verdict === "conflict" || verdict === "outdates";
+/** A verdict the pass records as a proposal: a superseding one, or p4's "duplicate" (proposalVerdict). */
+export const proposes = (verdict: string) => superseding(verdict) || verdict === "duplicate";
 
 /**
  * The area under the ROC curve of `score` for telling right from wrong: the
@@ -128,6 +134,8 @@ function selfCheck(): void {
   ok(rightFor(rej, "agree") === true && rightFor(rej, "unrelated") === true && rightFor(rej, "conflict") === false, "a rejected proposal is right as anything but a conflict");
   ok(rightFor(link, "agree") === true && rightFor(link, "continues") === true && rightFor(link, "unrelated") === false && rightFor(link, "conflict") === false, "a linked pair is right as related, wrong as unrelated or a conflict");
   ok(rightFor({ source: "pointer", label: "supersedes", direction: "newer" }, "conflict") === true && rightFor({ source: "pointer", label: "supersedes", direction: "newer" }, "evolves") === false, "a pointer pair is right only as a conflict");
+  ok(rightFor(acc, "outdates") === true && rightFor(rej, "outdates") === false && rightFor(link, "outdates") === false, "p4's outdates scores as p3's conflict");
+  ok(rightFor(acc, "duplicate") === true && rightFor(rej, "duplicate") === false, "a duplicate is proposed, so it scores as a supersession");
   ok(rightFor({ source: "candidate", label: "none", similarity: 0.7 }, "conflict") === null, "a candidate has no right answer");
   console.log(failed ? `\n${failed} failed` : "\nall passed");
   process.exit(failed ? 1 : 0);
@@ -294,8 +302,20 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
     if (s.length) console.log(`  ${src.padEnd(12)}right ${s.filter((x) => x.right).length}/${s.length}; stated ${f2(auroc(s.map((x) => ({ score: x.r.a.judgement.confidence, right: x.right }))))}${t.length ? `, token ${f2(auroc(t.map((x) => ({ score: tokenP(x.r)!, right: x.right }))))}` : ""}`);
   }
 
+  // 3b. The score the queue ranks by: is this pair a supersession at all? The
+  // positives are the pointers and the accepted proposals, the negatives the
+  // rejected proposals and the linked pairs. The token score is the mass on
+  // the proposing verdicts (proposalConfidence's sum); the stated one is the
+  // confidence when the verdict proposes and its complement when it does not.
+  const supTruth = (g: Gold) => g.source === "pointer" || (g.source === "proposal" && g.label === "accepted") ? true : g.source === "proposal" || g.source === "link" ? false : null;
+  const supRows = rows.filter((r) => supTruth(r.p.gold) !== null);
+  const supTok = (j: Judgement) => { const d = j.probabilities?.verdict?.p as Record<string, number> | undefined; return d ? (d.outdates ?? 0) + (d.duplicate ?? 0) + (d.conflict ?? 0) : null; };
+  const supStated = (j: Judgement) => proposes(j.verdict) ? j.confidence : 1 - j.confidence;
+  const tokRows = supRows.filter((r) => supTok(r.a.judgement) !== null);
+  console.log(`  supersession (${supRows.filter((r) => supTruth(r.p.gold)).length} true, ${supRows.filter((r) => !supTruth(r.p.gold)).length} not): stated ${f2(auroc(supRows.map((r) => ({ score: supStated(r.a.judgement), right: supTruth(r.p.gold)! }))))}${tokRows.length ? `, token ${f2(auroc(tokRows.map((r) => ({ score: supTok(r.a.judgement)!, right: supTruth(r.p.gold)! }))))}` : ""} — the score a --min-confidence floor would cut on`);
+
   // 4. Direction.
-  const conflicts = rows.filter((r) => r.a.judgement.verdict === "conflict");
+  const conflicts = rows.filter((r) => superseding(r.a.judgement.verdict));
   const directed = conflicts.filter((r) => r.a.judgement.supersedes !== "unknown").length;
   console.log(`\n  ── direction ──\n  ${conflicts.length} conflict verdict(s), ${directed} name a side (${pct(directed, conflicts.length)}), ${conflicts.length - directed} undirected`);
   const quoted = conflicts.filter((r) => r.a.judgement.supersedes !== "unknown" && r.a.judgement.evidenceFound !== undefined);
@@ -304,7 +324,7 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
   for (const src of ["proposal", "pointer"] as const) {
     const truth = rows.filter((r) => r.p.gold.source === src && goldDirection(r.p.gold));
     if (!truth.length) continue;
-    const conf = truth.filter((r) => r.a.judgement.verdict === "conflict");
+    const conf = truth.filter((r) => superseding(r.a.judgement.verdict));
     const right = conf.filter((r) => r.a.judgement.supersedes === goldDirection(r.p.gold)).length;
     const unknown = conf.filter((r) => r.a.judgement.supersedes === "unknown").length;
     const found = conf.filter((r) => r.a.judgement.evidenceFound === true);

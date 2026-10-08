@@ -3592,6 +3592,80 @@ instrument for both, and `--replay` re-scores a dump in seconds.
   later build (601 by that afternoon) changes the candidate table and can make
   the entity dump's fingerprints stale for edited issues.
 
+## The judge on a brain's own labels: prompt 4, and a confidence that means something (SMD-1873)
+
+`eval-judge.ts`. The corpus `eval-consolidate.ts` needs is gone with /tmp, and
+a brain the pass has run on already holds labels for the pairs its judge sees:
+the proposals a reviewer accepted or rejected, the board's links between two
+tickets (053's `link` facets — 079 keeps those pairs from the judge, so they
+are asked directly), and the writers' own `supersedes` pointers (most are the
+session hook's later summary replacing its earlier one: a supersession with a
+known direction). `--export` reads them, and a sample of today's candidates, in
+one repeatable-read read-only transaction; the judging is offline.
+
+```bash
+DATABASE_URL=… bun eval-judge.ts --export /private/tmp/judge-pairs.jsonl     # the brain's text: keep it local
+bun eval-judge.ts --pairs /private/tmp/judge-pairs.jsonl --logprobs 10        # judge, then report
+bun eval-judge.ts --pairs … --replay /private/tmp/judge-pairs.answers.jsonl   # re-score, no model
+```
+
+**The set** (dogfood stable, 2026-10-08, 1,657 thoughts): 126 rejected and 2
+accepted proposals, 126 linked ticket pairs (8 duplicate_of, 40 child_of, 39
+blocks, 39 relates_to), 60 pointer pairs, 120 candidates — 434 pairs. Ollama
+0.33.3 on this Mac, temperature 0, three at a time.
+
+**What a verdict is scored against.** An accepted proposal and a pointer pair
+are supersessions; a rejected proposal is not (most were two tickets, SMD-2448);
+a linked pair is related and is neither unrelated nor a supersession.
+
+| qwen2.5:7b, 434 pairs | p3 (agree / unrelated / conflict) | p4 (five verdicts, "outdates") |
+|---|---|---|
+| rejected proposals proposed again | 119 of 126 | 2 of 126 |
+| linked pairs read as related | 46 of 126 | 106 of 126 |
+| pointer + accepted pairs proposed (outdates or duplicate) | 3 of 62 | 22 of 62 |
+| supersessions naming a side | 14 of 128 (11%) | 4 of 4, 3 quoting words found in that side |
+| the written confidence | 6 values, 0.80 on 160 | 5 values, 0.80 on 368 |
+| AUROC, is it a supersession: written number | 0.12 | 0.61 |
+| AUROC, is it a supersession: token P(outdates or duplicate) | — | **0.92** |
+| candidates the pass would record | 1 of 120 | 0 of 120 |
+| median seconds per pair | 7.5 | 9.2 |
+
+The p3 confidence was a constant on the pairs it proposed (AUROC 0.53 among
+the proposals, a coin) — 0.80 was the model's answer, not a parse default — and
+its token probability was no better (0.39): p3 was sure of the wrong thing. An
+intermediate draft that kept the word "conflict" for the supersession cut the
+false proposals to 8 of 126 but called 2 of the 62 true ones a conflict: the pairs that
+make a thought out of date on this brain are mostly a later state of the same
+thing — a checkpoint and the final summary, a "state of the record" note and
+the release that followed — and the 7B reads "conflict" as contradiction
+only. "outdates" names both. The 7B's commonest answer for a pointer pair is
+"duplicate" (20 of 60, against 0 of 252 negatives), so p4 proposes a duplicate
+too, the newer standing.
+
+| p4, 140 of the pairs (all 62 true, 40 rejected, 38 linked) | qwen2.5:7b | qwen3.8:27b |
+|---|---|---|
+| pointer + accepted pairs proposed | 22 of 62 | 60 of 62 |
+| rejected proposals proposed | 0 of 40 | 6 of 40 |
+| linked pairs proposed | 0 of 38 | 5 of 38, all duplicate_of |
+| supersessions naming the right side, where labelled | 2 of 2 | 15 of 20 (15 of 18 with the quote found) |
+| token confidence | yes | no — Ollama returns the first token's logprobs only for this model, so the pass records the written number (0.95 on 129 of 140) |
+| seconds per pair, three at a time | ≈ 2.8 | ≈ 12.5 |
+
+So the 27B finds nearly every supersession for a few false ones and costs four
+times the time; the 7B proposes almost nothing false and ranks what it
+proposes. `OB1_JUDGE_MODEL` is the operator's choice (SMD-1901); the default
+stays the metadata model.
+
+Caveats:
+* 28 of the 128 proposals have a side edited since they were judged; their
+  label is the reviewer's on the older text.
+* A linked pair is related by a person's link; an unlinked pair is not
+  thereby unrelated, so the candidates carry no label and are reported only
+  as the pass's own rates.
+* The pointer pairs are mostly one writer's (the session hook); the set has
+  two accepted proposals. Recall on supersessions other writers would set is
+  not measured here.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline

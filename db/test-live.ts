@@ -5247,7 +5247,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
-      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; logprobs?: boolean };
       // Until judgeDownUntil every request, a follower's probe too, answers judgeDown (SMD-2599).
       if (Date.now() < judgeDownUntil) return judgeDown === "hang" ? neverAnswers() : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       // A follower's one-token probe, answered apart: no judge call counted.
@@ -5268,12 +5268,24 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       await Bun.sleep(5 + slowMs);
       if (hemlockIsProse && /hemlock/.test(a + b)) return Response.json({ choices: [{ message: { content: "I'd rather not say." } }] });
       let answer: Record<string, unknown>;
-      if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "conflict", supersedes: "B", confidence: 0.92, reason: "monthly billing against annual" };
-      else if (/blue/.test(a) && /green/.test(b)) answer = { verdict: "conflict", supersedes: "unknown", confidence: 0.7, reason: "two brand colours, neither says which stands" };
-      else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "conflict", supersedes: "B", confidence: 0.3, reason: "guessing" };
-      else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "agree", supersedes: "unknown", confidence: 0.8, reason: "both describe the deploy" };
+      if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "outdates", supersedes: "B", evidence: (b.match(/\S*annually\S*/)?.[0] ?? ""), confidence: 0.92, reason: "monthly billing against annual" };
+      else if (/blue/.test(a) && /green/.test(b)) answer = { verdict: "outdates", supersedes: "unknown", confidence: 0.7, reason: "two brand colours, neither says which stands" };
+      else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "outdates", supersedes: "B", confidence: 0.3, reason: "guessing" };
+      else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "evolves", supersedes: "unknown", confidence: 0.8, reason: "the later deploy note follows the earlier" };
       else answer = { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
-      return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
+      const content = JSON.stringify(answer);
+      // SMD-1873: the billing pair's answer comes with token probabilities when
+      // the pass asks — the verdict's first token among three alternatives — so
+      // the proposal records their mass on outdates and duplicate (0.90), not
+      // the 0.92 the answer states. The others come without, as from an
+      // endpoint that returns none, and record what they state.
+      if (body.logprobs && /monthly/.test(a) && /annually/.test(b)) {
+        const at = content.indexOf('"verdict":"') + '"verdict":"'.length;
+        const tok = (token: string, top: [string, number][] = [[token, 1]]) => ({ token, logprob: Math.log(top[0][1]), top_logprobs: top.map(([t, p]) => ({ token: t, logprob: Math.log(p) })) });
+        const tokens = [tok(content.slice(0, at)), tok(content.slice(at, at + 3), [["out", 0.7], ["dup", 0.2], ["rel", 0.1]]), tok(content.slice(at + 3))];
+        return Response.json({ choices: [{ message: { content }, logprobs: { content: tokens } }], model: body.model });
+      }
+      return Response.json({ choices: [{ message: { content } }], model: body.model });
     },
   });
 
@@ -5397,10 +5409,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     `the heartbeat beats through the first pass without error, and no row reaches a second worker (${firstBeats} beat(s))`);
   assert(first.code === 1 && /10 thought\(s\) judged, 1 failed/.test(first.out),
          `the first run judges ten thoughts and fails the one whose pair drew prose (exit ${first.code}: ${first.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
-  assert(/5 pair\(s\) judged — 0\.45 per thought judged, 455 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 1 agree, 0 unrelated, 3 conflict/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
+  assert(/5 pair\(s\) judged — 0\.45 per thought judged, 455 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 0 unrelated, 0 related, 1 evolves, 0 duplicate, 3 outdates/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
          `…five pairs (one per newer thought with an older neighbour), one malformed, and the six older thoughts with nothing older to compare against (${first.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
-  assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 conflict\(s\) under confidence 0\.5 not recorded/.test(first.out),
-         `…two proposals recorded, one undirected, one conflict too weak to record (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
+  assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 under confidence 0\.5 not recorded/.test(first.out),
+         `…two proposals recorded, one undirected, one too weak to record (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
   assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
   assert(modelsSeen.size === 1 && modelsSeen.has("stub-judge"), `every judge request named the metadata model, OB1_JUDGE_MODEL being unset (${[...modelsSeen].join(", ")})`);
   const callsAfterFirst = calls;
@@ -5421,16 +5433,27 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     `each proposal has its lineage row: both thoughts at the fingerprints the row took, the agent, the judge's model, prompt version and hash, the candidate parameters (${JSON.stringify(plin.map((l) => l.recipe))})`);
   const directed = p1.find((p) => p.verdict === "newer_supersedes_older")!;
   const undirected = p1.find((p) => p.verdict === "conflict_undirected")!;
-  assert(directed?.older_id === decision && directed.newer_id === reversal && Number(directed.confidence) === 0.92, "the billing pair is proposed newer-supersedes-older at the judge's confidence");
+  assert(directed?.older_id === decision && directed.newer_id === reversal && Number(directed.confidence) === 0.9,
+         `the billing pair is proposed newer-supersedes-older at the token probability of outdates and duplicate, 0.90, not the 0.92 the answer states (SMD-1873; ${directed?.confidence})`);
+  assert(Number(undirected?.confidence) === 0.7, "…and the colour pair, whose answer came without token probabilities, at the confidence it states");
+  const judgedOf = (id: string) => (plin.find((l) => l.o === p1.find((p) => p.id === id)?.older_id)?.recipe.judged ?? {}) as Record<string, unknown>;
+  assert(judgedOf(directed.id).verdict === "outdates" && judgedOf(directed.id).confidence_source === "token" && judgedOf(directed.id).stated_confidence === 0.92 && judgedOf(directed.id).evidence_found === true
+         && judgedOf(undirected.id).confidence_source === "stated" && !("evidence_found" in judgedOf(undirected.id)),
+         `each proposal's recipe says what the judge said: its verdict word, where the confidence came from, what it stated, and whether its quote was found (${JSON.stringify([judgedOf(directed.id), judgedOf(undirected.id)])})`);
   assert(undirected?.older_id === blue && undirected.newer_id === green, "the colour pair is proposed without a direction");
   const c1 = await claimCounts();
   assert(c1.succeeded === 10 && c1.failed === 1, `claims: 10 succeeded, 1 failed (${JSON.stringify(c1)})`);
   const [{ err }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${hemlockNewer}::uuid`;
   assert(/1 of 1 pair\(s\) not judged/.test(err) && /not JSON/.test(err), `the failed row says which pair and why (${err})`);
-  const lines = readFileSync(dump, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { verdict: string; recorded: string | null; proposal: string | null; key: string });
+  const lines = readFileSync(dump, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { verdict: string; recorded: string | null; proposal: string | null; key: string; supersedes: string; evidence: string; evidence_found: boolean | null });
   assert(lines.length === 4 && lines.every((l) => l.key === KEY), `the dump holds every parseable verdict, four, under the key — the malformed answer is not a verdict (${lines.length})`);
-  assert(lines.filter((l) => l.recorded === "proposed").length === 2 && lines.filter((l) => l.recorded === "under-confidence").length === 1 && lines.filter((l) => l.verdict === "agree").length === 1,
-         "…two proposed, one under confidence, one agree");
+  assert(lines.filter((l) => l.recorded === "proposed").length === 2 && lines.filter((l) => l.recorded === "under-confidence").length === 1 && lines.filter((l) => l.verdict === "evolves").length === 1,
+         "…two proposed, one under confidence, one evolves");
+  // SMD-1873: a directed conflict's quote is checked against the side it names; an undirected one carries none.
+  const billing = lines.find((l) => l.verdict === "outdates" && l.supersedes === "newer" && l.recorded === "proposed");
+  const brand = lines.find((l) => l.verdict === "outdates" && l.supersedes === "unknown");
+  assert(billing?.evidence !== "" && billing?.evidence_found === true && brand?.evidence === "" && brand?.evidence_found === null,
+         `the dump carries the directed conflict's evidence, found in the newer text, and none on the undirected one (${JSON.stringify([billing?.evidence, billing?.evidence_found, brand?.evidence, brand?.evidence_found])})`);
   assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c === 0, "the pass wrote nothing to thoughts.supersedes — it proposes");
 
   // --status, then a second run over an unchanged corpus.

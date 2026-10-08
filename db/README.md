@@ -2314,14 +2314,28 @@ capture's tagging (SMD-1901) — and only for a pair BOTH rows of which the
 egress gate lets reach the chat endpoint (SMD-1903; the more restricted row
 decides for the pair, a refused pair is recorded on the claim like a timeout,
 and the banner's `egress:` line says what the run will do). `server-portable/consolidate.ts` holds the prompt: thought A (older) and B
-(newer), dated, and one question — agree, unrelated, or conflict, and for a
-conflict which is current, decided from what the texts say and not from the
-dates. A conflict whose texts do not say is recorded `conflict_undirected` for
-the reviewer to direct. Only conflicts become rows; the verdict rides with its
-confidence, the judge's one-sentence reason (what a reviewer reads first), the
-cosine, and the pass key `consolidate:<model>@p<prompt version>` — the judge
-model on the row as 021 puts the embedding model beside the vector. The
-worker's agent id rides along as 016's mentions carry theirs.
+(newer), dated, and one question — are they unrelated, related, does one
+evolve from the other, are they a duplicate, or does one outdate the other
+(prompt version 4, SMD-1873; p3 asked agree, unrelated or conflict, and called
+119 of the 126 pairs a reviewer had rejected on the dogfood brain conflicts
+again) — and when one outdates the other, which is current, decided from what
+the texts say and not from the dates, with the words that show it quoted. A
+supersession whose texts do not say is recorded `conflict_undirected` for the
+reviewer to direct. Only `outdates` and `duplicate` become rows (a duplicate
+as the newer standing, its reason starting `duplicate —`); the verdict rides
+with its confidence, the judge's one-sentence reason (what a reviewer reads
+first), the cosine, and the pass key `consolidate:<model>@p<prompt version>` —
+the judge model on the row as 021 puts the embedding model beside the vector.
+The confidence is the model's own token probability of `outdates` or
+`duplicate` when the endpoint returns logprobs (Ollama does for qwen2.5:7b;
+it told a true supersession from a false one at AUROC 0.92 where the number
+the model wrote was 0.80 on most pairs), else the number it wrote; the
+proposal's recipe in `derivations` says which (`judged.confidence_source`),
+with the judge's verdict word and whether its quote was found in the side it
+named. An endpoint that refuses `logprobs` with a 400 is asked again without
+it for the rest of the run. `evals/eval-judge.ts` measures all of this on a
+brain's own labels. The worker's agent id rides along as 016's mentions carry
+theirs.
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -2400,12 +2414,12 @@ row is the next pass's work whatever key wrote it: every run re-pools each
 stale row's newer thought under its own key (a pair both sides of which have a
 vector, with no live or failed claim there — a failed claim is
 `--retry-failed`'s), judges the thought's pairs
-again — up to `--k` model calls per re-pooled thought, since its agree and
-unrelated pairs left no record, plus one per stale pair the top-k left out
+again — up to `--k` model calls per re-pooled thought, since its unrelated,
+related and evolves pairs left no record, plus one per stale pair the top-k left out
 that still meets the candidate rule, judged anyway — and either **replaces** the
-row in place (a conflict at
+row in place (an outdates or duplicate at
 the floor: `record_supersession_proposal`, back to pending under this key) or
-**settles** it (agree, unrelated, a conflict under the floor, or a pair the
+**settles** it (unrelated, related, evolves, either under the floor, or a pair the
 rule no longer admits — the note names which term: a side superseded, a
 lineage pair (066: one side derived from the other), no shared entity, under
 this run's similarity floor with the cosine; a stricter
@@ -3505,7 +3519,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2505 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1130 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1133 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

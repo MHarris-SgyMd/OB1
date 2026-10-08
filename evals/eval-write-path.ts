@@ -225,7 +225,7 @@ function expectedDefault(): Expected {
     // other pair is judged.
     if (a.subject !== b.subject || a.planted.kind === "stale" || b.planted.kind === "stale" || b.supersedes === a.id) continue;
     if (SESSIONS.findIndex((s) => s.items.includes(a)) === SESSIONS.findIndex((s) => s.items.includes(b))) continue;
-    if (judgeRule(a.text, b.text).verdict !== "conflict") continue;
+    if (judgeRule(a.text, b.text).verdict !== "outdates") continue;
     for (const x of [a, b]) if (p[x.id] === "plain") p[x.id] = "contested";
   }
   return p;
@@ -287,13 +287,13 @@ function selfCheck(): void {
   assert(fnv1a("a") !== fnv1a("b") && fnv1a("") === 0x811c9dc5, "the hash is FNV-1a");
   assert(JSON.stringify(subjectsIn("Deliverable: the Zeppelin budget and Saffron onboarding")) === JSON.stringify(["zeppelin", "saffron"]), "a deliverable names several subjects, in the table's order");
   assert(JSON.stringify(numbersIn("40 thousand, 3 approvers")) === JSON.stringify(["40", "3"]) && numbersIn("no digits").length === 0, "numbersIn reads digit runs");
-  assert(judgeRule("holds 4096 entries", "holds 2048 entries").verdict === "conflict" && judgeRule("holds 4096 entries", "holds 2048 entries").supersedes === "B", "different numbers under one subject: conflict, newer current");
-  assert(judgeRule("ships as one bundle", "ships as two bundles").verdict === "agree", "no digits: agree (a decision is the supersedes arm's, not the judge's)");
-  assert(judgeRule("holds 4096 entries", "is warmed daily").verdict === "agree", "a number against none: agree");
-  assert(judgeRule("costs 40 thousand", "costs 40 thousand").verdict === "agree", "the same numbers: agree");
-  assert(judgeRule("is 40 thousand for the quarter", "has 3 approvers").verdict === "conflict", "two true facts with different numbers: the rule fires — the planted false positive");
+  assert(judgeRule("holds 4096 entries", "holds 2048 entries").verdict === "outdates" && judgeRule("holds 4096 entries", "holds 2048 entries").supersedes === "B", "different numbers under one subject: conflict, newer current");
+  assert(judgeRule("ships as one bundle", "ships as two bundles").verdict === "related", "no digits: related (a decision is the supersedes arm's, not the judge's)");
+  assert(judgeRule("holds 4096 entries", "is warmed daily").verdict === "related", "a number against none: related");
+  assert(judgeRule("costs 40 thousand", "costs 40 thousand").verdict === "related", "the same numbers: related");
+  assert(judgeRule("is 40 thousand for the quarter", "has 3 approvers").verdict === "outdates", "two true facts with different numbers: the rule fires — the planted false positive");
   const judgeAnswer = JSON.parse(stubChat([{ role: "user", content: "Compare…\n\nTHOUGHT A, captured 2026-09-01:\n<thought_a>\nholds 4096 entries\n</thought_a>\n\nTHOUGHT B, captured 2026-09-02:\n<thought_b>\nholds 2048 entries\n</thought_b>\n\nAnswer as JSON." }]));
-  assert(judgeAnswer.verdict === "conflict" && judgeAnswer.supersedes === "B" && judgeAnswer.confidence === 0.9, "the chat stub answers the judge's prompt with the rule's verdict");
+  assert(judgeAnswer.verdict === "outdates" && judgeAnswer.supersedes === "B" && judgeAnswer.confidence === 0.9, "the chat stub answers the judge's prompt with the rule's verdict");
   const entities = JSON.parse(stubChat([{ role: "user", content: "Extract…\n<thought_content>\nThe Zeppelin budget is 40 thousand.\n</thought_content>\nReturn strict JSON" }]));
   assert(entities.entities.length === 1 && entities.entities[0].name === "the Zeppelin budget" && entities.entities[0].type === "project" && Array.isArray(entities.relationships), "the chat stub answers the extractor with the subject as one entity");
   for (const k of Object.keys(SUBJECTS) as (keyof typeof SUBJECTS)[]) {
@@ -310,12 +310,12 @@ function selfCheck(): void {
     { content: "The Quicksilver cache holds 4096 entries before it evicts.", createdAt: "2026-09-01T00:00:00Z", writer: "operator" },
     { content: "The Quicksilver cache holds 2048 entries before it evicts.", createdAt: "2026-09-02T00:00:00Z", writer: "operator" },
   )));
-  assert(realJudge.verdict === "conflict" && realJudge.supersedes === "newer" && !realJudge.malformed, "the stub reads the judge's REAL prompt and consolidate.ts parses its answer: conflict, the newer current");
+  assert(realJudge.verdict === "outdates" && realJudge.supersedes === "newer" && !realJudge.malformed, "the stub reads the judge's REAL prompt and consolidate.ts parses its answer: outdates, the newer current");
   const realAgree = parseJudgement(stubChat(buildJudgeMessages(
     { content: "We decided the Tamarind rota rotates weekly.", createdAt: "2026-09-01T00:00:00Z" },
     { content: "Decision revisited: the Tamarind rota rotates fortnightly.", createdAt: "2026-09-02T00:00:00Z" },
   )));
-  assert(realAgree.verdict === "agree" && !realAgree.malformed, "…and two decisions with no digits agree, the prompt's own dates notwithstanding");
+  assert(realAgree.verdict === "related" && !realAgree.malformed, "…and two decisions with no digits are related, the prompt's own dates notwithstanding");
 
   console.log("[3] Reading the server's replies");
   const reply = `Found 3 thought(s):\n\n` + [
