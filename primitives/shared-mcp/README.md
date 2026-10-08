@@ -124,6 +124,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
+import { mcpReply } from "../_shared/sse.ts"; // the reply kept alive while a tool runs (SMD-2001)
 
 const app = new Hono();
 
@@ -224,7 +225,7 @@ app.post("/mcp", async (c) => {
 
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
-  return transport.handleRequest(c);
+  return mcpReply(c, () => transport.handleRequest(c));
 });
 
 app.get("/", (c) => c.json({ status: "ok", service: "Household Shared", version: "1.0.0" }));
