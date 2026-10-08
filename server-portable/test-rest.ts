@@ -438,6 +438,7 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
     data,
     get: async (defaults: Record<string, unknown>) => Object.fromEntries(Object.entries(defaults).map(([k, d]) => [k, k in data ? data[k] : d])),
     set: async (items: Record<string, unknown>) => { Object.assign(data, items); },
+    remove: async (key: string) => { delete data[key]; },
   });
   const storage = {
     sync: area({ ob_capture_settings: { apiEndpoint: "https://brain.example.com/functions/v1", enabledPlatforms: { claude: true } } }),
@@ -506,6 +507,10 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
   const upgraded = await config.getConfig();
   assert(upgraded.apiEndpoint === "" && upgraded.apiKey === "cap-raw" && !config.isConfigured(upgraded), `an upgraded install keeps its key and reads no endpoint, so it is unconfigured (${JSON.stringify(upgraded)})`);
   assert((storage.sync.data.ob_capture_settings as { apiEndpoint?: string }).apiEndpoint === "" && !("ob_capture_rest_core_endpoint" in storage.local.data), "…the legacy sync endpoint is cleared, never carried into the new key");
+  assert(!("ob_capture_api_endpoint" in storage.local.data), "…and the old local key is removed");
+  const permanent = (sandbox.OBApiClient as { isPermanentError: (e: unknown) => boolean }).isPermanentError;
+  assert(!permanent({ status: 404 }) && !permanent({ status: 429 }) && !permanent({ status: 503 }) && permanent({ status: 400 }) && permanent({ status: 403 }) && permanent({ status: 413 }),
+    "a 404 (a wrong URL, or /api off) is retried like a 429 or a 503; a refusal of the capture itself is not");
 
   // Metadata: the brain's own keys are dropped, every one the server refuses
   // (RESERVED_META, and a capture key's ticket keys); a manual capture's mode

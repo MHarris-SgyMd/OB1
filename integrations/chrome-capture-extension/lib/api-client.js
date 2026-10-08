@@ -185,7 +185,19 @@
   // brain would call the REST core's POST /v1/search through apiFetch, with a
   // key that can read — a capture-scoped key cannot.
 
+  /**
+   * Whether a failed capture should be given up on rather than retried: a
+   * refusal of the capture itself (4xx). Not a 429, which says retry, and not
+   * a 404, which says the URL is wrong (an old gateway URL, or `/api` off) —
+   * the capture waits in the retry queue for a URL that works.
+   */
+  function isPermanentError(error) {
+    const status = Number(error && error.status);
+    return status >= 400 && status < 500 && status !== 429 && status !== 404;
+  }
+
   global.OBApiClient = {
+    isPermanentError,
     REQUEST_TIMEOUT_MS,
     INGEST_TIMEOUT_MS,
     apiFetch,

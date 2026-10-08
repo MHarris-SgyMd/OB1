@@ -24,6 +24,8 @@
     // core's URL — the banner asks, and the retry queue waits instead of
     // dead-lettering every capture on the old URL's 404.
     apiEndpoint: 'ob_capture_rest_core_endpoint',
+    // The retired gateway's URL, read only to remove it.
+    legacyApiEndpoint: 'ob_capture_api_endpoint',
     // Explicit boolean flag (chrome.storage.local) that signals the last
     // setConfig() write had to fall back to local because chrome.storage.sync
     // rejected the write (QUOTA_BYTES, managed policy, sync disabled).
@@ -185,6 +187,7 @@
       chrome.storage.local.get({
         [STORAGE_KEYS.apiKey]: '',
         [STORAGE_KEYS.apiEndpoint]: '',
+        [STORAGE_KEYS.legacyApiEndpoint]: '',
         [STORAGE_KEYS.localFallbackActive]: false
       }),
       // Fallback local-only settings blob (used when sync is unavailable).
@@ -219,10 +222,19 @@
       }
     }
 
-    // An endpoint left in sync storage by a legacy install named the retired
-    // gateway (see STORAGE_KEYS.apiEndpoint): it is cleared, never carried
-    // over, so sync keeps a blank apiEndpoint.
-    if (syncSettings.apiEndpoint) {
+    // An endpoint left by a legacy install named the retired gateway (see
+    // STORAGE_KEYS.apiEndpoint): it is removed, never carried over — the
+    // local key at once, sync's copy while sync takes writes (when it does
+    // not, the fallback below never reads it, and getConfig need not fail a
+    // write on every call).
+    if (localStored[STORAGE_KEYS.legacyApiEndpoint]) {
+      try {
+        await chrome.storage.local.remove(STORAGE_KEYS.legacyApiEndpoint);
+      } catch (err) {
+        console.warn('[Open Brain Capture] Legacy endpoint removal hit storage error', err);
+      }
+    }
+    if (syncSettings.apiEndpoint && !localFallbackActive) {
       try {
         await chrome.storage.sync.set({
           [STORAGE_KEYS.settings]: {
