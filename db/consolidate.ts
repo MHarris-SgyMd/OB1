@@ -8,8 +8,8 @@
  * extracted entities, `consolidation_candidates()` names the older thoughts
  * that share a subject with it and sit nearest in vector space; each pair goes
  * to the metadata model once (server-portable/consolidate.ts holds the prompt
- * and the parsing rules), and an OUTDATES or DUPLICATE verdict (prompt 4,
- * SMD-1873; p3's CONFLICT) becomes a pending row in
+ * and the parsing rules), and an OUTDATES verdict (prompt 4, SMD-1873; p3's
+ * CONFLICT) becomes a pending row in
  * `supersession_proposals`. Nothing here writes `thoughts`. An operator — or a
  * review agent, SMD-950 — reads the queue and accepts or rejects one proposal
  * at a time; acceptance writes `thoughts.supersedes` through
@@ -102,9 +102,9 @@
  * pairs again — up to --k model calls per re-pooled thought, since its
  * unrelated, related and evolves pairs left no record, plus one per stale
  * pair the top-k left out that still meets the candidate rule, judged anyway.
- * An outdates or duplicate at the floor REPLACES the row in place (063:
+ * An outdates at the floor REPLACES the row in place (063:
  * record_supersession_proposal, back to pending under this key); unrelated,
- * related, evolves, or either under the floor SETTLES it — the row is rejected
+ * related, evolves, duplicate, or an outdates under the floor SETTLES it — the row is rejected
  * with a note beginning `settled by the pass:` (the marker rebuild_derived
  * reads: a later text move under a pass-settled row sets it stale again,
  * where a person's rejection stands for ever) and its lineage row rewritten
@@ -150,7 +150,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderDown, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import {
-  actorKindOf, actorNameOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalReason, proposalVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
+  actorKindOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
@@ -474,7 +474,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // Which knob named it is read off the resolved pair, not the raw variable: a
   // value the resolver treats as unset (empty, or the metadata model's own name)
   // is the metadata model here too, however it was spelled.
-  if (!REVIEW_ONLY) out(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}; outdates and duplicates recorded at confidence >= ${MIN_CONFIDENCE}, the token probability where the endpoint returns one`);
+  if (!REVIEW_ONLY) out(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}; outdates recorded at confidence >= ${MIN_CONFIDENCE}, the token probability where the endpoint returns one`);
   // What may leave the box (SMD-1903): a pair either row of which the gate
   // refuses is not judged, and the thought's claim fails naming the rule.
   if (!REVIEW_ONLY) out(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
@@ -1165,8 +1165,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         continue;
       }
       totals[j.verdict]++;
-      // Review pass 3: a duplicate is proposed only when one writer wrote both (050's actor_name).
-      const verdict = proposalVerdict(j, { older: actorNameOf(older.metadata), newer: actorNameOf(row.metadata) });
+      const verdict = proposalVerdict(j);
       // SMD-1873: the token probability of a proposing verdict when the
       // endpoint returned one, else the number the model wrote.
       const scored = proposalConfidence(j);
@@ -1196,7 +1195,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // `derivations` with the proposal, beside both fingerprints (SMD-1731).
         const [{ id }] = await sql`
           SELECT record_supersession_proposal(${c.older_id}::uuid, ${row.id}::uuid, ${verdict}::text,
-                                              ${scored.confidence}::numeric, ${proposalReason(j) || null}::text, ${c.similarity}::float,
+                                              ${scored.confidence}::numeric, ${j.reason || null}::text, ${c.similarity}::float,
                                               ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
                                               ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM }, judgedRecipe(j, scored.source))}::jsonb) AS id`;
         proposalId = (id as string | null) ?? null;

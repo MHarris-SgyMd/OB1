@@ -5279,11 +5279,11 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       const content = JSON.stringify(answer);
       // SMD-1873: two answers come with token probabilities when the pass asks —
       // the verdict's first token among three alternatives. The billing pair's
-      // put 0.90 on outdates and duplicate, so it records 0.90, not the 0.92 it
-      // states; the lowconf pair's put 0.30 there though it states 0.9, so the
+      // put 0.90 on outdates, so it records 0.90, not the 0.92 it states — and
+      // not the 0.97 outdates and duplicate hold together (review pass 4); the lowconf pair's put 0.30 there though it states 0.9, so the
       // floor sets it aside on the token score (review pass 1). The others come
       // without, as from an endpoint that returns none, and record what they state.
-      const tokenTop: [string, number][] | null = /monthly/.test(a) && /annually/.test(b) ? [["out", 0.7], ["dup", 0.2], ["rel", 0.1]]
+      const tokenTop: [string, number][] | null = /monthly/.test(a) && /annually/.test(b) ? [["out", 0.9], ["dup", 0.07], ["rel", 0.03]]
         : /lowconf/.test(a) && /lowconf/.test(b) ? [["out", 0.3], ["rel", 0.6], ["ev", 0.1]] : null;
       if (body.logprobs && tokenTop) {
         const at = content.indexOf('"verdict":"') + '"verdict":"'.length;
@@ -5440,7 +5440,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const directed = p1.find((p) => p.verdict === "newer_supersedes_older")!;
   const undirected = p1.find((p) => p.verdict === "conflict_undirected")!;
   assert(directed?.older_id === decision && directed.newer_id === reversal && Number(directed.confidence) === 0.9,
-         `the billing pair is proposed newer-supersedes-older at the token probability of outdates and duplicate, 0.90, not the 0.92 the answer states (SMD-1873; ${directed?.confidence})`);
+         `the billing pair is proposed newer-supersedes-older at the token probability of outdates, 0.90 — not the 0.92 the answer states, nor 0.97 with duplicate's mass beside it (SMD-1873; ${directed?.confidence})`);
   assert(Number(undirected?.confidence) === 0.7, "…and the colour pair, whose answer came without token probabilities, at the confidence it states");
   const judgedOf = (id: string) => (plin.find((l) => l.o === p1.find((p) => p.id === id)?.older_id)?.recipe.judged ?? {}) as Record<string, unknown>;
   assert(judgedOf(directed.id).verdict === "outdates" && judgedOf(directed.id).confidence_source === "token" && judgedOf(directed.id).stated_confidence === 0.92 && judgedOf(directed.id).evidence_found === true
@@ -6315,11 +6315,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(followCode === 0, `…and exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
   }
 
-  // SMD-1873, review passes 2 and 3: the worker hands proposalVerdict each
-  // side's writer (050's actor_name). A duplicate across two keys proposes
-  // nothing — another key's copy, accepted, would take the original's
-  // standing — and one key's two copies are proposed, the newer standing. And
-  // an answer in p3's words fails its thought, naming the word.
+  // SMD-1873, review passes 2–4: a duplicate is judged and proposes nothing —
+  // here an agent's copy of the operator's thought, the case three passes
+  // found a way to turn into a takeover — and an answer in p3's words fails
+  // its thought, naming the word.
   {
     await sql`SELECT set_agent_kind('op-1873', 'operator')`;
     await sql`SELECT set_agent_kind('bot-1873', 'agent')`;
@@ -6331,18 +6330,13 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     };
     const rotaOld = await seedAs("op-1873", "The on-call rota is weekly.", 11, 4, ["rota"]);
     const rotaNew = await seedAs("bot-1873", "The rota for on-call runs weekly.", 11, 0, ["rota"]);
-    const shiftOld = await seedAs("bot-1873", "The rota's shift starts at nine.", 13, 4, ["rota-shift"]);
-    const shiftNew = await seedAs("bot-1873", "The rota shift starts at nine.", 13, 0, ["rota-shift"]);
     await seed("The relic note, the first.", 12, 4, ["relic"]);
     const relicNew = await seed("The relic note, the second.", 12, 0, ["relic"]);
     const kinds = (await sql`SELECT metadata->>'actor_kind' AS k FROM thoughts WHERE id IN (${rotaOld}::uuid, ${rotaNew}::uuid) ORDER BY created_at`).map((r: { k: string }) => r.k);
     const run = await consolidate();
     const rota = await sql`SELECT verdict FROM supersession_proposals WHERE older_id = ${rotaOld}::uuid AND newer_id = ${rotaNew}::uuid`;
-    const [shift] = await sql`SELECT verdict, reason FROM supersession_proposals WHERE older_id = ${shiftOld}::uuid AND newer_id = ${shiftNew}::uuid`;
-    assert(kinds.join() === "operator,agent" && rota.length === 0 && seen.some((p) => /on-call rota is weekly/.test(p.a) && /rota for on-call/.test(p.b)),
-           `an agent's duplicate of the operator's thought is judged and proposes nothing: two keys' copies are not one writer's (${kinds.join()}: ${JSON.stringify(rota)})`);
-    assert(shift?.verdict === "newer_supersedes_older" && /^duplicate — /.test(String(shift?.reason)),
-           `one key's two copies are proposed, the newer standing, the reason saying duplicate (${JSON.stringify(shift)})`);
+    assert(kinds.join() === "operator,agent" && rota.length === 0 && seen.some((p) => /on-call rota is weekly/.test(p.a) && /rota for on-call/.test(p.b)) && / 1 duplicate,/.test(run.out),
+           `a duplicate — an agent's copy of the operator's thought — is judged, counted, and proposes nothing (${kinds.join()}: ${JSON.stringify(rota)})`);
     const [{ err: relicErr }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${relicNew}::uuid`;
     assert(run.code === 1 && /answered the verdict "conflict", not one of prompt 4's five/.test(String(relicErr)),
            `an answer in p3's words fails its thought and names the word, where it used to read as an answer not JSON (exit ${run.code}: ${relicErr})`);

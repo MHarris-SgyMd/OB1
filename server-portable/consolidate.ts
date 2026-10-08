@@ -79,28 +79,17 @@ export function actorKindOf(metadata: Record<string, unknown> | null | undefined
 }
 
 /**
- * The name of the key that wrote a thought's current text: `metadata.actor_name`,
- * which 050 stamps from the envelope and never takes from the payload, or null
- * when the row has none (an unclassified write, one from outside the server).
- * proposalVerdict reads it to tell one writer's copies from another's.
- */
-export function actorNameOf(metadata: Record<string, unknown> | null | undefined): string | null {
-  const n = metadata?.actor_name;
-  return typeof n === "string" && n.trim() !== "" ? n : null;
-}
-
-/**
  * p4 (SMD-1873): five words where p3 had three. p3's "agree" and "conflict"
  * forced every pair that relates and evolves — a follow-up, a part split out,
  * a fix for what the other reported — into "conflict", and on the dogfood
- * brain 119 of 126 reviewed proposals were exactly that, rejected. "outdates"
- * (p3's "conflict") and "duplicate" are proposals (proposalVerdict);
- * "related" and "evolves" relate two thoughts that both stand. Each word
+ * brain 119 of 126 reviewed proposals were exactly that, rejected. Only
+ * "outdates" (p3's "conflict") is a proposal (proposalVerdict); "related",
+ * "evolves" and "duplicate" relate two thoughts that both stand. Each word
  * starts with a different letter, so the verdict's first token separates them
  * and valueDistribution can read the model's probability over all five.
  */
 export const VERDICTS = ["unrelated", "related", "evolves", "duplicate", "outdates"] as const;
-/** The verdict that names a current side; "duplicate" is proposed too (proposalVerdict), with the newer standing. */
+/** The one verdict that is a supersession proposal; the other four relate two thoughts that both stand. */
 export const SUPERSEDING_VERDICT = "outdates";
 export type Verdict = (typeof VERDICTS)[number];
 export type Direction = "newer" | "older" | "unknown";
@@ -146,8 +135,6 @@ export type Judgement = {
    * cut short, so the worker can say which (SMD-1873, review pass 1).
    */
   unknownVerdict?: string;
-  /** For a duplicate, the side the model named in `supersedes` though p4 asks for none — kept for the recipe, read by nothing. */
-  duplicateKeeps?: "older" | "newer";
   /**
    * SMD-1873: what the model's own token probabilities say, when the call
    * asked for them (judgePair's `logprobs`) and the endpoint returned them —
@@ -377,10 +364,7 @@ export function parseJudgement(raw: string): Judgement {
   // whole-word match is not failed by the half word the cut leaves (review pass 3).
   const quote = supersedes !== "unknown" && typeof parsed.evidence === "string" ? oneLine(parsed.evidence) : "";
   const evidence = [...quote].length > REASON_MAX ? cutByCodePoint(quote, REASON_MAX).replace(/\s+\S*$/, "") : quote;
-  // A duplicate carries no direction the pass uses; the letter the model gave anyway is kept for the recipe.
-  const letter = verdict === "duplicate" && typeof parsed.supersedes === "string" ? parsed.supersedes.trim().toUpperCase() : "";
-  const keeps = letter === "A" ? "older" : letter === "B" ? "newer" : undefined;
-  return { verdict: verdict as Verdict, supersedes, confidence: clampConfidence(parsed.confidence), reason, evidence, malformed: false, ...(keeps ? { duplicateKeeps: keeps } : {}) };
+  return { verdict: verdict as Verdict, supersedes, confidence: clampConfidence(parsed.confidence), reason, evidence, malformed: false };
 }
 
 /**
@@ -589,24 +573,19 @@ export function parseConsolidateKey(key: string): { model: string; version: numb
 
 /**
  * What migration 029 records for a judgement, or null when there is nothing to
- * propose. p4 (SMD-1873): a "duplicate" is proposed too, the newer standing —
- * on the dogfood brain the 7B answered it for 20 of the 60 pairs whose writer
- * had set `supersedes` (and for none of 252 pairs that were not), so a
- * reviewer sees it; it is a relation edge as well, which is SMD-1873's next
- * PR. It is proposed only when one writer wrote both — `writers` are the two
- * rows' `actor_name` (actorNameOf), the key's name the database stamps (050),
- * so a payload cannot claim it — and then the later copy, which a reader would
- * look for, is proposed to stand. Across writers, or with either unknown, a
- * duplicate proposes nothing: a capture-only key's near-copy of another key's
- * thought, accepted, would have let it repoint its copy at text of its own
- * (review pass 3, the harm SMD-2617 and SMD-2638 closed), and a run of copies
- * would have filled the queue; an agent restating the operator is the same
- * case (SMD-1726's rule, review pass 1).
+ * propose: only "outdates", in the direction named or undirected. A
+ * "duplicate" is not proposed — it is a relation edge, SMD-1873's next PR.
+ * Passes 1, 3 and 4 of SMD-1873's review each found a way for a proposed
+ * duplicate to hand one writer's near-copy the standing of another's thought
+ * (an agent restating the operator; a capture-only key's copy, accepted, then
+ * repointed at its own text, the harm SMD-2617 and SMD-2638 closed; a row a
+ * key or board-sync had taken still carrying its capturer's name), and two
+ * board-sync tickets' duplicate was directed against Linear's duplicate_of.
+ * The duplicates it caught on the dogfood brain were pairs whose writer had
+ * set `supersedes` already — pairs the pass never judges.
  */
-export function proposalVerdict(j: Judgement, writers?: { older?: string | null; newer?: string | null }): "newer_supersedes_older" | "older_supersedes_newer" | "conflict_undirected" | null {
-  if (j.malformed) return null;
-  if (j.verdict === "duplicate") return writers?.older && writers.older === writers.newer ? "newer_supersedes_older" : null;
-  if (j.verdict !== SUPERSEDING_VERDICT) return null;
+export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older_supersedes_newer" | "conflict_undirected" | null {
+  if (j.malformed || j.verdict !== SUPERSEDING_VERDICT) return null;
   if (j.supersedes === "newer") return "newer_supersedes_older";
   if (j.supersedes === "older") return "older_supersedes_newer";
   return "conflict_undirected";
@@ -617,35 +596,25 @@ export const MIN_COVERED = 0.5;
 
 /**
  * The confidence a proposal records, and where it came from (SMD-1873). With
- * the model's token probabilities, it is the mass on the two proposing
- * verdicts, "outdates" and "duplicate": on the dogfood brain it told a true
- * supersession from a false one at AUROC 0.91, where the number the model
- * wrote was 0.80 on 368 of 434 pairs. That 0.91 ranks every labelled pair,
- * proposed or not; among the 24 the 7B proposed, 2 were false — too few to
- * say how well it ranks proposals (evals/README.md). Without the
- * probabilities (an endpoint that returns none, or only the first token's),
- * or when the alternatives naming a verdict held under half the token's mass
- * (`covered`, so what the normalised share stands for is not the model's
- * choice), it is the written number. Rounded to 029's numeric(3,2).
+ * the model's token probabilities, it is the mass on "outdates", the one
+ * proposing verdict; the number the model wrote was 0.80 on 368 of 434 pairs
+ * on the dogfood brain. Whether the token mass ranks real proposals is not
+ * yet measured — the 7B proposed four of the labelled pairs (SMD-2705 measures
+ * it on p4's own queue). Without the probabilities (an endpoint that returns
+ * none, or only the first token's), or when the alternatives naming a verdict
+ * held under half the token's mass (`covered`, so what the normalised share
+ * stands for is not the model's choice), it is the written number. Rounded to
+ * 029's numeric(3,2).
  */
 export function proposalConfidence(j: Judgement): { confidence: number; source: "token" | "stated" } {
   const d = j.probabilities?.verdict;
   if (!d || d.covered < MIN_COVERED) return { confidence: j.confidence, source: "stated" };
   const p = d.p;
-  return { confidence: Math.min(1, Math.round((p.outdates + p.duplicate) * 100) / 100), source: "token" };
+  return { confidence: Math.round(p.outdates * 100) / 100, source: "token" };
 }
 
 /** How many alternatives per token the pass asks for: enough that the five verdicts' first tokens are all among them. */
 export const JUDGE_LOGPROBS = 10;
-
-/**
- * The reason a proposal stores: the judge's, and for a duplicate, said so
- * first — 029's verdict column reads `newer_supersedes_older` for both, and
- * a reviewer deciding a duplicate is deciding which copy to keep.
- */
-export function proposalReason(j: Judgement): string {
-  return j.verdict === "duplicate" ? cutByCodePoint(`duplicate — ${j.reason || "the two state the same claims"}`, REASON_MAX) : j.reason;
-}
 
 /**
  * What the judge said beyond the verdict 029 records, for the proposal's
@@ -653,11 +622,10 @@ export function proposalReason(j: Judgement): string {
  * stated number, whether the quote naming the current side was found in it,
  * and the token distributions themselves with their coverage.
  */
-export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean; duplicate_keeps?: "older" | "newer"; probabilities?: JudgeProbabilities } {
+export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean; probabilities?: JudgeProbabilities } {
   return {
     verdict: j.verdict, confidence_source: source, stated_confidence: j.confidence,
     ...(j.evidenceFound !== undefined ? { evidence_found: j.evidenceFound } : {}),
-    ...(j.duplicateKeeps ? { duplicate_keeps: j.duplicateKeeps } : {}),
     ...(j.probabilities ? { probabilities: j.probabilities } : {}),
   };
 }

@@ -213,15 +213,13 @@ if (!NO_JUDGE && labels.pairs.length) {
     judgeMs += Date.now() - t;
     if (!j) { skipped++; rows.push(`  · ${p.older} → ${p.newer}: not in the dump`); continue; }
     if (j.malformed) { malformed++; rows.push(`  ✗ ${p.older} → ${p.newer}: malformed answer (label ${p.label})`); continue; }
-    // p4 (SMD-1873): what the pass would propose — outdates or a duplicate — is the label's "conflict".
+    // p4 (SMD-1873): what the pass would propose — an outdates — is the label's "conflict".
     const saidConflict = proposalVerdict(j) !== null;
     const isConflict = p.label === "conflict";
     if (saidConflict && isConflict) {
       tp++;
       if (p.supersedes && p.supersedes !== "unknown") {
-        // p4: a duplicate is proposed with the newer standing (proposalVerdict; this corpus has no writer marks).
-        const said = j.verdict === "duplicate" ? "newer" : j.supersedes;
-        if (said === p.supersedes) dirRight++; else if (said === "unknown") dirUnknown++; else dirWrong++;
+        if (j.supersedes === p.supersedes) dirRight++; else if (j.supersedes === "unknown") dirUnknown++; else dirWrong++;
       }
     } else if (saidConflict && !isConflict) fp++;
     else if (!saidConflict && isConflict) fn++;

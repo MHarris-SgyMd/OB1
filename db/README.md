@@ -2321,21 +2321,19 @@ evolve from the other, are they a duplicate, or does one outdate the other
 again) — and when one outdates the other, which is current, decided from what
 the texts say and not from the dates, with the words that show it quoted. A
 supersession whose texts do not say is recorded `conflict_undirected` for the
-reviewer to direct. Only `outdates`, and a `duplicate` one writer wrote both
-sides of (050's `actor_name`, which a payload cannot set), become rows — the
-duplicate as the newer standing, its reason starting `duplicate —`; across two
-writers, or with either unknown, a duplicate proposes nothing, since a
-capture-only key's near-copy of another key's thought, accepted, would take
-its standing (SMD-1873 review pass 3). The verdict rides
+reviewer to direct. Only `outdates` becomes a row; `related`, `evolves` and
+`duplicate` relate two thoughts that both stand (a relation edge, SMD-1873's
+next PR) — a proposed duplicate would hand one writer's near-copy the
+standing of another's thought, which three review passes each found a way to
+do. The verdict rides
 with its confidence, the judge's one-sentence reason (what a reviewer reads
 first), the cosine, and the pass key `consolidate:<model>@p<prompt version>` —
 the judge model on the row as 021 puts the embedding model beside the vector.
-The confidence is the model's own token probability of `outdates` or
-`duplicate` when the endpoint returns logprobs (Ollama does for qwen2.5:7b,
-where the number the model wrote was 0.80 on most pairs; over every labelled
-pair the token score told a supersession from the rest at AUROC 0.91, though
-the 7B's proposals held too few false ones to measure how it ranks them),
-else the number it wrote — also when the alternatives naming a verdict held
+The confidence is the model's own token probability of `outdates` when the
+endpoint returns logprobs (Ollama does for qwen2.5:7b, where the number the
+model wrote was 0.80 on most pairs; whether the token probability ranks real
+proposals is SMD-2705's to measure), else the number it wrote — also when the
+alternatives naming a verdict held
 under half the token's mass. The proposal's recipe in
 `derivations` says which source (`judged.confidence_source`), with the judge's
 verdict word, its token distributions, and whether its quote was found in the
@@ -2428,9 +2426,9 @@ vector, with no live or failed claim there — a failed claim is
 again — up to `--k` model calls per re-pooled thought, since its unrelated,
 related and evolves pairs left no record, plus one per stale pair the top-k left out
 that still meets the candidate rule, judged anyway — and either **replaces** the
-row in place (an outdates or duplicate at
+row in place (an outdates at
 the floor: `record_supersession_proposal`, back to pending under this key) or
-**settles** it (unrelated, related, evolves, either under the floor, or a pair the
+**settles** it (unrelated, related, evolves, duplicate, an outdates under the floor, or a pair the
 rule no longer admits — the note names which term: a side superseded, a
 lineage pair (066: one side derived from the other), no shared entity, under
 this run's similarity floor with the cosine; a stricter
@@ -3530,7 +3528,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2505 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1136 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1135 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

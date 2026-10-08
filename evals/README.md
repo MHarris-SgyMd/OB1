@@ -3592,7 +3592,7 @@ instrument for both, and `--replay` re-scores a dump in seconds.
   later build (601 by that afternoon) changes the candidate table and can make
   the entity dump's fingerprints stale for edited issues.
 
-## The judge on a brain's own labels: prompt 4, and a confidence that means something (SMD-1873)
+## The judge on a brain's own labels: prompt 4 (SMD-1873)
 
 `eval-judge.ts`. The corpus `eval-consolidate.ts` needs is gone with /tmp, and
 a brain the pass has run on already holds labels for the pairs its judge sees:
@@ -3616,57 +3616,64 @@ blocks, 39 relates_to), 60 pointer pairs, 120 candidates — 434 pairs. Ollama
 
 **What a verdict is scored against.** An accepted proposal and a pointer pair
 are supersessions, which the judge is right to propose (p3's "conflict", p4's
-"outdates" or "duplicate"); a rejected proposal is not (most were two tickets,
-SMD-2448); a linked pair is related and is neither unrelated nor proposed.
+"outdates"); a rejected proposal is not (most were two tickets, SMD-2448); a
+linked pair is related and is neither unrelated nor proposed. A p4
+"duplicate" is a relation (a relation edge, SMD-1873's next PR), not a
+proposal.
 
 | qwen2.5:7b, 434 pairs | p3 (agree / unrelated / conflict) | p4 (five verdicts, "outdates") |
 |---|---|---|
 | rejected proposals proposed again | 119 of 126 | 2 of 126 |
 | linked pairs neither unrelated nor proposed | 46 of 126 (agree) | 106 of 126 (85 related, 21 evolves) |
-| pointer pairs proposed (outdates or duplicate) | 1 of 60 | 22 of 60 |
+| pointer pairs proposed | 1 of 60 | 2 of 60 (and 20 read as duplicate) |
 | the 2 accepted proposals proposed | 2 of 2 | 0 of 2 (both read as evolves) |
-| supersessions the model directed | 14 of 128 conflicts (11%) | 4 of 4 outdates, 3 quoting words found in that side and not the other — the other 20 proposals are duplicates, directed by rule (the newer) |
+| supersessions the model directed | 14 of 128 (11%) | 4 of 4, 3 quoting words found in that side and not the other |
 | the written confidence | 6 values, 0.80 on 160 | 5 values, 0.80 on 368 |
-| AUROC, is it a supersession, over all 314 labelled pairs: written number | 0.12 | 0.61 |
-| …the same: token P(outdates or duplicate), as the pass records it | — | **0.91** |
-| AUROC among the pairs it proposes, by the score that pass records | 0.81, the written number (127 proposed, 3 true: too few to measure) | 0.84, token (24 proposed, 2 false: too few to measure) |
+| AUROC, is it a supersession, over all 314 labelled pairs: written number | 0.12 | 0.28 |
+| …the same: token P(outdates), as the pass records it | — | 0.59 |
+| proposals among the labelled pairs (true / false) | 127 (3 / 124) | 4 (2 / 2): too few to measure a ranking |
 | candidates the pass would record | 1 of 120 | 0 of 120 |
 | median seconds per pair | 7.5 | 9.2 |
 
-The 0.91 ranks every labelled pair, proposed or not, so most of it is the
-verdict itself; what `--min-confidence` cuts is the ranking among the
-proposals, and p4 on the 7B makes only two false ones here — too few to say
-how well the token score ranks them. On the p3 side, its confidence was a
-constant on the reviewed proposals (AUROC 0.53 among them, a coin) — 0.80 was
-the model's answer, not a parse default — and its token probability was no
-better (0.39): p3 was sure of the wrong thing. An
-intermediate draft that kept the word "conflict" for the supersession cut the
-false proposals to 8 of 126 but called 2 of the 62 true ones a conflict: the pairs that
-make a thought out of date on this brain are mostly a later state of the same
-thing — a checkpoint and the final summary, a "state of the record" note and
-the release that followed — and the 7B reads "conflict" as contradiction
-only. "outdates" names both. The 7B answered "duplicate" for 20 of the 60
-pointer pairs (and "related" for 32), against 0 of the 252 negatives, so p4
-proposes a duplicate too, the newer standing — but only when one writer wrote
-both sides (050's `actor_name`): across two writers a capture-only key's
-near-copy of another key's thought, accepted, would take its standing
-(SMD-1873 review pass 3). Every duplicate in this set was one writer's, so
-the rule changes none of these numbers.
+What p4 buys on the 7B is the false proposals gone — 119 of the 126 pairs a
+reviewer had rejected proposed again under p3, 2 under p4 — and every
+supersession it does propose naming a side. It does not find more: 2 of the
+62 true pairs against p3's 3, and neither of the two a reviewer accepted.
+Whether its token score ranks proposals is unmeasured with four of them;
+SMD-2705 measures it on p4's own queue. p3's confidence was a constant on the
+reviewed proposals (AUROC 0.53 among them, a coin) — 0.80 was the model's
+answer, not a parse default — and its token probability was no better
+(0.39): p3 was sure of the wrong thing.
+
+An intermediate draft that kept the word "conflict" for the supersession cut
+the false proposals to 8 of 126 and called 2 of the 62 true ones a conflict:
+the pairs that make a thought out of date on this brain are mostly a later
+state of the same thing — a checkpoint and the final summary, a "state of the
+record" note and the release that followed — and the 7B reads "conflict" as
+contradiction only. "outdates" names both. The 7B answered "duplicate" for 20
+of the 60 pointer pairs (and "related" for 32), against 0 of the 252
+negatives; for a while p4 proposed a duplicate too, and the token mass on
+outdates plus duplicate ranked supersessions over all pairs at AUROC 0.91.
+Three review passes each found a way for a proposed duplicate to hand one
+writer's copy the standing of another's thought, and every duplicate it
+caught was a pointer pair — a pair the pass never judges, since a superseded
+thought leaves the pool. A duplicate is a relation now.
 
 | p4, 140 of the pairs (all 62 true, 40 rejected, 38 linked) | qwen2.5:7b | qwen3.8:27b |
 |---|---|---|
-| pointer + accepted pairs proposed | 22 of 62 | 60 of 62 |
+| pointer + accepted pairs proposed | 2 of 62 | 20 of 62 |
 | rejected proposals proposed | 0 of 40 | 6 of 40 |
 | linked pairs proposed | 0 of 38 | 5 of 38, all duplicate_of |
-| proposals naming the right side, where labelled | 22 of 22 | 55 of 60 (outdates with the quote found: 15 of 18) |
+| proposals naming the right side, where labelled | 2 of 2 | 15 of 20 (with the quote found: 15 of 18) |
 | token confidence | yes | no — Ollama returns the first token's logprobs only for this model, so the pass records the written number (0.95 on 129 of 140) |
-| AUROC among the pairs it proposes, by the score it records | 0 false of 22 | 0.35 (71 proposed, 11 false): the written number ranks them worse than a coin |
+| AUROC among the pairs it proposes, by the score it records | 2 proposed, none false | 0.39 (31 proposed, 11 false): the written number ranks them worse than a coin |
 | seconds per pair, three at a time | ≈ 3.1 | ≈ 12.5 |
 
-So the 27B finds nearly every supersession for a few false ones, costs four
-times the time, and records a confidence that orders its proposals no better
-than chance; the 7B proposes almost nothing false. `OB1_JUDGE_MODEL` is the operator's choice (SMD-1901); the default
-stays the metadata model.
+The 27B proposes ten times the true supersessions of the 7B for 11 false
+ones, at four times the time, and with a confidence that orders its proposals
+no better than chance; it also answered "duplicate" for 40 pointer pairs.
+`OB1_JUDGE_MODEL` is the operator's choice (SMD-1901); the default stays the
+metadata model, and SMD-2705 decides between them or a cascade.
 
 Caveats:
 * 28 of the 128 proposals have a side edited since they were judged; their

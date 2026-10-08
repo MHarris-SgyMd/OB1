@@ -56,7 +56,8 @@
  *
  * "Right" per label: an accepted proposal and a pointer pair are
  * supersessions — the judge is right to propose them (p3's "conflict", p4's
- * "outdates" or "duplicate"); a rejected proposal is not; a linked pair is
+ * "outdates"; a p4 "duplicate" is a relation, not a proposal); a rejected
+ * proposal is not; a linked pair is
  * related and is neither unrelated nor proposed — a board link is never a
  * reversal (a duplicate_of pair is the one place a reader could argue
  * otherwise, and it is reported on its own row). A rejected proposal says the
@@ -75,7 +76,7 @@ import { appendFileSync, chmodSync, existsSync, readFileSync, writeFileSync } fr
 import { loadEnv } from "./env.ts";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import {
-  actorKindOf, actorNameOf, consolidateKey, evidenceIn, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, MIN_COVERED, type Judgement, type PairSide,
+  actorKindOf, consolidateKey, evidenceIn, judgePair, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, MIN_COVERED, type Judgement, type PairSide,
 } from "../server-portable/consolidate.ts";
 
 // ── The file shapes ──────────────────────────────────────────────────────────
@@ -108,14 +109,13 @@ export function rightFor(gold: Gold, verdict: string, proposed: boolean = propos
 
 /** The verdict that names a current side: p3's "conflict", p4's "outdates" — so one harness scores both. */
 export const superseding = (verdict: string) => verdict === "conflict" || verdict === "outdates";
-/** A verdict the pass may record as a proposal: a superseding one, or p4's "duplicate" — which it records only when one writer wrote both (proposesPair). */
-export const proposes = (verdict: string) => superseding(verdict) || verdict === "duplicate";
-/** Whether the pass records this answer on this pair: proposalVerdict's rule, a duplicate only when one writer (050's actor_name) wrote both sides. */
-export const proposesPair = (p: PairLine, j: Judgement) =>
-  superseding(j.verdict) || (j.verdict === "duplicate" && proposalVerdict(j, { older: actorNameOf(p.older.metadata), newer: actorNameOf(p.newer.metadata) }) !== null);
+/** A verdict the pass records as a proposal (proposalVerdict): the superseding one. */
+export const proposes = superseding;
+/** Whether the pass records this answer on this pair — by its verdict alone. */
+export const proposesPair = (_p: PairLine, j: Judgement) => proposes(j.verdict);
 
 /**
- * The token mass on the proposing verdicts — p3's word or p4's — or null
+ * The token mass on the proposing verdict — p3's word or p4's — or null
  * without a distribution covering half the mass: proposalConfidence's rule
  * and rounding, so the eval floors on the number the pass records (review
  * pass 2: unrounded, one pair at 0.4959 fell under the floor the pass's 0.50
@@ -125,7 +125,7 @@ export function tokenScore(j: Judgement): number | null {
   const d = j.probabilities?.verdict;
   if (!d || d.covered < MIN_COVERED) return null;
   const p = d.p as Record<string, number>;
-  return Math.min(1, Math.round(((p.outdates ?? 0) + (p.duplicate ?? 0) + (p.conflict ?? 0)) * 100) / 100);
+  return Math.round(((p.outdates ?? 0) + (p.conflict ?? 0)) * 100) / 100;
 }
 /** What the pass records: the token score, else the written number. */
 export const recordedScore = (j: Judgement) => tokenScore(j) ?? j.confidence;
@@ -161,7 +161,7 @@ function selfCheck(): void {
   ok(rightFor(link, "agree") === true && rightFor(link, "continues") === true && rightFor(link, "unrelated") === false && rightFor(link, "conflict") === false, "a linked pair is right as related, wrong as unrelated or a conflict");
   ok(rightFor({ source: "pointer", label: "supersedes", direction: "newer" }, "conflict") === true && rightFor({ source: "pointer", label: "supersedes", direction: "newer" }, "evolves") === false, "a pointer pair is right only as a conflict");
   ok(rightFor(acc, "outdates") === true && rightFor(rej, "outdates") === false && rightFor(link, "outdates") === false, "p4's outdates scores as p3's conflict");
-  ok(rightFor(acc, "duplicate") === true && rightFor(rej, "duplicate") === false, "a duplicate is proposed, so it scores as a supersession");
+  ok(rightFor(acc, "duplicate") === false && rightFor(rej, "duplicate") === true && rightFor(link, "duplicate") === true, "a duplicate is a relation, not a proposal: wrong for a supersession, right for a rejected or linked pair");
   ok(rightFor({ source: "candidate", label: "none", similarity: 0.7 }, "conflict") === null, "a candidate has no right answer");
   console.log(failed ? `\n${failed} failed` : "\nall passed");
   process.exit(failed ? 1 : 0);
@@ -347,19 +347,16 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
   const pt = proposed.filter((r) => supTruth(r.p.gold)).length;
   console.log(`  among the ${proposed.length} labelled pair(s) it proposes (${pt} true, ${proposed.length - pt} false), the recorded score (token where there is one): ${f2(auroc(proposed.map((r) => ({ score: recordedScore(r.a.judgement), right: supTruth(r.p.gold)! }))))}, the written number ${f2(auroc(proposed.map((r) => ({ score: r.a.judgement.confidence, right: supTruth(r.p.gold)! }))))}${Math.min(pt, proposed.length - pt) < 10 ? ` — under ten ${pt < proposed.length - pt ? "true" : "false"} ones, too few to say how it ranks proposals` : ""} — the ranking --min-confidence cuts`);
 
-  // 4. Direction: what the pass would record as current — a duplicate the
-  // newer, or the operator's (proposalVerdict), an outdates the side it names.
+  // 4. Direction: what the pass would record as current — the side an outdates names.
   const dirOf = (r: typeof rows[number]): Judgement["supersedes"] => {
     const j = r.a.judgement;
-    if (j.verdict !== "duplicate") return superseding(j.verdict) ? j.supersedes : "unknown";
-    return proposesPair(r.p, j) ? "newer" : "unknown";
+    return superseding(j.verdict) ? j.supersedes : "unknown";
   };
   const props = rows.filter((r) => proposesPair(r.p, r.a.judgement));
   const sups = props.filter((r) => superseding(r.a.judgement.verdict));
   const supDirected = sups.filter((r) => r.a.judgement.supersedes !== "unknown").length;
-  const dups = props.filter((r) => r.a.judgement.verdict === "duplicate").length;
-  const dupsAcross = rows.filter((r) => r.a.judgement.verdict === "duplicate" && !proposesPair(r.p, r.a.judgement)).length;
-  console.log(`\n  ── direction ──\n  ${sups.length} supersession verdict(s), ${supDirected} directed by the model (${pct(supDirected, sups.length)}); ${dups} duplicate(s) proposed, directed by rule (the newer)${dupsAcross ? `; ${dupsAcross} duplicate(s) across two writers or an unknown one, proposed by nothing` : ""}`);
+  const dups = rows.filter((r) => r.a.judgement.verdict === "duplicate").length;
+  console.log(`\n  ── direction ──\n  ${sups.length} supersession verdict(s), ${supDirected} directed by the model (${pct(supDirected, sups.length)})${dups ? `; ${dups} duplicate(s), relations the pass does not propose` : ""}`);
   const quoted = props.filter((r) => superseding(r.a.judgement.verdict) && r.a.judgement.supersedes !== "unknown" && r.a.judgement.evidenceFound !== undefined);
   if (quoted.length) console.log(`  evidence: ${quoted.filter((r) => r.a.judgement.evidenceFound).length} of ${quoted.length} directed outdates quote words found in the side they name and not the other`);
   const goldDirection = (g: Gold) => (g.source === "proposal" && g.label === "accepted") || g.source === "pointer" ? g.direction : undefined;

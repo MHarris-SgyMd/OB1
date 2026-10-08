@@ -701,7 +701,7 @@ those its own way.
 bun test-server.ts        # 699 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, and a `Host` the URL parser refuses, or none
 bun test-auth.ts          # 165 — scoped, hashed, named keys
 bun test-rest.ts          # 272 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
-bun run test:local        # 193 — fully local provider, no credential
+bun run test:local        # 199 — fully local provider, no credential
 bun run test:sql          # 237 — store conformance, real Postgres in a container
 bun run test:e2e          # 519 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 153 — the REST core beside the MCP server on one database: every operation through both
