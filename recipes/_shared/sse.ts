@@ -54,8 +54,8 @@ const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
  * `intervalMs` until the body ends (`onEnd` runs once, then), the client
  * leaves (`signal` aborts, or the next frame finds the stream closed — either
  * stops the timer, so an abandoned call leaks nothing), or `maxMs` passes
- * since `startedAt` (the timer stops, `stalledRequestLine` is logged for
- * `label` and `onStall` runs once — the route marks the request settled, so
+ * since `startedAt` (the timer stops, `stalledLine` — stalledRequestLine
+ * unless given — is logged for `label` and `onStall` runs once — the route marks the request settled, so
  * the runtime's reap that follows on Bun is not logged as a client leaving; on
  * Node or Workers nothing reaps a silent stream, and it stays open until the
  * client or a proxy gives up). A response that is not an event stream is
@@ -63,7 +63,10 @@ const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
  */
 export function withSseKeepalive(
   response: Response,
-  opts: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string } = {},
+  opts: {
+    intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string;
+    stalledLine?: (label: string, elapsedMs: number) => string;
+  } = {},
 ): Response {
   const body = response.body;
   if (!body || !/^text\/event-stream\b/i.test(response.headers.get("content-type") ?? "")) {
@@ -86,7 +89,7 @@ export function withSseKeepalive(
         const elapsed = performance.now() - started;
         if (elapsed >= maxMs) {
           stop();
-          console.warn(stalledRequestLine(opts.label ?? "?", elapsed));
+          console.warn((opts.stalledLine ?? stalledRequestLine)(opts.label ?? "?", elapsed));
           opts.onStall?.();
           return;
         }
@@ -114,6 +117,16 @@ export const labelPart = (s: string): string => s.replace(/[^\x20-\x7e]/g, "?").
 /** The line logged when a stream has been kept alive for SSE_KEEPALIVE_MAX_MS: the call is stuck, and the keepalive lets go. */
 export function stalledRequestLine(label: string, elapsedMs: number): string {
   return `request still running after ${Math.round(elapsedMs / 1000)} s: ${label} — the keepalive stops here and the runtime's idle timeout takes over; a provider call is bounded by OB1_LLM_TIMEOUT, so look at the database (SMD-1864)`;
+}
+
+/**
+ * The same, from a vendored server (review pass 3). No OB1_LLM_TIMEOUT bounds
+ * its provider calls — some carry no timeout at all — so the line names
+ * neither that bound nor the database: the stuck part is a provider call or a
+ * query, and the server's own log above it says which.
+ */
+export function vendoredStalledLine(label: string, elapsedMs: number): string {
+  return `request still running after ${Math.round(elapsedMs / 1000)} s: ${label} — the keepalive stops here and the runtime's idle timeout takes over; the call is stuck on a provider call or a query (SMD-2001)`;
 }
 
 /**
@@ -152,18 +165,21 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
  * context, typed by the two members read here: `c.req.raw`, the request as it
  * came (its signal is the client's), and `c.req.text()`, its body — Hono caches
  * it, so the transport's own read sees the same text. `respond` is the
- * transport's handleRequest. The watch starts here, after the key check: these
- * servers do nothing before it that takes long. A reply that is not an event
- * stream (a JSON reply, a 202, a refusal) comes back as it is; a respond() that
- * throws settles the request and throws.
+ * transport's handleRequest. The watch starts here, after the key check and the
+ * server's build: these servers do nothing before it that takes long. Its
+ * listener is registered before the body is read, as at the core route, so a
+ * client that leaves mid-upload is logged (label `?`) (review pass 3). A reply
+ * that is not an event stream (a JSON reply, a 202, a refusal) comes back as
+ * it is; a respond() that throws settles the request and throws. A stream held
+ * to the ceiling is logged with vendoredStalledLine.
  *
  * Only a POST carries a call: any other method's reply is respond()'s as it
  * is, its body unread and its close unwatched. ob-graph hands a GET to the
  * transport, which opens a stream that only the client ends, so keeping that
  * stream alive would hold it for the whole ceiling, and its close is no
  * abandoned call (review pass 1). A client already gone when the call would
- * start gets the line and a 408, as at the core route, and the tool never runs
- * for no one to read (review pass 2).
+ * start gets the line and a 408, and the tool never runs for no one to read
+ * (review pass 2) — though, unlike at the core route, the server was built.
  */
 export async function mcpReply(
   c: { req: { raw: Request; text(): Promise<string> } },
@@ -172,18 +188,21 @@ export async function mcpReply(
   const req = c.req.raw;
   if (req.method !== "POST") return respond();
   const started = performance.now();
-  const label = requestLabel(await c.req.text().catch(() => null));
+  let label = "?";
   let settled = false;
   const settle = () => { settled = true; };
   const abandoned = () => {
     if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
   };
+  // A listener added to a signal already aborted never fires, so that case is logged by hand.
+  req.signal.addEventListener("abort", abandoned, { once: true });
+  if (req.signal.aborted) abandoned();
+  else label = requestLabel(await c.req.text().catch(() => null));
   if (req.signal.aborted) {
-    // A listener added to a signal already aborted never fires: the line by hand, and no call.
-    abandoned();
+    // Gone before the call: logged once (by the listener or above), and no call.
+    settle();
     return new Response(null, { status: 408 });
   }
-  req.signal.addEventListener("abort", abandoned, { once: true });
   let response: Response | undefined;
   try {
     response = await respond();
@@ -195,5 +214,5 @@ export async function mcpReply(
     settle();
     return response;
   }
-  return withSseKeepalive(response, { signal: req.signal, label, startedAt: started, onEnd: settle, onStall: settle });
+  return withSseKeepalive(response, { signal: req.signal, label, startedAt: started, onEnd: settle, onStall: settle, stalledLine: vendoredStalledLine });
 }

@@ -67,7 +67,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
-import { abandonedRequestLine, mcpReply } from "./_shared/sse.ts";
+import { abandonedRequestLine, mcpReply, vendoredStalledLine, withSseKeepalive } from "./_shared/sse.ts";
 import { askRaw, createAssert, leaveMidUpload, PACKAGES, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
@@ -554,9 +554,8 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
         capture(50, "a thought whose classification outlives the idle timeout"),
         capture(51, "needle-the-line-must-not-carry", AbortSignal.timeout(1500)),
       ]);
-      // The abandoned call's tool runs on behind it: held until it has embedded too, then its refused write settles.
-      for (let i = 0; i < 40 && embeddings < 2; i++) await Bun.sleep(50);
-      await Bun.sleep(300);
+      // The abandoned call's tool runs on behind it: held until both calls' refused writes are logged.
+      for (let i = 0; i < 60 && errored.filter((e) => e.startsWith("brain_capture_thought failed")).length < 2; i++) await Bun.sleep(50);
     } finally {
       Object.assign(console, quiet);
       globalThis.fetch = realFetch;
@@ -576,6 +575,9 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
     assert(lines.length === 1 && m !== null && lines[0] === abandonedRequestLine("tools/call brain_capture_thought", Number(m[1]) * 1000),
       `…and the server logs it once, in sse.ts's line naming the method and the tool (${lines.length} of ${warned.length} warnings)`);
     assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
+    // The positive control first (review pass 3): both calls' refused writes were caught here, the abandoned one's included.
+    assert(errored.filter((e) => e.startsWith("brain_capture_thought failed")).length === 2 && embeddings === 2,
+      `both captures ran to their refused write, the abandoned one too, and logged it while this probe listened (${errored.length} errors, ${embeddings} embeddings)`);
     assert(![...warned, ...errored].some((w) => /needle-the-line-must-not-carry/.test(w)), `…and never the thought, in a warning or an error (${warned.length + errored.length} lines)`);
   }
 }
@@ -596,13 +598,33 @@ console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the id
     await Bun.sleep(10);
     assert(get === stream && warned.length === 0,
       `a GET's event stream is neither kept alive nor watched: mcpReply hands it back as the transport made it, and the client's leaving logs nothing (${warned.length} lines)`);
-    // A client gone before the call starts (review pass 2): the line, a 408, and no call, as at the core route.
+    // A client gone before the call starts (review pass 2): the line, a 408, and no call. Its body is
+    // not read for the label — a gone client's may never arrive — so the line names `?`, as at the core route.
     let calls = 0;
     const gone = AbortSignal.abort();
     const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "brain_capture_thought", arguments: { content: "x" } } });
     const early = await mcpReply(ctx(new Request("http://extension.test/mcp", { method: "POST", body, signal: gone })), () => { calls++; return stream; });
-    assert(early?.status === 408 && calls === 0 && warned.length === 1 && warned[0].startsWith("request abandoned by the client after ") && warned[0].includes(": tools/call brain_capture_thought — "),
+    assert(early?.status === 408 && calls === 0 && warned.length === 1 && warned[0] === abandonedRequestLine("?", Number(/after (\d+\.\d) s/.exec(warned[0])?.[1]) * 1000),
       `a POST whose client is already gone is logged once and answered 408, and the tool never runs (${early?.status}, ${calls} calls, ${warned.length} lines)`);
+    // A client that leaves mid-upload (review pass 3): the listener is registered before the body is
+    // read, so the leaving is logged once, whether the read fails first or the signal aborts first.
+    warned.length = 0;
+    const upload = Bun.serve({ port: 0, fetch: (req) => mcpReply(ctx(req), () => new Response(new ReadableStream(), { headers: { "content-type": "text/event-stream" } })) as Promise<Response> });
+    try {
+      await leaveMidUpload(upload, "/mcp", "127.0.0.1", ["accept: application/json, text/event-stream"], '{"jsonrpc":"2.0","id":1,"method":"tools/ca');
+      const pending = await pendingSettled(upload);
+      for (let i = 0; i < 20 && warned.length === 0; i++) await Bun.sleep(50);
+      assert(warned.length === 1 && warned[0].startsWith("request abandoned by the client after ") && pending === 0,
+        `a client that leaves mid-upload is logged once, and the request settles (${warned.length} lines, ${pending} pending)`);
+    } finally {
+      upload.stop(true);
+    }
+    // At the ceiling a vendored stream says so in its own line: no OB1_LLM_TIMEOUT bounds its provider calls (review pass 3).
+    warned.length = 0;
+    const silent = new Response(new ReadableStream({ async start(ctl) { await Bun.sleep(300); ctl.close(); } }), { headers: { "content-type": "text/event-stream" } });
+    await withSseKeepalive(silent, { intervalMs: 20, maxMs: 100, label: "tools/call slow_one", stalledLine: vendoredStalledLine }).text();
+    assert(warned.length === 1 && warned[0].startsWith("request still running after 0 s: tools/call slow_one — ") && !/OB1_LLM_TIMEOUT|look at the database/.test(warned[0]),
+      `a stall is logged in the line given, which names no core-only bound (${warned[0]?.slice(0, 120)})`);
   } finally {
     console.warn = realWarn;
   }
