@@ -72,14 +72,16 @@
  *
  * ── Refusals ────────────────────────────────────────────────────────────────
  * Every sleep starts its passes afresh, so each meets its start's refusals
- * again (the model not served, the key refused). A pass refusing (2) before
- * it has run in this process — past its start and still running when a sleep
- * ended on a wake or a drain, so past the provider refusing the request on
- * its first claims too — is the configuration's, and ends the scheduler with
- * 2. A refusal by a pass that has run — a model re-pulled, a key rotated —
- * is retried on SMD-2599's outage schedule, the heartbeat failed and
- * re-stamped through the wait, failed until that pass stamps again. Any
- * other code a pass ends with ends the scheduler.
+ * again (the model not served, the key refused). One rule, on a fact the
+ * scheduler has — whether the pass got past its start (the engines' onPass):
+ *  - a refusal at the start of a pass that got past its start earlier in
+ *    this process — a key rotated, a model re-pulled — is retried under
+ *    --follow on SMD-2599's outage schedule, heartbeat:sleep failed and
+ *    re-stamped through the wait, and the next sleep starting from ok;
+ *  - a refusal at a pass's first start, or mid-pass (the provider refusing
+ *    the request itself, a key refused on a real call), is the
+ *    configuration's, as it is for a follower: it ends the scheduler with 2;
+ *  - any other code a pass ends with ends the scheduler.
  *
  * ── Heartbeat ───────────────────────────────────────────────────────────────
  * `heartbeat:sleep` in ob1_config (db/pass-stamp.ts, SMD-2261): running while
@@ -289,7 +291,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
 
   const logState = await readsQueryLog(sql);
   const readsLog = logState === "yes";
-  out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested')${readsLog ? " and no read logged in query_log" : " — reads are not watched (below)"}`);
+  out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested')${readsLog ? " and no read logged in query_log" : " — reads are not watched"}`);
   if (logState === "denied") err("  query_log: this role cannot read it (only its owner can) — only writes wake the brain; run as the owner for reads to wake it");
   else if (logState === "missing") err("  query_log: no such table (migration 034 not applied) — only writes wake the brain");
   // The log is written only under the server's OB1_QUERY_LOG=on, off by
@@ -331,20 +333,17 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   let malformed: MalformedBlock | null | undefined;
   const sleepOutcome = (): "ok" | "failed" => (Object.values(words).includes("failed") ? "failed" : "ok");
   /**
-   * The passes that have run in this process: past their start's refusals
-   * (onPass) and still running when a sleep ended on a wake or a drain — so
-   * past a provider refusing the request itself on the claims they took,
-   * which ends a pass by itself (the engines' configError; a pass stamps even
-   * then, so a stamp cannot say it, review pass 2).
+   * The passes that have got past their start in this process (onPass): the
+   * provider answered their probe and the key resolved, at least once. A
+   * refusal at a later start — before onPass — is then one a restart could
+   * meet as well, and is retried (review pass 3, replacing passes 1 and 2's
+   * "has run").
    */
   const begun = new Set<PassName>();
-  /** The passes whose last word was a refusal: their `failed` stands across sleeps until they stamp again. */
-  const refused = new Set<PassName>();
   /** What a pass stamps goes to the sleep's row: its outcome mid-sleep, never an end, which is the scheduler's. */
   const through = (pass: PassName): PassStamper => ({
     key: stamper.key,
     async stamp(o, m) {
-      refused.delete(pass);
       words[pass] = o;
       if (m !== undefined) malformed = m;
       await stamper.alive(sleepOutcome(), malformed ?? undefined);
@@ -429,7 +428,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     const say = (write: Writer["out"]) => (l: string) => { if (!(p.hushed && PASS_STOP_LINE.test(l))) write(tag(l)); };
     const common = {
       url, env, workers: WORKERS, follow: PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
-      onPass: (s: PassStop) => { p.stop = s; },
+      onPass: (s: PassStop) => { p.stop = s; begun.add(name); },
       writer: { out: say(out), err: say(err) },
     };
     const ended = passEnded;
@@ -445,11 +444,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     });
     running.push(p);
     return p;
-  };
-
-  /** A sleep ended on a wake or a drain: the passes past their start and still running have run (`begun`). */
-  const markRun = (): void => {
-    for (const p of running) if (p.stop !== null && !p.settled) begun.add(p.name);
   };
 
   /** Stop every pass — hard, a wake; soft, a sleep done — and wait for each to return. A pass that threw rejects here, once the others have stopped. */
@@ -512,12 +506,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
    * consolidation beside it. "woken" on a live event, "done" when one sleep
    * (no --follow) drained both, "stopped" on a stop — the passes stopped
    * before it returns, inside the heartbeat's `during` — or a pass that ended
-   * by itself (a refusal), with its code.
+   * by itself (a refusal), with its code and whether it had got past its
+   * start in this sleep.
    */
-  const asleep = async (since: Date): Promise<"woken" | "done" | "stopped" | { pass: PassName; code: number }> => {
-    // A refused pass's word stands until it stamps again: the row reads failed
-    // until the broken pass runs, not only until the first one that works.
-    for (const k of PASSES) if (!refused.has(k)) delete words[k];
+  const asleep = async (since: Date): Promise<"woken" | "done" | "stopped" | { pass: PassName; code: number; started: boolean }> => {
+    for (const k of PASSES) delete words[k];
     passEnded = new AbortController();
     const wake = AbortSignal.any([onStop.signal, passEnded.signal]);
     const stopped = async (): Promise<"stopped"> => {
@@ -536,6 +529,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       if (stopping) return stopped();
       const live = await reading(() => newestLive(sql, from, readsLog));
       if (live === null) return stopped();
+      // A pass that ended by itself before the wake is read first: a refusal
+      // and a live call in one poll would otherwise read as the wake alone.
+      const ended = running.find((p) => p.settled);
+      if (ended) {
+        // A pass that threw rejects out of stopPasses, after the others stop.
+        await stopPasses(true);
+        const code = ended.code === null || ended.code === 0 ? 1 : ended.code;
+        err(`  ${ended.name} ended by itself (exit ${ended.code}) — the sleep stops`);
+        return { pass: ended.name, code, started: ended.stop !== null };
+      }
       const woke = newer(live.read, live.write);
       if (woke !== null) {
         out(`  awake: a live ${live.read && woke === live.read ? "read" : "write"} at ${woke.toISOString()} — the passes stop now, their leases returned`);
@@ -546,18 +549,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           err(`  could not read the claims the wake leaves (${e.message}) — the next sleep takes them first again`);
           return [];
         });
-        markRun();
         await stopPasses(true);
         if (held) await toTail(held);
         return "woken";
-      }
-      const ended = running.find((p) => p.settled);
-      if (ended) {
-        // A pass that threw rejects out of stopPasses, after the others stop.
-        await stopPasses(true);
-        const code = ended.code === null || ended.code === 0 ? 1 : ended.code;
-        err(`  ${ended.name} ended by itself (exit ${ended.code}) — the sleep stops`);
-        return { pass: ended.name, code };
       }
       // The pools decide two things only — when consolidation joins, and when
       // one sleep is done — so a --follow consolidating reads neither: the
@@ -571,7 +565,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           consolidating = true;
         } else if (!FOLLOW && pools.consolidate && drained(pools.extract) && drained(pools.consolidate)) {
           out("  both pools drained — the sleep ends");
-          markRun();
           await stopPasses(false);
           return "done";
         }
@@ -593,22 +586,23 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         return FOLLOW && !hardStopped ? 0 : 130;
       }
       if (typeof r === "object") {
-        // A refusal (2) by a pass that has run in this process (`begun`)
-        // before — the provider and the key passed then — is one a restart
-        // could meet as well: a key rotated, a model re-pulled. Every sleep
-        // starts its passes afresh, so under --follow it is retried, the row
-        // failed meanwhile, rather than ending a scheduler nothing restarts.
-        // A pass refusing before it ever finished one is the configuration's,
-        // and any other code is no refusal: either ends the run.
-        if (!FOLLOW || !begun.has(r.pass) || r.code !== 2) {
+        // Every sleep starts its passes afresh, so each meets its start's
+        // refusals again. One at the start (2 before onPass: the probe, the
+        // key) by a pass that got past its start in an earlier sleep is one a
+        // restart could meet as well — a key rotated, a model re-pulled — and
+        // under --follow it is retried, the row failed meanwhile, rather than
+        // ending a scheduler nothing restarts. A pass refusing at its first
+        // start, or mid-pass (the provider refusing the request itself, a key
+        // refused on a real call), is the configuration's, as for a follower;
+        // any other code is no refusal: each ends the run (review pass 3).
+        if (!FOLLOW || r.code !== 2 || r.started || !begun.has(r.pass)) {
           await stamper.end("failed", malformed ?? undefined);
           return r.code;
         }
         words[r.pass] = "failed";
-        refused.add(r.pass);
         await stamper.stamp("failed", malformed ?? undefined);
         const waitMs = outageWait(refusals++);
-        err(`  ${r.pass} has run in this process before, so the next sleep tries it again in ${waitMs / 1000} s; heartbeat:sleep reads failed until it runs`);
+        err(`  ${r.pass} refused at its start, which it passed earlier in this process, so the next sleep tries it again in ${waitMs / 1000} s; heartbeat:sleep reads failed meanwhile`);
         // Re-stamped through the wait, at most a minute apart: a wait of up to
         // 5 min would otherwise read stale, and preflight would ask for a
         // second scheduler beside this one (review pass 2).

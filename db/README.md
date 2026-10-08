@@ -2478,9 +2478,12 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 ```
 
 **Running it.** Until SMD-2678's compose service, on the compose stack (whose
-Postgres publishes no port) run it in the `extract` service's container,
-which mounts the checkout and carries the server's model settings,
-`MCP_ACCESS_KEYS`, `OB1_WORKER_KEY` and the owner's `DATABASE_URL`:
+Postgres publishes no port) run it in a one-off container of the `extract`
+service, which mounts the checkout and carries the server's model settings,
+`MCP_ACCESS_KEYS`, the owner's `DATABASE_URL`, and `OB1_WORKER_KEY` when
+`deploy/.env` sets it — the command replaces the service's, so its refusal
+without the key does not apply, and the passes then say they write with no
+agent id. In the foreground, stopped with Ctrl-C; nothing restarts it:
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/sleep.ts --follow
@@ -2508,10 +2511,12 @@ of an operator. A wake hard-stops both: every lease returned, the model call in
 hand aborted, the thoughts in hand moved to the back of the queue. A thought
 longer than every sleep is never finished while the brain keeps waking, and
 consolidation does not join while it is pending (SMD-2694). A failed row stays
-failed: `--retry-failed` is the operator's. A pass refusing before it has run
-in this process (a model not served, a key refused, the provider refusing the
-request) ends the scheduler with 2; one refusing later is retried on SMD-2599's
-schedule (5 s, doubling, at most 5 min).
+failed: `--retry-failed` is the operator's. A pass refusing at its start (the
+model not served, the key refused) after it got past its start earlier in this
+process — a model re-pulled, a key rotated — is retried on SMD-2599's schedule
+(5 s, doubling, at most 5 min). A refusal at a pass's first start, or mid-pass
+(the provider refusing the request itself), ends the scheduler with 2, as it
+ends a follower.
 
 **Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute:
 preflight's `workers` row reads "running a pass" while asleep, "alive" while
@@ -3535,7 +3540,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2467 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1150 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1152 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

@@ -10409,6 +10409,23 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     badRequest = false;
     assert(refusedMidPass === 2 && lines.some((l) => /refuses the request itself/.test(l)) && !lines.some((l) => /tries it again/.test(l)),
       `a 400 on the first pass ends --follow with 2, not retried (exit ${refusedMidPass})`);
+    // Woken while extraction waits at its start (the provider down, no pass
+    // begun), then refused at the next start: it never got past its start in
+    // this process, so the refusal is the configuration's (review pass 3).
+    lines.length = 0;
+    unavailable = true;
+    const acProbe = new AbortController();
+    const probeRun = sleepRun({ follow: true, signal: acProbe.signal, minStampEveryS: 1 });
+    await pollUntil(async () => lines.some((l) => /provider is not answering at start/.test(l)), 20_000);
+    await capture("A note that wakes it while it waits at the start.", "op-sleep", 0, 9);
+    await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
+    unavailable = false;
+    missing = true;
+    const refusedNeverStarted = await Promise.race([probeRun, Bun.sleep(30_000).then(() => "hung" as const)]);
+    if (refusedNeverStarted === "hung") { acProbe.abort(); await probeRun; }
+    missing = false;
+    assert(refusedNeverStarted === 2 && !lines.some((l) => /tries it again/.test(l)),
+      `woken while waiting at its start, then refused at the next: it never got past its start, so --follow ends with 2 (exit ${refusedNeverStarted})`);
 
     // The same refusal after the pass has run in this process — a model
     // re-pulled, a key rotated — is retried on the outage schedule, the row
@@ -10475,8 +10492,18 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       slow = 0;
       restorePauses();
     }
-    ac3.abort();
-    await retrying;
+    // A refusal mid-pass — the provider refusing the request itself — by a
+    // pass that has passed its start many times is still the configuration's:
+    // it ends --follow with 2, as it ends a follower, rather than a retry
+    // (review pass 3: "has run" counted a pass with its first claim in hand).
+    const atBad = lines.length;
+    badRequest = true;
+    await capture("A synced note the model refuses to be asked about.", "sync-sleep", 0, 10);
+    const midPassCode = await Promise.race([retrying, Bun.sleep(40_000).then(() => "hung" as const)]);
+    if (midPassCode === "hung") { ac3.abort(); await retrying; }
+    badRequest = false;
+    assert(midPassCode === 2 && !lines.slice(atBad).some((l) => /tries it again/.test(l)),
+      `a refusal mid-pass by a pass that has run ends --follow with 2, not a retry (exit ${midPassCode})`);
 
     // The CLI, signalled twice while asleep with a call in hand: it exits 130
     // at once, and the row reads ended, not running until it goes stale — the

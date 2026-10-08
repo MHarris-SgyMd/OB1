@@ -1648,7 +1648,19 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "failed" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
   const consSleptFailed = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // Asleep, the scheduler's own claim holds a live lease beside the workers
+  // profile's old ended row: not "start it again", a second worker (review
+  // pass 3). A stale heartbeat:sleep claims nothing: the row reads stopped.
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  await claims`SELECT claim_thoughts(${CONS}, 'consolidate-sleephost-1-0-aaaaaaaa', 1)`;
+  const consSleptLive = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })}, updated_at = now() - interval '600 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSleptStale = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
   await claims`DELETE FROM ob1_config WHERE key IN (${`heartbeat:${CONS}`}, 'heartbeat:sleep')`;
+  assert(/a pass under this key is running: 1 in flight/.test(row(consSleptLive.out, "consolidate pass")) && !/Start it again/.test(fix(consSleptLive.out, "consolidate pass"))
+      && /stopped before it finished/.test(row(consSleptStale.out, "consolidate pass")) && !/the sleep scheduler runs this key/.test(row(consSleptStale.out, "consolidate pass")),
+         `asleep, the scheduler's live claim beside an old workers-profile row reads running, no restart; a stale heartbeat:sleep claims nothing (${row(consSleptLive.out, "consolidate pass")} | ${row(consSleptStale.out, "consolidate pass")})`);
   assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 20 s ago; awake, its passes waiting for the brain to go quiet\); 1 proposal/.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
       && /stopped before it finished/.test(row(consOtherJudge.out, "consolidate pass")),
          `a fresh heartbeat:sleep makes the current judge's key the scheduler's, no remedy; another judge's key reads stopped (${row(consSlept.out, "consolidate pass")} | ${row(consOtherJudge.out, "consolidate pass")})`);

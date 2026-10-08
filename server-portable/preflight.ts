@@ -3943,14 +3943,23 @@ if (configFailed) {
               // it holds none (SMD-2423, SMD-2261 item 7). An ok row, with no
               // remedy that would start a second worker.
               const l = leases.get(key) ?? NO_LEASES;
-              const beat =facts.workers?.heartbeats.find((h) => h.worker === "consolidate" && h.job === key);
+              const beat = facts.workers?.heartbeats.find((h) => h.worker === "consolidate" && h.job === key);
               const follower = beat && !beat.stale && !beat.ended ? beat : undefined;
+              // The sleep scheduler, fresh, on this server's judge's key
+              // (SMD-1794): heartbeat:sleep carries no job, so the key is matched
+              // to this server's judge (SMD-2678's own row can match the
+              // scheduler's), and a key whose model does not parse is not its.
+              const sleeping = model !== undefined && envPrefix === ""
+                ? facts.workers?.heartbeats.find((h) => h.worker === "sleep" && !h.stale && !h.ended)
+                : undefined;
               // A follower killed outright leaves its claims' leases live until
               // they lapse (900 s by default) while its heartbeat goes stale: the
               // heartbeat is the fresher word, so the row says the follower is
               // gone rather than "running" beside a workers row that says it is
-              // (review pass 3, a walkthrough).
-              if (beat && !follower && l.live > 0) {
+              // (review pass 3, a walkthrough) — unless the scheduler is asleep,
+              // whose own claims those live leases may be, beside an old
+              // workers-profile row (SMD-1794 review pass 3).
+              if (beat && !follower && l.live > 0 && !sleeping?.running) {
                 add("consolidate pass", "warn",
                     `${key}: ${counts} — its follower is not running (the workers row says so), and ${l.live} claim(s) it held keep live leases until ${l.liveUntil ?? "they lapse"} UTC${queue ? `; ${queue}` : ""}`,
                     `Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool (work_type ${key}, include_live with the worker_id worker_status names) returns them now.`);
@@ -3965,23 +3974,19 @@ if (configFailed) {
                 continue;
               }
               // No lease live, none left by a dead worker, no follower: the
-              // sleep scheduler, fresh, works the current judge's key between
-              // its sleeps (SMD-1794) — its followers stamp through
-              // heartbeat:sleep, and awake it holds no lease. The row is its,
-              // with no remedy that starts a worker beside it, where it would
-              // read stopped (an old workers-profile row included). Only that
-              // case: a dead worker's leases and a killed follower keep their
-              // words above and below (review pass 2). heartbeat:sleep carries
-              // no job, so the key is matched to this server's judge
-              // (SMD-2678's own row can match the scheduler's).
-              const sleeper = model !== undefined && envPrefix === "" && l.expired === 0
-                ? facts.workers?.heartbeats.find((h) => h.worker === "sleep" && !h.stale && !h.ended)
-                : undefined;
+              // sleep scheduler works the key between its sleeps — its
+              // followers stamp through heartbeat:sleep, and awake it holds no
+              // lease. The row is its, with no remedy that starts a worker
+              // beside it, where it would read stopped (an old workers-profile
+              // row included). Only that case: a dead worker's leases keep
+              // their words below (review pass 2).
+              const sleeper = l.expired === 0 ? sleeping : undefined;
               if (sleeper) {
                 const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
                 if (sleeper.outcome === "failed") {
+                  const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
                   add("consolidate pass", "warn", `${words}, and its last pass failed${queue ? `; ${queue}` : ""}`,
-                      "The scheduler's log says why (the workers row reads it too); it tries again on its own — no second worker.");
+                      `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`);
                 } else {
                   const r = runningRow(key, c, words, queue ? `; ${queue}` : "");
                   add("consolidate pass", r.status, r.detail, r.fix);
@@ -4207,7 +4212,9 @@ if (configFailed) {
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 return h.worker === "board-sync"
                   ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
-                  : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
+                  : h.worker === "sleep"
+                    ? `sleep's last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).`
+                    : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
               });
               add("workers", "warn", detail, fixes.join(" "));
             }
