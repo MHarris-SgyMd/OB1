@@ -32,6 +32,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { SQL } from "bun";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
+import { mcpReply } from "../_shared/sse.ts";
 
 // ob1-fork (SMD-1524): capture_thought writes `thoughts` with a raw INSERT, by design —
 // this deployment's Postgres is its own, built by k8s/init.sql from the guide's shape,
@@ -600,7 +601,8 @@ app.all("*", async (c) => {
   const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
-  const response = await transport.handleRequest(c);
+  // The reply kept alive while the tool runs, and a client that leaves logged (SMD-2001, _shared/sse.ts).
+  const response = await mcpReply(c, () => transport.handleRequest(c));
   if (!response) return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
   response.headers.delete("mcp-session-id");
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
