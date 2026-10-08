@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2271]
-migrations: [077]
----
-
-## Changelog
-
-Migration 077 has search_thoughts' opt-in prefer_current also rank below a thought with no ticket of its own whose tickets are all finished — the rule `evals/eval-transitive-freshness.ts` chose (`central+share-veto`) against blind-graded labels, which demotes no hit labelled current in any window it was judged on and cuts the planning queries' stale hits (P1–P4 21 → 14, H1–H4 17 → 8); a demoted hit names the deciding tickets (SMD-2271).
-
-## FORK
-
-prefer_current reads the tickets a thought is about, not only its own lifecycle (SMD-2271)
+# 258. prefer_current reads the tickets a thought is about, not only its own lifecycle (SMD-2271)
 
 **What changed.** Two PRs: the measurement, then the ranking.
 - PR 1, `evals/eval-transitive-freshness.ts` and

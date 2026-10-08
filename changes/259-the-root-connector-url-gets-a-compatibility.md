@@ -1,17 +1,4 @@
----
-type: deprecated
-bump: minor
-tickets: [SMD-2306]
-migrations: []
----
-
-## Changelog
-
-The root connector URL (`http://127.0.0.1:8000/?key=…`, `https://host/?key=…`) is deprecated: `/mcp` replaces it, and every setup guide for the compose stack now gives it. Through the proxy's legacy route the root still answers until **v2.0.0**, and no sooner than two weeks after this release. Every answer there carries a `Deprecation` header and a `Link` to the upgrade guide, `deploy/README.md` "Moving a client to /mcp". The server logs a line the first time each key name reaches it on the root, from an MCP client or a keyed REST call (`compose logs -t server | grep 'old root URL'`). `scan_thoughts` handles link under the endpoint the call came to (`/mcp/jobs/<id>`), and the proxy's `health` route takes `OPTIONS`. Removing the root is a MAJOR change, and FORK.md's versioning rules now say so. No schema change (SMD-2306).
-
-## FORK
-
-The root connector URL gets a compatibility window that closes with 2.0.0 (SMD-2306)
+# 259. The root connector URL gets a compatibility window that closes with 2.0.0 (SMD-2306)
 
 **What changed.**
 - **The legacy router.** In `deploy/compose.yaml`'s `x-proxy-routes`, the `legacy` router gains a `legacy-window` headers middleware:

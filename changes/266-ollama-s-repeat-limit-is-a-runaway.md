@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2449]
-migrations: []
----
-
-## Changelog
-
-Entity extraction now treats a model repeating one word inside its answer — entity after entity named `Linear Linear …`, each name one copy longer — as a runaway: it is aborted once the answer ends in 24 copies and sent to the penalised retry, or to `OB1_EXTRACT_ESCALATE_MODEL` when set. Ollama's repeat limit ends such a stream with no finish reason, which the worker used to take for a provider outage: it retried the same call, paused and could stop, leaving other thoughts pending. An answer Ollama cut this way, streamed or read whole, is now retried the same way. A row failed before this fix with `provider error after 3 retries: … closed mid-answer …` comes back with `--retry-failed` under the same model; after a change of model, the new key's pass extracts it anyway (SMD-2449).
-
-## FORK
-
-Ollama's repeat limit is a runaway, not a provider outage (SMD-2449)
+# 266. Ollama's repeat limit is a runaway, not a provider outage (SMD-2449)
 
 **What changed.**
 - **`repeatedTail(text, { cut })`** (`server-portable/entities.ts`, with `TOKEN_REPEATS` = 24 and `REPEAT_UNIT_MAX` = 32) returns the unit the text ends in 24 or more copies of, or null. Whitespace is dropped first, since Ollama trims the tokens it compares. The unit is the shortest repeat of up to 32 characters.

@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2599]
-migrations: []
----
-
-## Changelog
-
-A `--follow` run of `db/extract-entities.ts` or `db/consolidate.ts` now outlasts its database or its provider going away. It says so once, checks again after 5 s, doubling to 5 min, and resumes when the database or the model answers. A thought it holds goes back to the pool rather than being recorded failed. Before this fix, a Postgres restart made it exit 1, a provider outage failed every thought it claimed, and a model being pulled made it exit 2 (SMD-2599).
-
-## FORK
-
-A `--follow` worker outlasts a database or provider outage — it waits and resumes, where it exited or failed what it held (SMD-2599)
+# 273. A `--follow` worker outlasts a database or provider outage — it waits and resumes, where it exited or failed what it held (SMD-2599)
 
 **What changed — the database (PR 1).**
 - **`worker-bootstrap.ts`** has three new pieces, shared by both workers:

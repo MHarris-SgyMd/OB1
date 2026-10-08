@@ -53,7 +53,6 @@ import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, rec
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
-import { parseHeartbeats } from "../server-portable/brain-info.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -3728,12 +3727,12 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(extracted, "a thought captured while --follow polls is extracted by the trigger and the poll, with no new run");
   assert(followCode === 0, `the follower exits 0 on SIGINT (exit ${followCode}; ${followOut.split("\n").filter(Boolean).slice(-2).join(" | ")})`);
   assert((await entityByName("Grafana")) !== undefined, "…and Grafana is in the graph");
-  // …and its heartbeat: one row under its job, stopped by the signal, the
-  // passes it finished counted, judged against a minute (a 1-second poll).
+  // …and its heartbeat: one row under its job, stopped by the signal, judged
+  // against a minute (a 1-second poll).
   const extractBeats = await beatsOf("extract");
   const eb = extractBeats.length === 1 ? JSON.parse(extractBeats[0].value) : null;
-  assert(eb !== null && /^heartbeat:extract:\S+@p\d+$/.test(extractBeats[0].key) && eb.v === 1 && eb.outcome === "stopped" && eb.running === false && eb.passes >= 2 && eb.every_s === 60,
-    `the follower stamped one heartbeat, stopped, with its passes (${extractBeats.map((b) => `${b.key} ${b.value}`).join("; ")})`);
+  assert(eb !== null && /^heartbeat:extract:\S+@p\d+$/.test(extractBeats[0].key) && eb.v === 1 && eb.outcome === "stopped" && eb.running === false && eb.every_s === 60,
+    `the follower stamped one heartbeat, stopped (${extractBeats.map((b) => `${b.key} ${b.value}`).join("; ")})`);
 
   const extractedNow = async (id: string) => (await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${id}::uuid`)[0].c > 0;
 
@@ -3768,7 +3767,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       const inHandDone = await pollUntil(() => extractedNow(inHand), 20_000);
       // The heartbeat (SMD-2261) of a follower that waited the cuts out says
       // it is running, not ended: a pass the database failed is no end.
-      const beatAfterCuts = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}") as { ended?: boolean; passes?: number };
+      const beatAfterCuts = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}") as { v?: number; ended?: boolean };
       slowMs = 0;
       cutFollower.kill("SIGINT");
       const cutOut = (await new Response(cutFollower.stdout).text()) + (await new Response(cutFollower.stderr).text());
@@ -3782,7 +3781,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       assert(cutOut.includes(`recording nothing for ${inHand}`) && /could not return its leases \([^)]*\); they expire within 900 s, or return when the database answers again/.test(cutOut),
              "…and names the thought it recorded nothing for, and the leases it returns when the database answers");
       assert(cutCode === 0, `…and a signal still ends it with 0 (exit ${cutCode})`);
-      assert(beatAfterCuts.passes !== undefined && beatAfterCuts.ended === undefined,
+      assert(beatAfterCuts.v === 1 && beatAfterCuts.ended === undefined,
              `…and its heartbeat after the cuts is a running follower's, not an ended one's (${JSON.stringify(beatAfterCuts)})`);
     } finally {
       slowMs = 0;
@@ -4405,16 +4404,18 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     let st: PassStop | undefined;
     const r = runExtract({ url: URL_!, env, workers: 1, follow: 30, signal: ac2.signal, onPass: (x) => { st = x; }, writer: { out: () => {}, err: () => {} } });
     await Bun.sleep(1500);
+    const asleep = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
     const at = Date.now();
     stopIt(st, ac2);
     // A stop that does not reach the follower fails here rather than hanging the suite.
     const code = await Promise.race([r, Bun.sleep(10_000).then(() => -1)]);
-    return { code, ms: Date.now() - at };
+    return { code, ms: Date.now() - at, asleep };
   };
   const followSoft = await followRun((_, ac2) => ac2.abort());
-  // One pass, then asleep, then stopped: the row counts that pass and says stopped (SMD-2261).
+  // One pass, stamped done while asleep, then stopped: the row says so (SMD-2261).
   const softBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
-  assert(softBeat.passes === 1 && softBeat.outcome === "stopped" && softBeat.running === false, `a follower stopped asleep after its first pass stamped that pass, then stopped (${JSON.stringify(softBeat)})`);
+  assert(followSoft.asleep.outcome === "ok" && followSoft.asleep.running === false && !followSoft.asleep.ended && softBeat.outcome === "stopped" && softBeat.ended === true && softBeat.running === false,
+    `a follower asleep after its first pass has stamped it done, and stopped, stamps stopped (${JSON.stringify(followSoft.asleep)} → ${JSON.stringify(softBeat)})`);
   const followHard = await followRun((st) => { st?.(); void st?.(); });
   assert(followSoft.code === 0 && followSoft.ms < 1500 && followHard.code === 130 && followHard.ms < 1500,
          `a follower asleep wakes on a caller's abort (exit ${followSoft.code} after ${followSoft.ms} ms) and on the hard stop, which is 130 (exit ${followHard.code} after ${followHard.ms} ms)`);
@@ -5834,7 +5835,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
            `…and the summary counts the row once, settled, with no wait clause (${staleLine(followOut)})`);
     const cb = await consolidateBeats();
     const cv = cb.length === 1 ? JSON.parse(cb[0].value) : null;
-    assert(cv !== null && cb[0].key === `heartbeat:${KEY}` && cv.outcome === "stopped" && cv.passes >= 2 && cv.every_s === 60 && !("malformed" in cv),
+    assert(cv !== null && cb[0].key === `heartbeat:${KEY}` && cv.outcome === "stopped" && cv.every_s === 60 && !("malformed" in cv),
       `the consolidation follower stamped one heartbeat under its key, stopped, with no malformed block (${cb.map((b) => `${b.key} ${b.value}`).join("; ")})`);
     const olderBack = await consolidate("--status");
     assert(olderBack.code === 0 && !/stale/.test(olderBack.out.split("\n").find((l) => /queue:/.test(l)) ?? "x stale"), `no stale row is left (${olderBack.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 160)})`);
@@ -10060,49 +10061,40 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     assert(stampKey("board-sync") === "heartbeat:board-sync" && stampKey("extract", "extract:qwen2.5:7b@p2") === "heartbeat:extract:qwen2.5:7b@p2" && stampKey("extract", "my-job") === "heartbeat:extract:my-job" && stampKey("extract", "extractor-v2") === "heartbeat:extract:extractor-v2",
       "stampKey: board-sync alone, a job named for its worker kept, a custom job prefixed — one that only begins with the worker's name too");
 
-    // A pass's stamp: outcome, passes, the malformed block, the interval's minute floor.
+    // A pass's stamp: outcome, the malformed block, the interval's minute floor.
     const st = passStamper({ sql: hsql as never, worker: "extract", job: "extract:test@p2", intervalS: 15 });
     await st.stamp("ok", { answers: 50, bad: 12, alarm: true });
     const one = await row(st.key);
-    assert(one?.v === 1 && one.outcome === "ok" && one.passes === 1 && one.running === false && one.every_s === 60 && one.malformed?.alarm === true && one.malformed.bad === 12 && one.age < 5,
-      `a stamp records the outcome, the pass, the block and a minute's floor (${JSON.stringify(one)})`);
+    assert(one?.v === 1 && one.outcome === "ok" && !("passes" in one) && one.running === false && one.every_s === 60 && one.malformed?.alarm === true && one.malformed.bad === 12 && one.age < 5,
+      `a stamp records the outcome, the block and a minute's floor, and no count of passes (${JSON.stringify(one)})`);
+    // Each stamp moves the row's time, which is all that keeps a live worker from reading stale.
+    await hsql`UPDATE ob1_config SET updated_at = now() - interval '1 hour' WHERE key = ${st.key}`;
+    await st.stamp("ok");
+    const restamped = await row(st.key);
+    assert(restamped !== null && restamped.age < 5, `a stamp over an hour-old row moves its time to now (age ${restamped?.age})`);
     await st.end("stopped");
     const two = await row(st.key);
-    assert(two?.outcome === "stopped" && two.ended === true && two.passes === 1 && two.malformed?.bad === 12 && two.job === "extract:test@p2", `a stop is the worker's end, no pass, the last block stays, and the job is in the value (${JSON.stringify(two)})`);
-    // A restarted follower (a new stamper, no block of its own) keeps the row's
-    // block, so a restart on the same model does not clear the alarm; its own
-    // judged block replaces it (review pass 1).
+    assert(two?.outcome === "stopped" && two.ended === true && two.malformed?.bad === 12 && two.job === "extract:test@p2", `a stop is the worker's end, the last block stays, and the job is in the value (${JSON.stringify(two)})`);
+    // Each stamp writes the whole value: a restarted follower (a new stamper,
+    // no block of its own) clears the row's block until it judges one, and an
+    // old value of any shape, JSON or not, is replaced.
     const restarted = passStamper({ sql: hsql as never, worker: "extract", job: "extract:test@p2", intervalS: 15 });
     await restarted.stamp("ok");
-    const kept = await row(st.key);
+    const cleared = await row(st.key);
     await restarted.stamp("ok", { answers: 48, bad: 2, alarm: false });
-    const replaced = await row(st.key);
-    assert(kept?.malformed?.alarm === true && kept.passes === 1 && replaced?.malformed?.alarm === false && replaced.malformed.bad === 2,
-      `a restart keeps the row's tripped block until it judges its own (${JSON.stringify(kept?.malformed)} → ${JSON.stringify(replaced?.malformed)})`);
-    // Only a block of the shape the stamper writes is kept, and an old value
-    // that is not JSON is simply overwritten (review pass 2).
+    const judged = await row(st.key);
+    assert(cleared !== null && !("malformed" in cleared) && !("ended" in cleared) && judged?.malformed?.alarm === false && judged.malformed.bad === 2,
+      `a restart's first stamp carries no block, and its own judged block is written (${JSON.stringify(cleared)} → ${JSON.stringify(judged?.malformed)})`);
     const shapeKey = "heartbeat:consolidate:shape@p3";
     const shapeStamper = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:shape@p3", intervalS: 60 });
-    const keptFrom = [];
-    for (const old of [JSON.stringify({ v: 1, malformed: { answers: "x", bad: 1, alarm: true } }), JSON.stringify({ v: 1, malformed: null }), JSON.stringify({ v: 1, malformed: [1] }), "oops"]) {
+    const replacedFrom = [];
+    for (const old of [JSON.stringify({ v: 1, malformed: { answers: 50, bad: 12, alarm: true } }), JSON.stringify({ v: 1, malformed: [1] }), "oops"]) {
       await hsql`INSERT INTO ob1_config (key, value) VALUES (${shapeKey}, ${old}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
       await shapeStamper.stamp("ok");
       const got = await row(shapeKey);
-      keptFrom.push(got !== null && !("malformed" in got) && got.outcome === "ok");
+      replacedFrom.push(got !== null && !("malformed" in got) && got.outcome === "ok");
     }
-    assert(keptFrom.every(Boolean), `an old block not of the shape, or an old value not JSON, is replaced by the stamp whole (${keptFrom.join(",")})`);
-    // Blocks of the right JSON types but numbers the reader refuses, or a
-    // field missing or mistyped alone: whatever the merge keeps, the worker is
-    // still read, its block left off (review pass 3: such a block hid it).
-    const stillRead = [];
-    for (const m of [{ answers: 10, bad: 20, alarm: true }, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: 1, bad: "x", alarm: true }, { answers: 1, bad: 0, alarm: "yes" }]) {
-      await hsql`INSERT INTO ob1_config (key, value) VALUES (${shapeKey}, ${JSON.stringify({ v: 1, malformed: m })}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-      await shapeStamper.stamp("ok");
-      const rows = await hsql`SELECT key, value, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at, extract(epoch FROM now() - updated_at)::float8 AS age_s FROM ob1_config WHERE key = ${shapeKey}`;
-      const read = parseHeartbeats(rows as never);
-      stillRead.push(read.heartbeats.length === 1 && read.heartbeats[0].malformed === null && read.ignored === 0);
-    }
-    assert(stillRead.every(Boolean), `a kept block the reader refuses never hides the worker (${stillRead.join(",")})`);
+    assert(replacedFrom.every(Boolean), `an old value, a tripped block, a block not of the shape or a value not JSON, is replaced by the stamp whole (${replacedFrom.join(",")})`);
     // A pass is stamped running as it starts, before the timer's first tick.
     const starting = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:start@p3", intervalS: 15 });
     let atStart: { running?: boolean } | null = null;
@@ -10149,7 +10141,7 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     await throwing.stamp("ok");
     failNow = false;
     await throwing.stamp("ok");
-    assert(first === "resolved" && throwCalls === 1 && (await row(throwing.key))?.passes === 3, `a throwing reporter is told once, neither rejects the stamp nor stops the next (${first}, ${throwCalls})`);
+    assert(first === "resolved" && throwCalls === 1 && (await row(throwing.key))?.outcome === "ok", `a throwing reporter is told once, neither rejects the stamp nor stops the next (${first}, ${throwCalls})`);
 
     // board-sync's loop: a pass that reports errors, one that throws, one that
     // finishes; then the signal. The loop's code is the last pass's.
@@ -10178,7 +10170,7 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     }
     const board = await row("heartbeat:board-sync");
     assert((midLoop as { running?: boolean } | null)?.running === true, `board-sync's pass is stamped running while it runs (${JSON.stringify(midLoop)})`);
-    assert(seenOutcomes.join(",") === "failed,failed,ok,end:stopped" && loopCode! === 0 && board?.outcome === "stopped" && board.ended === true && board.passes === 3 && board.every_s === 60,
+    assert(seenOutcomes.join(",") === "failed,failed,ok,end:stopped" && loopCode! === 0 && board?.outcome === "stopped" && board.ended === true && board.every_s === 60,
       `the loop stamps each pass's outcome (errors and a throw both failed), then stopped (${seenOutcomes.join(",")}; ${JSON.stringify(board)})`);
     // A dry run or an audit passes no stamper: the loop writes no row.
     await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;

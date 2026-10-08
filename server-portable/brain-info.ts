@@ -147,8 +147,6 @@ export interface WorkerHeartbeat {
   outcome: "ok" | "failed" | "stopped" | null;
   /** The worker's process has ended — stopped, or failed on a refusal or a thrown pass — so its row speaks for nothing running. */
   ended: boolean;
-  /** Passes this worker's process has finished. */
-  passes: number;
   /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm (extraction only). */
   malformed: { answers: number; bad: number; alarm: boolean } | null;
 }
@@ -186,9 +184,9 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     try { v = typeof r.value === "string" ? JSON.parse(r.value) : null; } catch { v = null; }
     const ageS = typeof r.age_s === "number" ? r.age_s : Number(r.age_s);
     // A block not of the shape is left off, not a reason to refuse the row: the
-    // heartbeat still says whether the worker is alive (review pass 3: a block
-    // the merge kept, of the right JSON types but bad > answers, hid a live
-    // follower for good).
+    // heartbeat still says whether the worker is alive. Any role of the worker
+    // group can write the row, so a block of the right JSON types but
+    // bad > answers must not hide a live follower (review pass 3).
     const m = v?.malformed as Record<string, unknown> | undefined;
     const malformed = m !== null && typeof m === "object" && count(m.answers) && count(m.bad, m.answers as number) && typeof m.alarm === "boolean"
       ? { answers: m.answers as number, bad: m.bad as number, alarm: m.alarm }
@@ -205,7 +203,6 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       && typeof v.running === "boolean"
       && (v.outcome === null || v.outcome === "ok" || v.outcome === "failed" || v.outcome === "stopped")
       && (v.ended === undefined || v.ended === true)
-      && count(v.passes)
       && typeof r.at === "string" && UTC_INSTANT.test(r.at) && Number.isFinite(ageS) && ageS > -FUTURE_SLACK_S;
     if (!ok) {
       ignored++;
@@ -223,7 +220,6 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       running: v!.running as boolean,
       outcome: v!.outcome as WorkerHeartbeat["outcome"],
       ended: v!.ended === true || v!.outcome === "stopped",
-      passes: v!.passes as number,
       malformed,
     });
   }
