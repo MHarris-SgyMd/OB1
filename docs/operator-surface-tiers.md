@@ -221,7 +221,7 @@ Read against the tree on 2026-09-27.
 
 ## Retirement conditions
 
-Which vendored integrations become plugins and which retire was decided on 2026-10-08 (SMD-1931), with each REST gateway route's fate: [`docs/vendored-disposition.md`](vendored-disposition.md), "The brain's outward surface". Plugins: agent-memory-api, smart-ingest and readwise-capture (SMD-2690), slack- and telegram-capture (SMD-2101). Retired: the two REST gateways, enhanced-mcp, the delete- and update-thought servers, discord-capture and kubernetes-deployment. The Chrome capture extension becomes a client of `/api`.
+Which vendored integrations become plugins and which retire was decided on 2026-10-08 (SMD-1931), with each REST gateway route's fate: [`docs/vendored-disposition.md`](vendored-disposition.md), "The brain's outward surface". Plugins: agent-memory-api, smart-ingest and readwise-capture (SMD-2690), slack- and telegram-capture (SMD-2101). Retired: the two REST gateways, enhanced-mcp, the delete- and update-thought servers and discord-capture, all gone from the tree with SMD-1931; and kubernetes-deployment, whose removal is SMD-2288. The Chrome capture extension becomes a client of `/api`.
 
 | Surface | Retires when |
 |---|---|

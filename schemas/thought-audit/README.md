@@ -54,7 +54,7 @@ SUPABASE (from your Open Brain setup)
 1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console). This creates the `thought_audit` table and its indexes — on a brain built by `db/migrate.ts`, migration 008 already did, and the file is idempotent, with one wrinkle: its `thought_audit_session_id_idx` is 008's `thought_audit_session_idx` (same column, same predicate) under another name, so applying the file there builds one redundant index; drop it, or skip the file.
 2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>`: the role your server connects as gets `SELECT, INSERT` on the table — append-only, as upstream's grant to Supabase's `service_role` was; the file itself grants nothing and enables no RLS (this fork, SMD-1796).
 3. *(Optional)* Apply `author-session-id.sql` the same way (`psql "$DATABASE_URL" -f author-session-id.sql`), then run `--grant` again: it creates the `thought_provenance` view and `thoughts_by_session()` RPC used to query by session id, and a view needs its own `SELECT` — your role's `SELECT` on `thoughts` does not reach it (this fork, SMD-1796).
-4. **Wire audit writes into your mutation tools.** This schema is storage only — no trigger, no hidden magic. You (or a mutation integration like `integrations/update-thought-mcp` and `integrations/delete-thought-mcp`) are responsible for inserting a row after each capture / update / delete. See the "How to write audit rows" section below for copy-paste examples.
+4. **Wire audit writes into your mutation tools.** This schema is storage only — no trigger, no hidden magic. Your own mutation code is responsible for inserting a row after each capture / update / delete. (On this fork the core server's `update_thought` and `delete_thought` already record every change in the brain's own audit trail; the standalone `update-thought-mcp` and `delete-thought-mcp` servers this README once pointed to retired with SMD-1931.) See the "How to write audit rows" section below for copy-paste examples.
 5. Navigate to **Table Editor** → confirm `thought_audit` appears with columns `id, thought_id, action, source, author_session_id, diff, actor_context, created_at`.
 6. Run `insert into thought_audit (thought_id, action, source) values (gen_random_uuid(), 'capture', 'manual-test');` then `select * from thought_audit order by created_at desc limit 1;` to confirm writes land.
 
@@ -82,7 +82,7 @@ await supabase.from("thought_audit").insert({
 });
 ```
 
-**On update (see `integrations/update-thought-mcp`):**
+**On update:**
 
 ```ts
 await supabase.from("thought_audit").insert({
@@ -98,7 +98,7 @@ await supabase.from("thought_audit").insert({
 });
 ```
 
-**On delete (see `integrations/delete-thought-mcp`):**
+**On delete:**
 
 ```ts
 await supabase.from("thought_audit").insert({
@@ -142,10 +142,9 @@ The source column is an open `text` — feel free to add your own. Keep them sho
 
 ## Dependencies and Companions
 
-- `integrations/update-thought-mcp` — adds an `update_thought` MCP tool. Its README documents how to extend it to write audit rows.
-- `integrations/delete-thought-mcp` — adds a `delete_thought` MCP tool. Its README documents how to extend it to write audit rows with preserved prior content.
+- The core server's `update_thought` and `delete_thought` tools record their own audit trail; the standalone `update-thought-mcp` and `delete-thought-mcp` integrations this list named retired with SMD-1931.
 
-Both are standalone — installing this schema without those integrations is perfectly valid (you can write audit rows from your own capture / mutation code instead).
+Installing this schema on its own is valid: write audit rows from your own capture / mutation code.
 
 ## Troubleshooting
 

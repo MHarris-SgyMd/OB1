@@ -105,7 +105,10 @@ is green.
    `StreamableHTTPTransport` → `WebStandardStreamableHTTPServerTransport` line.
    `delete-thought-mcp` / `update-thought-mcp` also import `ListToolsRequestSchema`
    from the SDK — re-point to v2's type exports. This stage is a candidate to
-   fold into SMD-1931's consolidation (retire rather than migrate).
+   fold into SMD-1931's consolidation (retire rather than migrate). **Done for
+   three:** SMD-1931 retired `enhanced-mcp`, `delete-thought-mcp` and
+   `update-thought-mcp`; `ob-graph` and `work-operating-model-activation`
+   remain.
 3. **The self-pinned outliers.** `integrations/kubernetes-deployment` vendors its
    own pinned SDK + `@hono/mcp` (its own `package.json`/`bun.lock`) — a self-
    contained swap. `recipes/vercel-neon-telegram` is already on the v1

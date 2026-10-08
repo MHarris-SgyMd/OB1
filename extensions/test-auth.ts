@@ -181,8 +181,6 @@ const SERVERS: Server[] = [
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
     ["start_operating_model_session", "save_operating_model_layer", "generate_operating_model_exports"], { health: "/health" }),
-  vendored("integrations/delete-thought-mcp/index.ts", "mcp", [], ["delete_thought"]),
-  vendored("integrations/update-thought-mcp/index.ts", "mcp", [], ["update_thought"]),
   vendored("integrations/kubernetes-deployment/index.ts", "mcp", ["search", "fetch", "search_thoughts", "list_thoughts", "thought_stats"], ["capture_thought"]),
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
@@ -391,18 +389,13 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
 
   // A call, not only a listing: the tool is not registered for this principal,
   // so the server answers "not found" before any handler — or any query — runs.
-  // A server with no tool at all for this principal (delete-thought-mcp,
-  // update-thought-mcp) lists an empty set but has no tools/call handler, so a
-  // call is told the method does not exist: nothing to call, either way.
   if (s.writes.length > 0) {
     const attempt = await call(s, READ_KEY, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: s.writes[0], arguments: {} } });
     const err = attempt.json?.error ?? attempt.json?.result;
     const code = attempt.json?.error?.code;
-    assert(attempt.status === 200 && (code === -32602 || attempt.json?.result?.isError === true || (s.reads.length === 0 && code === -32601))
+    assert(attempt.status === 200 && (code === -32602 || attempt.json?.result?.isError === true)
       && /not found|unknown tool/i.test(JSON.stringify(err)),
       `a read-scoped key calling ${s.writes[0]} is told the tool does not exist (${JSON.stringify(err).slice(0, 80)})`);
-    if (s.reads.length === 0) assert(Array.isArray(read.json?.result?.tools) && read.json.result.tools.length === 0,
-      "…and its listing is an empty list under a declared tools capability, not a failed method");
   }
 
   // Three overlapping requests under one key (see `overlapping` above), each
@@ -441,43 +434,6 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   env(s, undefined, undefined);
   assert((await call(s, LEGACY_KEY, LIST)).status === 401, "no keys configured at all refuses everything");
   env(s, KEYS);
-}
-
-// ── The MCP server outside the shared auth path ──────────────────────────────
-//
-// enhanced-mcp keeps its own single-key compare (change 67 left it there, and
-// check 8 passes it), so it is not in SERVERS and none of the claims above are
-// made for it. It was, though, the fourth module-level McpServer connect()ed
-// to a fresh transport on every request — SMD-1497 named three — so the
-// concurrency probe runs against it too, imported the same way, under the one
-// key it reads.
-{
-  const file = "integrations/enhanced-mcp/index.ts";
-  console.log(`\n[${file}]`);
-  process.env.SUPABASE_URL = PG;
-  process.env.MCP_ACCESS_KEY = LEGACY_KEY;
-  const before = handlers.length;
-  try {
-    handlers.push(await importServer(file));
-  } catch (e) {
-    assert(false, `${file} threw at import: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  assert(handlers.length === before + 1, `${file} imports as a module and exports default { fetch }`);
-  const handler = handlers[before];
-  const ids = [11, 12, 13];
-  // No handler (the import failed above) is already a counted failure; the probe is skipped rather than thrown from.
-  const answers = handler ? await overlapping(ids, (id, late) => answer(handler, new Request("http://extension.test/mcp",
-    // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
-    // The late request carries no Accept, as in the table probe: the transport takes none as */* (change 84).
-    { method: "POST", headers: late ? { "Content-Type": RPC["Content-Type"], "x-brain-key": LEGACY_KEY } : { ...RPC, "x-brain-key": LEGACY_KEY }, body: late ?? JSON.stringify({ ...LIST, id }), ...(late ? { duplex: "half" } : {}) }))) : [];
-  // The reference list is the first answer that carries one — not answers[0], which under the defect is the timeout.
-  const tools = answers.map(toolsOf).find((t) => t.length > 0) ?? [];
-  assert(tools.length > 0, `its tools/list under the key names its tools (${tools.length})`);
-  for (const [i, r] of answers.entries()) {
-    assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === tools.join(),
-      `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and the same tools (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
-  }
-  delete process.env.MCP_ACCESS_KEY;
 }
 
 // ── The HTTP APIs ────────────────────────────────────────────────────────────
@@ -630,12 +586,6 @@ const LIVE: Live[] = [
       assert((await fetch(base + path, { method, headers: { "x-brain-key": "not-a-key", "Content-Type": "application/json" }, body })).status === 401, "…and a wrong key is refused with 401");
     },
   })),
-  // The MCP server on its own single-key compare (the section above): on the shim since SMD-1798, so started here too.
-  { file: "integrations/enhanced-mcp/index.ts", env: { MCP_ACCESS_KEY: LEGACY_KEY, SUPABASE_URL: PG }, probe: async (base) => {
-    const r = await parse(await fetch(`${base}/mcp`, { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, body: JSON.stringify(LIST) }));
-    assert(r.status === 200 && toolsOf(r).length === 13, `integrations/enhanced-mcp/index.ts: under bun, the configured key's tools/list is its 13 tools (${r.status}: ${toolsOf(r).length})`);
-    assert((await fetch(`${base}/mcp`, { method: "POST", headers: { ...RPC, "x-brain-key": "not-a-key" }, body: JSON.stringify(LIST) })).status === 401, "…and a wrong key is refused with 401");
-  } },
 ];
 /** Bun's entry shape as the servers spell it — the tail server-portable/index.ts has — held to the letter (SMD-1799). */
 const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\| 8000\),\n  fetch: (?:app\.fetch|handler),\n\};\n/m;
@@ -968,18 +918,10 @@ for (const s of SERVERS) {
   assert(text.includes('from "../_shared/auth.ts"') && text.includes("secretMatches(") && !/[!=]== ?READWISE_WEBHOOK_SECRET\b/.test(text),
     `${WEBHOOK.file}: the echoed secret is compared through the module's secretMatches(), digest to digest, and with no operator`);
 }
-{
-  const file = "integrations/enhanced-mcp/index.ts";
-  const text = readFileSync(join(ROOT, file), "utf8");
-  assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
-    `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
-  assert(!ACCEPT_PATCH.test(text), `${file}: the Accept patch is gone (change 84)`);
-  holdsBrowserHeaders(file, text);
-}
-// The rule reached the four lists the tree publishes — a list respelled (a template literal, hono's cors())
-// would drop out of the regex's reach silently otherwise (first review pass).
-assert(HELD_ALLOW_LISTS.length === 4,
-  `the allow-list rule read four lists — delete-thought, update-thought, kubernetes-deployment, enhanced-mcp (${HELD_ALLOW_LISTS.length}: ${HELD_ALLOW_LISTS.join(", ")})`);
+// The rule reached the one list an MCP server in the tree publishes — a list respelled (a template literal,
+// hono's cors()) would drop out of the regex's reach silently otherwise (first review pass).
+assert(HELD_ALLOW_LISTS.join() === "integrations/kubernetes-deployment/index.ts",
+  `the allow-list rule read one list — kubernetes-deployment's (${HELD_ALLOW_LISTS.length}: ${HELD_ALLOW_LISTS.join(", ")})`);
 
 // The files this test cannot import — a Next.js route, a README's code block, a
 // Node stub — say the same thing in their text. (The cost recipe's per-session

@@ -15,13 +15,14 @@ toward updating or deprecating instead of deleting.
 - Codex
 - Grok
 - Any AI client that supports reusable skills, rules, or custom instructions and
-  is connected to the `delete-thought-mcp` server
+  is connected to the core Open Brain MCP server with a write-scoped key
 
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- The `delete-thought-mcp` integration deployed and connected as
-  `open-brain-delete-thought` (see `integrations/delete-thought-mcp`)
+- A write-scoped key on your Open Brain connector — the core MCP server lists
+  `delete_thought` only for a write key (the standalone `delete-thought-mcp`
+  server retired with SMD-1931)
 - A read tool (`search_thoughts` / `list_thoughts`) to resolve thought ids
 
 ## Installation
@@ -61,7 +62,7 @@ Solution: That is an update, not a delete — tag it `superseded` via the
 
 ## Notes for Other Clients
 
-Client-agnostic: it names the tool (`delete_thought`) and connector
-(`open-brain-delete-thought`), not a specific client. Adapt only the
+Client-agnostic: it names the tool (`delete_thought`) on the core Open Brain
+connector, not a specific client. Adapt only the
 skills-directory path per client. Pairs with **updating-thoughts** for the
 non-destructive path.
