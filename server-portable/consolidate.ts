@@ -49,8 +49,8 @@ import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
  * mostly a later state of the same thing, not a contradiction, and the 7B read
  * "conflict" as contradiction only. Measured on the dogfood brain's own labels
  * (evals/eval-judge.ts; evals/README.md has the tables): rejected proposals
- * the judge proposes again 119 → 0 of 126, linked tickets read as related
- * 46 → 106 of 126, and every supersession names a side.
+ * the judge proposes again 119 → 2 of 126, linked tickets read as related
+ * 46 → 106 of 126, and every outdates names a side.
  */
 export const CONSOLIDATE_PROMPT_VERSION = 4;
 
@@ -81,14 +81,14 @@ export function actorKindOf(metadata: Record<string, unknown> | null | undefined
  * p4 (SMD-1873): five words where p3 had three. p3's "agree" and "conflict"
  * forced every pair that relates and evolves — a follow-up, a part split out,
  * a fix for what the other reported — into "conflict", and on the dogfood
- * brain 119 of 126 reviewed proposals were exactly that, rejected. Only
- * "conflict" is a supersession proposal; "related", "evolves" and
- * "duplicate" are relations between two thoughts that both stand. Each word
+ * brain 119 of 126 reviewed proposals were exactly that, rejected. "outdates"
+ * (p3's "conflict") and "duplicate" are proposals (proposalVerdict);
+ * "related" and "evolves" relate two thoughts that both stand. Each word
  * starts with a different letter, so the verdict's first token separates them
  * and valueDistribution can read the model's probability over all five.
  */
 export const VERDICTS = ["unrelated", "related", "evolves", "duplicate", "outdates"] as const;
-/** The one verdict that is a supersession proposal; the other four relate two thoughts that both stand. */
+/** The verdict that names a current side; "duplicate" is proposed too (proposalVerdict), with the newer standing. */
 export const SUPERSEDING_VERDICT = "outdates";
 export type Verdict = (typeof VERDICTS)[number];
 export type Direction = "newer" | "older" | "unknown";
@@ -103,7 +103,7 @@ export type Direction = "newer" | "older" | "unknown";
 export const DEFAULT_CANDIDATES = 3;
 export const DEFAULT_MIN_SIMILARITY = 0.6;
 
-/** Below this the judge is guessing; a conflict under it is not recorded. The worker's --min-confidence. */
+/** Below this the judge is guessing; a proposal under it (proposalConfidence) is not recorded. The worker's --min-confidence. */
 export const DEFAULT_MIN_CONFIDENCE = 0.5;
 
 /** Characters of each thought sent per call. Two thoughts per prompt, so half entities.ts's limit each. */
@@ -111,13 +111,13 @@ export const CONTENT_LIMIT_CHARS = 6000;
 
 export type Judgement = {
   verdict: Verdict;
-  /** Which thought is current, when the verdict is conflict; "unknown" otherwise or when the texts do not say. */
+  /** Which thought is current, when the verdict is outdates; "unknown" otherwise or when the texts do not say. */
   supersedes: Direction;
   confidence: number;
   reason: string;
   /**
    * p4: the words the judge copied from the current thought to show it is
-   * current — one line, clipped, and "" unless the conflict is directed.
+   * current — one line, clipped, and "" unless an outdates is directed.
    */
   evidence: string;
   /**
@@ -128,6 +128,12 @@ export type Judgement = {
   evidenceFound?: boolean;
   /** True when the model's answer was not parseable JSON of the expected shape. */
   malformed: boolean;
+  /**
+   * When the answer parsed but its verdict is none of the five — p3's
+   * "conflict" or "agree" from a model that kept to the old words — that word,
+   * cut short, so the worker can say which (SMD-1873, review pass 1).
+   */
+  unknownVerdict?: string;
   /**
    * SMD-1873: what the model's own token probabilities say, when the call
    * asked for them (judgePair's `logprobs`) and the endpoint returned them —
@@ -323,9 +329,10 @@ function clampConfidence(v: unknown): number {
 
 /**
  * Parse the model's answer. Lenient about wrapping (code fences), strict about
- * the vocabulary: a verdict outside the three is malformed, not coerced. A
- * direction is read only from a conflict — an "A" on an agree verdict is
- * dropped — and "A" means the older thought, "B" the newer, as the prompt
+ * the vocabulary: a verdict outside the five is malformed, not coerced, and
+ * the word is kept in `unknownVerdict`. A direction, and the evidence for it,
+ * are read only from "outdates" — an "A" on a related verdict is dropped —
+ * and "A" means the older thought, "B" the newer, as the prompt
  * labels them. The reason is one line, clipped: a reviewer reads it, a
  * database stores it, and --dump writes it to a JSON line — every break a
  * space and the controls a line may not keep dropped, by oneLine's rule, cut
@@ -344,7 +351,7 @@ export function parseJudgement(raw: string): Judgement {
   }
   if (!isRecord(parsed)) return bad;
   const verdict = typeof parsed.verdict === "string" ? parsed.verdict.trim().toLowerCase() : "";
-  if (!(VERDICTS as readonly string[]).includes(verdict)) return bad;
+  if (!(VERDICTS as readonly string[]).includes(verdict)) return verdict ? { ...bad, unknownVerdict: cutByCodePoint(oneLine(verdict), 40) } : bad;
   let supersedes: Direction = "unknown";
   if (verdict === SUPERSEDING_VERDICT && typeof parsed.supersedes === "string") {
     const s = parsed.supersedes.trim().toUpperCase();
@@ -356,18 +363,28 @@ export function parseJudgement(raw: string): Judgement {
   return { verdict: verdict as Verdict, supersedes, confidence: clampConfidence(parsed.confidence), reason, evidence, malformed: false };
 }
 
-/** Text as evidenceIn compares it: lower case, every run of whitespace one space, the quotes a model wraps a quote in taken off the ends. */
-const forQuote = (t: string) => oneLine(t).toLowerCase().replace(/^["'`“”‘’]+|["'`“”‘’.,;:]+$/g, "").trim();
+/**
+ * Text as evidenceIn compares it: lower case, every run of whitespace one
+ * space, curly quotes and long dashes as their ASCII forms (a model often
+ * types the plain one), and a quote's wrapping — quote marks, an ellipsis
+ * either end, closing punctuation — taken off.
+ */
+const forQuote = (t: string) => oneLine(t).toLowerCase()
+  .replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, "-").replace(/…/g, "...")
+  .replace(/^(?:["'`]|\.\.\.|\s)+|(?:["'`.,;:]|\.\.\.|\s)+$/g, "").trim();
 
 /**
- * Whether the judge's evidence is in the text it was sent of the side it
- * names current (SMD-1873). Compared after forQuote on both sides, so a
- * line break or a capital the model normalised does not fail it; anything
- * shorter than three characters proves nothing and is not found.
+ * Whether the judge's evidence shows the side it names is current (SMD-1873):
+ * found in that side's text as the judge was sent it, and NOT in the other
+ * side's — words both thoughts hold say nothing about which is later.
+ * Compared after forQuote, so a line break, a capital or a curly quote the
+ * model normalised does not fail it; anything shorter than three characters
+ * proves nothing and is not found.
  */
-export function evidenceIn(evidence: string, content: string): boolean {
+export function evidenceIn(evidence: string, content: string, other?: string): boolean {
   const q = forQuote(evidence);
-  return q.length >= 3 && forQuote(content.slice(0, CONTENT_LIMIT_CHARS)).includes(q);
+  if (q.length < 3 || !forQuote(content.slice(0, CONTENT_LIMIT_CHARS)).includes(q)) return false;
+  return other === undefined || !forQuote(other.slice(0, CONTENT_LIMIT_CHARS)).includes(q);
 }
 
 /**
@@ -382,9 +399,13 @@ export function evidenceIn(evidence: string, content: string): boolean {
  * The token holding the value's first character may begin earlier — a `"`
  * or ` "` is often one token with the value's head — so that leading text is
  * taken off each alternative before it is read, and an alternative that does
- * not begin with it is not a value of this field. Null when the tokens do not
- * spell `content` (a provider that rewrote them), the field is not there, or
- * no alternative names a word.
+ * not begin with it is not a value of this field; a space inside the quote is
+ * read past, as parseJudgement trims it. The chosen token counts among its
+ * alternatives even when the endpoint's top list left it out (it was sampled
+ * at a temperature above 0). Null when the tokens do not spell `content` (a
+ * provider that rewrote them), the field is not there, the token has no
+ * alternatives (an endpoint that returns the chosen token's probability
+ * alone, which normalised would always read 1), or none names a word.
  */
 export function valueDistribution<W extends string>(content: string, tokens: TokenLogprob[], field: string, words: readonly W[]): ValueDistribution<W> | null {
   if (tokens.map((t) => t.token).join("") !== content) return null;
@@ -398,9 +419,11 @@ export function valueDistribution<W extends string>(content: string, tokens: Tok
       const lead = content.slice(start, at);
       const p = Object.fromEntries(words.map((w) => [w, 0])) as Record<W, number>;
       let covered = 0;
-      for (const alt of t.top_logprobs?.length ? t.top_logprobs : [t]) {
+      if (!t.top_logprobs?.length) return null;
+      const alts = t.top_logprobs.some((a) => a.token === t.token) ? t.top_logprobs : [...t.top_logprobs, t];
+      for (const alt of alts) {
         if (!alt.token.startsWith(lead)) continue;
-        const head = alt.token.slice(lead.length).toLowerCase();
+        const head = alt.token.slice(lead.length).toLowerCase().trimStart();
         if (!head) continue;
         const hits = words.filter((w) => { const lw = w.toLowerCase(); return lw.startsWith(head) || head.startsWith(`${lw}"`); });
         if (hits.length !== 1) continue;
@@ -535,29 +558,40 @@ export function parseConsolidateKey(key: string): { model: string; version: numb
  * writer had set `supersedes` (20 of 60, none of 252 pairs that were not), so
  * a reviewer sees it; it is a relation edge as well, which is SMD-1873's
  * third PR. Either thought could go, so the later one, which a reader would
- * look for, is the one proposed to stand.
+ * look for, is the one proposed to stand — unless the operator wrote the
+ * older and someone else the newer: an agent restating what the operator
+ * stated never stands over it (SMD-1726's rule, which the prompt states for
+ * "outdates" and a "duplicate" would otherwise go round; review pass 1).
  */
-export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older_supersedes_newer" | "conflict_undirected" | null {
+export function proposalVerdict(j: Judgement, writers?: { older?: string | null; newer?: string | null }): "newer_supersedes_older" | "older_supersedes_newer" | "conflict_undirected" | null {
   if (j.malformed) return null;
-  if (j.verdict === "duplicate") return "newer_supersedes_older";
+  if (j.verdict === "duplicate") return writers?.older === "operator" && writers.newer !== "operator" ? "older_supersedes_newer" : "newer_supersedes_older";
   if (j.verdict !== SUPERSEDING_VERDICT) return null;
   if (j.supersedes === "newer") return "newer_supersedes_older";
   if (j.supersedes === "older") return "older_supersedes_newer";
   return "conflict_undirected";
 }
 
+/** proposalConfidence uses the token distribution only when the alternatives naming a verdict held at least this share of the token's mass. */
+export const MIN_COVERED = 0.5;
+
 /**
  * The confidence a proposal records, and where it came from (SMD-1873). With
  * the model's token probabilities, it is the mass on the two proposing
  * verdicts, "outdates" and "duplicate": on the dogfood brain it told a true
  * supersession from a false one at AUROC 0.92, where the number the model
- * wrote was 0.80 on 368 of 434 pairs. Without them (an endpoint that returns
- * none, or only the first token's), it is the written number. Rounded to
- * 029's numeric(3,2).
+ * wrote was 0.80 on 368 of 434 pairs. That 0.92 ranks every labelled pair,
+ * proposed or not; among the 24 the 7B proposed, 2 were false — too few to
+ * say how well it ranks proposals (evals/README.md). Without the
+ * probabilities (an endpoint that returns none, or only the first token's),
+ * or when the alternatives naming a verdict held under half the token's mass
+ * (`covered`, so what the normalised share stands for is not the model's
+ * choice), it is the written number. Rounded to 029's numeric(3,2).
  */
 export function proposalConfidence(j: Judgement): { confidence: number; source: "token" | "stated" } {
-  const p = j.probabilities?.verdict?.p;
-  if (!p) return { confidence: j.confidence, source: "stated" };
+  const d = j.probabilities?.verdict;
+  if (!d || d.covered < MIN_COVERED) return { confidence: j.confidence, source: "stated" };
+  const p = d.p;
   return { confidence: Math.min(1, Math.round((p.outdates + p.duplicate) * 100) / 100), source: "token" };
 }
 
@@ -575,18 +609,26 @@ export function proposalReason(j: Judgement): string {
 
 /**
  * What the judge said beyond the verdict 029 records, for the proposal's
- * recipe (061): the p4 verdict word, where the confidence came from, and
- * whether the quote naming the current side was found in it.
+ * recipe (061): the p4 verdict word, where the confidence came from, the
+ * stated number, whether the quote naming the current side was found in it,
+ * and the token distributions themselves with their coverage.
  */
-export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean } {
-  return { verdict: j.verdict, confidence_source: source, stated_confidence: j.confidence, ...(j.evidenceFound !== undefined ? { evidence_found: j.evidenceFound } : {}) };
+export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean; probabilities?: JudgeProbabilities } {
+  return {
+    verdict: j.verdict, confidence_source: source, stated_confidence: j.confidence,
+    ...(j.evidenceFound !== undefined ? { evidence_found: j.evidenceFound } : {}),
+    ...(j.probabilities ? { probabilities: j.probabilities } : {}),
+  };
 }
 
 /**
- * Chat endpoints that refused a request carrying `logprobs` (an HTTP 400),
- * by base URL: judgePair asks them without it for the rest of the process,
- * so a provider that does not take the field costs one extra call, not a
- * failed pass.
+ * Chat endpoints that refused a request carrying `logprobs` (an HTTP 400)
+ * and then answered the same request without it, by base URL: judgePair asks
+ * them without it for the rest of the process, so a provider that does not
+ * take the field costs one extra call, not a failed pass. A 400 the retry
+ * gets too (a context-length overflow, a bad parameter) is about the request,
+ * not the field, and leaves the endpoint asked with logprobs — one such pair
+ * must not move every later proposal onto the written number (review pass 1).
  */
 const refusesLogprobs = new Set<string>();
 
@@ -610,11 +652,13 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
     if (!gate.allowed) throw refuseEgress("Judge", cfg.chat.base, gate);
   }
   const logprobs = opts.logprobs && !refusesLogprobs.has(cfg.chat.base) ? opts.logprobs : undefined;
-  const r = await judgeRequest(older, newer, cfg, signal, logprobs);
+  let r = await judgeRequest(older, newer, cfg, signal, logprobs);
+  let asked = logprobs;
   if (!r.ok && r.status === 400 && logprobs) {
     await r.text().catch(() => "");
-    refusesLogprobs.add(cfg.chat.base);
-    return judgePair(older, newer, cfg, signal, actor, opts);
+    r = await judgeRequest(older, newer, cfg, signal, undefined);
+    asked = undefined;
+    if (r.ok) refusesLogprobs.add(cfg.chat.base);
   }
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
@@ -626,9 +670,10 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
   const text = d?.choices?.[0]?.message?.content;
   if (typeof text !== "string") return { verdict: "unrelated", supersedes: "unknown", confidence: 0, reason: "", evidence: "", malformed: true };
   const parsed = parseJudgement(text);
-  const j = parsed.supersedes === "unknown" ? parsed : { ...parsed, evidenceFound: evidenceIn(parsed.evidence, parsed.supersedes === "newer" ? newer.content : older.content) };
+  const j = parsed.supersedes === "unknown" ? parsed
+    : { ...parsed, evidenceFound: parsed.supersedes === "newer" ? evidenceIn(parsed.evidence, newer.content, older.content) : evidenceIn(parsed.evidence, older.content, newer.content) };
   const tokens = d.choices?.[0]?.logprobs?.content;
-  if (!logprobs || j.malformed || !Array.isArray(tokens)) return j;
+  if (!asked || j.malformed || !Array.isArray(tokens)) return j;
   const verdict = valueDistribution(text, tokens, "verdict", VERDICTS);
   const supersedes = valueDistribution(text, tokens, "supersedes", ["A", "B", "unknown"] as const);
   return verdict || supersedes ? { ...j, probabilities: { ...(verdict ? { verdict } : {}), ...(supersedes ? { supersedes } : {}) } } : j;

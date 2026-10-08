@@ -401,6 +401,30 @@ console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_M
          "a judge call asking for logprobs from an endpoint that refuses them with a 400 still returns the judgement, without probabilities");
   assert(JSON.stringify(asked) === JSON.stringify([true, false, false]), `…asked once with logprobs, then without, and without for the rest of the process (${JSON.stringify(asked)})`);
   strict.stop();
+
+  // Review pass 1: a 400 the request gets with or without logprobs (a
+  // context-length overflow) is about the request, so the endpoint is still
+  // asked with logprobs next time; and any other status is no retry at all.
+  const seen: { logprobs: boolean; status: number }[] = [];
+  let status = 400;
+  const fussy = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { logprobs?: boolean };
+      seen.push({ logprobs: body.logprobs === true, status });
+      return Response.json({ error: { message: "maximum context length exceeded" } }, { status });
+    },
+  });
+  const fussyCfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${fussy.port}/v1`, OB1_METADATA_MODEL: META_MODEL });
+  const statusOf = (p: Promise<unknown>) => p.then(() => 0, (e) => (e as { status?: number }).status ?? -1);
+  assert(await statusOf(judgePair(older, newer, fussyCfg, undefined, undefined, { logprobs: 10 })) === 400 && await statusOf(judgePair(older, newer, fussyCfg, undefined, undefined, { logprobs: 10 })) === 400,
+         "a 400 the retry without logprobs gets too is the caller's error, twice");
+  assert(JSON.stringify(seen.map((x) => x.logprobs)) === JSON.stringify([true, false, true, false]), `…and the second call still asks with logprobs: one overflowing pair does not move the rest of the pass onto the written number (${JSON.stringify(seen)})`);
+  seen.length = 0;
+  status = 503;
+  assert(await statusOf(judgePair(older, newer, fussyCfg, undefined, undefined, { logprobs: 10 })) === 503 && JSON.stringify(seen.map((x) => x.logprobs)) === JSON.stringify([true]),
+         "a 503 is not retried without logprobs: only a 400 can be the field refused");
+  fussy.stop();
 }
 
 console.log("\n[10] A long thought is extracted in windows of the metadata model's size, each call budgeted, and the windows' answers merged (SMD-1879)");

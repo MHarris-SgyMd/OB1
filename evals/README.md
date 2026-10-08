@@ -3615,45 +3615,53 @@ blocks, 39 relates_to), 60 pointer pairs, 120 candidates — 434 pairs. Ollama
 0.33.3 on this Mac, temperature 0, three at a time.
 
 **What a verdict is scored against.** An accepted proposal and a pointer pair
-are supersessions; a rejected proposal is not (most were two tickets, SMD-2448);
-a linked pair is related and is neither unrelated nor a supersession.
+are supersessions, which the judge is right to propose (p3's "conflict", p4's
+"outdates" or "duplicate"); a rejected proposal is not (most were two tickets,
+SMD-2448); a linked pair is related and is neither unrelated nor proposed.
 
 | qwen2.5:7b, 434 pairs | p3 (agree / unrelated / conflict) | p4 (five verdicts, "outdates") |
 |---|---|---|
 | rejected proposals proposed again | 119 of 126 | 2 of 126 |
 | linked pairs read as related | 46 of 126 | 106 of 126 |
 | pointer + accepted pairs proposed (outdates or duplicate) | 3 of 62 | 22 of 62 |
-| supersessions naming a side | 14 of 128 (11%) | 4 of 4, 3 quoting words found in that side |
+| proposals naming a side | 14 of 128 (11%) | 24 of 24: 20 duplicates (the newer, or the operator's), 4 outdates — 3 quoting words found in that side and not the other |
 | the written confidence | 6 values, 0.80 on 160 | 5 values, 0.80 on 368 |
-| AUROC, is it a supersession: written number | 0.12 | 0.61 |
-| AUROC, is it a supersession: token P(outdates or duplicate) | — | **0.92** |
+| AUROC, is it a supersession, over all 314 labelled pairs: written number | 0.12 | 0.61 |
+| …the same: token P(outdates or duplicate) | — | **0.92** |
+| AUROC among the pairs it proposes, by the score it records | 0.77 (127 proposed, 3 true) | 0.84 (24 proposed, 2 false: too few to measure) |
 | candidates the pass would record | 1 of 120 | 0 of 120 |
 | median seconds per pair | 7.5 | 9.2 |
 
-The p3 confidence was a constant on the pairs it proposed (AUROC 0.53 among
-the proposals, a coin) — 0.80 was the model's answer, not a parse default — and
-its token probability was no better (0.39): p3 was sure of the wrong thing. An
+The 0.92 ranks every labelled pair, proposed or not, so most of it is the
+verdict itself; what `--min-confidence` cuts is the ranking among the
+proposals, and p4 on the 7B makes only two false ones here — too few to say
+how well the token score ranks them. On the p3 side, its confidence was a
+constant on the reviewed proposals (AUROC 0.53 among them, a coin) — 0.80 was
+the model's answer, not a parse default — and its token probability was no
+better (0.39): p3 was sure of the wrong thing. An
 intermediate draft that kept the word "conflict" for the supersession cut the
 false proposals to 8 of 126 but called 2 of the 62 true ones a conflict: the pairs that
 make a thought out of date on this brain are mostly a later state of the same
 thing — a checkpoint and the final summary, a "state of the record" note and
 the release that followed — and the 7B reads "conflict" as contradiction
-only. "outdates" names both. The 7B's commonest answer for a pointer pair is
-"duplicate" (20 of 60, against 0 of 252 negatives), so p4 proposes a duplicate
-too, the newer standing.
+only. "outdates" names both. The 7B answered "duplicate" for 20 of the 60
+pointer pairs (and "related" for 32), against 0 of the 252 negatives, so p4
+proposes a duplicate too, the newer standing — or the operator's, when an
+agent's newer thought duplicates what the operator wrote.
 
 | p4, 140 of the pairs (all 62 true, 40 rejected, 38 linked) | qwen2.5:7b | qwen3.8:27b |
 |---|---|---|
 | pointer + accepted pairs proposed | 22 of 62 | 60 of 62 |
 | rejected proposals proposed | 0 of 40 | 6 of 40 |
 | linked pairs proposed | 0 of 38 | 5 of 38, all duplicate_of |
-| supersessions naming the right side, where labelled | 2 of 2 | 15 of 20 (15 of 18 with the quote found) |
+| proposals naming the right side, where labelled | 22 of 22 | 55 of 60 (outdates with the quote found: 15 of 18) |
 | token confidence | yes | no — Ollama returns the first token's logprobs only for this model, so the pass records the written number (0.95 on 129 of 140) |
+| AUROC among the pairs it proposes, by the score it records | 0 false of 22 | 0.35 (71 proposed, 11 false): the written number ranks them worse than a coin |
 | seconds per pair, three at a time | ≈ 2.8 | ≈ 12.5 |
 
-So the 27B finds nearly every supersession for a few false ones and costs four
-times the time; the 7B proposes almost nothing false and ranks what it
-proposes. `OB1_JUDGE_MODEL` is the operator's choice (SMD-1901); the default
+So the 27B finds nearly every supersession for a few false ones, costs four
+times the time, and records a confidence that orders its proposals no better
+than chance; the 7B proposes almost nothing false. `OB1_JUDGE_MODEL` is the operator's choice (SMD-1901); the default
 stays the metadata model.
 
 Caveats:

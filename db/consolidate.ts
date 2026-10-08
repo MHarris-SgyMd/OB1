@@ -8,7 +8,8 @@
  * extracted entities, `consolidation_candidates()` names the older thoughts
  * that share a subject with it and sit nearest in vector space; each pair goes
  * to the metadata model once (server-portable/consolidate.ts holds the prompt
- * and the parsing rules), and a CONFLICT verdict becomes a pending row in
+ * and the parsing rules), and an OUTDATES or DUPLICATE verdict (prompt 4,
+ * SMD-1873; p3's CONFLICT) becomes a pending row in
  * `supersession_proposals`. Nothing here writes `thoughts`. An operator — or a
  * review agent, SMD-950 — reads the queue and accepts or rejects one proposal
  * at a time; acceptance writes `thoughts.supersedes` through
@@ -99,11 +100,11 @@
  * both sides of which have a vector, with no live or failed claim here — a
  * failed claim is --retry-failed's, 015's rule), then judges the thought's
  * pairs again — up to --k model calls per re-pooled thought, since its
- * agree/unrelated pairs left no record, plus one per stale pair the top-k
- * left out that still meets the candidate rule, judged anyway. A conflict at the
- * floor REPLACES the row in place (063:
- * record_supersession_proposal, back to pending under this key); agree,
- * unrelated or a conflict under the floor SETTLES it — the row is rejected
+ * unrelated, related and evolves pairs left no record, plus one per stale
+ * pair the top-k left out that still meets the candidate rule, judged anyway.
+ * An outdates or duplicate at the floor REPLACES the row in place (063:
+ * record_supersession_proposal, back to pending under this key); unrelated,
+ * related, evolves, or either under the floor SETTLES it — the row is rejected
  * with a note beginning `settled by the pass:` (the marker rebuild_derived
  * reads: a later text move under a pass-settled row sets it stale again,
  * where a person's rejection stands for ever) and its lineage row rewritten
@@ -149,7 +150,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderDown, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import {
-  actorKindOf, consolidateKey, judgedRecipe, judgePair, passSettledNote, proposalConfidence, proposalReason, proposalVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
+  actorKindOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalReason, proposalVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
@@ -986,7 +987,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
   let llmMs = 0;
-  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
+  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
     // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
     // 067: the stale rows this run met — replaced in place (a conflict found
@@ -1160,14 +1161,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       totals.pairs++;
       if (j.malformed) {
         totals.malformed++;
-        problems.push(`pair with ${c.older_id}: the model's answer was not JSON of the expected shape${staleRow ? " (its stale proposal stands)" : ""}`);
+        problems.push(`pair with ${c.older_id}: ${j.unknownVerdict !== undefined ? `the model answered the verdict "${j.unknownVerdict}", not one of prompt ${CONSOLIDATE_PROMPT_VERSION}'s five (${VERDICTS.join(", ")}) — a model keeping to an older prompt's words` : "the model's answer was not JSON of the expected shape"}${staleRow ? " (its stale proposal stands)" : ""}`);
         continue;
       }
       totals[j.verdict]++;
-      const verdict = proposalVerdict(j);
+      // Review pass 1: a duplicate of the operator's thought by another writer leaves the operator's standing.
+      const verdict = proposalVerdict(j, { older: actorKindOf(older.metadata), newer: actorKindOf(row.metadata) });
       // SMD-1873: the token probability of a proposing verdict when the
       // endpoint returned one, else the number the model wrote.
       const scored = proposalConfidence(j);
+      if (verdict !== null) totals[scored.source === "token" ? "tokenScored" : "statedScored"]++;
       let proposalId: string | null = null;
       let recorded: "proposed" | "under-confidence" | "already" | "replaced" | "settled" | null = null;
       if (verdict === null || scored.confidence < MIN_CONFIDENCE) {
@@ -1703,7 +1706,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     `  ${totals.proposed} proposal(s) recorded (${totals.undirected} without a direction)` +
       `${totals.underConfidence ? `, ${totals.underConfidence} under confidence ${MIN_CONFIDENCE} not recorded` : ""}` +
       `${totals.alreadyProposed ? `, ${totals.alreadyProposed} pair(s) already had a proposal` : ""}` +
-      `${totals.malformed ? `, ${totals.malformed} answer(s) not JSON of the expected shape` : ""}`
+      `${totals.malformed ? `, ${totals.malformed} answer(s) not JSON of the expected shape` : ""}` +
+      // SMD-1873: which scale the floor cut on — the model's token probability or the number it wrote.
+      `${totals.tokenScored + totals.statedScored ? `; confidence from token probabilities on ${totals.tokenScored}, from the number the model wrote on ${totals.statedScored}` : ""}`
   );
   if (totals.pairs > 0) out(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
   // 067: what became of the stale proposals this run met (a line only when it met one).

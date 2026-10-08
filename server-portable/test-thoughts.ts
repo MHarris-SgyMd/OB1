@@ -19,7 +19,7 @@ import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TY
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalReason, proposalVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
@@ -591,7 +591,9 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(["unrelated", "related", "evolves", "duplicate", "outdates"].every((v) => parseJudgement(`{"verdict":"${v}","supersedes":"unknown","confidence":0.6}`).verdict === v), "p4 reads each of its five verdicts (SMD-1873)");
   assert(parseJudgement('{"verdict":"maybe","supersedes":"A","confidence":0.9}').malformed, "a verdict outside the five is malformed, not coerced");
   assert(parseJudgement('{"verdict":"agree","supersedes":"unknown","confidence":0.9}').malformed, "…and so is p3's \"agree\", which p4 no longer asks for");
-  assert(parseJudgement('{"verdict":"conflict","supersedes":"B","confidence":0.9}').malformed, "…and p3's \"conflict\", which p4 calls \"outdates\"");
+  const p3Word = parseJudgement('{"verdict":"conflict","supersedes":"B","confidence":0.9}');
+  assert(p3Word.malformed && p3Word.unknownVerdict === "conflict", "…and p3's \"conflict\", which p4 calls \"outdates\" — the word kept, so the worker can name it");
+  assert(parseJudgement("not json").unknownVerdict === undefined && parseJudgement('{"verdict":7}').unknownVerdict === undefined, "an answer with no verdict word names none");
   // SMD-1873: the evidence rides a directed supersession only, one line, and is
   // found only in the text of the side it names.
   const quoted = parseJudgement('{"verdict":"outdates","supersedes":"B","evidence":"  the monthly plan\\nis withdrawn ","confidence":0.9,"reason":"r"}');
@@ -601,6 +603,11 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
          "evidence is found through case, a line break and wrapping quotes, and a quote the text lacks is not");
   assert(!evidenceIn("is", "this is it") && !evidenceIn("", "anything"), "a quote under three characters proves nothing");
   assert(!evidenceIn("tail", "x".repeat(6000) + " tail"), "evidence past the characters the judge was sent is not found");
+  // Review pass 1: words both sides hold say nothing about which is later; a
+  // model's straight quotes, dashes and an ellipsis around a quote still match.
+  assert(evidenceIn("shipped in 1.6", "it shipped in 1.6", "planned for 1.5") && !evidenceIn("the release", "the release shipped", "the release is planned"),
+         "a quote also in the other side is not evidence for either");
+  assert(evidenceIn("…it's done - finally", "Yes: it’s done — finally.") , "curly quotes, a long dash and a leading ellipsis are read as the model's plain forms");
   assert(parseJudgement("I cannot say.").malformed && parseJudgement("").malformed, "prose and an empty answer are malformed");
   const long = parseJudgement(`{"verdict":"outdates","supersedes":"unknown","confidence":0.6,"reason":"${"x\u001b[2K ".repeat(200)}"}`);
   assert(long.reason.length <= 400 && !long.reason.includes("\u001b"), "the reason is clipped to 400 characters with control characters stripped");
@@ -637,18 +644,40 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(valueDistribution('{"verdict": "con"}', [lpTok('{"verdict": "'), lpTok("con", [["con", 1]]), lpTok('"}')], "verdict", ["conflict", "continues"] as const) === null,
          "a first token two words share counts toward neither");
   assert(valueDistribution('{"reason": "x"}', [lpTok('{"reason": "x"}')], "verdict", VERDICTS) === null, "a missing field is no distribution");
+  // Review pass 1: the edges of the token reader.
+  const bare: TokenLogprob[] = toks.map((t) => ({ token: t.token, logprob: t.logprob }));
+  assert(valueDistribution(answer, bare, "verdict", VERDICTS) === null, "a token with no alternatives is no distribution — normalised, its own probability alone would always read 1");
+  const sampled = [...toks]; sampled[3] = { token: ' "out', logprob: Math.log(0.15), top_logprobs: [{ token: ' "rel', logprob: Math.log(0.5) }, { token: ' "ev', logprob: Math.log(0.3) }] };
+  const sd2 = valueDistribution(answer, sampled, "verdict", VERDICTS);
+  assert(sd2 !== null && sd2.p.outdates === 0.1579 && sd2.p.related === 0.5263, `the chosen token counts when the top list left it out (${JSON.stringify(sd2)})`);
+  const foreign = [...toks]; foreign[3] = lpTok(' "out', [[' "out', 0.5], ['xyout', 0.4], [' "ev', 0.1]]);
+  assert(valueDistribution(answer, foreign, "verdict", VERDICTS)?.p.outdates === 0.8333, "an alternative that does not begin with the lead-in is not this field's value, though its tail names a word");
+  const whole = '{"verdict": "outdates", "x": 1}';
+  const wholeToks = [lpTok('{"verdict": '), lpTok('"outdates"', [['"outdates"', 0.7], ['"evolves"', 0.3]]), lpTok(', "x": 1}')];
+  assert(JSON.stringify(valueDistribution(whole, wholeToks, "verdict", VERDICTS)?.p) === JSON.stringify({ unrelated: 0, related: 0, evolves: 0.3, duplicate: 0, outdates: 0.7 }), "a token holding the whole value and its closing quote is read as that word");
+  const spaced = '{"verdict":" outdates"}';
+  const spacedToks = [lpTok('{"verdict":"'), lpTok(" out", [[" out", 0.9], [" rel", 0.1]]), lpTok('dates"}')];
+  assert(valueDistribution(spaced, spacedToks, "verdict", VERDICTS)?.p.outdates === 0.9, "a space inside the quote is read past, as the parser trims it");
 
   // SMD-1873: what a judgement proposes, and at what confidence.
   const jg = (verdict: Judgement["verdict"], supersedes: Judgement["supersedes"], probabilities?: Judgement["probabilities"]): Judgement => ({ verdict, supersedes, confidence: 0.8, reason: "", evidence: "", malformed: false, ...(probabilities ? { probabilities } : {}) });
   assert(proposalVerdict(jg("outdates", "older")) === "older_supersedes_newer" && proposalVerdict(jg("outdates", "unknown")) === "conflict_undirected",
          "outdates proposes in the direction named, or undirected");
   assert(proposalVerdict(jg("duplicate", "unknown")) === "newer_supersedes_older", "a duplicate is proposed too, the newer standing");
+  assert(proposalVerdict(jg("duplicate", "unknown"), { older: "operator", newer: "agent" }) === "older_supersedes_newer"
+         && proposalVerdict(jg("duplicate", "unknown"), { older: "operator", newer: "operator" }) === "newer_supersedes_older"
+         && proposalVerdict(jg("duplicate", "unknown"), { older: "agent", newer: "operator" }) === "newer_supersedes_older",
+         "…unless the operator wrote the older and another writer the newer: the operator's stands (SMD-1726's rule, review pass 1)");
+  assert(proposalReason(jg("duplicate", "unknown")) === "duplicate — the two state the same claims" && proposalReason({ ...jg("duplicate", "unknown"), reason: "same" }) === "duplicate — same"
+         && proposalReason({ ...jg("outdates", "newer"), reason: "later" }) === "later", "a duplicate's stored reason says so first; another verdict's is the judge's");
   assert(["unrelated", "related", "evolves"].every((v) => proposalVerdict(jg(v as Judgement["verdict"], "unknown")) === null), "unrelated, related and evolves propose nothing");
   assert(proposalVerdict({ ...jg("outdates", "newer"), malformed: true }) === null, "a malformed answer proposes nothing");
   const dist = { p: { unrelated: 0.05, related: 0.2, evolves: 0.1, duplicate: 0.25, outdates: 0.4 }, covered: 0.9 };
   assert(JSON.stringify(proposalConfidence(jg("outdates", "newer", { verdict: dist }))) === JSON.stringify({ confidence: 0.65, source: "token" }),
          "with token probabilities the confidence is the mass on outdates and duplicate together");
   assert(JSON.stringify(proposalConfidence(jg("outdates", "newer"))) === JSON.stringify({ confidence: 0.8, source: "stated" }), "without them it is the number the model wrote");
+  assert(JSON.stringify(proposalConfidence(jg("outdates", "newer", { verdict: { ...dist, covered: 0.4 } }))) === JSON.stringify({ confidence: 0.8, source: "stated" }),
+         "…and so it is when the alternatives naming a verdict held under half the token's mass");
 
   // The display cleaner: control characters and ESC go, tab/newline/return stay.
   // ESC goes and the sequence's printable tail stays as text — "[2A" moves nothing without it.

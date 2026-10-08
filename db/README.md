@@ -2327,13 +2327,19 @@ with its confidence, the judge's one-sentence reason (what a reviewer reads
 first), the cosine, and the pass key `consolidate:<model>@p<prompt version>` —
 the judge model on the row as 021 puts the embedding model beside the vector.
 The confidence is the model's own token probability of `outdates` or
-`duplicate` when the endpoint returns logprobs (Ollama does for qwen2.5:7b;
-it told a true supersession from a false one at AUROC 0.92 where the number
-the model wrote was 0.80 on most pairs), else the number it wrote; the
-proposal's recipe in `derivations` says which (`judged.confidence_source`),
-with the judge's verdict word and whether its quote was found in the side it
-named. An endpoint that refuses `logprobs` with a 400 is asked again without
-it for the rest of the run. `evals/eval-judge.ts` measures all of this on a
+`duplicate` when the endpoint returns logprobs (Ollama does for qwen2.5:7b,
+where the number the model wrote was 0.80 on most pairs; over every labelled
+pair the token score told a supersession from the rest at AUROC 0.92, though
+the 7B's proposals held too few false ones to measure how it ranks them),
+else the number it wrote — also when the alternatives naming a verdict held
+under half the token's mass. A duplicate of the operator's thought by another
+writer is proposed with the operator's standing. The proposal's recipe in
+`derivations` says which source (`judged.confidence_source`), with the judge's
+verdict word, its token distributions, and whether its quote was found in the
+side it named and not the other; the run summary counts proposals scored each
+way. An endpoint that refuses `logprobs` with a 400 and then answers without
+it is asked without it for the rest of the run; a 400 it gets either way is
+the pair's own. `evals/eval-judge.ts` measures all of this on a
 brain's own labels. The worker's agent id rides along as 016's mentions carry
 theirs.
 

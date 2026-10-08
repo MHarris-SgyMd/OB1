@@ -5270,19 +5270,22 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       let answer: Record<string, unknown>;
       if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "outdates", supersedes: "B", evidence: (b.match(/\S*annually\S*/)?.[0] ?? ""), confidence: 0.92, reason: "monthly billing against annual" };
       else if (/blue/.test(a) && /green/.test(b)) answer = { verdict: "outdates", supersedes: "unknown", confidence: 0.7, reason: "two brand colours, neither says which stands" };
-      else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "outdates", supersedes: "B", confidence: 0.3, reason: "guessing" };
+      else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "outdates", supersedes: "B", confidence: 0.9, reason: "guessing" };
       else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "evolves", supersedes: "unknown", confidence: 0.8, reason: "the later deploy note follows the earlier" };
       else answer = { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
       const content = JSON.stringify(answer);
-      // SMD-1873: the billing pair's answer comes with token probabilities when
-      // the pass asks — the verdict's first token among three alternatives — so
-      // the proposal records their mass on outdates and duplicate (0.90), not
-      // the 0.92 the answer states. The others come without, as from an
-      // endpoint that returns none, and record what they state.
-      if (body.logprobs && /monthly/.test(a) && /annually/.test(b)) {
+      // SMD-1873: two answers come with token probabilities when the pass asks —
+      // the verdict's first token among three alternatives. The billing pair's
+      // put 0.90 on outdates and duplicate, so it records 0.90, not the 0.92 it
+      // states; the lowconf pair's put 0.30 there though it states 0.9, so the
+      // floor sets it aside on the token score (review pass 1). The others come
+      // without, as from an endpoint that returns none, and record what they state.
+      const tokenTop: [string, number][] | null = /monthly/.test(a) && /annually/.test(b) ? [["out", 0.7], ["dup", 0.2], ["rel", 0.1]]
+        : /lowconf/.test(a) && /lowconf/.test(b) ? [["out", 0.3], ["rel", 0.6], ["ev", 0.1]] : null;
+      if (body.logprobs && tokenTop) {
         const at = content.indexOf('"verdict":"') + '"verdict":"'.length;
         const tok = (token: string, top: [string, number][] = [[token, 1]]) => ({ token, logprob: Math.log(top[0][1]), top_logprobs: top.map(([t, p]) => ({ token: t, logprob: Math.log(p) })) });
-        const tokens = [tok(content.slice(0, at)), tok(content.slice(at, at + 3), [["out", 0.7], ["dup", 0.2], ["rel", 0.1]]), tok(content.slice(at + 3))];
+        const tokens = [tok(content.slice(0, at)), tok(content.slice(at, at + 3), tokenTop), tok(content.slice(at + 3))];
         return Response.json({ choices: [{ message: { content }, logprobs: { content: tokens } }], model: body.model });
       }
       return Response.json({ choices: [{ message: { content } }], model: body.model });
@@ -5411,8 +5414,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
          `the first run judges ten thoughts and fails the one whose pair drew prose (exit ${first.code}: ${first.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
   assert(/5 pair\(s\) judged — 0\.45 per thought judged, 455 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 0 unrelated, 0 related, 1 evolves, 0 duplicate, 3 outdates/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
          `…five pairs (one per newer thought with an older neighbour), one malformed, and the six older thoughts with nothing older to compare against (${first.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
-  assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 under confidence 0\.5 not recorded/.test(first.out),
-         `…two proposals recorded, one undirected, one too weak to record (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
+  assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 under confidence 0\.5 not recorded.*; confidence from token probabilities on 2, from the number the model wrote on 1/.test(first.out),
+         `…two proposals recorded, one undirected, one too weak to record on its token score though it states 0.9, and the floor cut two on token probabilities and one on the written number (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
   assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
   assert(modelsSeen.size === 1 && modelsSeen.has("stub-judge"), `every judge request named the metadata model, OB1_JUDGE_MODEL being unset (${[...modelsSeen].join(", ")})`);
   const callsAfterFirst = calls;
