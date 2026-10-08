@@ -1962,7 +1962,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const paid = stubBodies.filter((b) => b.includes("[13d] a capture key")).length;
     assert(paid === 0, `…and no refused capture reached either model call (${paid} stub requests carried one)`);
     const own = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] the capture key's note", source: "linear", metadata: { probe_note: TKT } } })));
-    assert(own !== undefined && stubBodies.some((b) => b.includes("[13d] the capture key's note")), "…while its own note under a key of its own lands, through the model stub (so the check above can fail)");
+    assert(own !== undefined && stubBodies.some((b) => b.includes("[13d] the capture key's note")), "…while its own note, under a metadata key no reader reads, lands through the model stub (so the check above can fail)");
     const [head] = await sql`SELECT head_id::text AS id, status_type FROM ob1_ticket_head WHERE issue = ${TKT}`;
     const states = await sql`SELECT thought_id::text AS id, status_type, open FROM node_state(${sql.array([ticketRow, note], "TEXT")}::uuid[])`;
     const [refs] = await sql`SELECT ticket_references_settled(content, metadata) AS settled FROM thoughts WHERE id = ${summary}::uuid`;
@@ -1979,14 +1979,16 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const DONE = "TKT-7001", LIVE = "TKT-8001";
     await call("capture_thought", { content: `[13d] ${DONE} — the writer's done ticket`, source: "linear", metadata: { issue: DONE, status: "Done", status_type: "completed" } });
     const T = `[13d] ${LIVE} — a live ticket's text\n\nStatus: In Progress`;
-    const squat = await rpc("tools/call", { name: "capture_thought", arguments: { content: T, metadata: { ticket: DONE } } });
-    assert(squat.result?.isError === true && sc(squat)?.problem === "ticket_key" && sc(squat)?.key === "ticket", `the capture key's squat on ${DONE} is refused, naming \`ticket\` (${textOf(squat).slice(0, 90)})`);
+    const squatOn = (content: string) => rpc("tools/call", { name: "capture_thought", arguments: { content, metadata: { ticket: DONE } } });
+    const refusedTicket = (r: Awaited<ReturnType<typeof rpc>>) => r.result?.isError === true && sc(r)?.problem === "ticket_key" && sc(r)?.key === "ticket";
+    const squat = await squatOn(T);
+    assert(refusedTicket(squat), `the capture key's squat on ${DONE} is refused, naming \`ticket\` (${textOf(squat).slice(0, 90)})`);
     const keyRow = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: T } })));
     const merged = idIn(await call("capture_thought", { content: T, source: "linear", metadata: { issue: LIVE, status: "In Progress", status_type: "started" } }));
     // Without the `issue` facet: the key squats a plain text, and a writer's
     // plain capture of it lands on the key's row.
     const P = "[13d] a plain text the capture key sent first";
-    const plainSquat = await rpc("tools/call", { name: "capture_thought", arguments: { content: P, metadata: { ticket: DONE } } });
+    const plainSquat = await squatOn(P);
     const plainKey = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: P } })));
     const plain = idIn(await call("capture_thought", { content: P }));
     assert(keyRow !== undefined && merged === keyRow && plainKey !== undefined && plain === plainKey, `setup: each writer's capture lands on the capture key's row (${keyRow} ${merged}, ${plainKey} ${plain})`);
@@ -1997,7 +1999,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     assert(headOf(LIVE)?.id === keyRow && headOf(LIVE)?.status_type === "started" && headOf(DONE)?.status_type === "completed"
         && readOf(keyRow)?.status_type === "started" && readOf(keyRow)?.open === true,
       `the merged row is ${LIVE}'s head and reads its own started status, and ${DONE} still reads done (${JSON.stringify({ heads, read })})`);
-    assert(plainSquat.result?.isError === true && sc(plainSquat)?.key === "ticket" && readOf(plain) !== undefined && readOf(plain)?.status_type === null,
+    assert(refusedTicket(plainSquat) && readOf(plain) !== undefined && readOf(plain)?.status_type === null,
       `…and the writer's plain thought, its squat refused, reads no ticket's status (${textOf(plainSquat).slice(0, 60)} ${JSON.stringify(readOf(plain))})`);
   }
 
