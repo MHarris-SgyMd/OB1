@@ -119,6 +119,7 @@ import { hostname } from "node:os";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
+import { STALE_AFTER_INTERVALS } from "../server-portable/brain-info.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
 import { databaseUnavailable, outageWait, waitOut } from "./worker-bootstrap.ts";
@@ -228,7 +229,7 @@ async function readsQueryLog(sql: SQL): Promise<"yes" | "denied" | "missing"> {
   }
 }
 
-/** The claim followers stamping outside this scheduler, fresh: they do not yield to a live call. */
+/** The claim followers stamping outside this scheduler, fresh as brain-info.ts reads a heartbeat: they do not yield to a live call. */
 async function followersOutside(sql: SQL): Promise<string[]> {
   const rows = (await sql`
     SELECT key, value, extract(epoch FROM now() - updated_at)::float8 AS age_s FROM ob1_config
@@ -236,7 +237,7 @@ async function followersOutside(sql: SQL): Promise<string[]> {
   return rows.filter((r) => {
     try {
       const v = JSON.parse(r.value) as { every_s?: number; ended?: boolean };
-      return !v.ended && typeof v.every_s === "number" && Number(r.age_s) < v.every_s * 3;
+      return !v.ended && typeof v.every_s === "number" && Number(r.age_s) <= v.every_s * STALE_AFTER_INTERVALS;
     } catch { return false; }
   }).map((r) => r.key);
 }
@@ -547,9 +548,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       // and a live call in one poll would otherwise read as the wake alone.
       const ended = running.find((p) => p.settled);
       if (ended) {
-        // A pass that threw rejects out of stopPasses, after the others stop.
+        // A pass that threw rejects out of stopPasses, after the others stop,
+        // so past it the pass returned a code; a 0 unasked is no success.
         await stopPasses(true);
-        const code = ended.code === null || ended.code === 0 ? 1 : ended.code;
+        const code = ended.code || 1;
         err(`  ${ended.name} ended by itself (exit ${ended.code}) — the sleep stops`);
         return { pass: ended.name, code, started: ended.stop !== null };
       }
