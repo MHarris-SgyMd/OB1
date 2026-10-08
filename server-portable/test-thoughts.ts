@@ -690,12 +690,12 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
          "related, evolves and duplicate are relations");
   assert(relationVerdict(jg("unrelated", "unknown")) === null && relationVerdict(jg("outdates", "newer")) === null && relationVerdict({ ...jg("related", "unknown"), malformed: true }) === null,
          "an unrelated pair, an outdates (a proposal's) and a malformed answer record no relation — the pass closes the pair's");
-  assert(JSON.stringify(relationConfidence(jg("duplicate", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.25, source: "token" })
-         && JSON.stringify(relationConfidence(jg("related", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.2, source: "token" }),
-         "a relation's confidence is the token probability of its own word");
-  assert(JSON.stringify(relationConfidence(jg("related", "unknown"))) === JSON.stringify({ confidence: 0.8, source: "stated" })
+  assert(JSON.stringify(relationConfidence(jg("duplicate", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.25, mass: 0.55, source: "token" })
+         && JSON.stringify(relationConfidence(jg("related", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.2, mass: 0.55, source: "token" }),
+         "a relation stores the token probability of its own word, and the floor reads the three relation words' mass together — related 0.2 is a relation the model holds at 0.55 (review pass 1)");
+  assert(JSON.stringify(relationConfidence(jg("related", "unknown"))) === JSON.stringify({ confidence: 0.8, mass: 0.8, source: "stated" })
          && relationConfidence(jg("related", "unknown", { verdict: { ...dist, covered: 0.4 } })).source === "stated",
-         "…else the number the model wrote, also under half the token's mass");
+         "…else both are the number the model wrote, also under half the token's mass");
 
   // The display cleaner: control characters and ESC go, tab/newline/return stay.
   // ESC goes and the sequence's printable tail stays as text — "[2A" moves nothing without it.

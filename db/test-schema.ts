@@ -12497,9 +12497,21 @@ console.log("\n[73] Migration 084: the consolidation judge's relations — a `re
   }
   assert(/thought_facets_relation_active_uniq/.test(await insert({ ...ok, target: older, relation: "evolves" })), "a second active relation on one pair is refused by the index, whatever its word");
   assert((await insert({ relation: "duplicate", target: newer, judge_key: "k" }, older)) === "", "the other direction is another pair: the older thought may hold its own relation to the newer");
-  assert((await refused(`UPDATE thought_facets SET payload = payload || '{"relation": "nonsense"}'::jsonb WHERE id = $1::uuid`, [row.id])) !== "", "an UPDATE that is not a close is judged like a write");
+  // Review pass 1: a relation is written once and only closed.
+  const ONCE = /a relation is written once and only closed/;
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET payload = payload || '{"relation": "evolves"}'::jsonb WHERE id = $1::uuid`, [row.id])), "a relation's word is not rewritten — a replace closes it and writes another");
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET payload = payload || '{"confidence": 1}'::jsonb WHERE id = $1::uuid`, [row.id])), "…nor its confidence");
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET thought_id = $2::uuid WHERE id = $1::uuid`, [row.id, older])), "…nor is it moved to another thought");
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET valid_until = now(), created_at = now() - interval '1 day' WHERE id = $1::uuid`, [row.id])), "a close that changes anything else is refused");
   assert((await refused(`UPDATE thought_facets SET valid_until = now() WHERE id = $1::uuid`, [row.id])) === "", "a pure close passes");
-  assert((await insert({ ...ok, target: older })) === "", "once closed, the pair takes a new active relation; the closed row is history");
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET valid_until = NULL WHERE id = $1::uuid`, [row.id])), "a closed relation is not re-opened");
+  assert(/a relation is written standing/.test(await insert({ ...ok, target: older }).then(() => refused(`INSERT INTO thought_facets (thought_id, kind, payload, valid_until) VALUES ($1::uuid, 'relation', $2::jsonb, now() + interval '1 day')`, [older, JSON.stringify({ relation: "related", target: newer, judge_key: "k" })]))),
+    "a relation is written standing: a valid_until set at insert, even a future one past the index, is refused");
+  await db.query(`SELECT record_citation($1::uuid, $2::uuid, 'the newer note rests on the older', 'stated')`, [newer, older]);
+  const cit = (await q<{ id: string }>(`SELECT id FROM thought_facets WHERE kind = 'citation' AND thought_id = $1::uuid`, [newer]))[0];
+  if (cit) assert(ONCE.test(await refused(`UPDATE thought_facets SET kind = 'relation', payload = $2::jsonb WHERE id = $1::uuid`, [cit.id, JSON.stringify({ relation: "duplicate", target: older, judge_key: "consolidate:x" })])), "a citation is not turned into a relation — origin judged means the pass wrote it");
+  else assert(false, "a citation to test the kind change with (record_citation)");
+  if (cit) await db.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [cit.id]);  // a citation of the older would refuse its delete below (042's guard)
   await db.exec(`DELETE FROM thought_facets WHERE kind = 'relation'`);
 
   // record_thought_relation: the set per pair.
@@ -12515,13 +12527,20 @@ console.log("\n[73] Migration 084: the consolidation judge's relations — a `re
   const l1 = await lineage(added.id!);
   assert(added.ok && added.action === "added" && e1.length === 1 && e1[0].relation === "evolves" && e1[0].confidence === 0.73 && l1.length === 1 && l1[0].inputs.join() === `${older},${newer}` && l1[0].fps.join() === "fo1,fn1" && l1[0].by === "consolidate:t@p4" && l1[0].recipe.model === "t",
     `added: one active edge at the confidence rounded to two places, its lineage row naming the older then the newer at the fingerprints judged, the pass and the recipe (${JSON.stringify([added, e1, l1])})`);
-  const kept = await rec("evolves", 0.9, "fo2", "fn2");
+  const kept = await rec("evolves", 0.734, "fo2", "fn2");
   const l2 = await lineage(added.id!);
   assert(kept.action === "kept" && kept.id === added.id && (await edges()).length === 1 && l2.length === 1 && l2[0].fps.join() === "fo2,fn2",
-    `kept: the same relation judged again keeps the edge, and its lineage moves to the texts judged now (${JSON.stringify([kept, l2])})`);
+    `kept: the same word by the same pass at the same confidence keeps the edge, and its lineage moves to the texts judged now (${JSON.stringify([kept, l2])})`);
+  // Review pass 1: a relation is never edited, so another key or another
+  // confidence is a replace — the payload always says who judged it and how sure.
+  const otherKey = await rec("evolves", 0.734, "fo3", "fn3", "consolidate:other@p4");
+  const otherConf = await rec("evolves", 0.55, "fo3", "fn3", "consolidate:other@p4");
+  const ek = await edges();
+  assert(otherKey.action === "replaced" && otherConf.action === "replaced" && ek.filter((e) => e.active).length === 1 && ek.find((e) => e.active)?.confidence === 0.55 && (await lineage(otherConf.id!))[0]?.by === "consolidate:other@p4",
+    `the same word under another judge key, or at another confidence, replaces the edge; the standing one carries its own judge and score, its lineage that judge's (${JSON.stringify([otherKey.action, otherConf.action, ek])})`);
   const replaced = await rec("duplicate", 0.81);
   const e3 = await edges();
-  assert(replaced.action === "replaced" && replaced.id !== added.id && e3.length === 2 && e3.filter((e) => e.active).length === 1 && e3.find((e) => e.active)?.relation === "duplicate" && (await lineage(replaced.id!)).length === 1,
+  assert(replaced.action === "replaced" && replaced.id !== added.id && e3.length === 4 && e3.filter((e) => e.active).length === 1 && e3.find((e) => e.active)?.relation === "duplicate" && (await lineage(replaced.id!)).length === 1,
     `replaced: another word closes the edge and writes a new one with its own lineage (${JSON.stringify(e3)})`);
   const closed = await rec(null, null);
   const none = await rec(null, null);
@@ -12535,6 +12554,9 @@ console.log("\n[73] Migration 084: the consolidation judge's relations — a `re
     const m = await refused(sql, params);
     assert(re.test(m), `record_thought_relation refuses ${what} (${m.slice(0, 80)})`);
   }
+  const ghost2 = "00000000-0000-4000-8000-000000000085";
+  const gone = (await one<{ r: { action: string; gone?: boolean } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, 'k', NULL, 'a', 'b', NULL) AS r`, [newer, ghost2])).r;
+  assert(gone.action === "none" && gone.gone === true, `a write against a thought already deleted answers none, not an error the pass would blame on the newer thought (${JSON.stringify(gone)})`);
   const withoutRecipe = await rec("related", null);
   assert(withoutRecipe.action === "added" && (await lineage(withoutRecipe.id!))[0]?.recipe.deterministic === false, "a relation written with no recipe records the undeclared one, as a proposal does");
 

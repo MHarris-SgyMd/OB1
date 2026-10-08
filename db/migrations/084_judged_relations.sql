@@ -21,8 +21,10 @@
 --     one of related | evolves | duplicate; target a thought id that exists
 --     and is not the thought's own; judge_key the pass's key; confidence a
 --     number in 0..1 or absent; origin `judged`, written here. The facet sits
---     on the NEWER thought and names the older as its target. A pure close
---     passes unjudged, as for a link.
+--     on the NEWER thought and names the older as its target. It is written
+--     standing and only ever closed: the one UPDATE admitted sets valid_until,
+--     every other column as it was; a rewrite, a re-open, a move, or another
+--     kind turned into a relation is refused.
 --   * One active relation per pair: a partial unique index; a probe on the
 --     target for "what is related to X".
 --   * derivations: `relation` joins the artifact kinds (064's CHECK and
@@ -31,10 +33,18 @@
 --     that writes the edge (the event-log rule for a comprehended artifact).
 --   * record_thought_relation(newer, older, relation, confidence, judge_key,
 --     agent, older_fp, newer_fp, recipe) — the pass's one write, a set per
---     pair: the same relation active is kept (its lineage moved to the texts
---     judged now), a different one replaces it (the old edge closed), a NULL
---     relation closes the pair's edge (a re-judge said unrelated or
---     outdates, or the score fell under the floor). Returns {ok, action, id}.
+--     pair: the same relation standing, by the same judge key at the same
+--     confidence, is kept (its lineage moved to the texts judged now); any
+--     other replaces it (the old edge closed, a new one written); a NULL
+--     relation closes the pair's edge (a re-judge said unrelated or outdates,
+--     or the score fell under the floor). Both thoughts are locked FOR KEY
+--     SHARE before the facet, so a delete of either waits rather than
+--     deadlocks. Returns {ok, action, id}.
+--   * Grants: none new. The caller needs INSERT on thought_facets — the
+--     structure group's, held since 053 — and the capture group's UPDATE on
+--     it and on thoughts and its derivations writes; the worker group gains
+--     nothing (a grant of INSERT there would let it write citations and links
+--     too — SMD-1873 PR 2 review pass 1).
 --   * The other thought deleted: an AFTER DELETE trigger on thoughts closes
 --     the active relations naming it. The facet's own thought deleted: the
 --     foreign key cascades, and an AFTER DELETE trigger on thought_facets
@@ -102,14 +112,29 @@ BEGIN
       HINT = 'The registered kinds are: citation (migration 042), link (migration 053), relation (migration 084). A new kind is registered by a migration that extends thought_facets_validate.';
   END IF;
 
-  IF NEW.kind = 'relation' THEN
+  IF NEW.kind = 'relation' OR (TG_OP = 'UPDATE' AND OLD.kind = 'relation') THEN
     -- ob1:relation-facet (084)
-    -- A close — record_thought_relation, or the target's delete, setting
-    -- valid_until with the payload as it was — is not re-judged: the target
-    -- may be gone by then. Exactly a close, as for a link (053).
-    IF TG_OP = 'UPDATE' AND OLD.kind = 'relation' AND NEW.thought_id = OLD.thought_id
-       AND NEW.payload = OLD.payload AND OLD.valid_until IS NULL AND NEW.valid_until IS NOT NULL THEN
-      RETURN NEW;
+    -- A relation is written once and only ever closed. The one UPDATE is the
+    -- close — record_thought_relation, or the target's delete, setting
+    -- valid_until with every other column as it was — and it is not re-judged:
+    -- the target may be gone by then. Any other UPDATE of a relation, or one
+    -- turning another kind into a relation, is refused: a rewrite would leave
+    -- its lineage naming what it no longer says, a re-open could stand an edge
+    -- on a deleted thought, and `origin: judged` is to mean the pass wrote it
+    -- (SMD-1873 PR 2 review pass 1).
+    IF TG_OP = 'UPDATE' THEN
+      IF OLD.kind = 'relation' AND NEW.kind = 'relation' AND NEW.thought_id = OLD.thought_id AND NEW.payload = OLD.payload
+         AND NEW.superseded_by IS NOT DISTINCT FROM OLD.superseded_by AND NEW.created_at = OLD.created_at
+         AND OLD.valid_until IS NULL AND NEW.valid_until IS NOT NULL THEN
+        RETURN NEW;
+      END IF;
+      RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = 'a relation is written once and only closed: the one update it takes sets valid_until on a standing relation, every other column as it was',
+        HINT = 'record_thought_relation replaces a relation (the old one closed, a new one written); write a new row rather than edit one.';
+    END IF;
+    IF NEW.valid_until IS NOT NULL OR NEW.superseded_by IS NOT NULL THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = 'a relation is written standing: valid_until and superseded_by are set only by its close';
     END IF;
     v_relation := NEW.payload->>'relation';
     v_target   := NEW.payload->>'target';
@@ -142,12 +167,10 @@ BEGIN
     END IF;
     -- The target must exist when the edge is written; locked FOR KEY SHARE so
     -- a delete of it waits, and then closes the edge (084's trigger on thoughts).
-    IF TG_OP = 'INSERT' OR v_target IS DISTINCT FROM (OLD.payload->>'target') OR OLD.kind IS DISTINCT FROM 'relation' THEN
-      PERFORM 1 FROM thoughts WHERE id = v_target::uuid FOR KEY SHARE;
-      IF NOT FOUND THEN
-        RAISE EXCEPTION USING ERRCODE = 'check_violation',
-          MESSAGE = format('a relation''s target %s is not a thought', v_target);
-      END IF;
+    PERFORM 1 FROM thoughts WHERE id = v_target::uuid FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = format('a relation''s target %s is not a thought', v_target);
     END IF;
     -- Origin is the validator's word, not the writer's: a pass judged it.
     NEW.payload := NEW.payload || jsonb_build_object('origin', 'judged');
@@ -280,7 +303,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_facets_validate() IS
-  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): relation one of related | evolves | duplicate, target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string, confidence a number in 0..1 or absent; writes origin = judged. A pure close of a link or a relation passes unjudged. Migrations 042, 053, 084.';
+  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate, target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, every other column as it was) is admitted — no rewrite, re-open or move, and no other kind turned into a relation. A pure close of a link passes unjudged. Migrations 042, 053, 084.';
 
 -- One active relation per pair (the newer thought, the older target): the
 -- set is the index's, not a writer's discipline. Closed rows are history.
@@ -404,6 +427,8 @@ AS $$
 DECLARE
   v_active    uuid;
   v_relation  text;
+  v_key       text;
+  v_conf      numeric;
   v_id        uuid;
 BEGIN
   IF p_newer IS NULL OR p_older IS NULL OR p_newer = p_older THEN
@@ -421,8 +446,17 @@ BEGIN
   -- One writer per pair at a time: two passes judging the pair at once would
   -- otherwise both find nothing active and the second insert hit the index.
   PERFORM pg_advisory_xact_lock(hashtextextended('ob1:relation:' || p_newer::text || ':' || p_older::text, 0));
+  -- Both thoughts locked FOR KEY SHARE before the facet row: a delete of either
+  -- then waits here, rather than holding its thought while its trigger (the
+  -- close, or the cascade) waits on the facet this call locked — a deadlock
+  -- Postgres would break by aborting one side, the user's delete perhaps
+  -- (review pass 1). A thought already gone answers none: nothing to write.
+  PERFORM 1 FROM thoughts WHERE id IN (p_newer, p_older) ORDER BY id FOR KEY SHARE;
+  IF (SELECT count(*) FROM thoughts WHERE id IN (p_newer, p_older)) < 2 THEN
+    RETURN jsonb_build_object('ok', true, 'action', 'none', 'gone', true);
+  END IF;
 
-  SELECT f.id, f.payload->>'relation' INTO v_active, v_relation
+  SELECT f.id, f.payload->>'relation', f.payload->>'judge_key', (f.payload->>'confidence')::numeric INTO v_active, v_relation, v_key, v_conf
     FROM thought_facets f
    WHERE f.thought_id = p_newer AND f.kind = 'relation' AND f.valid_until IS NULL
      AND f.payload->>'target' = p_older::text
@@ -436,8 +470,13 @@ BEGIN
     RETURN jsonb_build_object('ok', true, 'action', 'closed', 'id', v_active);
   END IF;
 
-  IF v_active IS NOT NULL AND v_relation = p_relation THEN
-    -- Kept: the edge stands, its lineage moved to the texts judged now.
+  IF v_active IS NOT NULL AND v_relation = p_relation AND v_key = p_judge_key
+     AND v_conf IS NOT DISTINCT FROM round(p_confidence, 2) THEN
+    -- Kept: the same word, by the same pass, at the same confidence — the
+    -- edge stands, its lineage moved to the texts judged now. Anything else
+    -- is a replace, since a relation is never edited (the validator): its
+    -- payload says who judged it and how sure, and its lineage is that judge's
+    -- (review pass 1: a kept edge under another key read stale).
     PERFORM ob1_record_derivation('relation', v_active, ARRAY[p_older, p_newer], ARRAY[p_older_fp, p_newer_fp], p_judge_key,
                                   COALESCE(p_recipe, jsonb_build_object('deterministic', false, 'declared', false)), p_agent);
     RETURN jsonb_build_object('ok', true, 'action', 'kept', 'id', v_active);
@@ -460,7 +499,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) IS
-  'The consolidation pass''s write of one judged relation (SMD-1873 PR 2): a `relation` facet on the newer thought naming the older as target, a set per pair under an advisory lock on the pair. The same relation already active is kept (its lineage row moved to the fingerprints judged now); a different one replaces it (the old edge closed with valid_until, the new one inserted); a NULL relation closes the pair''s active edge, or answers none. Each new edge''s lineage row (artifact_kind relation, inputs older and newer at the fingerprints the judge was sent, produced_by the judge key) is written in the same transaction (ob1:relation-lineage-with-its-artifact). Returns {ok, action: added | kept | replaced | closed | none, id}. SECURITY INVOKER: the caller needs INSERT and UPDATE on thought_facets and the writes on derivations (the worker group, 084). Migration 084 / SMD-1873.';
+  'The consolidation pass''s write of one judged relation (SMD-1873 PR 2): a `relation` facet on the newer thought naming the older as target, a set per pair under an advisory lock on the pair, both thoughts locked FOR KEY SHARE first. The same relation already standing, by the same judge key at the same confidence, is kept (its lineage row moved to the fingerprints judged now); anything else replaces it (the old edge closed with valid_until, a new one inserted — a relation is never edited); a NULL relation closes the pair''s standing edge, or answers none; a thought gone answers none. Each new edge''s lineage row (artifact_kind relation, inputs older and newer at the fingerprints the judge was sent, produced_by the judge key) is written in the same transaction (ob1:relation-lineage-with-its-artifact). Returns {ok, action: added | kept | replaced | closed | none, id}. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group). Migration 084 / SMD-1873.';
 
 -- ---------------------------------------------------------------------------
 -- 4. Deletes: the other thought's closes the edge; the facet's own drops its lineage
@@ -501,6 +540,12 @@ DROP TRIGGER IF EXISTS thought_facets_drop_relation_derivation ON thought_facets
 CREATE TRIGGER thought_facets_drop_relation_derivation
   AFTER DELETE ON thought_facets
   FOR EACH ROW WHEN (OLD.kind = 'relation') EXECUTE FUNCTION ob1_drop_relation_derivation();
+
+-- 042's comments named one kind; the catalog's copy follows the three.
+COMMENT ON TABLE thought_facets IS
+  'Typed rows on a thought, three kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), written once by record_thought_relation and only ever closed. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084 / SMD-1712, SMD-1867, SMD-1873.';
+COMMENT ON COLUMN thought_facets.kind IS
+  'The registered kind: citation (042), link (053) or relation (084). A later migration registers another by extending thought_facets_validate, not by a registry table.';
 
 -- ---------------------------------------------------------------------------
 -- 5. supersession_proposals: p4's word on the table

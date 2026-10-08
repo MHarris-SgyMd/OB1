@@ -177,7 +177,7 @@ const FLAGS = {
   list: "optional", accept: "one", reject: "one", direction: "one", note: "one", force: "none",
   status: "none", "dry-run": "none", "retry-failed": "none",
 } as const;
-const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" };
+const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all|relations]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "all", "relations"];
 /**
@@ -943,8 +943,24 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const [{ has_079: HAS_079 }] = (await sql`
     SELECT COALESCE((SELECT prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')), false)
            AND to_regprocedure('consolidation_linked_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_079`) as { has_079: boolean }[];
-  /** 084 (SMD-1873 PR 2): whether the pass stores its related, evolves and duplicate verdicts as relations. */
-  const HAS_084 = await has084();
+  /**
+   * 084 (SMD-1873 PR 2): whether the pass stores its related, evolves and
+   * duplicate verdicts as relations — the migration applied, and this role
+   * able to write them: INSERT on thought_facets is the structure group's,
+   * UPDATE on it and on thoughts (the row locks) and the derivations writes
+   * the capture group's. Without either, the verdicts are counted and the run
+   * says why, rather than failing every thought on a permission error.
+   */
+  const RELATIONS_OFF: string | null = !(await has084())
+    ? "this brain lacks migration 084 (cd db && bun migrate.ts --url <url>)"
+    : await (async () => {
+        const [g] = (await sql`
+          SELECT has_table_privilege('thought_facets', 'INSERT') AS fi, has_table_privilege('thought_facets', 'UPDATE') AS fu,
+                 has_table_privilege('thoughts', 'UPDATE') AS tu, has_table_privilege('derivations', 'INSERT') AS di`) as { fi: boolean; fu: boolean; tu: boolean; di: boolean }[];
+        const missing = [!g.fi && "INSERT on thought_facets (the structure group)", !(g.fu && g.tu && g.di) && "UPDATE on thought_facets and thoughts and INSERT on derivations (the capture group)"].filter(Boolean);
+        return missing.length ? `this role lacks ${missing.join(" and ")} — cd db && bun migrate.ts --url <url> --grant <role> --groups capture,worker,structure` : null;
+      })();
+  const HAS_084 = RELATIONS_OFF === null;
   /** The judge calls 079 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
   async function ticketCallsSaved(ids: string, param: string): Promise<{ n: number; t: number }> {
     const [r] = (await sql.unsafe(`
@@ -1278,11 +1294,23 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       if (HAS_084) {
         const rv = relationVerdict(j);
         const rs = relationConfidence(j);
-        const write = rv !== null && rs.confidence >= MIN_CONFIDENCE ? rv : null;
-        const [{ r }] = (await sql`
-          SELECT record_thought_relation(${row.id}::uuid, ${c.older_id}::uuid, ${write}::text, ${write === null ? null : rs.confidence}::numeric,
-                                         ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
-                                         ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM }, judgedRecipe(j, rs.source))}::jsonb) AS r`) as { r: { action: string } }[];
+        // The floor on the mass of the three relation words; the word's own probability is what the relation stores.
+        const write = rv !== null && rs.mass >= MIN_CONFIDENCE ? rv : null;
+        let r: { action: string };
+        try {
+          [{ r }] = (await sql`
+            SELECT record_thought_relation(${row.id}::uuid, ${c.older_id}::uuid, ${write}::text, ${write === null ? null : rs.confidence}::numeric,
+                                           ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
+                                           ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM }, judgedRecipe(j, rs.source))}::jsonb) AS r`) as { r: { action: string } }[];
+        } catch (e) {
+          // A side deleted between the judgement and this write (the target
+          // check, or the foreign key) is that pair's, not the thought's: the
+          // write answers nothing and the rest of the thought's pairs go on
+          // (review pass 1: a racing delete failed the newer thought).
+          const code = (e as { code?: string; errno?: string }).errno ?? (e as { code?: string }).code;
+          if (code !== "23514" && code !== "23503") throw e;
+          r = { action: "none" };
+        }
         relation = r.action;
         if (r.action === "added") totals.relationsAdded++;
         else if (r.action === "kept") totals.relationsKept++;
@@ -1797,7 +1825,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // 084 (SMD-1873 PR 2): what the pass did to the relations it judged.
   out(HAS_084
     ? `  relations: ${totals.relationsAdded} added, ${totals.relationsKept} kept, ${totals.relationsReplaced} replaced, ${totals.relationsClosed} closed`
-    : `  relations: not stored (this brain lacks migration 084) — ${totals.related + totals.evolves + totals.duplicate} related, evolves or duplicate verdict(s) counted only`);
+    : `  relations: not stored — ${RELATIONS_OFF} — ${totals.related + totals.evolves + totals.duplicate} related, evolves or duplicate verdict(s) counted only`);
   if (totals.pairs > 0) out(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
   // 067: what became of the stale proposals this run met (a line only when it met one).
   {

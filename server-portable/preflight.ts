@@ -2398,7 +2398,9 @@ if (configFailed) {
                                  (to_jsonb(d) ->> 'stale_since')::timestamptz AS stale_since
                             FROM public.derivations d LIMIT ${BOUND}),
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
-                           WHERE d.artifact_kind <> 'proposal'
+                           -- 084: a relation, like a proposal, is the consolidation pass's to judge again, not rebuild_derived's
+                           -- (SMD-2726 adds its arm); a closed one's row stays as history (SMD-1873 PR 2 review pass 1).
+                           WHERE d.artifact_kind NOT IN ('proposal', 'relation')
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
                    orph AS (SELECT d.id, d.artifact_kind FROM al d
                              WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
@@ -2448,7 +2450,7 @@ if (configFailed) {
             // knows no section).
             const sectionRemedy = (Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "")
               // 084 (SMD-1873): a relation's row is its own writer's too, and 061's backfill knows no relation.
-              + (Number(c.relations) ? " A judged relation's row is written by 084's record_thought_relation: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<relation id>') and let the consolidation pass judge the pair again (bun db/consolidate.ts --retry-failed, or the thought's claim cleared)." : "");
+              + (Number(c.relations) ? " A judged relation's row is written by 084's record_thought_relation: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<relation id>') and let the consolidation pass judge the pair again: clear the newer thought's claim under the judge's key (DELETE FROM thought_work_claims WHERE thought_id = '<newer thought id>' AND work_type = '<judge key>') and run bun db/consolidate.ts." : "");
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
