@@ -109,7 +109,7 @@
  * reads: a later text move under a pass-settled row sets it stale again,
  * where a person's rejection stands for ever) and its lineage row rewritten
  * at the texts judged, through settle_supersession_proposal. A stale pair the
- * rule no longer admits for a reason that means "no conflict" — no shared
+ * rule no longer admits for a reason that means "nothing to propose" — no shared
  * entity, under the similarity floor, a side superseded — is settled with a
  * note saying so; one a side of which has no vector yet waits for the reembed
  * pool and the run after its write. A stale pair whose call timed out, was
@@ -605,7 +605,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const lineageClause = (n: number, has070: boolean): string =>
     `${n} unreviewed standing on a lineage pair (${has070 ? "--list lineage shows them" : "apply migration 070 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
   const staleClause = (st: ReturnType<typeof staleStandings>): string =>
-    `${st.total} stale (a text moved under the verdict: ${staleStandingsText(st, JOB)}; the pass replaces one it finds in conflict again and settles one it does not)`;
+    `${st.total} stale (a text moved under the verdict: ${staleStandingsText(st, JOB)}; the pass replaces one it proposes again and settles one it does not)`;
 
   // ── Review: --list, --accept, --reject, --stale ─────────────────────────────
 
@@ -641,7 +641,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const verdictPhrase = (v: string) =>
     v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
     : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
-    : "conflict, direction not stated";
+    : "one is out of date, which not stated";
 
   async function printList(status: string | undefined, limit = 50): Promise<number> {
     // 070's three-argument form, always: 029 re-applied by hand lands its
@@ -805,7 +805,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   async function printQueue(): Promise<void> {
     // 063 (SMD-1732): a stale row is a pending verdict whose texts moved under
     // it; 067 (SMD-2297): the next pass judges the pair again and REPLACES the
-    // row when it finds the conflict again, and SETTLES it — a rejection with
+    // row when it proposes the pair again, and SETTLES it — a rejection with
     // the pass's note — when it does not. The rejected count says how many are
     // the pass's; each stale row is placed against the pools (see the header).
     const [q] = await sql`
@@ -990,8 +990,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
     // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
-    // 067: the stale rows this run met — replaced in place (a conflict found
-    // again), settled after a judgement of no conflict, settled because the
+    // 067: the stale rows this run met — replaced in place (proposed again),
+    // settled after a judgement that proposes nothing, settled because the
     // pair no longer meets the candidate rule, left waiting for a vector, or
     // decided by a reviewer or another pass between the read and the write.
   };
@@ -1178,12 +1178,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           totals.underConfidence++;
           recorded = "under-confidence";
         }
-        // 067: no conflict at the floor on a pair whose proposal is stale — the
+        // 067: nothing proposed at the floor on a pair whose proposal is stale — the
         // pass settles it, at the fingerprints the judge was sent.
         // (The older's fingerprint from the read the judge was sent, not the
         // stale read before the candidates — a move between the two would
         // record a text the judge did not see; first review pass, cold read.)
-        if (staleRow && await settleStale(staleRow, verdict === null ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — ${j.verdict} at confidence ${scored.confidence.toFixed(2)}, under the floor ${MIN_CONFIDENCE}`, older.fingerprint, row.fingerprint, verdict === null ? j.verdict : "under-confidence")) {
+        if (staleRow && await settleStale(staleRow, verdict === null ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — ${j.verdict} at confidence ${scored.confidence.toFixed(2)} (${scored.source === "token" ? "token probability" : "the number the model wrote"}), under the floor ${MIN_CONFIDENCE}`, older.fingerprint, row.fingerprint, verdict === null ? j.verdict : "under-confidence")) {
           staleMet.settled.add(staleRow.id);
           recorded = "settled";
         }
@@ -1216,8 +1216,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // 067: the stale rows no candidate reached — pairs the candidate rule no
     // longer admits. A side without a vector is "not yet" (the reembed pool
     // writes it; the run after that re-pools this thought); the rest — no
-    // shared entity, under the similarity floor, a side superseded — mean no
-    // conflict and are settled at the current texts. A pair whose call timed
+    // shared entity, under the similarity floor, a side superseded — mean
+    // nothing to propose and are settled at the current texts. A pair whose call timed
     // out, was refused by the egress gate or drew a malformed answer is in
     // `problems` above and was reached: its row stays stale, the thought is
     // recorded failed, and --retry-failed revisits it.
@@ -1708,7 +1708,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       `${totals.alreadyProposed ? `, ${totals.alreadyProposed} pair(s) already had a proposal` : ""}` +
       `${totals.malformed ? `, ${totals.malformed} answer(s) not JSON of the expected shape` : ""}` +
       // SMD-1873: which scale the floor cut on — the model's token probability or the number it wrote.
-      `${totals.tokenScored + totals.statedScored ? `; confidence from token probabilities on ${totals.tokenScored}, from the number the model wrote on ${totals.statedScored}` : ""}`
+      `${totals.tokenScored + totals.statedScored ? `; of ${totals.tokenScored + totals.statedScored} proposing verdict(s), confidence from token probabilities on ${totals.tokenScored}, from the number the model wrote on ${totals.statedScored}` : ""}`
   );
   if (totals.pairs > 0) out(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
   // 067: what became of the stale proposals this run met (a line only when it met one).
@@ -1719,8 +1719,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (m.replaced + m.settled + m.settledOut + m.wait + m.raced + m.gone > 0) {
       out(
         `  stale proposals: ` + [
-          m.settled + m.settledOut ? `${m.settled + m.settledOut} settled by the pass (${[m.settled ? `${m.settled} judged again with no conflict at the floor` : "", m.settledOut ? `${m.settledOut} no longer a candidate pair` : ""].filter(Boolean).join(", ")})` : "",
-          m.replaced ? `${m.replaced} replaced in place — the conflict found again` : "",
+          m.settled + m.settledOut ? `${m.settled + m.settledOut} settled by the pass (${[m.settled ? `${m.settled} judged again with no proposal at the floor` : "", m.settledOut ? `${m.settledOut} no longer a candidate pair` : ""].filter(Boolean).join(", ")})` : "",
+          m.replaced ? `${m.replaced} replaced in place — proposed again` : "",
           m.wait ? `${m.wait} wait on a vector the reembed pool writes (re-pooled by the run after it lands)` : "",
           m.raced ? `${m.raced} decided by a reviewer or another pass meanwhile` : "",
           m.gone ? `${m.gone} gone with a deleted thought` : "",

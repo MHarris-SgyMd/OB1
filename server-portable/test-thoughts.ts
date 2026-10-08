@@ -608,6 +608,13 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(evidenceIn("shipped in 1.6", "it shipped in 1.6", "planned for 1.5") && !evidenceIn("the release", "the release shipped", "the release is planned"),
          "a quote also in the other side is not evidence for either");
   assert(evidenceIn("…it's done - finally", "Yes: it’s done — finally.") , "curly quotes, a long dash and a leading ellipsis are read as the model's plain forms");
+  assert(evidenceIn('the "v2" plan', "We adopted the “v2” plan."), "…and curly double quotes too");
+  // Review pass 2: whole words, and no backtracking on a run of dots.
+  assert(!evidenceIn("done", "The plan was abandoned.") && evidenceIn("done", "The plan is done."), "a quote is found as whole words — \"done\" is not in \"abandoned\"");
+  const dots = "Contents" + ".".repeat(4000) + " 7";
+  const t0 = performance.now();
+  for (let i = 0; i < 20; i++) evidenceIn("contents" + ".".repeat(60) + " x", dots, dots);
+  assert(performance.now() - t0 < 200, `twenty quotes over text holding a run of four thousand dots take ${(performance.now() - t0).toFixed(0)} ms, not the seconds an alternation that matches a dot two ways backtracks for`);
   assert(parseJudgement("I cannot say.").malformed && parseJudgement("").malformed, "prose and an empty answer are malformed");
   const long = parseJudgement(`{"verdict":"outdates","supersedes":"unknown","confidence":0.6,"reason":"${"x\u001b[2K ".repeat(200)}"}`);
   assert(long.reason.length <= 400 && !long.reason.includes("\u001b"), "the reason is clipped to 400 characters with control characters stripped");
@@ -678,6 +685,7 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(JSON.stringify(proposalConfidence(jg("outdates", "newer"))) === JSON.stringify({ confidence: 0.8, source: "stated" }), "without them it is the number the model wrote");
   assert(JSON.stringify(proposalConfidence(jg("outdates", "newer", { verdict: { ...dist, covered: 0.4 } }))) === JSON.stringify({ confidence: 0.8, source: "stated" }),
          "…and so it is when the alternatives naming a verdict held under half the token's mass");
+  assert(proposalConfidence(jg("outdates", "newer", { verdict: { ...dist, covered: 0.5 } })).source === "token", "…and not at exactly half");
 
   // The display cleaner: control characters and ESC go, tab/newline/return stay.
   // ESC goes and the sequence's printable tail stays as text — "[2A" moves nothing without it.

@@ -2329,11 +2329,13 @@ the judge model on the row as 021 puts the embedding model beside the vector.
 The confidence is the model's own token probability of `outdates` or
 `duplicate` when the endpoint returns logprobs (Ollama does for qwen2.5:7b,
 where the number the model wrote was 0.80 on most pairs; over every labelled
-pair the token score told a supersession from the rest at AUROC 0.92, though
+pair the token score told a supersession from the rest at AUROC 0.91, though
 the 7B's proposals held too few false ones to measure how it ranks them),
 else the number it wrote — also when the alternatives naming a verdict held
 under half the token's mass. A duplicate of the operator's thought by another
-writer is proposed with the operator's standing. The proposal's recipe in
+writer is proposed with the operator's standing; accepting it points the
+operator's thought at the other, so one that already supersedes something
+answers `ALREADY_SUPERSEDES` (036) and is a reviewer's to settle. The proposal's recipe in
 `derivations` says which source (`judged.confidence_source`), with the judge's
 verdict word, its token distributions, and whether its quote was found in the
 side it named and not the other; the run summary counts proposals scored each
@@ -3525,7 +3527,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2505 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1133 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1135 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

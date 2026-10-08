@@ -111,12 +111,18 @@ export const superseding = (verdict: string) => verdict === "conflict" || verdic
 /** A verdict the pass records as a proposal: a superseding one, or p4's "duplicate" (proposalVerdict). */
 export const proposes = (verdict: string) => superseding(verdict) || verdict === "duplicate";
 
-/** The token mass on the proposing verdicts — p3's word or p4's — or null without a distribution covering half the mass (proposalConfidence's rule). */
+/**
+ * The token mass on the proposing verdicts — p3's word or p4's — or null
+ * without a distribution covering half the mass: proposalConfidence's rule
+ * and rounding, so the eval floors on the number the pass records (review
+ * pass 2: unrounded, one pair at 0.4959 fell under the floor the pass's 0.50
+ * cleared).
+ */
 export function tokenScore(j: Judgement): number | null {
   const d = j.probabilities?.verdict;
   if (!d || d.covered < MIN_COVERED) return null;
   const p = d.p as Record<string, number>;
-  return Math.min(1, (p.outdates ?? 0) + (p.duplicate ?? 0) + (p.conflict ?? 0));
+  return Math.min(1, Math.round(((p.outdates ?? 0) + (p.duplicate ?? 0) + (p.conflict ?? 0)) * 100) / 100);
 }
 /** What the pass records: the token score, else the written number. */
 export const recordedScore = (j: Judgement) => tokenScore(j) ?? j.confidence;
@@ -332,7 +338,7 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
   console.log(`  is it a supersession, every labelled pair (${supRows.filter((r) => supTruth(r.p.gold)).length} true, ${supRows.filter((r) => !supTruth(r.p.gold)).length} not; the verdict decides most of it): stated ${f2(auroc(supRows.map((r) => ({ score: supStated(r.a.judgement), right: supTruth(r.p.gold)! }))))}${tokRows.length ? `, token ${f2(auroc(tokRows.map((r) => ({ score: supTok(r.a.judgement)!, right: supTruth(r.p.gold)! }))))}` : ""}`);
   const proposed = supRows.filter((r) => proposes(r.a.judgement.verdict));
   const pt = proposed.filter((r) => supTruth(r.p.gold)).length;
-  console.log(`  among the ${proposed.length} labelled pair(s) it proposes (${pt} true, ${proposed.length - pt} false), the recorded score: ${f2(auroc(proposed.map((r) => ({ score: recordedScore(r.a.judgement), right: supTruth(r.p.gold)! }))))}${proposed.length - pt < 10 ? " — under ten false ones, too few to say how it ranks proposals" : ""} — the ranking --min-confidence cuts`);
+  console.log(`  among the ${proposed.length} labelled pair(s) it proposes (${pt} true, ${proposed.length - pt} false), the recorded score (token where there is one): ${f2(auroc(proposed.map((r) => ({ score: recordedScore(r.a.judgement), right: supTruth(r.p.gold)! }))))}, the written number ${f2(auroc(proposed.map((r) => ({ score: r.a.judgement.confidence, right: supTruth(r.p.gold)! }))))}${Math.min(pt, proposed.length - pt) < 10 ? ` — under ten ${pt < proposed.length - pt ? "true" : "false"} ones, too few to say how it ranks proposals` : ""} — the ranking --min-confidence cuts`);
 
   // 4. Direction: what the pass would record as current — a duplicate the
   // newer, or the operator's (proposalVerdict), an outdates the side it names.

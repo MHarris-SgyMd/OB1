@@ -50,7 +50,7 @@ import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
  * "conflict" as contradiction only. Measured on the dogfood brain's own labels
  * (evals/eval-judge.ts; evals/README.md has the tables): rejected proposals
  * the judge proposes again 119 → 2 of 126, linked tickets read as related
- * 46 → 106 of 126, and every outdates names a side.
+ * 46 → 106 of 126, and the model named a side on all 4 of its outdates.
  */
 export const CONSOLIDATE_PROMPT_VERSION = 4;
 
@@ -366,25 +366,41 @@ export function parseJudgement(raw: string): Judgement {
 /**
  * Text as evidenceIn compares it: lower case, every run of whitespace one
  * space, curly quotes and long dashes as their ASCII forms (a model often
- * types the plain one), and a quote's wrapping — quote marks, an ellipsis
- * either end, closing punctuation — taken off.
+ * types the plain one).
  */
-const forQuote = (t: string) => oneLine(t).toLowerCase()
-  .replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, "-").replace(/…/g, "...")
-  .replace(/^(?:["'`]|\.\.\.|\s)+|(?:["'`.,;:]|\.\.\.|\s)+$/g, "").trim();
+const plainText = (t: string) => oneLine(t).toLowerCase()
+  .replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, "-").replace(/…/g, "...");
+/**
+ * A quote as evidenceIn looks for it: plain, its wrapping — quote marks, an
+ * ellipsis either end, closing punctuation — taken off. Single character
+ * classes, not alternatives: an alternation that can match a dot two ways
+ * backtracks exponentially on a run of dots (review pass 2 measured 0.3 s a
+ * call at 45).
+ */
+const forQuote = (t: string) => plainText(t).replace(/^[\s"'`.]+|[\s"'`.,;:]+$/g, "");
+
+/** Whether `q` occurs in `text` as whole words: no letter or digit on either side of it. */
+function holdsWords(text: string, q: string): boolean {
+  const word = /[\p{L}\p{N}]/u;
+  for (let i = text.indexOf(q); i >= 0; i = text.indexOf(q, i + 1)) {
+    if (!word.test(text[i - 1] ?? "") && !word.test(text[i + q.length] ?? "")) return true;
+  }
+  return false;
+}
 
 /**
  * Whether the judge's evidence shows the side it names is current (SMD-1873):
  * found in that side's text as the judge was sent it, and NOT in the other
  * side's — words both thoughts hold say nothing about which is later.
- * Compared after forQuote, so a line break, a capital or a curly quote the
- * model normalised does not fail it; anything shorter than three characters
- * proves nothing and is not found.
+ * Compared as whole words after plainText, so a line break, a capital or a
+ * curly quote the model normalised does not fail it, and "done" is not found
+ * in "abandoned"; anything shorter than three characters proves nothing and
+ * is not found.
  */
 export function evidenceIn(evidence: string, content: string, other?: string): boolean {
   const q = forQuote(evidence);
-  if (q.length < 3 || !forQuote(content.slice(0, CONTENT_LIMIT_CHARS)).includes(q)) return false;
-  return other === undefined || !forQuote(other.slice(0, CONTENT_LIMIT_CHARS)).includes(q);
+  if (q.length < 3 || !holdsWords(plainText(content.slice(0, CONTENT_LIMIT_CHARS)), q)) return false;
+  return other === undefined || !holdsWords(plainText(other.slice(0, CONTENT_LIMIT_CHARS)), q);
 }
 
 /**
@@ -554,10 +570,10 @@ export function parseConsolidateKey(key: string): { model: string; version: numb
 /**
  * What migration 029 records for a judgement, or null when there is nothing to
  * propose. p4 (SMD-1873): a "duplicate" is proposed too, the newer standing —
- * on the dogfood brain it was the judge's commonest answer for a pair whose
- * writer had set `supersedes` (20 of 60, none of 252 pairs that were not), so
- * a reviewer sees it; it is a relation edge as well, which is SMD-1873's
- * third PR. Either thought could go, so the later one, which a reader would
+ * on the dogfood brain the 7B answered it for 20 of the 60 pairs whose writer
+ * had set `supersedes` (and for none of 252 pairs that were not), so a
+ * reviewer sees it; it is a relation edge as well, which is SMD-1873's next
+ * PR. Either thought could go, so the later one, which a reader would
  * look for, is the one proposed to stand — unless the operator wrote the
  * older and someone else the newer: an agent restating what the operator
  * stated never stands over it (SMD-1726's rule, which the prompt states for
@@ -579,8 +595,8 @@ export const MIN_COVERED = 0.5;
  * The confidence a proposal records, and where it came from (SMD-1873). With
  * the model's token probabilities, it is the mass on the two proposing
  * verdicts, "outdates" and "duplicate": on the dogfood brain it told a true
- * supersession from a false one at AUROC 0.92, where the number the model
- * wrote was 0.80 on 368 of 434 pairs. That 0.92 ranks every labelled pair,
+ * supersession from a false one at AUROC 0.91, where the number the model
+ * wrote was 0.80 on 368 of 434 pairs. That 0.91 ranks every labelled pair,
  * proposed or not; among the 24 the 7B proposed, 2 were false — too few to
  * say how well it ranks proposals (evals/README.md). Without the
  * probabilities (an endpoint that returns none, or only the first token's),

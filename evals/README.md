@@ -3624,15 +3624,15 @@ SMD-2448); a linked pair is related and is neither unrelated nor proposed.
 | rejected proposals proposed again | 119 of 126 | 2 of 126 |
 | linked pairs read as related | 46 of 126 | 106 of 126 |
 | pointer + accepted pairs proposed (outdates or duplicate) | 3 of 62 | 22 of 62 |
-| proposals naming a side | 14 of 128 (11%) | 24 of 24: 20 duplicates (the newer, or the operator's), 4 outdates — 3 quoting words found in that side and not the other |
+| supersessions the model directed | 14 of 128 conflicts (11%) | 4 of 4 outdates, 3 quoting words found in that side and not the other — the other 20 proposals are duplicates, directed by rule (the newer, or the operator's) |
 | the written confidence | 6 values, 0.80 on 160 | 5 values, 0.80 on 368 |
 | AUROC, is it a supersession, over all 314 labelled pairs: written number | 0.12 | 0.61 |
-| …the same: token P(outdates or duplicate) | — | **0.92** |
-| AUROC among the pairs it proposes, by the score it records | 0.77 (127 proposed, 3 true) | 0.84 (24 proposed, 2 false: too few to measure) |
+| …the same: token P(outdates or duplicate), as the pass records it | — | **0.91** |
+| AUROC among the pairs it proposes, by the score that pass records | 0.81, the written number (127 proposed, 3 true: too few to measure) | 0.84, token (24 proposed, 2 false: too few to measure) |
 | candidates the pass would record | 1 of 120 | 0 of 120 |
 | median seconds per pair | 7.5 | 9.2 |
 
-The 0.92 ranks every labelled pair, proposed or not, so most of it is the
+The 0.91 ranks every labelled pair, proposed or not, so most of it is the
 verdict itself; what `--min-confidence` cuts is the ranking among the
 proposals, and p4 on the 7B makes only two false ones here — too few to say
 how well the token score ranks them. On the p3 side, its confidence was a
@@ -3657,7 +3657,7 @@ agent's newer thought duplicates what the operator wrote.
 | proposals naming the right side, where labelled | 22 of 22 | 55 of 60 (outdates with the quote found: 15 of 18) |
 | token confidence | yes | no — Ollama returns the first token's logprobs only for this model, so the pass records the written number (0.95 on 129 of 140) |
 | AUROC among the pairs it proposes, by the score it records | 0 false of 22 | 0.35 (71 proposed, 11 false): the written number ranks them worse than a coin |
-| seconds per pair, three at a time | ≈ 2.8 | ≈ 12.5 |
+| seconds per pair, three at a time | ≈ 3.1 | ≈ 12.5 |
 
 So the 27B finds nearly every supersession for a few false ones, costs four
 times the time, and records a confidence that orders its proposals no better

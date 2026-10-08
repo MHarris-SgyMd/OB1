@@ -219,7 +219,9 @@ if (!NO_JUDGE && labels.pairs.length) {
     if (saidConflict && isConflict) {
       tp++;
       if (p.supersedes && p.supersedes !== "unknown") {
-        if (j.supersedes === p.supersedes) dirRight++; else if (j.supersedes === "unknown") dirUnknown++; else dirWrong++;
+        // p4: a duplicate is proposed with the newer standing (proposalVerdict; this corpus has no writer marks).
+        const said = j.verdict === "duplicate" ? "newer" : j.supersedes;
+        if (said === p.supersedes) dirRight++; else if (said === "unknown") dirUnknown++; else dirWrong++;
       }
     } else if (saidConflict && !isConflict) fp++;
     else if (!saidConflict && isConflict) fn++;

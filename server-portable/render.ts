@@ -580,7 +580,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     const phrase = (v: string) =>
       v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
       : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
-      : "conflict, direction not stated — accepting needs --direction newer or older";
+      : "one is out of date, which not stated — accepting needs --direction newer or older";
     const results = data.map((p, i) => {
       const edited = p.older.edited || p.newer.edited;
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";

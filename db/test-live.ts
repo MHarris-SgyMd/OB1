@@ -5267,10 +5267,13 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       if (onJudge) await onJudge();
       await Bun.sleep(5 + slowMs);
       if (hemlockIsProse && /hemlock/.test(a + b)) return Response.json({ choices: [{ message: { content: "I'd rather not say." } }] });
+      // SMD-1873, review pass 2: an answer in p3's words, from a model keeping to the old prompt.
+      if (/relic/.test(a) && /relic/.test(b)) return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "conflict", supersedes: "B", confidence: 0.9, reason: "p3's word" }) } }] });
       let answer: Record<string, unknown>;
       if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "outdates", supersedes: "B", evidence: (b.match(/\S*annually\S*/)?.[0] ?? ""), confidence: 0.92, reason: "monthly billing against annual" };
       else if (/blue/.test(a) && /green/.test(b)) answer = { verdict: "outdates", supersedes: "unknown", confidence: 0.7, reason: "two brand colours, neither says which stands" };
       else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "outdates", supersedes: "B", confidence: 0.9, reason: "guessing" };
+      else if (/rota/.test(a) && /rota/.test(b)) answer = { verdict: "duplicate", supersedes: "unknown", confidence: 0.85, reason: "the same rota" };
       else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "evolves", supersedes: "unknown", confidence: 0.8, reason: "the later deploy note follows the earlier" };
       else answer = { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
       const content = JSON.stringify(answer);
@@ -5414,7 +5417,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
          `the first run judges ten thoughts and fails the one whose pair drew prose (exit ${first.code}: ${first.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
   assert(/5 pair\(s\) judged — 0\.45 per thought judged, 455 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 0 unrelated, 0 related, 1 evolves, 0 duplicate, 3 outdates/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
          `…five pairs (one per newer thought with an older neighbour), one malformed, and the six older thoughts with nothing older to compare against (${first.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
-  assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 under confidence 0\.5 not recorded.*; confidence from token probabilities on 2, from the number the model wrote on 1/.test(first.out),
+  assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 under confidence 0\.5 not recorded.*; of 3 proposing verdict\(s\), confidence from token probabilities on 2, from the number the model wrote on 1/.test(first.out),
          `…two proposals recorded, one undirected, one too weak to record on its token score though it states 0.9, and the floor cut two on token probabilities and one on the written number (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
   assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
   assert(modelsSeen.size === 1 && modelsSeen.has("stub-judge"), `every judge request named the metadata model, OB1_JUDGE_MODEL being unset (${[...modelsSeen].join(", ")})`);
@@ -5441,7 +5444,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   assert(Number(undirected?.confidence) === 0.7, "…and the colour pair, whose answer came without token probabilities, at the confidence it states");
   const judgedOf = (id: string) => (plin.find((l) => l.o === p1.find((p) => p.id === id)?.older_id)?.recipe.judged ?? {}) as Record<string, unknown>;
   assert(judgedOf(directed.id).verdict === "outdates" && judgedOf(directed.id).confidence_source === "token" && judgedOf(directed.id).stated_confidence === 0.92 && judgedOf(directed.id).evidence_found === true
-         && judgedOf(undirected.id).confidence_source === "stated" && !("evidence_found" in judgedOf(undirected.id)),
+         && "probabilities" in judgedOf(directed.id)
+         && judgedOf(undirected.id).confidence_source === "stated" && !("evidence_found" in judgedOf(undirected.id)) && !("probabilities" in judgedOf(undirected.id)),
          `each proposal's recipe says what the judge said: its verdict word, where the confidence came from, what it stated, and whether its quote was found (${JSON.stringify([judgedOf(directed.id), judgedOf(undirected.id)])})`);
   assert(undirected?.older_id === blue && undirected.newer_id === green, "the colour pair is proposed without a direction");
   const c1 = await claimCounts();
@@ -5475,7 +5479,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
 
   // --list prints both thoughts, the IDs, and the decision each row takes.
   const list = await consolidate("--list");
-  assert(list.code === 0 && /2 pending proposal\(s\)/.test(list.out) && /the NEWER thought supersedes the older/.test(list.out) && /conflict, direction not stated/.test(list.out),
+  assert(list.code === 0 && /2 pending proposal\(s\)/.test(list.out) && /the NEWER thought supersedes the older/.test(list.out) && /one is out of date, which not stated/.test(list.out),
          "--list names both verdicts");
   assert(list.out.includes(`ID: ${reversal}`) && list.out.includes(`ID: ${decision}`) && list.out.includes(`--accept ${directed.id}`) && list.out.includes(`--accept ${undirected.id} --direction <newer|older>`),
          "…with the thought ids and the accept command, asking for a direction where the judge gave none");
@@ -5658,7 +5662,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const rb1 = await rebuild(atlasNew);
     assert(rb1.ok === true && rb1.stale_proposals === 1 && (await proposalRow(atlas!.id)).status === "stale", "a raw text move under the verdict: the rebuild sets the proposal stale and requeues the pair under the judge's key");
     const staleStatus = await consolidate("--status");
-    assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it finds in conflict again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
+    assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it proposes again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
     const staleList = await consolidate("--list", "stale");
     assert(staleList.code === 0 && /1 stale proposal\(s\)/.test(staleList.out) && /\(stale — in this pass's pool\)/.test(staleList.out) && staleList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`), `--list stale tags the row's standing and still offers the reviewer's decision (${staleList.out.split("\n").find((l) => /stale —/.test(l))?.trim().slice(0, 200)})`);
     // 070 (SMD-2313): the same stale row standing on a lineage pair — the
@@ -5695,7 +5699,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const settled = await consolidate();
     const atlasAfter = await proposalRow(atlas!.id);
     const settledNote = passSettledNote("judged again after a text moved — unrelated", KEY);
-    assert(settled.code === 0 && /pool: 1 thought\(s\) added\s*$/m.test(settled.out) && seen.some((p) => /monthly/.test(p.a) && /deploy calendar/.test(p.b)) && /stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\)/.test(settled.out),
+    assert(settled.code === 0 && /pool: 1 thought\(s\) added\s*$/m.test(settled.out) && seen.some((p) => /monthly/.test(p.a) && /deploy calendar/.test(p.b)) && /stale proposals: 1 settled by the pass \(1 judged again with no proposal at the floor\)/.test(settled.out),
            `the pass judges the stale pair again and reports settling it (exit ${settled.code}: ${staleLine(settled.out)})`);
     assert(atlasAfter.status === "rejected" && atlasAfter.reviewed_at !== null && atlasAfter.review_note === settledNote,
            `…the row is rejected with the pass's marker note and reviewed_at set (${JSON.stringify(atlasAfter)})`);
@@ -5719,7 +5723,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     await rebuild(beaconNew);
     const replaced = await consolidate();
     const beaconAfter = await proposalRow(beacon.id);
-    assert(replaced.code === 0 && /stale proposals: 1 replaced in place — the conflict found again/.test(replaced.out) && beaconAfter.status === "pending" && beaconAfter.review_note === null && (await lineageOf(beacon.id)).length === 1 && (await lineageOf(beacon.id))[0].fps[1] === beaconFp2,
+    assert(replaced.code === 0 && /stale proposals: 1 replaced in place — proposed again/.test(replaced.out) && beaconAfter.status === "pending" && beaconAfter.review_note === null && (await lineageOf(beacon.id)).length === 1 && (await lineageOf(beacon.id))[0].fps[1] === beaconFp2,
            `a stale pair the pass finds in conflict again is replaced in place: pending, one lineage row at the moved text (exit ${replaced.code}: ${staleLine(replaced.out)}; ${JSON.stringify(beaconAfter)})`);
     // A later move under the pass-settled atlas row reopens it (067's arm), and the pass settles it again.
     await moveRaw(atlasNew, "Invoices for the atlas account: see the deploy calendar, second edit.");
@@ -5792,7 +5796,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const notRepooled = await consolidate();
     assert(notRepooled.code === 1 && !/re-pooled/.test(notRepooled.out) && !seen.some((p) => /cedar/.test(p.a + p.b)) && (await proposalRow(cedar.id)).status === "stale", "a run meanwhile leaves the failed thought to --retry-failed: no re-pool, no judge call on the pair");
     const retried = await consolidate("--retry-failed");
-    assert(retried.code === 0 && /stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\)/.test(retried.out) && (await proposalRow(cedar.id)).status === "rejected", `--retry-failed judges the pair again and the pass settles it (${staleLine(retried.out)})`);
+    assert(retried.code === 0 && /stale proposals: 1 settled by the pass \(1 judged again with no proposal at the floor\)/.test(retried.out) && (await proposalRow(cedar.id)).status === "rejected", `--retry-failed judges the pair again and the pass settles it (${staleLine(retried.out)})`);
     // The OLDER side without a vector waits too, and is not re-pooled every
     // run (first review pass, run-it: it was, with a judge call on the
     // thought's other pairs each time).
@@ -5848,7 +5852,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
            `a consolidate follower whose database is cut keeps running, says so, and resumes when it is back (alive ${aliveCut}; ${followOut.split("\n").filter((l) => /not answering|answers again/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
     assert(followSettled && followCode === 0 && /\(1 more re-pooled for stale proposals\)/.test(followOut) && seen.length === 1,
            `the poll after the vector lands re-pools the thought and settles the row, one judge call in all (exit ${followCode}; ${followOut.split("\n").filter((l) => /pool:|stale proposals:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
-    assert(/^\s*stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\) — distinct rows across the polls\s*$/m.test(followOut),
+    assert(/^\s*stale proposals: 1 settled by the pass \(1 judged again with no proposal at the floor\) — distinct rows across the polls\s*$/m.test(followOut),
            `…and the summary counts the row once, settled, with no wait clause (${staleLine(followOut)})`);
     const cb = await consolidateBeats();
     const cv = cb.length === 1 ? JSON.parse(cb[0].value) : null;
@@ -6309,6 +6313,34 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       restorePauses();
     }
     assert(followCode === 0, `…and exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
+  }
+
+  // SMD-1873, review pass 2: the worker hands proposalVerdict each side's
+  // writer. A duplicate of the operator's thought, written through an agent's
+  // key, is proposed with the operator's standing — the older; swapping the
+  // sides the worker passes would propose the agent's. And an answer in p3's
+  // words fails its thought, naming the word.
+  {
+    await sql`SELECT set_agent_kind('op-1873', 'operator')`;
+    await sql`SELECT set_agent_kind('bot-1873', 'agent')`;
+    const seedAs = async (key: string, content: string, axis: number, daysAgo: number, names: string[]) => {
+      const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" }, actor: { name: key, via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+      await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+      await sql`SELECT record_thought_entities(${id}::uuid, ${EXTRACT}, ${names.map((n) => ({ name: n, type: "topic", confidence: 0.9 }))}::jsonb, '[]'::jsonb, NULL, NULL)`;
+      return id;
+    };
+    const rotaOld = await seedAs("op-1873", "The on-call rota is weekly.", 11, 4, ["rota"]);
+    const rotaNew = await seedAs("bot-1873", "The rota for on-call runs weekly.", 11, 0, ["rota"]);
+    await seed("The relic note, the first.", 12, 4, ["relic"]);
+    const relicNew = await seed("The relic note, the second.", 12, 0, ["relic"]);
+    const kinds = (await sql`SELECT metadata->>'actor_kind' AS k FROM thoughts WHERE id IN (${rotaOld}::uuid, ${rotaNew}::uuid) ORDER BY created_at`).map((r: { k: string }) => r.k);
+    const run = await consolidate();
+    const [rota] = await sql`SELECT verdict, reason FROM supersession_proposals WHERE older_id = ${rotaOld}::uuid AND newer_id = ${rotaNew}::uuid`;
+    assert(kinds.join() === "operator,agent" && rota?.verdict === "older_supersedes_newer" && /^duplicate — /.test(String(rota?.reason)),
+           `an agent's duplicate of the operator's thought is proposed with the operator's, the older, standing, its reason saying duplicate (${kinds.join()}: ${JSON.stringify(rota)})`);
+    const [{ err: relicErr }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${relicNew}::uuid`;
+    assert(run.code === 1 && /answered the verdict "conflict", not one of prompt 4's five/.test(String(relicErr)),
+           `an answer in p3's words fails its thought and names the word, where it used to read as an answer not JSON (exit ${run.code}: ${relicErr})`);
   }
 
   judge.stop(true);
