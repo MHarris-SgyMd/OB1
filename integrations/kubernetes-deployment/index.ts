@@ -111,9 +111,19 @@ function thoughtUrl(id: string): string {
 
 /** server-portable/embed.ts's, held equal by extensions/test-auth.ts. */
 const DEFAULT_LLM_TIMEOUT_S = 120;
-// Read per call below; a value it cannot use is said once here, as OB1_STOP_GRACE's is (review pass 4).
+/** OB1_LLM_TIMEOUT's seconds if it is a finite positive number (embed.ts's rule), else undefined. */
+function llmTimeoutOf(text: string | undefined): number | undefined {
+  const n = text ? Number(text) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+// Read per call below; a value it cannot use is said once here, as OB1_STOP_GRACE's is (review passes 4 and 5).
 const llmTimeoutText = process.env.OB1_LLM_TIMEOUT?.trim() ?? "";
-if (llmTimeoutText && !(Number(llmTimeoutText) > 0)) console.warn(`OB1_LLM_TIMEOUT="${llmTimeoutText}" is not a positive number of seconds, with no unit; provider calls are given ${DEFAULT_LLM_TIMEOUT_S} s (SMD-2692)`);
+if (llmTimeoutText && llmTimeoutOf(llmTimeoutText) === undefined) console.warn(`OB1_LLM_TIMEOUT="${llmTimeoutText}" is not a positive number of seconds, with no unit; provider calls are given ${DEFAULT_LLM_TIMEOUT_S} s (SMD-2692)`);
+
+/** A provider answer's body: empty if it fails to arrive, unless the deadline passed during it (embed.ts providerCall). */
+function bodyOf(r: Response): Promise<string> {
+  return r.text().catch((e: Error) => { if (e.name === "TimeoutError") throw e; return ""; });
+}
 
 /** A provider call that ran past OB1_LLM_TIMEOUT, its message naming the knob. */
 class ProviderTimeout extends Error {}
@@ -126,8 +136,7 @@ class ProviderTimeout extends Error {}
  * client sat through all of it. Read per call, as the keys are.
  */
 async function withDeadline<T>(what: string, base: string, call: (deadline: { signal: AbortSignal; timeout: false }) => Promise<T>): Promise<T> {
-  const raw = Number(process.env.OB1_LLM_TIMEOUT || NaN);
-  const seconds = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LLM_TIMEOUT_S;
+  const seconds = llmTimeoutOf(process.env.OB1_LLM_TIMEOUT) ?? DEFAULT_LLM_TIMEOUT_S;
   try {
     // `timeout: false` makes this the one deadline: Bun's fetch would otherwise
     // cut the call at its 300 s idle timeout, so a longer value never applied (embed.ts).
@@ -152,9 +161,8 @@ async function getEmbedding(text: string): Promise<number[]> {
       }),
       ...deadline,
     });
-    // As the chat call's below: a body that fails to arrive is an empty one,
-    // unless the deadline passed during it, and an error body is capped (review pass 3).
-    const body = await r.text().catch((e: Error) => { if (e.name === "TimeoutError") throw e; return ""; });
+    // Read as the chat call's below, and an error body capped (review pass 3).
+    const body = await bodyOf(r);
     if (!r.ok) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} failed: ${r.status} ${body.slice(0, 500)}`);
     let d: { data?: [{ embedding?: unknown }] } | null;
     try {
@@ -209,10 +217,7 @@ Only extract what's explicitly there.`,
         }),
         ...deadline,
       });
-      // The status is known from here on: a body that fails to arrive is an
-      // empty one, unless the deadline passed during it (embed.ts providerCall).
-      const body = await r.text().catch((e: Error) => { if (e.name === "TimeoutError") throw e; return ""; });
-      return { ok: r.ok, status: r.status, text: body };
+      return { ok: r.ok, status: r.status, text: await bodyOf(r) };
     });
   } catch (e) {
     if (e instanceof ProviderTimeout) return fallback("provider_timeout", e.message);

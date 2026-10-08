@@ -720,7 +720,7 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
     }
     const control = captures.tags;
     // Its answer is the database's refusal, not a provider's, so a capture that matches it reached the write (review pass 4).
-    assert(control.lines.length === 0 && /connect/i.test(control.error) && !/Embeddings? |Chat completion|OB1_LLM_TIMEOUT/.test(control.error),
+    assert(control.lines.length === 0 && /Failed to connect|ECONNREFUSED|connection refused/i.test(control.error) && !/Embeddings? |Chat completion|OB1_LLM_TIMEOUT/.test(control.error),
       `the control: a capture whose tags arrive logs nothing from the extractor, and its write is refused by the closed database port ("${control.error.slice(0, 60)}")`);
     const why: Record<string, string> = {
       stall: `Chat completion request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
