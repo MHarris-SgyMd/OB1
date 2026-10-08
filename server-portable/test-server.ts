@@ -420,7 +420,8 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
 console.log("\n[10a] MCP tools/list and the REST core's OpenAPI document are two projections of one contract (SMD-1931)");
 {
   // Both surfaces are read as a client reads them — tools/list from the
-  // running server, the document openapi.ts serves — and compared with each
+  // running server, and the document openapi.ts builds, which the REST core
+  // serves at /openapi.json with only `servers` added — and compared with each
   // other, not each with the source: a tool's name, title, description and
   // input, field by field, and which keys reach it. A tool added once (the
   // manifest, its spec, its route) is on both or this fails; a schema, a word

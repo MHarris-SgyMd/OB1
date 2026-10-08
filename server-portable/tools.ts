@@ -66,8 +66,9 @@ export const UNLOCKS: Readonly<Record<Scope, readonly ToolScope[]>> = {
   forward: [],
 };
 
+const SCOPE_OF: ReadonlyMap<ToolName, ToolScope> = new Map(TOOLS.map((t) => [t.name, t.scope]));
 /** A tool's group, from its manifest entry. */
-export const scopeOf = (name: ToolName): ToolScope => TOOLS.find((t) => t.name === name)!.scope;
+export const scopeOf = (name: ToolName): ToolScope => SCOPE_OF.get(name) as ToolScope;
 
 /**
  * Whether a key's scope unlocks a tool — the one gate both surfaces ask

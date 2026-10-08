@@ -21,8 +21,11 @@
  *   session-end hook holds: a credential that sits in a config file on every
  *   machine that runs the hook, and whose leak must be worth as little as
  *   possible. A leaked capture key can add a thought; it cannot read one, alter
- *   one or remove one. index.ts asks the three questions below — canRead,
- *   canCapture, canWrite — one per tool group. The vendored servers (the copies
+ *   one or remove one. The core servers ask tools.ts's mayCall, which reads a
+ *   tool's group from the manifest (SMD-1931); canRead, canCapture and
+ *   canWrite below state the same three groups for a caller without a tool
+ *   name — the REST core's capture reply, which tells a key that cannot
+ *   read less, and the copies. The vendored servers (the copies
  *   of this file) ask only canWrite and register their read tools for every
  *   authenticated key — so authenticate() ADMITS only the scopes its caller
  *   names, and a caller that names none admits read and write: to a vendored

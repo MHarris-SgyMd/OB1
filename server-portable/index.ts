@@ -2,7 +2,7 @@
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
 import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";
-import { authenticateRequest, canRead, canWrite, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
+import { authenticateRequest, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
@@ -620,7 +620,8 @@ app.get("*", async (c, next) => {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  // The keyed body is brain_info's record, so the key needs what that tool needs.
+  if (!principal || !mayCall(principal, "brain_info")) return c.text("ok", 200, corsHeaders);
   // A HEAD has no body to carry the record: liveness, as without a key, and no
   // read for nothing (review pass 1: it paid the whole read, and the deadline).
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
@@ -663,7 +664,7 @@ app.get("*", async (c, next) => {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, "worker_status")) return c.text("ok", 200, corsHeaders);
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
   // The same identity gate as /health: a revoked or unresolved key is shown nothing.
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -689,7 +690,7 @@ app.get("*", async (c, next) => {
 // endpoint (app.on(MCP_METHODS, "*") below), so this guard is registered BEFORE
 // it and falls through with next() for any path it does not own; the two action
 // paths it handles never reach the transport, and no MCP client posts JSON-RPC
-// there. WRITE-scoped (canWrite) — stricter than /worker-status's read mirror; a
+// there. Gated as the tool each mirrors (mayCall: write scope today) — stricter than /worker-status's read mirror; a
 // read/capture/no/wrong/revoked key is shown and does nothing (plain "ok",
 // parity with /health and /worker-status). Args ride the JSON body; the
 // refusals-as-values are the tool's, as a 400 carrying the same code, and the
@@ -706,7 +707,7 @@ app.post("*", async (c, next) => {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !canWrite(principal)) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, isRetry ? "retry_failed" : isRelease ? "release_stale_leases" : "run_worker")) return c.text("ok", 200, corsHeaders);
   // The same identity gate as /worker-status: a revoked or unresolved key does nothing.
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([
@@ -776,7 +777,7 @@ app.get("*", async (c, next) => {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, "job_status")) return c.text("ok", 200, corsHeaders);
   // HEAD carries no body for a job's state or stream: liveness, before the
   // identity resolve, exactly as /health and the worker mirrors answer it.
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
