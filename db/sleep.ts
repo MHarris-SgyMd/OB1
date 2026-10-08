@@ -1,36 +1,40 @@
 #!/usr/bin/env bun
 /**
- * sleep.ts — run the background passes while the brain is quiet, and hand the
- * model and the database back on the first live call: the sleep scheduler,
- * "dolphin sleep" (SMD-1794).
+ * sleep.ts — run the background passes while the brain is quiet, and stop
+ * them within --poll seconds of the first live call being recorded: the sleep
+ * scheduler, "dolphin sleep" (SMD-1794).
  *
  *   bun db/sleep.ts --url postgres://… --follow     # sleep whenever the brain is quiet, for ever
- *   bun db/sleep.ts --url …                         # wait for quiet, sleep once — until the passes are done or a call wakes it — then exit
+ *   bun db/sleep.ts --url …                         # wait for quiet, sleep once — until both pools drain or a call wakes it — then exit
  *   bun db/sleep.ts --url … --dry-run               # the idle reading and each pass's pool; writes nothing
  *   await run({ url, follow: true, signal })         # in-process: import { run } from "./sleep.ts" (SMD-2304's engine shape)
- *   --quiet SECONDS (300)   --poll SECONDS (5)   --workers N (1, for each pass)
- *   exits 0 done, or --follow stopped · 1 woken with work left (one sleep) · 2 usage, configuration or a pass's refusal · 130 a signal before the sleep ended (a second, at once)
+ *   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1, for each pass)
+ *   exits 0 done, or --follow stopped · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, or a pass's refusal at its first start · 130 a signal before the sleep ended (a second, at once)
  *
  * ── Quiet ───────────────────────────────────────────────────────────────────
  * The brain is awake while it is used: a read the server logged (query_log,
- * migration 034 — written only under OB1_QUERY_LOG=on) or a write the audit
- * recorded (thought_audit, 008) whose actor_kind is not `ingested`. Sync
- * writes — board-sync's, the kind 'ingested' — are background work, as the
- * passes are, and do not wake it. The brain falls asleep after --quiet seconds
- * with neither, and wakes on the first. Every comparison is on the database's
- * clock, now(). Measured on the stable brain over 14 days (2026-09-23 to
- * 10-07): 3,379 live events, the median gap 0.3 s; at 300 s it slept 222
- * times, 93% of the time, a median sleep of 16.6 min (p10 2.4); at 60 s, 98%
- * and 12.6 min; at 900 s, 84% and 25.5 min. Counting board-sync's writes as
- * live halves the median sleep at 300 s (6.5 min). The rule from the schema
- * gave the same numbers as a hand-kept list of background actors.
- *
- * The passes it runs write no thought_audit row (extraction writes the entity
- * tables; consolidation writes proposals) and call no server, so its own work
- * never wakes it. Only the owner can read query_log — no grant group holds
- * SELECT on it — so a role that cannot is told once, and then only writes
- * wake the brain. A query log that is off says nothing either way; --dry-run
- * prints how old its newest row is.
+ * migration 034) or a write the audit recorded (thought_audit, 008) through a
+ * key whose kind is not `ingested` (set_agent_kind, 046). It falls asleep
+ * after --quiet seconds with neither, and wakes on the first. Every
+ * comparison is on the database's clock, now().
+ *  - Reads wake it only under the server's OB1_QUERY_LOG=on, off by default:
+ *    with it off nothing logs a search. Nothing in the database says which,
+ *    so a log with no row in 24 h is said once at the start. Only the owner
+ *    can read query_log (no grant group holds SELECT on it): a role that
+ *    cannot is told once, and then only writes wake the brain.
+ *  - "Background" is the key's kind, not the work: board-sync's key is
+ *    `ingested` on the stable brain, so its sync writes do not wake it, while
+ *    reembed.ts and ingest-records.ts write as `agent` keys and a migration's
+ *    backfill with no kind, and those do.
+ *  - The passes it runs write no thought_audit row (extraction writes the
+ *    entity tables; consolidation writes proposals) and call no server, so
+ *    its own work never wakes it.
+ * The default is from the stable brain's logs over 14 days (2026-09-23 to
+ * 10-07), replayed at each quiet — the scheduler did not run there, and
+ * stable logs reads: 3,379 live events, the median gap 0.3 s; at 300 s it
+ * would have slept 222 times, 93% of the time, a median sleep of 16.6 min
+ * (p10 2.4); at 60 s, 98% and 12.6 min; at 900 s, 84% and 25.5 min. Counting
+ * board-sync's writes as live halves the median sleep at 300 s (6.5 min).
  *
  * ── Asleep ──────────────────────────────────────────────────────────────────
  * The passes in a fixed order. The extraction follower runs alone until its
@@ -42,48 +46,65 @@
  * safe for what arrives from then on, as a candidate was captured on an
  * earlier UTC date. A failed row stays failed — the operator's --retry-failed.
  * Followers, not one-shot runs: a follower waits out a database restart or a
- * provider outage (SMD-2599), where a one-shot run fails the thought in hand.
- * Without --follow, a sleep that drains both pools stops the followers and
- * exits 0.
+ * provider outage mid-sleep (SMD-2599), where a one-shot run fails the
+ * thought in hand. Without --follow, a sleep that drains both pools stops the
+ * followers and exits 0; one whose provider is down at its start waits.
  *
  * ── Waking ──────────────────────────────────────────────────────────────────
  * Every --poll seconds while asleep the logs are read for a live event since
  * the sleep began — and up to 30 s before it, within the quiet just read: an
  * audit row is dated at its transaction's start, so a capture begun before
- * the sleep and committed after it is dated before it. On one, both passes
- * are hard-stopped (the pass's signal, then its PassStop): every lease
- * returned, the model call in hand aborted — extract's since this ticket's
- * first cut, consolidate's since SMD-2304 — and the thoughts in hand
- * abandoned to the next sleep. Waking costs up to --poll seconds of a pass
- * beside the live call, and the calls in flight thrown away. Awake, it reads
- * again when the brain could first fall asleep — the newest live event's age
- * plus --quiet — at most a minute apart.
+ * the sleep and committed after it is dated before it (one blocked longer is
+ * missed). On one, both passes are hard-stopped (the pass's signal, then its
+ * PassStop): every lease returned, the model call in hand aborted —
+ * extract's since this ticket's first cut, consolidate's since SMD-2304 — and
+ * the claims they held moved to the back of the queue, since a release keeps
+ * a claim's place: a thought longer than the sleeps would otherwise be every
+ * sleep's first, and the pool behind it would never move. Waking costs up to
+ * --poll seconds of a pass beside the live call, and the calls in flight
+ * thrown away. The first live call is not spared: it is recorded after the
+ * model work it does, so on a one-slot model it can queue behind the call in
+ * hand. Awake, it reads again when the brain could first fall asleep — the
+ * newest live event's age plus --quiet — at most a minute apart.
+ *
+ * ── Refusals ────────────────────────────────────────────────────────────────
+ * Every sleep starts its passes afresh, so each meets its start's refusals
+ * again (the model not served, the key refused). A pass's first start
+ * refusing is the configuration's, and ends the scheduler with its code; a
+ * refusal by a pass that has run in this process before — a model re-pulled,
+ * a key rotated — is retried on SMD-2599's outage schedule, the heartbeat
+ * failed until a sleep runs.
  *
  * ── Heartbeat ───────────────────────────────────────────────────────────────
  * `heartbeat:sleep` in ob1_config (db/pass-stamp.ts, SMD-2261): running while
- * asleep, re-stamped at least every minute awake or asleep, its outcome a
- * sleep's: `failed` while a pass's last word was (a
- * provider still failing). The passes stamp through it, not their own rows,
- * so a wake does not end a follower's row for preflight to warn about.
- * Only --follow stamps: one sleep leaves no row to go stale, as a one-shot
- * pass does not. Followers run outside sleep (the workers profile) do not
- * yield: --dry-run and the start name any whose heartbeat is fresh.
+ * asleep, re-stamped at least every minute awake or asleep, `failed` while a
+ * pass's last word was (a provider still failing), ended when the scheduler
+ * stops — a second signal included. The passes stamp through it, not their
+ * own rows, so a wake does not end a follower's row for preflight to warn
+ * about, and preflight's consolidate pass row reads it as the scheduler at
+ * work. Only --follow stamps: one sleep leaves no row to go stale, as a
+ * one-shot pass does not. Followers run outside sleep (the workers profile)
+ * do not yield: --dry-run and the start name any whose heartbeat is fresh,
+ * with how to stop them and retire their rows.
  *
- * ── Not here (SMD-1794's later cuts) ────────────────────────────────────────
- * A budget per pass (statement_timeout, work_mem) and per sleep (wall clock);
- * the re-derive pass (rebuild_derived, SMD-1732); the compose service and
- * preflight's row. The frozen-belief scan, decay relabelling and an HNSW heal
- * are their own tickets' passes (SMD-1722, SMD-1736, SMD-1632), as is the
- * awake latency under a sleep at 1M and 10M rows (SMD-1500's harness).
+ * ── Not here ────────────────────────────────────────────────────────────────
+ * The compose service, preflight's own `sleep` row, quieter banners and
+ * start-time configuration checks (SMD-2678); a budget per pass
+ * (statement_timeout, work_mem) and per sleep (a wall clock), and the
+ * re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). The frozen-belief
+ * scan, decay relabelling and an HNSW heal are their own tickets' passes
+ * (SMD-1722, SMD-1736, SMD-1632), as is the awake latency under a sleep at 1M
+ * and 10M rows (SMD-1500's harness).
  */
 
 import type { SQL } from "bun";
+import { hostname } from "node:os";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
-import { databaseUnavailable, waitOut } from "./worker-bootstrap.ts";
+import { databaseUnavailable, outageWait, waitOut } from "./worker-bootstrap.ts";
 import { MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, passStamper, type MalformedBlock, type PassOutcome, type PassStamper } from "./pass-stamp.ts";
 import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
@@ -92,7 +113,7 @@ import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSq
 const FLAGS = { url: "one", quiet: "one", poll: "one", workers: "one", follow: "none", "dry-run": "none" } as const;
 const HINTS = { url: "<postgres://…>", quiet: "<SECONDS>", poll: "<SECONDS>", workers: "<N>" };
 
-/** The quiet before a sleep, measured on the stable brain (the header): 93% of the time asleep, a median sleep of 16.6 min. */
+/** The quiet before a sleep, from the stable brain's logs replayed (the header): 93% of the time asleep, a median sleep of 16.6 min. */
 export const DEFAULT_QUIET_S = 300;
 /** How often the logs are read while asleep: the most a pass runs beside a live call. */
 export const DEFAULT_POLL_S = 5;
@@ -100,6 +121,12 @@ export const DEFAULT_POLL_S = 5;
 export const PASS_FOLLOW_S = 15;
 /** How far before a sleep began its wake reads, for a write committed after it in a transaction begun before (asleep()). */
 export const WAKE_SLACK_S = 30;
+/** The longest --poll: the awake wait is at most a minute, the heartbeat's floor, and a poll past it would break that. */
+export const MAX_POLL_S = 60;
+/** A query log with no row this recent is likely off (OB1_QUERY_LOG unset), and a search does not wake the brain. */
+export const QUERY_LOG_QUIET_S = 86_400;
+/** A pass's own line about the stop the scheduler made it take, not the operator's signal: left out of the scheduler's output. */
+const PASS_STOP_LINE = /^\s*(stopping after the current thought|second signal — exiting now|stopped before the pass began)/;
 
 /** The two passes, in their order. */
 export const PASSES = ["extract", "consolidate"] as const;
@@ -206,7 +233,7 @@ function numbers(opts: SleepOptions): { quiet: number; poll: number; workers: nu
   };
   const quiet = read("--quiet", opts.quiet, DEFAULT_QUIET_S, { min: 1, max: 86_400 });
   if (typeof quiet === "string") return quiet;
-  const poll = read("--poll", opts.poll, DEFAULT_POLL_S, { min: 1, max: 3_600 });
+  const poll = read("--poll", opts.poll, DEFAULT_POLL_S, { min: 1, max: MAX_POLL_S });
   if (typeof poll === "string") return poll;
   const workers = read("--workers", opts.workers, 1, { min: 1, max: MAX_WORKERS });
   if (typeof workers === "string") return workers;
@@ -243,7 +270,7 @@ export async function run(opts: SleepOptions): Promise<number> {
 }
 
 /** A pass the scheduler started: its run, its stop once the pass began, and the signal that stops it before. */
-type Running = { name: PassName; done: Promise<number>; settled: boolean; code: number | null; stop: PassStop | null; abort: AbortController };
+type Running = { name: PassName; done: Promise<number>; settled: boolean; code: number | null; stop: PassStop | null; abort: AbortController; hushed: boolean };
 
 async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: number; poll: number; workers: number }, out: Writer["out"], err: Writer["err"]): Promise<number> {
   const { quiet: QUIET, poll: POLL, workers: WORKERS } = n;
@@ -255,8 +282,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const readsLog = await readsQueryLog(sql);
   out(`  quiet:  ${QUIET} s with no read logged in query_log and no write in thought_audit but sync's (actor_kind 'ingested')`);
   if (!readsLog) err("  query_log: this role cannot read it (only its owner can) — only writes wake the brain");
+  // The log is written only under the server's OB1_QUERY_LOG=on, off by
+  // default, and nothing in the database says which: a log with no recent row
+  // is said once, since a search then never wakes the brain.
+  else if ((await sql`SELECT EXISTS (SELECT 1 FROM query_log WHERE logged_at > now() - make_interval(secs => ${QUERY_LOG_QUIET_S})) AS recent`)[0].recent !== true) {
+    err("  query_log: no row in the last 24 h — with OB1_QUERY_LOG off on the server (its default) a search is not logged and does not wake the brain; only writes do. Set OB1_QUERY_LOG=on for reads to wake it.");
+  }
   const outside = await followersOutside(sql);
-  if (outside.length) err(`  followers running outside sleep, which do not yield to a live call: ${outside.join(", ")} — stop them (the workers profile) to let sleep run the passes`);
+  if (outside.length) err(`  followers running outside sleep, which do not yield to a live call: ${outside.join(", ")} — the workers profile's, or a --follow run by hand. Stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, and take workers out of COMPOSE_PROFILES in deploy/.env), then delete their rows (DELETE FROM ob1_config WHERE key IN (${outside.map((k) => `'${k}'`).join(", ")})) so preflight does not ask for them back`);
 
   if (opts.dryRun) {
     const [{ now }] = await sql`SELECT now() AS now`;
@@ -277,6 +310,32 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     return 0;
   }
 
+  // ── The heartbeat ────────────────────────────────────────────────────────
+  // Only --follow stamps, as only a follower does: one sleep leaves no row to go stale.
+  const stamper: PassStamper = FOLLOW
+    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the passes go on`) })
+    : { key: "", stamp: async () => {}, end: async () => {}, during: (p) => p, alive: async () => {} };
+  const everyMs = Math.max(opts.minStampEveryS ?? MIN_STAMP_EVERY_S, POLL) * 1000;
+  /** Each pass's last word in this sleep, and extraction's last judged block. */
+  const words: Partial<Record<PassName, PassOutcome>> = {};
+  let malformed: MalformedBlock | null | undefined;
+  const sleepOutcome = (): "ok" | "failed" => (Object.values(words).includes("failed") ? "failed" : "ok");
+  /** What a pass stamps goes to the sleep's row: its outcome mid-sleep, never an end, which is the scheduler's. */
+  const through = (pass: PassName): PassStamper => ({
+    key: stamper.key,
+    async stamp(o, m) {
+      words[pass] = o;
+      if (m !== undefined) malformed = m;
+      await stamper.alive(sleepOutcome(), malformed ?? undefined);
+    },
+    async end(o, m) {
+      if (o === "failed") words[pass] = o;
+      if (m !== undefined) malformed = m;
+    },
+    during: (p) => p,
+    alive: async () => {},
+  });
+
   // ── The scheduler's stop ─────────────────────────────────────────────────
   let stopping = false;
   let hardStopped = false;
@@ -287,11 +346,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // A pass's signal is its first stop, and aborting it again does nothing; its
   // PassStop called after that is the hard stop — the leases returned and the
   // call in hand aborted. A pass not yet begun has no PassStop: the signal
-  // stops it before it claims.
+  // stops it before it claims. Either way the pass's own words for the stop
+  // (a "signal" the operator did not send) are left out (`hushed`).
   const softStop = (p: Running): void => {
+    p.hushed = true;
     if (!p.settled) p.abort.abort();
   };
   const hardStop = async (p: Running): Promise<void> => {
+    p.hushed = true;
     if (p.settled) return;
     p.abort.abort();
     await p.stop?.();
@@ -301,7 +363,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     if (stopping) {
       hardStopped = true;
       err("\n  second signal — the passes stop now, their leases returned");
-      return Promise.all(running.map(hardStop));
+      // The row ends before the CLI exits on the release (stopOnSignals), so
+      // it reads stopped rather than running until it goes stale.
+      return Promise.all(running.map(hardStop)).then(() => stamper.end("stopped", malformed ?? undefined));
     }
     stopping = true;
     onStop.abort();
@@ -318,32 +382,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   };
   opts.signal?.addEventListener("abort", abort, { once: true });
   opts.onPass?.(stop);
-
-  // ── The heartbeat ────────────────────────────────────────────────────────
-  // Only --follow stamps, as only a follower does: one sleep leaves no row to go stale.
-  const stamper: PassStamper = FOLLOW
-    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the passes go on`) })
-    : { key: "", stamp: async () => {}, end: async () => {}, during: (p) => p, alive: async () => {} };
-  const everyMs = Math.max(opts.minStampEveryS ?? MIN_STAMP_EVERY_S, POLL) * 1000;
-  /** Each pass's last word in this sleep, and extraction's last judged block. */
-  const words: Partial<Record<PassName, PassOutcome>> = {};
-  let malformed: MalformedBlock | null | undefined;
-  const sleepOutcome = (): "ok" | "failed" => (Object.values(words).includes("failed") ? "failed" : "ok");
-  /** What a pass stamps goes to the sleep's row: its outcome, never a pass of the sleep's, nor an end. */
-  const through = (pass: PassName): PassStamper => ({
-    key: stamper.key,
-    async stamp(o, m) {
-      words[pass] = o;
-      if (m !== undefined) malformed = m;
-      await stamper.alive(sleepOutcome(), malformed ?? undefined);
-    },
-    async end(o, m) {
-      if (o === "failed") words[pass] = o;
-      if (m !== undefined) malformed = m;
-    },
-    during: (p) => p,
-    alive: async () => {},
-  });
 
   /** A database read that outlasts the database going away (SMD-2599's rule): null when a stop ended the wait. */
   let saidDown = false;
@@ -363,14 +401,17 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
 
   /** Aborted when a pass of the current sleep settles, so its poll wakes to read why. */
   let passEnded = new AbortController();
+  /** The passes that have begun in this process: past their start's refusals (the provider, the key) at least once. */
+  const begun = new Set<PassName>();
   const start = (name: PassName): Running => {
     const abort = new AbortController();
     const tag = (line: string) => line.split("\n").map((l) => (l.trim() ? `  [${name}]${l}` : l)).join("\n");
-    const p: Running = { name, done: Promise.resolve(0), settled: false, code: null, stop: null, abort };
+    const p: Running = { name, done: Promise.resolve(0), settled: false, code: null, stop: null, abort, hushed: false };
+    const say = (write: Writer["out"]) => (l: string) => { if (!(p.hushed && PASS_STOP_LINE.test(l))) write(tag(l)); };
     const common = {
       url, env, workers: WORKERS, follow: PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
-      onPass: (s: PassStop) => { p.stop = s; },
-      writer: { out: (l: string) => out(tag(l)), err: (l: string) => err(tag(l)) },
+      onPass: (s: PassStop) => { p.stop = s; begun.add(name); },
+      writer: { out: say(out), err: say(err) },
     };
     const ended = passEnded;
     p.done = (name === "extract" ? runExtract(common) : runConsolidate(common)).then((code) => {
@@ -397,6 +438,36 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     if (thrown) throw (thrown as PromiseRejectedResult).reason;
   };
 
+  /**
+   * The claims this process's passes hold — their worker ids carry the host
+   * and pid (extract-entities.ts's and consolidate.ts's `workerId`) — read
+   * before a wake's hard stop returns them.
+   */
+  const heldHere = async (): Promise<{ id: string; job: string }[]> =>
+    (await sql`
+      SELECT thought_id::text AS id, work_type AS job FROM thought_work_claims
+       WHERE work_type IN (${JOBS.extract}, ${JOBS.consolidate}) AND status = 'claimed'
+         AND (starts_with(worker_id, ${`extract-${hostname()}-${process.pid}-`}) OR starts_with(worker_id, ${`consolidate-${hostname()}-${process.pid}-`}))`) as { id: string; job: string }[];
+  /**
+   * A wake's abandoned claims to the back of the queue. The release keeps
+   * enqueued_at and counts no attempt (015), and claims are taken oldest
+   * first, so a thought longer than the sleeps would be taken first by every
+   * sleep and the pool behind it would never move (review pass 1, run).
+   */
+  let saidTail = false;
+  const toTail = async (held: { id: string; job: string }[]): Promise<void> => {
+    if (held.length === 0) return;
+    try {
+      await sql`
+        UPDATE thought_work_claims c SET enqueued_at = now()
+          FROM unnest(${sql.array(held.map((h) => h.id), "TEXT")}::uuid[], ${sql.array(held.map((h) => h.job), "TEXT")}::text[]) AS u(id, job)
+         WHERE c.thought_id = u.id AND c.work_type = u.job AND c.status = 'pending'`;
+    } catch (e) {
+      if (!saidTail) err(`  could not move the thought(s) the wake left to the back of the queue (${(e as Error).message}) — the next sleep takes them first again`);
+      saidTail = true;
+    }
+  };
+
   /** Awake: wait until the brain has been quiet --quiet seconds. The database's now() when it fell asleep, or null on a stop. */
   const awaitQuiet = async (): Promise<Date | null> => {
     let stampedAt = 0;
@@ -415,13 +486,18 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   /**
    * Asleep from `since`: extraction alone until its pool drains, then
    * consolidation beside it. "woken" on a live event, "done" when one sleep
-   * (no --follow) drained both, "stopped" on a stop, or the code of a pass
-   * that ended by itself (a refusal).
+   * (no --follow) drained both, "stopped" on a stop — the passes stopped
+   * before it returns, inside the heartbeat's `during` — or a pass that ended
+   * by itself (a refusal), with its code.
    */
-  const asleep = async (since: Date): Promise<"woken" | "done" | "stopped" | { code: number }> => {
+  const asleep = async (since: Date): Promise<"woken" | "done" | "stopped" | { pass: PassName; code: number }> => {
     for (const k of PASSES) delete words[k];
     passEnded = new AbortController();
     const wake = AbortSignal.any([onStop.signal, passEnded.signal]);
+    const stopped = async (): Promise<"stopped"> => {
+      await stopPasses(hardStopped);
+      return "stopped";
+    };
     out(`  asleep: no live call for ${QUIET} s — extracting${FOLLOW ? "" : ", then consolidating, until both pools are drained"}`);
     start("extract");
     let consolidating = false;
@@ -431,27 +507,31 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // just read, where nothing visible then can stand.
     const from = new Date(since.getTime() - Math.min(QUIET, WAKE_SLACK_S) * 1000);
     for (;;) {
-      if (stopping) return "stopped";
+      if (stopping) return stopped();
       const live = await reading(() => newestLive(sql, from, readsLog));
-      if (live === null) return "stopped";
+      if (live === null) return stopped();
       const woke = newer(live.read, live.write);
       if (woke !== null) {
         out(`  awake: a live ${live.read && woke === live.read ? "read" : "write"} at ${woke.toISOString()} — the passes stop now, their leases returned`);
+        const held = await reading(heldHere);
         await stopPasses(true);
+        if (held) await toTail(held);
         return "woken";
       }
       const ended = running.find((p) => p.settled);
       if (ended) {
-        err(`  ${ended.name} ended by itself (exit ${ended.code}) — the sleep stops`);
+        // A pass that threw rejects out of stopPasses, after the others stop.
         await stopPasses(true);
-        return { code: ended.code === 0 || ended.code === null ? 1 : ended.code };
+        const code = ended.code === null || ended.code === 0 ? 1 : ended.code;
+        err(`  ${ended.name} ended by itself (exit ${ended.code}) — the sleep stops`);
+        return { pass: ended.name, code };
       }
       // The pools decide two things only — when consolidation joins, and when
       // one sleep is done — so a --follow consolidating reads neither: the
       // extraction pool's count is a scan of every thought.
       if (!consolidating || !FOLLOW) {
         const pools = await reading(async () => ({ extract: await poolOf(sql, "extract", JOBS.extract), consolidate: consolidating ? await poolOf(sql, "consolidate", JOBS.consolidate) : null }));
-        if (pools === null) return "stopped";
+        if (pools === null) return stopped();
         if (!consolidating && drained(pools.extract)) {
           out("  extraction drained — consolidating beside it");
           start("consolidate");
@@ -467,19 +547,36 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   };
 
   try {
+    /** Refusals in a row since a sleep last ran: the next is tried on SMD-2599's outage schedule. */
+    let refusals = 0;
     for (;;) {
       const since = await awaitQuiet();
-      if (since === null) break;
+      // A stop during the last read: no pass is started for it.
+      if (since === null || stopping) break;
       const r = await stamper.during(asleep(since));
       if (r === "stopped") {
-        await stopPasses(hardStopped);
         await stamper.end("stopped", malformed ?? undefined);
         return FOLLOW && !hardStopped ? 0 : 130;
       }
       if (typeof r === "object") {
-        await stamper.end("failed", malformed ?? undefined);
-        return r.code;
+        // A refusal by a pass that has begun in this process before — the
+        // provider or the key passed its start then — is one a restart could
+        // meet as well: a key rotated, a model re-pulled. Every sleep starts
+        // its passes afresh, so under --follow it is retried, the row failed
+        // meanwhile, rather than ending a scheduler nothing restarts. A
+        // pass's first start refusing is the configuration's: it ends the run.
+        if (!FOLLOW || !begun.has(r.pass)) {
+          await stamper.end("failed", malformed ?? undefined);
+          return r.code;
+        }
+        words[r.pass] = "failed";
+        await stamper.stamp("failed", malformed ?? undefined);
+        const waitMs = outageWait(refusals++);
+        err(`  ${r.pass} has run in this process before, so the next sleep tries it again in ${waitMs / 1000} s; heartbeat:sleep reads failed until one runs`);
+        await sleepUnless(waitMs, onStop.signal);
+        continue;
       }
+      refusals = 0;
       await stamper.stamp(sleepOutcome(), malformed ?? undefined);
       if (!FOLLOW) return r === "done" ? 0 : 1;
     }
@@ -499,7 +596,7 @@ if (import.meta.main) {
   const cli = commandLine("sleep.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
   const quiet = cli.int("quiet", { absent: DEFAULT_QUIET_S, min: 1, max: 86_400 });
-  const poll = cli.int("poll", { absent: DEFAULT_POLL_S, min: 1, max: 3_600 });
+  const poll = cli.int("poll", { absent: DEFAULT_POLL_S, min: 1, max: MAX_POLL_S });
   const workers = cli.int("workers", { absent: 1, min: 1, max: MAX_WORKERS });
   const sql = openSql(url, { max: 2 });
   let uninstall = () => {};

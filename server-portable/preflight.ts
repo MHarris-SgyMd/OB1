@@ -3943,6 +3943,17 @@ if (configFailed) {
               // it holds none (SMD-2423, SMD-2261 item 7). An ok row, with no
               // remedy that would start a second worker.
               const l = leases.get(key) ?? NO_LEASES;
+              // The sleep scheduler, fresh, works the current judge's key
+              // (SMD-1794). Its followers stamp through heartbeat:sleep, and
+              // awake it holds no lease: the row is the scheduler's, with no
+              // remedy that would start a worker beside it — an old
+              // consolidate row of the workers profile's included.
+              const sleeper = envPrefix === "" ? facts.workers?.heartbeats.find((h) => h.worker === "sleep" && !h.stale && !h.ended) : undefined;
+              if (sleeper) {
+                const r = runningRow(key, c, `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`, queue ? `; ${queue}` : "");
+                add("consolidate pass", r.status, r.detail, r.fix);
+                continue;
+              }
               const beat = facts.workers?.heartbeats.find((h) => h.worker === "consolidate" && h.job === key);
               const follower = beat && !beat.stale && !beat.ended ? beat : undefined;
               // A follower killed outright leaves its claims' leases live until

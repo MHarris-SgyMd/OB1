@@ -2466,46 +2466,94 @@ on the snapshot for it (the grants table). test-live [31] drives it.
 
 Extraction and consolidation cost model time, and on a local model that time
 is shared with captures and searches. `sleep.ts` runs the two passes while the
-brain is quiet and hands the model and the database back on the first live
-call — "dolphin sleep": one half works while the other keeps answering.
+brain is quiet and stops them within `--poll` seconds of the first live call
+being recorded — "dolphin sleep": one half works while the other keeps
+answering.
 
 ```bash
 bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
 bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --quiet SECONDS (300)   --poll SECONDS (5)   --workers N (1, for each pass)
-#   exits 0 done, or --follow stopped · 1 woken with work left (one sleep) · 2 usage, configuration or a pass's refusal · 130 a signal before the sleep ended
+#   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1, for each pass: N extraction and, once it joins, N consolidation calls at once)
+#   exits 0 done, or --follow stopped · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration or a pass's refusal at its first start · 130 a signal before the sleep ended
 ```
 
+It needs what the passes need: the server's model settings in its
+environment (`OB1_METADATA_MODEL`, `OB1_JUDGE_MODEL`, the endpoint and its
+egress declaration — otherwise the passes work another job key's pool),
+`OB1_WORKER_KEY` for an agent id on what they write, and a role holding the
+`worker` and `extraction` groups and the `server` group's `SELECT` on
+`thought_audit` (`migrate.ts --grant`); `query_log` only its owner reads. It
+runs in the foreground from a checkout until SMD-2678's compose service: on
+the compose stack the database is reached on the stack's network (the one-off
+`bun` container pattern in `deploy/README.md`). It has no `--job`, so it works
+the configured keys' pools only.
+
 - **Quiet** is no live event for `--quiet` seconds. A live event is a read the
-  server logged (`query_log`, written only under `OB1_QUERY_LOG=on`) or a write
-  the audit recorded through a key not classified `ingested` (`set_agent_kind`
-  — board-sync's sync writes are background work, as the passes are). The
-  passes write no audit row and call no server, so they never wake it. Only
-  the owner can read `query_log`; a role that cannot is told once and then only
-  writes wake the brain. Measured on the stable brain over 14 days: at 300 s
-  it slept 222 times, 93% of the time, with a median sleep of 16.6 min; at
-  60 s, 98% and 12.6 min; at 900 s, 84% and 25.5 min. Counting board-sync's
-  writes as live would halve the median sleep.
+  server logged in `query_log`, or a write the audit recorded through a key not
+  classified `ingested` (`set_agent_kind`). Two consequences:
+  - **Reads wake it only under `OB1_QUERY_LOG=on`** on the server, off by
+    default. With it off a search is not logged, and only writes wake the
+    brain. The start and `--dry-run` say so when the log has no row in 24 h.
+    Even on, the log holds searches, `fetch`, two worker actions and
+    provenance-carrying captures, not every call. Only the owner can read
+    `query_log`; a role that cannot is told once.
+  - **"Background" is the key's kind, not the work.** board-sync's key is
+    `ingested` on the stable brain, so its writes do not wake it; a brain that
+    never classified it would halve the median sleep. `reembed.ts` and
+    `ingest-records.ts` write as `agent` keys, so a vector they fill wakes it,
+    and so does a migration's backfill (kind NULL). The passes it runs write
+    no audit row and call no server, so they never wake it.
+- **What the default is from.** The stable brain's logs over 14 days,
+  replayed at each quiet (the scheduler did not run there, and stable logs
+  reads): at 300 s it would have slept 222 times, 93% of the time, with a
+  median sleep of 16.6 min; at 60 s, 98% and 12.6 min; at 900 s, 84% and
+  25.5 min. The poll, the reach-back below and the passes' own calls are not
+  in those numbers.
 - **Asleep**, the extraction follower runs alone until its pool is drained —
   nothing pending, in flight or not yet pooled — then the consolidation
   follower joins it: the order "Start `extract` alone on a backlog" in
   `deploy/README.md` asks of an operator, held by the scheduler. Followers,
-  not one-shot runs, so a database restart or a provider outage is waited out
-  (SMD-2599). A failed row stays failed: `--retry-failed` is the operator's.
-- **Waking**, both passes are hard-stopped: every lease returned, the model
-  call in hand aborted, the thoughts in hand left to the next sleep. A pass
-  runs at most `--poll` seconds beside a live call.
+  not one-shot runs, so a database restart or a provider outage mid-sleep is
+  waited out (SMD-2599). A failed row stays failed: `--retry-failed` is the
+  operator's. One sleep with the provider down at its start waits for it, and
+  does not end.
+- **Waking.** The logs are read every `--poll` seconds while asleep, reaching
+  up to 30 s before the sleep began (an audit row is dated at its
+  transaction's start, so a capture begun before the sleep and committed
+  after it is dated before it; one blocked longer than that is missed). On a
+  live event both passes are hard-stopped: every lease returned, the model
+  call in hand aborted (a `--decide` decider call is waited for), the
+  thoughts in hand moved to the back of the queue — a thought longer than
+  the sleeps would otherwise be every sleep's first, the pool behind it never
+  moving. Such a thought, and so consolidation's turn, waits for a sleep long
+  enough, likely overnight. The first live call is not handed the model: it
+  is recorded after the model work it does (a capture's metadata call, a
+  search), so on a model with one slot it can queue behind the call in hand.
+- **Refusals.** Every sleep starts its passes afresh, so each meets its
+  start's refusals again: the model not served, the key refused, a 401. A
+  pass's first start refusing is the configuration's, and ends the scheduler
+  with its code. A refusal by a pass that has run in this process before — a
+  model re-pulled, a key rotated — is retried on the outage schedule (5 s,
+  doubling, at most 5 min), the heartbeat failed until a sleep runs.
 - **Heartbeat.** `--follow` stamps `heartbeat:sleep` (above): running while
-  asleep, at least every minute, its outcome the sleep's, `failed` while a
-  pass's last word was. The followers stamp through it, not their own rows, so
-  a wake ends no row for preflight's `workers` row to warn about. Followers run
-  outside it — the `workers` compose profile — do not yield; the start and
-  `--dry-run` name any whose heartbeat is fresh.
+  asleep, at least every minute awake or asleep, `failed` while a pass's last
+  word was, ended when the scheduler stops (a second signal included).
+  Preflight's `workers` row reads "running a pass" for asleep and "alive" for
+  awake. The followers stamp through it, not their own rows, so a wake ends no
+  row for preflight to warn about, and preflight's `consolidate pass` row reads
+  a fresh `heartbeat:sleep` as the scheduler working the current judge's key.
+  Its restart names the defaults, not the flags it was started with.
+- **From the `workers` profile.** Its followers do not yield. Stop them
+  (`podman compose -f deploy/compose.yaml --profile workers stop extract
+  consolidate`), take `workers` out of `COMPOSE_PROFILES` in `deploy/.env`,
+  and delete their `heartbeat:extract:…` and `heartbeat:consolidate:…` rows,
+  or preflight's `workers` row asks for them back. The start and `--dry-run`
+  name any with a fresh heartbeat, with those steps.
 
-Not yet here, the ticket's later cuts: a budget per pass and per sleep, the
-re-derive pass (`rebuild_derived`), and a compose service. test-live [38]
-drives it against a stub model.
+Not yet here: a budget per pass and per sleep and the re-derive pass
+(SMD-2679), and a compose service with preflight's own `sleep` row
+(SMD-2678). test-live [38] drives it against a stub model.
 
 ## Extensions
 
@@ -3510,7 +3558,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2467 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1131 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1145 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

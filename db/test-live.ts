@@ -10220,11 +10220,17 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   let slow = 0;
   /** Extraction calls only: a judge started beside extraction would judge before it ends. */
   let slowExtract = 0;
+  /** Every request, probes too: the model not served (a 404 naming it) — a refusal at a pass's start. */
+  let missing = false;
+  /** Every request, probes too: the provider unavailable (503) — an outage a follower waits out. */
+  let unavailable = false;
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      if (missing) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
+      if (unavailable) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       const judging = /<thought_a>/.test(prompt);
@@ -10280,9 +10286,13 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     // One sleep: extraction alone, drained, then consolidation, then done.
     lines.length = 0;
     const auditBefore = await auditRows();
+    const sessions = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE datname = current_database()`)[0].c);
+    const sessionsBefore = await sessions();
     slowExtract = 1500;
     const once = await sleepRun();
     slowExtract = 0;
+    await Bun.sleep(300);
+    const sessionsAfter = await sessions();
     const onceText = lines.join("\n");
     const lastExtract = Math.max(...modelCalls.filter((c) => c.kind === "extract").map((c) => c.at));
     const firstJudge = Math.min(...modelCalls.filter((c) => c.kind === "judge").map((c) => c.at));
@@ -10294,6 +10304,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
     assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
       `…writing nothing to thoughts.supersedes and no audit row — its own work cannot wake it — and, without --follow, no heartbeat (${supersedes} superseding, ${(await auditRows()) - auditBefore} audit row(s), heartbeat ${JSON.stringify(await beat())})`);
+    assert(sessionsAfter === sessionsBefore, `…and the sleep done, its passes are stopped: no follower's connection is left (${sessionsBefore} → ${sessionsAfter} session(s))`);
 
     // --follow: a live read wakes it mid-call; the passes stop at once.
     lines.length = 0;
@@ -10304,6 +10315,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const following = sleepRun({ follow: true, quiet: 3, signal: ac.signal, minStampEveryS: 1 });
     await pollUntil(async () => modelCalls.length > callsBefore && (await claims(EX)).claimed === 1, 20_000);
     const asleepBeat = await beat();
+    const [inHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
     const wokenAt = Date.now();
     await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read')`;
     await pollUntil(async () => lines.some((l) => /awake: a live read/.test(l)) && !(await claims(EX)).claimed, 10_000);
@@ -10311,6 +10323,13 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const awakeBeat = await beat();
     assert(asleepBeat?.running === true && wakeMs < 3000 && !(await claims(EX)).claimed && (await claims(EX)).pending === 3 && awakeBeat?.running === false && awakeBeat.outcome === "ok",
       `a live read wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
+    // The thought the wake left goes to the back of the queue: claims are taken
+    // oldest first and the release keeps its place, so a thought longer than
+    // the sleeps would be every sleep's first (review pass 1).
+    const queueOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
+    const wakeLines = lines.join("\n");
+    assert(inHand?.id !== undefined && queueOrder.at(-1) === inHand.id && !/second signal|stopping after the current thought/.test(wakeLines),
+      `…the thought it held goes to the back of the queue, and no pass's line speaks of a signal (${queueOrder.indexOf(inHand?.id)} of ${queueOrder.length})`);
     // Asleep again after the quiet, it extracts the backlog; a sync write
     // (a key classified 'ingested') does not wake it, a live write does.
     slow = 0;
@@ -10327,8 +10346,9 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     ac.abort();
     const followCode = await following;
     const endBeat = await beat();
-    assert(followCode === 0 && endBeat?.ended === true && endBeat.outcome === "stopped",
-      `a stopped --follow exits 0 and its heartbeat reads ended (exit ${followCode}; ${JSON.stringify(endBeat)})`);
+    const ownRows = Number((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key LIKE 'heartbeat:extract%' OR key LIKE 'heartbeat:consolidate%'`)[0].c);
+    assert(followCode === 0 && endBeat?.ended === true && endBeat.outcome === "stopped" && ownRows === 0,
+      `a stopped --follow exits 0 and its heartbeat reads ended, and its followers wrote no heartbeat rows of their own (exit ${followCode}; ${JSON.stringify(endBeat)}; ${ownRows} follower row(s))`);
 
     // A capture whose transaction began before the sleep and commits after it
     // is dated before the sleep: it still wakes it.
@@ -10348,6 +10368,62 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     ac2.abort();
     await late;
     assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+
+    // A pass refusing at its first start is the configuration's: the
+    // scheduler ends with its code, the row ended failed.
+    lines.length = 0;
+    missing = true;
+    // Bounded: a scheduler that misses the pass's end would wait for ever.
+    const acFirst = new AbortController();
+    const firstRun = sleepRun({ follow: true, signal: acFirst.signal, minStampEveryS: 1 });
+    const refusedFirst = await Promise.race([firstRun, Bun.sleep(30_000).then(() => "hung" as const)]);
+    if (refusedFirst === "hung") { acFirst.abort(); await firstRun; }
+    missing = false;
+    const firstBeat = await beat();
+    assert(refusedFirst === 2 && firstBeat?.ended === true && firstBeat.outcome === "failed" && lines.some((l) => /extract ended by itself \(exit 2\)/.test(l)),
+      `a model not served at the first sleep's start ends --follow with 2, the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
+
+    // The same refusal after the pass has run in this process — a model
+    // re-pulled, a key rotated — is retried on the outage schedule, the row
+    // failed meanwhile, and the next sleep that runs puts it back to ok.
+    lines.length = 0;
+    const ac3 = new AbortController();
+    let retryDone = false;
+    const retrying = sleepRun({ follow: true, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
+    await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
+    missing = true;
+    await capture("A note that wakes it before the model goes.", "op-sleep", 0, 5);
+    const refusedLater = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 20_000);
+    const laterBeat = await beat();
+    const stillRunning = !retryDone;
+    missing = false;
+    const at = lines.length;
+    const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 30_000);
+    assert(refusedLater && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered,
+      `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed, then ok once a sleep runs (${JSON.stringify(laterBeat)}; recovered ${recovered})`);
+
+    // A provider outage mid-sleep: the follower waits it out (SMD-2599), the
+    // row reads failed while it does and ok once a pass runs again — the
+    // passes' words reach heartbeat:sleep.
+    lines.length = 0;
+    for (let i = 0; i < 2; i++) await capture(`A note an outage holds, number ${i}.`, "sync-sleep", 0, 6);
+    slow = 1500;
+    const restorePauses = shortenPauses();
+    try {
+      await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
+      unavailable = true;
+      const failedBeat = await pollUntil(async () => (await beat())?.outcome === "failed", 20_000);
+      unavailable = false;
+      slow = 0;
+      const okBeat = await pollUntil(async () => (await beat())?.outcome === "ok" && !(await claims(EX)).pending, 30_000);
+      assert(failedBeat && okBeat && !retryDone, `an outage mid-sleep reads failed on heartbeat:sleep while the follower waits, and ok once it passes (failed ${failedBeat}, ok ${okBeat})`);
+    } finally {
+      unavailable = false;
+      slow = 0;
+      restorePauses();
+    }
+    ac3.abort();
+    await retrying;
   } finally {
     stub.stop(true);
     await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;

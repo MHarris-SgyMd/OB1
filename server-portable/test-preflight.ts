@@ -1630,6 +1630,19 @@ else {
   assert([consBeatStale, consEnded].every((r) => /!\s+consolidate pass\s+\S+: .* — a consolidation pass under this key stopped before it finished/.test(r.out)
       && /^\s*→ Its follower is not running: start it again as the workers row says; it finishes the pass\.$/m.test(r.out) && !/Finish it: cd db && OB1_JUDGE_MODEL/.test(r.out)),
          "a stale or ended follower heartbeat is no running pass: the row reads stopped, and points to the workers row's restart rather than a second remedy");
+  // The sleep scheduler, fresh, runs the current judge's key (SMD-1794): the
+  // row is its, with no remedy that starts a worker beside it — not even with
+  // the workers profile's ended row still there. Under another judge the key
+  // is not the scheduler's, and the row reads stopped as before.
+  await followerBeat(20, { outcome: "stopped", ended: true });
+  await claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })}, now() - interval '20 seconds')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  const consSlept = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  const consOtherJudge = await run(SQL_ENV);
+  await claims`DELETE FROM ob1_config WHERE key IN (${`heartbeat:${CONS}`}, 'heartbeat:sleep')`;
+  assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 20 s ago; awake, its passes waiting for the brain to go quiet\); 1 proposal/.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
+      && /stopped before it finished/.test(row(consOtherJudge.out, "consolidate pass")),
+         `a fresh heartbeat:sleep makes the current judge's key the scheduler's, no remedy; another judge's key reads stopped (${row(consSlept.out, "consolidate pass")} | ${row(consOtherJudge.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
   const consFailed = await run(SQL_ENV);
   assert(/consolidate pass\s+[^\n]* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool/.test(consFailed.out) && /\(--retry-failed for the 1 failed row\(s\) once their cause is fixed\)/.test(consFailed.out),
