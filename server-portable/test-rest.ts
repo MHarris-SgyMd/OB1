@@ -461,8 +461,8 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
     apiFetch: (path: string, o: { apiKey: string; endpoint: string; method?: string; body?: unknown }) => Promise<unknown>;
     failureKind: (e: unknown) => string;
     retryPlan: (attempts: number, kind: string, max: number) => { attempts: number; delayMinutes: number; deadLetter: boolean };
-    describeFailure: (e: unknown) => string;
-    verifyForSave: (current: Record<string, string>, next: Record<string, string>) => Promise<void>;
+    describeFailure: (e: unknown, atSave?: boolean) => string;
+    verifyForSave: (current: Record<string, string>, next: Record<string, string>) => Promise<{ warning?: string }>;
     healthCheck: (o: { apiKey: string; endpoint: string }) => Promise<Record<string, unknown>>;
     ingestDocument: (payload: unknown, o: { apiKey: string; endpoint: string }) => Promise<Record<string, unknown>>;
     toCapture: (payload: unknown) => { content: string; source: string; trust: string; metadata: Record<string, unknown> };
@@ -525,6 +525,13 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
   assert(["", "NO_ROUTE", "METHOD_NOT_ALLOWED"].every((code) => kind({ status: 404, code }) === "setup") && kind({ status: 406 }) === "setup" && kind({ status: 401, code: "UNAUTHORIZED" }) === "setup" && kind({ status: 403, code: "FORBIDDEN" }) === "setup",
     "an answer that is not the REST core's, a path it does not serve, or a refused key is setup: the capture waits");
   assert(kind({ status: 429 }) === "transient" && kind({ status: 503, code: "BUSY" }) === "transient" && kind({ message: "Request timed out" }) === "transient", "a 429, a 5xx or a timeout is transient");
+  assert(kind({ status: 403, code: "REFUSED_EGRESS" }) === "refused" && kind({ status: 404, code: "NOT_FOUND" }) === "setup" && kind({ status: 405, code: "SOMETHING" }) === "setup",
+    "the egress gate's 403 refuses the capture; a 404 or 405 is the path's fault whatever code another server puts on it");
+  let noKey: unknown = null;
+  try { await client.ingestDocument(queued, { apiKey: "", ...at }); } catch (e) { noKey = e; }
+  let noUrl: unknown = null;
+  try { await client.ingestDocument(queued, { apiKey: "cap-raw", endpoint: "" }); } catch (e) { noUrl = e; }
+  assert(kind(noKey) === "setup" && kind(noUrl) === "setup", "a missing key or URL is setup: the capture waits for it");
   // A bare origin reaches the MCP server's root: its JSON-RPC 400 is setup, not a refusal of the capture.
   let bare: unknown = null;
   try { await client.ingestDocument(queued, { apiKey: "cap-raw", endpoint: "http://mcp/" }); } catch (e) { bare = e; }
@@ -537,6 +544,13 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
   const good = { apiEndpoint: "http://api/", apiKey: "cap-raw" };
   const notSaved = async (next: Record<string, string>, current: Record<string, string> = { apiEndpoint: "", apiKey: "" }) => { try { await client.verifyForSave(current, next); return ""; } catch (e) { return (e as Error).message; } };
   assert(await notSaved(good) === "", "a URL and key that reach the REST core and can capture are saved");
+  const atSave = client.describeFailure(bare, true);
+  assert(!/captures wait/.test(atSave) && /captures wait/.test(client.describeFailure(bare)) && /HTTP 400: Invalid Request/.test(atSave), `at save the words promise no wait, and the server's answer is kept (${atSave})`);
+  answer = async () => { throw new Error("unused"); };
+  identity = { status: "busy" } as unknown as AgentOutcome;
+  const busy = await client.verifyForSave({ apiEndpoint: "", apiKey: "" }, good);
+  assert(/^Saved, but the brain did not answer/.test(busy.warning ?? ""), `a brain that is busy at the check lets the setting save, with a warning (${JSON.stringify(busy)})`);
+  identity = { status: "ok", agentId: "agent-1" };
   assert(/^Not saved: This URL did not answer as the brain's REST core \(HTTP 400\)/.test(await notSaved({ apiEndpoint: "http://mcp/", apiKey: "cap-raw" })), "a bare origin (the MCP endpoint's) is not saved, and the user is told why");
   assert(/^Not saved: .*cannot capture/.test(await notSaved({ apiEndpoint: "http://api/", apiKey: "read-raw" })), "a key that cannot capture is not saved");
   calls.length = 0;

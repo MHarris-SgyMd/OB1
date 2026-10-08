@@ -12,7 +12,10 @@
     if (!text) return 'Unknown error';
     try {
       const parsed = JSON.parse(text);
-      if (parsed.error || parsed.message) return parsed.error || parsed.message;
+      // `error` is a string in some servers' bodies and an object in a
+      // JSON-RPC one (the MCP endpoint's `{ code, message }`).
+      const said = [parsed.error, parsed.error && parsed.error.message, parsed.message].find((v) => typeof v === 'string' && v);
+      if (said) return said;
       // The REST core answers a refusal as `{ code, ...facts }`: the facts
       // that say why — the field an input refusal names, the scope a
       // FORBIDDEN needs, a metadata problem and its key.
@@ -45,10 +48,18 @@
     const opts = options || {};
     const apiKey = String(opts.apiKey || '').trim();
     if (!apiKey) {
-      throw new Error('Missing x-brain-key API key. Open the extension popup and complete the Configure screen.');
+      const missing = new Error('Missing x-brain-key API key. Open the extension popup and complete the Configure screen.');
+      missing.setup = true;
+      throw missing;
     }
 
-    const baseUrl = global.OBConfig.buildRestBase(opts.endpoint);
+    let baseUrl;
+    try {
+      baseUrl = global.OBConfig.buildRestBase(opts.endpoint);
+    } catch (err) {
+      err.setup = true;
+      throw err;
+    }
     const url = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
     const timeoutMs = opts.timeoutMs || REQUEST_TIMEOUT_MS;
     const controller = new AbortController();
@@ -219,12 +230,15 @@
    *     with backoff, then dead-lettered.
    */
   function failureKind(error) {
+    if (error && error.setup) return 'setup';
     const status = Number(error && error.status);
     const code = (error && error.code) || '';
     if (!status || status === 429 || status >= 500) return 'transient';
     if (status === 413) return 'refused';
-    if (status === 401 || status === 403) return 'setup';
-    if (!code || code === 'NO_ROUTE' || code === 'METHOD_NOT_ALLOWED') return 'setup';
+    // The REST core refuses a capture with a 400, 403 (egress), 409 or 422 —
+    // never a 404 or 405, which say the path is wrong whoever answers.
+    if (status === 401 || status === 403 && !/^REFUSED_/.test(code) || status === 404 || status === 405) return 'setup';
+    if (!code) return 'setup';
     return 'refused';
   }
 
@@ -248,15 +262,22 @@
     return { attempts: next, delayMinutes: Math.min(Math.pow(2, Math.max(1, next) - 1), 60), deadLetter: next >= maxAttempts };
   }
 
-  /** What a failure is, in words for the activity log and the popup. */
-  function describeFailure(error) {
+  /**
+   * What a failure is, in words for the activity log and the popup. `atSave`:
+   * said of a setting not yet saved, so nothing is waiting on it.
+   */
+  function describeFailure(error, atSave) {
     const status = Number(error && error.status);
     const kind = failureKind(error);
+    const waits = atSave ? '' : '; captures wait until it works';
     if (kind === 'setup' && (status === 401 || status === 403)) {
-      return `API key refused (HTTP ${status}) — check the key in the Configure screen; captures wait until it works. ${error.message}`;
+      return `API key refused (HTTP ${status}) — check the key in the Configure screen${waits}. (${error.message})`;
+    }
+    if (kind === 'setup' && status) {
+      return `This URL did not answer as the brain's REST core (HTTP ${status}) — check the URL in the Configure screen (the brain's origin with /api) and that /api is on${waits}. (${error.message})`;
     }
     if (kind === 'setup') {
-      return `This URL did not answer as the brain's REST core (HTTP ${status}) — check the URL in the Configure screen (the brain's origin with /api) and that /api is on; captures wait until it works.`;
+      return `${error.message}${waits ? ' Captures wait until it is set.' : ''}`;
     }
     return error && error.message ? error.message : String(error);
   }
@@ -269,11 +290,16 @@
    */
   async function verifyForSave(current, next) {
     const changed = String(next.apiEndpoint || '') !== String(current.apiEndpoint || '') || String(next.apiKey || '') !== String(current.apiKey || '');
-    if (!changed || !String(next.apiEndpoint || '').trim() || !String(next.apiKey || '').trim()) return;
+    if (!changed || !String(next.apiEndpoint || '').trim() || !String(next.apiKey || '').trim()) return {};
     try {
       await healthCheck({ apiKey: next.apiKey, endpoint: next.apiEndpoint });
+      return {};
     } catch (error) {
-      throw new Error(`Not saved: ${failureKind(error) === 'setup' && Number(error.status) ? describeFailure(error).replace(/; captures wait until it works\./, '.') : error.message}`);
+      // A brain that is down or busy says nothing about the setting: it is
+      // saved, with a warning. A wrong URL or key, or a key that cannot
+      // capture, is not.
+      if (failureKind(error) === 'transient') return { warning: `Saved, but the brain did not answer the check (${error.message}). Test the connection once it is up.` };
+      throw new Error(`Not saved: ${describeFailure(error, true)}`);
     }
   }
 

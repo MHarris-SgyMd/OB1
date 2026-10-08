@@ -281,8 +281,7 @@ async function recordRejectedCapture(platform, preview, fingerprint, errorMessag
   await refreshBadge();
 }
 
-async function queueRetry(item, error) {
-  const errorMessage = describeIngestError(error);
+async function queueRetry(item, error, errorMessage = describeIngestError(error)) {
   return withStorageLock(async () => {
     const state = await getLocalState();
     const queue = [...readRetryQueue(state)];
@@ -500,20 +499,21 @@ async function processCaptureRequest(message) {
         queuedAt: new Date().toISOString()
       };
 
-      await queueRetry(retryItem, error);
+      const detail = describeIngestError(error);
+      await queueRetry(retryItem, error, detail);
       await appendCaptureLog({
         timestamp: new Date().toISOString(),
         platform: capture.platform || 'unknown',
         status: 'queued_retry',
         preview: capture.preview,
-        detail: describeIngestError(error),
+        detail,
         fingerprint: fingerprint.slice(0, 16)
       });
 
       return {
         ok: false,
         status: 'queued_retry',
-        error: describeIngestError(error),
+        error: detail,
         fingerprint
       };
     }
@@ -568,8 +568,15 @@ async function processRetryQueue(forceAll) {
   }
 
   let processed = 0;
+  // A setup failure (a wrong URL or key) would answer every item the same:
+  // after the first, the rest go back to the queue unsent.
+  let setupFailure = null;
 
   for (const item of dueItems) {
+    if (setupFailure) {
+      await queueRetry(item, setupFailure.error, setupFailure.detail);
+      continue;
+    }
     processingFingerprints.add(item.fingerprint);
     try {
       const result = await OBApiClient.ingestDocument(item.payload, {
@@ -599,7 +606,9 @@ async function processRetryQueue(forceAll) {
       if (isPermanentIngestError(error)) {
         await recordRejectedCapture(item.platform, item.preview, item.fingerprint, describeIngestError(error));
       } else {
-        await queueRetry(item, error);
+        const detail = describeIngestError(error);
+        await queueRetry(item, error, detail);
+        if (OBApiClient.failureKind(error) === 'setup') setupFailure = { error, detail };
       }
     } finally {
       processingFingerprints.delete(item.fingerprint);
@@ -771,10 +780,10 @@ async function handleMessage(message) {
     case 'SAVE_CONFIG': {
       // A new URL or key is checked against the REST core before it is kept.
       const current = await OBConfig.getConfig();
-      await OBApiClient.verifyForSave(current, OBConfig.mergeSettings({ ...current, ...(message.config || {}) }));
+      const check = await OBApiClient.verifyForSave(current, OBConfig.mergeSettings({ ...current, ...(message.config || {}) }));
       const saved = await OBConfig.setConfig(message.config || {});
       await refreshBadge();
-      return { ok: true, config: saved };
+      return { ok: true, config: saved, ...(check.warning ? { warning: check.warning } : {}) };
     }
     case 'TEST_CONNECTION': {
       const incoming = message.config || message.settings || {};

@@ -32,8 +32,9 @@ Delete only when **both** hold:
   an accidental capture, **and**
 - Editing or tagging it is not good enough.
 
-If the thought is merely outdated, wrong, or superseded, **update it or tag it**
-`superseded` instead — see the **updating-thoughts** skill.
+If the thought is merely outdated, wrong, or superseded, **update it**, or point
+the newer thought at it with `update_thought`'s `supersedes` field (which
+search labels) — see the **updating-thoughts** skill.
 
 ## Process
 
