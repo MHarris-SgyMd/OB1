@@ -690,11 +690,18 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const { RUNAWAY_PENALTY, RUNAWAY_REPEATS, TOKEN_REPEATS, REPEAT_UNIT_MAX, repeatedTail, callsMadeBy } = await import("./entities.ts");
   let runawayOnce = false;
   const penalties: (number | undefined)[] = [];
+  /** Set, the penalised retry is held this long, and `onRetry` told as it arrives (the hard stop, SMD-1794). */
+  let holdRetryMs = 0;
+  let onRetry: (() => void) | null = null;
   const providerE = Bun.serve({
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { max_tokens?: number; frequency_penalty?: number };
       penalties.push(body.frequency_penalty);
+      if (body.frequency_penalty !== undefined && holdRetryMs) {
+        onRetry?.();
+        await Bun.sleep(holdRetryMs);
+      }
       if (runawayOnce && body.frequency_penalty === undefined) {
         runawayOnce = false;
         return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
@@ -721,6 +728,21 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   penalties.length = 0;
   const clean = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
   assert(!clean.malformed && clean.retried === undefined && penalties.length === 1, "…and an answer that converges is never retried");
+  // The hard stop reaches the retry too (SMD-1794): a stop while the penalised
+  // retry is in hand aborts it, not after its 3 s answer.
+  penalties.length = 0;
+  runawayOnce = true;
+  holdRetryMs = 3000;
+  const retryStop = new AbortController();
+  onRetry = () => { setTimeout(() => retryStop.abort(), 200); };
+  const retryAt = Date.now();
+  let retryErr: unknown = null;
+  try { await extractEntities(short, cfgE, undefined, { kind: "extraction" }, undefined, retryStop.signal); } catch (e) { retryErr = e; }
+  const retryMs = Date.now() - retryAt;
+  holdRetryMs = 0;
+  onRetry = null;
+  assert(retryErr !== null && retryMs < 1500 && penalties.length === 2 && callsMadeBy(retryErr) === 2,
+    `a stop during the runaway's retry aborts it, not after its answer (${retryMs} ms, ${penalties.length} call(s) sent, ${callsMadeBy(retryErr)} counted)`);
 
   // SMD-2000: with OB1_EXTRACT_ESCALATE_MODEL set, a runaway is remade on the
   // LARGER model with no penalty — not once more on the same model under one —
