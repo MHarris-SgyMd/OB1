@@ -159,11 +159,13 @@ async function getEmbedding(text: string): Promise<number[]> {
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  // The capture goes on without its tags when the chat call times out, is
-  // refused or answers something not JSON, the embedding being what it needs:
-  // logged, and recorded on the thought in the core server's reasons
-  // (server-portable/metadata.ts). A deadline that failed the capture instead
-  // would lose one that a model slower than it had always completed (review pass 1).
+  // The capture goes on without its tags when the chat call times out,
+  // answers a status outside 2xx, or answers with no usable tags, the embedding
+  // being what it needs: logged, and recorded on the thought in the core
+  // server's reasons (server-portable/metadata.ts). A deadline that failed the
+  // capture instead would lose one that a model slower than it had always
+  // completed (review pass 1). A chat endpoint that cannot be reached at all
+  // still fails the capture, as on the core server.
   const fallback = (reason: string, why: string): Record<string, unknown> => {
     console.error(`extractMetadata: ${why}`);
     return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: reason };
@@ -196,28 +198,34 @@ Only extract what's explicitly there.`,
         }),
         ...deadline,
       });
-      if (!r.ok) {
-        await r.body?.cancel().catch(() => {});
-        return { status: r.status, text: "" };
-      }
-      return { status: r.status, text: await r.text() };
+      // The status is known from here on: a body that fails to arrive is an
+      // empty one, unless the deadline passed during it (embed.ts providerCall).
+      const body = await r.text().catch((e: Error) => { if (e.name === "TimeoutError") throw e; return ""; });
+      return { status: r.status, text: body };
     });
   } catch (e) {
     if (e instanceof ProviderTimeout) return fallback("provider_timeout", e.message);
     throw e;
   }
-  if (answer.status < 200 || answer.status > 299) return fallback(`provider_${answer.status}`, `Chat completion request to ${CHAT_API_BASE} answered ${answer.status}`);
-  let d: { choices?: [{ message?: { content?: string } }] };
+  if (answer.status < 200 || answer.status > 299) return fallback(`provider_${answer.status}`, `Chat completion request to ${CHAT_API_BASE} failed: ${answer.status} ${answer.text.slice(0, 500)}`);
+  let d: { choices?: [{ message?: { content?: unknown } }] } | null;
   try {
     d = JSON.parse(answer.text);
   } catch {
     return fallback("invalid_response_body", `Chat completion request to ${CHAT_API_BASE} answered a body that is not JSON`);
   }
+  const content = d?.choices?.[0]?.message?.content;
+  if (typeof content !== "string") return fallback("no_message_content", "provider response had no message content");
+  let parsed: unknown;
   try {
-    return JSON.parse(d.choices![0].message!.content!);
+    parsed = JSON.parse(content);
   } catch {
-    return { topics: ["uncategorized"], type: "observation" };
+    return fallback("unparseable_model_output", "model content was not valid JSON");
   }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return fallback("unexpected_json_shape", "model returned JSON that is not an object");
+  // The marker is the server's to set, never the model's: the confirmation prints it (review pass 2).
+  const { metadata_extraction_failed: _, ...tags } = parsed as Record<string, unknown>;
+  return tags;
 }
 
 // --- MCP Server Setup ---

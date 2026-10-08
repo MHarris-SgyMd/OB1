@@ -585,12 +585,13 @@ console.log(`\n[${K8S.file}: a search slower than the idle timeout is answered, 
 // the core server's do. The provider is a real server, and the server's fetch
 // reaches it with its init as given, so the deadline under test is the real
 // fetch's signal. search_thoughts' embedding stalls after its headers (the body
-// read), and the tool fails naming the knob. capture_thought's chat call stalls
-// before any answer, or answers 502, or HTML: each is logged and the capture
-// goes on to its write without tags, as the core's does (review pass 1) — here
-// the write is refused, there being no database, which is how it is seen to have
-// been reached. Until then Bun's 300 s fetch cut was the only bound, and
-// SMD-2001's keepalive let a client sit through it.
+// read), and the tool fails naming the knob. capture_thought's chat call fails
+// each way the core's extractMetadata names (review passes 1 and 2): each is
+// logged, and the capture goes on to its write without tags. Here the write is
+// refused, there being no database, and a control capture whose tags arrive
+// shows which answer the write gives, whatever this machine has on its port.
+// Until then Bun's 300 s fetch cut was the only bound, and SMD-2001's keepalive
+// let a client sit through it.
 console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1_LLM_TIMEOUT, naming it (SMD-2692)]`);
 {
   const handler = handlers[SERVERS.indexOf(K8S)];
@@ -601,27 +602,52 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
   if (handler) {
     env(K8S, KEYS);
     const realFetch = globalThis.fetch;
+    const enc = new TextEncoder();
+    const choice = (content: unknown) => Response.json({ choices: [{ message: { content } }] });
+    /** The chat endpoint's answers, by case; the embedding stalls for the search and answers for every capture. */
+    const CHAT: Record<string, () => Response | Promise<Response>> = {
+      tags: () => choice(JSON.stringify({ topics: ["x"], type: "idea", metadata_extraction_failed: "provider_timeout" })),
+      stall: () => new Promise<Response>(() => {}),
+      "502": () => new Response("model not found", { status: 502 }),
+      html: () => new Response("<html>a proxy's page</html>", { headers: { "content-type": "text/html" } }),
+      reset: () => new Response("served by `cut` below"),
+      empty: () => Response.json({ error: { message: "rate limited" } }),
+      prose: () => choice("here are your tags: none"),
+      array: () => choice("[1, 2]"),
+    };
     let embedStalls = true;
-    let chat: "stall" | "502" | "html" = "stall";
+    let chat = "stall";
     const provider = Bun.serve({
       port: 0,
       fetch(req) {
-        if (new URL(req.url).pathname !== "/embeddings") {
-          if (chat === "502") return new Response("bad gateway", { status: 502 });
-          if (chat === "html") return new Response("<html>a proxy's page</html>", { headers: { "content-type": "text/html" } });
-          return new Promise<Response>(() => {});
-        }
+        if (new URL(req.url).pathname !== "/embeddings") return CHAT[chat]();
         if (!embedStalls) return Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
-        return new Response(new ReadableStream({ start(ctl) { ctl.enqueue(new TextEncoder().encode('{"data":')); } }), { headers: { "content-type": "application/json" } });
+        return new Response(new ReadableStream({ start(ctl) { ctl.enqueue(enc.encode('{"data":')); } }), { headers: { "content-type": "application/json" } });
+      },
+    });
+    // A body cut off: 200 and a length of 100, six bytes, and the socket closed, so the body read rejects (review pass 2).
+    const cut = Bun.listen<{ answered: boolean }>({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open(s) { s.data = { answered: false }; },
+        data(s) {
+          if (s.data.answered) return;
+          s.data.answered = true;
+          s.write('HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{"choi');
+          s.end();
+        },
       },
     });
     globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const to = /\/(embeddings|chat\/completions)$/.exec(url);
-      return realFetch(to ? `http://127.0.0.1:${provider.port}/${to[1]}` : input, init);
+      const port = to?.[1] === "chat/completions" && chat === "reset" ? cut.port : provider.port;
+      return realFetch(to ? `http://127.0.0.1:${port}/${to[1]}` : input, init);
     }) as typeof fetch;
+    type Outcome = { ms: number; lines: string[]; error: string };
     /** One tool call: its error text, the extractor's log lines, and how long it took; given up on at 8 s, so a call with no deadline fails here rather than hanging the suite. */
-    const tool = async (key: string, id: number, name: string, args: Record<string, string>) => {
+    const tool = async (key: string, id: number, name: string, args: Record<string, string>): Promise<Outcome> => {
       const t0 = performance.now();
       const req = new Request("http://extension.test/mcp", { method: "POST", headers: { ...RPC, "x-access-key": key },
         body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) });
@@ -637,32 +663,42 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
       }
     };
     process.env.OB1_LLM_TIMEOUT = "2";
-    const notRun = { ms: 0, lines: [] as string[], error: "not run" };
-    let search = notRun, slow = notRun, refused = notRun, html = notRun;
+    let search: Outcome = { ms: 0, lines: [], error: "not run" };
+    const captures: Record<string, Outcome> = {};
     try {
       search = await tool(READ_KEY, 60, "search_thoughts", { query: "a query whose embedding never finishes" });
       embedStalls = false;
-      slow = await tool(WRITE_KEY, 61, "capture_thought", { content: "a thought whose tags never come" });
-      chat = "502";
-      refused = await tool(WRITE_KEY, 62, "capture_thought", { content: "a thought whose tags are refused" });
-      chat = "html";
-      html = await tool(WRITE_KEY, 63, "capture_thought", { content: "a thought whose tags are a web page" });
+      let id = 61;
+      for (const name of Object.keys(CHAT)) {
+        chat = name;
+        captures[name] = await tool(WRITE_KEY, id++, "capture_thought", { content: `a thought whose chat answer is ${name}` });
+      }
     } finally {
       delete process.env.OB1_LLM_TIMEOUT;
       globalThis.fetch = realFetch;
       provider.stop(true);
+      cut.stop(true);
     }
     const BASE = "https://openrouter.ai/api/v1";
-    /** The capture went on past its tags: its error is the write's, not the provider's. */
-    const wrote = (r: typeof notRun) => !r.error.startsWith("no error reply") && !/Chat completion|timed out|Unexpected token/.test(r.error);
     assert(search.error === `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)` && search.ms >= 1_900 && search.ms < 6_000,
       `an embedding whose body stalls fails search_thoughts at OB1_LLM_TIMEOUT=2, naming it (${Math.round(search.ms)} ms: ${search.error})`);
-    assert(slow.lines.join() === `extractMetadata: Chat completion request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)` && slow.ms >= 1_900 && slow.ms < 6_000 && wrote(slow),
-      `a chat call that never answers is logged at the deadline, naming it, and the capture goes on to its write (${Math.round(slow.ms)} ms: ${slow.lines.join(" / ")}; ${slow.error.slice(0, 80)})`);
-    assert(refused.lines.join() === `extractMetadata: Chat completion request to ${BASE} answered 502` && wrote(refused),
-      `a chat call answered 502 is logged with its status, and the capture goes on (${refused.lines.join(" / ")}; ${refused.error.slice(0, 80)})`);
-    assert(html.lines.join() === `extractMetadata: Chat completion request to ${BASE} answered a body that is not JSON` && wrote(html),
-      `a chat call answered with a page that is not JSON is logged, and the capture goes on (${html.lines.join(" / ")}; ${html.error.slice(0, 80)})`);
+    const control = captures.tags;
+    assert(control.lines.length === 0 && control.error.length > 0, `the control: a capture whose tags arrive logs nothing from the extractor, and its write answers "${control.error.slice(0, 60)}"`);
+    const why: Record<string, string> = {
+      stall: `Chat completion request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
+      "502": `Chat completion request to ${BASE} failed: 502 model not found`,
+      html: `Chat completion request to ${BASE} answered a body that is not JSON`,
+      reset: `Chat completion request to ${BASE} answered a body that is not JSON`, // empty, the read having failed
+      empty: "provider response had no message content",
+      prose: "model content was not valid JSON",
+      array: "model returned JSON that is not an object",
+    };
+    for (const [name, line] of Object.entries(why)) {
+      const c = captures[name];
+      assert(c.lines.join() === `extractMetadata: ${line}` && c.error === control.error,
+        `a chat answer that is ${name} is logged ("${c.lines.join(" / ")}"), and the capture goes on to the control's write (${c.error === control.error ? "the same answer" : c.error.slice(0, 80)})`);
+    }
+    assert(captures.stall.ms >= 1_900 && captures.stall.ms < 6_000, `…the stalled one at the deadline (${Math.round(captures.stall.ms)} ms)`);
   }
 }
 
