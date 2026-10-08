@@ -56,7 +56,7 @@ BROWSER INFO
 3. Toggle **Developer mode** on (top-right)
 4. Click **Load unpacked** and pick the `integrations/chrome-capture-extension/` folder
 5. Pin the extension icon to the toolbar so you can reach it quickly
-6. A new tab opens automatically on first install — the Configure Open Brain screen (see below)
+6. A new tab opens automatically on first install — the Configure Open Brain screen (see below). Upgrading from a release before 0.7.0, which spoke to the retired `open-brain-rest` gateway: the extension starts unconfigured and asks for the REST core's URL; captures already queued wait for it and send once it is saved
 
 ## First-Run Config
 
@@ -220,7 +220,7 @@ Solution: The site DOM has changed and the extractor selectors are stale. Check 
 Solution: The SHA-256 fingerprint cache is populated but the ingest POSTs are silently rejected. Open the Activity log on the Overview tab and look for `queued_retry` or `dead_letter` entries — those will show the actual API error. Common causes: the key was revoked or rotated and you didn't update the extension, or `/api` is off (the proxy answers 404 until `compose.api-public.yaml` is named).
 
 **Issue: I configured the extension but Test Connection says "fetch failed"**
-Solution: Your browser doesn't have host permission for that origin. Open the Configure screen and save again — Chrome will re-prompt. If it still fails, verify the URL is reachable from your browser (paste it directly into the address bar, expect a 401 or similar from the gateway).
+Solution: Your browser doesn't have host permission for that origin. Open the Configure screen and save again — Chrome will re-prompt. If it still fails, verify the URL is reachable from your browser: paste the URL with `/openapi.json` on the end into the address bar and expect the REST core's OpenAPI document. An empty 404 there means `/api` is off on the brain.
 
 ## Tool Surface Area
 

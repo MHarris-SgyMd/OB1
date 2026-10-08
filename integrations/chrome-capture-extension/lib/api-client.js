@@ -12,8 +12,20 @@
     if (!text) return 'Unknown error';
     try {
       const parsed = JSON.parse(text);
-      // The REST core answers a refusal as `{ code, ...facts }`.
-      return parsed.error || parsed.message || (parsed.code ? `${parsed.code}${parsed.problem ? ` (${parsed.problem}${parsed.key ? `: ${parsed.key}` : ''})` : ''}` : text);
+      if (parsed.error || parsed.message) return parsed.error || parsed.message;
+      // The REST core answers a refusal as `{ code, ...facts }`: the facts
+      // that say why — the field an input refusal names, the scope a
+      // FORBIDDEN needs, a metadata problem and its key.
+      if (parsed.code) {
+        const issue = Array.isArray(parsed.issues) && parsed.issues[0] ? parsed.issues[0] : null;
+        const facts = [
+          issue ? `${issue.path || 'input'}: ${issue.message || 'refused'}` : '',
+          parsed.needs ? `needs a ${parsed.needs} key` : '',
+          parsed.problem ? `${parsed.problem}${parsed.key ? ` (${parsed.key})` : ''}` : ''
+        ].filter(Boolean);
+        return facts.length ? `${parsed.code} — ${facts.join('; ')}` : parsed.code;
+      }
+      return text;
     } catch {
       return text;
     }
@@ -97,11 +109,28 @@
   }
 
   // capture_thought's bounds on `metadata`: at most eight keys, each a short
-  // lower-case name, each value a scalar of at most 200 characters.
+  // lower-case name the brain does not keep for itself, each value a scalar
+  // of at most 200 characters (UTF-16 units, as the server counts them).
+  const META_KEYS_MAX = 8;
   const META_VALUE_MAX = 200;
-  const META_FIELDS = ['conversation_id', 'conversation_title', 'page_title', 'page_url', 'capture_mode', 'extension_platform', 'source_type', 'content_fingerprint'];
+  const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
+  // The brain's own keys (its extractor's tags, the source and the actor
+  // columns): a capture naming one is refused.
+  const RESERVED_META = new Set(['people', 'action_items', 'dates_mentioned', 'topics', 'type', 'type_raw', 'source', 'actor_kind', 'actor_name', 'trust', 'embedding_model', 'metadata_extraction_failed', 'issue', 'status', 'status_type', 'linear_updated_at']);
+  // The keys kept first, in this order; then the platform's own (Gemini's
+  // conversation and response ids, …) while there is room.
+  const META_FIRST = ['content_fingerprint', 'extension_platform', 'capture_mode', 'source_type', 'conversation_id', 'conversation_title', 'page_title', 'page_url'];
   // A URL cut short would point somewhere else: one too long is left out, not cut.
   const UNCUT_FIELDS = new Set(['page_url']);
+
+  /** A string cut to the server's bound, never through a surrogate pair. */
+  function cutToBound(value) {
+    if (value.length <= META_VALUE_MAX) return value;
+    let end = META_VALUE_MAX;
+    const code = value.charCodeAt(end - 1);
+    if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+    return value.slice(0, end);
+  }
 
   /**
    * The capture a queued payload asks for, as capture_thought takes it. The
@@ -113,15 +142,20 @@
     const p = payload || {};
     const meta = p.source_metadata && typeof p.source_metadata === 'object' ? p.source_metadata : {};
     const platform = String(meta.extension_platform || String(p.source_label || '').split(':')[0] || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
-    const fields = { ...meta, source_type: p.source_type };
+    // A manual capture's mode rides as extension_capture_mode, a sync's as capture_mode.
+    const fields = { ...meta, capture_mode: meta.capture_mode || meta.extension_capture_mode, source_type: p.source_type };
+    delete fields.extension_capture_mode;
     const metadata = {};
-    for (const key of META_FIELDS) {
+    const keys = [...META_FIRST, ...Object.keys(fields).filter((k) => !META_FIRST.includes(k))];
+    for (const key of keys) {
+      if (Object.keys(metadata).length >= META_KEYS_MAX) break;
+      if (!META_KEY_RE.test(key) || RESERVED_META.has(key)) continue;
       const value = fields[key];
-      if (typeof value === 'number' || typeof value === 'boolean') {
+      if (typeof value === 'number' ? Number.isFinite(value) : typeof value === 'boolean') {
         metadata[key] = value;
       } else if (typeof value === 'string' && value.trim()) {
         if (value.length <= META_VALUE_MAX) metadata[key] = value;
-        else if (!UNCUT_FIELDS.has(key)) metadata[key] = value.slice(0, META_VALUE_MAX);
+        else if (!UNCUT_FIELDS.has(key)) metadata[key] = cutToBound(value);
       }
     }
     return {
