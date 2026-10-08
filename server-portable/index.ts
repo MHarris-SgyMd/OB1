@@ -10,7 +10,7 @@ import { createCore, SPECS, type Input, type Outcome, type RefusalCode } from ".
 import type { ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
-import { labelPart, withSseKeepalive } from "./sse.ts";
+import { abandonedRequestLine, labelPart, requestLabel, withSseKeepalive } from "./sse.ts";
 import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
@@ -18,7 +18,7 @@ import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDoc
 export { parseFilter, withActorFilter } from "./core/filter.ts";
 export { actorLine, demotedLine, currentNote, currentSearchHint, ingestedNotice, INGESTED_NOTICE, minTrustHint } from "./render.ts";
 export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";
-export { SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
+export { abandonedRequestLine, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
 
 // The core (SMD-2283): every tool's logic over the store and the model
 // provider, as functions of a principal and a typed input (core/index.ts). Built
@@ -802,33 +802,9 @@ app.get("*", async (c, next) => {
 });
 
 
-/**
- * What a log line may say about a request: the JSON-RPC method and, for a
- * tool call, the tool's name — never the arguments, which are the thought —
- * each as `labelPart` admits it, since both are the caller's strings. A batch
- * is named by its first message; anything unreadable is `?`.
- */
-export function requestLabel(bodyText: string | null): string {
-  try {
-    const parsed: unknown = JSON.parse(bodyText ?? "");
-    const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const msg = (first ?? {}) as { method?: unknown; params?: { name?: unknown } };
-    const method = typeof msg.method === "string" ? labelPart(msg.method) : "?";
-    return typeof msg.params?.name === "string" ? `${method} ${labelPart(msg.params.name)}` : method;
-  } catch {
-    return "?";
-  }
-}
-
-/**
- * The line the server logs when a client closes the connection before the
- * response is complete — the trace SMD-1864's captures never left. The tool
- * runs to its end regardless (a capture may still land), which the line says,
- * so an operator reading a duplicate row later knows where it came from.
- */
-export function abandonedRequestLine(label: string, elapsedMs: number): string {
-  return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
-}
+// requestLabel and abandonedRequestLine live in sse.ts, beside the keepalive,
+// so the vendored MCP servers' copies of it log a client that leaves the same
+// way (SMD-2001).
 
 /**
  * The same close when the server's own stop made it: the request was still

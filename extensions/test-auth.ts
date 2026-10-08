@@ -32,6 +32,10 @@
  * the tree's three installs (this directory's, server-portable's, the Kubernetes
  * image's) — and the pinned `@hono/mcp` lets go of each request once it has
  * answered it (SMD-1607, change 83: 0.1.1 kept every one until close()).
+ * Every MCP server's reply leaves through `_shared/sse.ts`'s mcpReply, a
+ * byte copy of server-portable/sse.ts like auth.ts's, and enhanced-mcp
+ * answers a capture whose classification takes 13 s, past Bun's idle timeout,
+ * with a client that leaves logged (SMD-2001).
  *
  * The files are imported as modules: each exports Bun's entry shape,
  * `export default { port, fetch }` (SMD-1799), and its `fetch` is the handler
@@ -63,6 +67,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
+import { abandonedRequestLine } from "./_shared/sse.ts";
 import { askRaw, createAssert, leaveMidUpload, PACKAGES, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
@@ -205,22 +210,26 @@ const WEBHOOK = { file: "integrations/readwise-capture/index.ts", secretEnv: "RE
 // Every function deploys one level under supabase/functions/, so every server
 // imports `../_shared/auth.ts` and a copy sits in each directory that holds a
 // function directory. The list here, the tree, and package.json's sync-auth
-// (the one command that rewrites them all) must agree.
+// (the one command that rewrites them all) must agree. The same for sse.ts, the
+// keepalive every MCP server's reply leaves through (SMD-2001): a copy beside
+// each directory of MCP servers — no worker or webhook directory holds one — and
+// sync-sse.
 const COPIES = ["extensions/_shared/auth.ts", "recipes/_shared/auth.ts", "recipes/editorial-policy/_shared/auth.ts",
   "integrations/_shared/auth.ts", "integrations/consolidation-workers/_shared/auth.ts"];
-const CORE = readFileSync(join(ROOT, "server-portable", "auth.ts"), "utf8");
-for (const copy of COPIES) {
-  assert(existsSync(join(ROOT, copy)) && readFileSync(join(ROOT, copy), "utf8") === CORE,
-    `${copy} is byte-for-byte server-portable/auth.ts — \`bun run sync-auth\` here rewrites every copy`);
-}
-{
-  const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/_shared/auth.ts").scanSync({ cwd: ROOT })]
+const SSE_COPIES = ["extensions/_shared/sse.ts", "recipes/_shared/sse.ts", "integrations/_shared/sse.ts"];
+for (const [module, copies, script] of [["auth.ts", COPIES, "sync-auth"], ["sse.ts", SSE_COPIES, "sync-sse"]] as const) {
+  const core = readFileSync(join(ROOT, "server-portable", module), "utf8");
+  for (const copy of copies) {
+    assert(existsSync(join(ROOT, copy)) && readFileSync(join(ROOT, copy), "utf8") === core,
+      `${copy} is byte-for-byte server-portable/${module} — \`bun run ${script}\` here rewrites every copy`);
+  }
+  const inTree = [...new Bun.Glob(`{extensions,recipes,integrations}/**/_shared/${module}`).scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules")).sort();
-  assert(inTree.join() === [...COPIES].sort().join(), `every _shared/auth.ts in the tree is in COPIES and vice versa (${inTree.join(", ")})`);
-  const sync = (JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).scripts as Record<string, string>)["sync-auth"] ?? "";
-  for (const copy of COPIES) {
+  assert(inTree.join() === [...copies].sort().join(), `every _shared/${module} in the tree is listed here and vice versa (${inTree.join(", ")})`);
+  const sync = (JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).scripts as Record<string, string>)[script] ?? "";
+  for (const copy of copies) {
     const dir = relative(HERE, join(ROOT, dirname(copy))).replace(/\\/g, "/");
-    assert(sync.split(/[\s;]+/).includes(dir), `package.json's sync-auth names ${dir}`);
+    assert(sync.split(/[\s;]+/).includes(dir), `package.json's ${script} names ${dir}`);
   }
 }
 
@@ -483,6 +492,85 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
       `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and the same tools (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
   }
   delete process.env.MCP_ACCESS_KEY;
+}
+
+// ── A tool call that outlives the runtime's idle timeout ─────────────────────
+//
+// SMD-2001: the core server's SMD-1864 fix, on a vendored server. enhanced-mcp's
+// brain_capture_thought pays a classification and an embedding before it
+// writes, the shape that killed the core server's large captures at 9.8 s, and
+// @hono/mcp answers the POST on an event stream it writes nothing to until the
+// tool returns. Served here as `bun <file>` serves it — Bun.serve on the
+// runtime's defaults, idle timeout 10 s — with the provider's classification
+// held SLOW_CLASSIFY_MS: past the last sweep that can reset a silent stream (8
+// to 12 s by phase; test-server.ts [17] measures that premise), so a reply that
+// skipped mcpReply is reset on every run. The write that follows is refused (no
+// database), so the tool's answer is its failure: the point is that it
+// arrived. Beside it, a client that gives up at 1.5 s is logged once, by method
+// and tool and never by content. The module and its key are the block above's.
+console.log("\n[integrations/enhanced-mcp/index.ts: a capture slower than the idle timeout is answered, and a client that leaves is logged (SMD-2001)]");
+{
+  const SLOW_CLASSIFY_MS = 13_000;
+  const handler = await importServer("integrations/enhanced-mcp/index.ts").catch(() => null);
+  assert(handler !== null, "the module imports, as above");
+  if (handler) {
+    const realFetch = globalThis.fetch;
+    // The provider, stubbed: the classification answers after SLOW_CLASSIFY_MS, the embedding at once.
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!url.startsWith("https://openrouter.ai/")) return realFetch(input, init);
+      if (url.endsWith("/chat/completions")) {
+        await Bun.sleep(SLOW_CLASSIFY_MS);
+        return Response.json({ choices: [{ message: { content: JSON.stringify({ type: "observation", topics: ["keepalive"] }) } }] });
+      }
+      return Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
+    }) as typeof fetch;
+    process.env.OPENROUTER_API_KEY = "stub";
+    const server = Bun.serve({ port: 0, fetch: handler });
+    type Read = { ok: boolean; status: number; text: string; error: string; ms: number };
+    const capture = async (id: number, content: string, signal?: AbortSignal): Promise<Read> => {
+      const t0 = performance.now();
+      try {
+        const r = await realFetch(`http://127.0.0.1:${server.port}/mcp`, { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, signal,
+          body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "brain_capture_thought", arguments: { content } } }) });
+        const text = await r.text();
+        return { ok: true, status: r.status, text, error: "", ms: performance.now() - t0 };
+      } catch (e) {
+        const code = (e as { code?: string }).code;
+        return { ok: false, status: 0, text: "", error: e instanceof Error ? `${e.name}${code ? ` ${code}` : ""}` : String(e), ms: performance.now() - t0 };
+      }
+    };
+    const warned: string[] = [];
+    const quiet = { error: console.error, warn: console.warn };
+    console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+    console.error = () => {}; // the refused write's own log
+    let slow: Read, gone: Read;
+    try {
+      [slow, gone] = await Promise.all([
+        capture(50, "a thought whose classification outlives the idle timeout"),
+        capture(51, "needle-the-line-must-not-carry", AbortSignal.timeout(1500)),
+      ]);
+      await Bun.sleep(500); // the abandoned call's tool runs on behind it, and settles
+    } finally {
+      Object.assign(console, quiet);
+      globalThis.fetch = realFetch;
+      delete process.env.OPENROUTER_API_KEY;
+      server.stop(true);
+    }
+    const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
+    assert(slow.ok && slow.status === 200 && slow.ms >= SLOW_CLASSIFY_MS,
+      `brain_capture_thought is answered after a ${SLOW_CLASSIFY_MS} ms classification, past the last sweep (${slow.ok ? `${slow.status} in ${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
+    const reply = await parse(new Response(slow.text));
+    assert(reply.json?.jsonrpc === "2.0" && reply.json?.id === 50, `…with the call's JSON-RPC envelope (${slow.text.slice(0, 80).replace(/\n/g, "\\n")})`);
+    assert(frames(slow.text) >= 2, `…kept alive by comment frames the client never sees as events (${frames(slow.text)})`);
+    assert(!gone.ok, `a client that gives up at 1.5 s is gone (${gone.ok ? "answered" : gone.error})`);
+    const lines = warned.filter((w) => /request abandoned/.test(w));
+    const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
+    assert(lines.length === 1 && m !== null && lines[0] === abandonedRequestLine("tools/call brain_capture_thought", Number(m[1]) * 1000),
+      `…and the server logs it once, in sse.ts's line naming the method and the tool (${lines.length} of ${warned.length} warnings)`);
+    assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
+    assert(!warned.some((w) => /needle-the-line-must-not-carry/.test(w)), "…and never the thought");
+  }
 }
 
 // ── The HTTP APIs ────────────────────────────────────────────────────────────
@@ -887,6 +975,17 @@ const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[
  */
 const builtPerRequest = (text: string) =>
   !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
+/**
+ * SMD-2001: the transport's reply leaves through _shared/sse.ts's mcpReply,
+ * and by no other way. @hono/mcp answers a POST on an event stream it writes
+ * nothing to until the tool returns, and Bun closes a stream silent for 8–12 s
+ * (SMD-1864); mcpReply keeps it alive and logs a client that leaves. The
+ * enhanced-mcp probe below is the proof; this holds every server to the shape.
+ */
+const KEPT_ALIVE = /mcpReply\(c\.req\.raw, await c\.req\.text\(\)\.catch\(\(\) => null\), \(\) => transport\.handleRequest\(c\)\)/;
+const repliesKeptAlive = (text: string) =>
+  text.includes('import { mcpReply } from "../_shared/sse.ts";') && KEPT_ALIVE.test(text) && text.split("transport.handleRequest(").length === 2;
+const KEPT_ALIVE_SAYS = "…its reply leaves through ../_shared/sse.ts's mcpReply and no other way: kept alive while the tool runs, a client that leaves logged (SMD-2001)";
 /** The Accept patch by its mechanism — every one re-wrapped the request over `c.req.raw` — not by the header it set, which an outgoing fetch may set too. */
 const ACCEPT_PATCH = /Object\.defineProperty\(\s*c\.req,\s*['"]raw['"]/;
 /** A published CORS allow-list, the one shape these servers use (none takes hono's cors() middleware). */
@@ -936,6 +1035,7 @@ for (const s of SERVERS) {
     assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 78)");
     assert(!ACCEPT_PATCH.test(text),
       "…and no Accept patch: the transport at @hono/mcp 0.3.x takes a missing Accept as */* and either token as enough, so the re-wrap of every request for Claude Desktop connectors is gone (change 84)");
+    assert(repliesKeptAlive(text), KEPT_ALIVE_SAYS);
     holdsBrowserHeaders(s.file, text);
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
@@ -982,7 +1082,19 @@ for (const s of SERVERS) {
   assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
     `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
   assert(!ACCEPT_PATCH.test(text), `${file}: the Accept patch is gone (change 84)`);
+  assert(repliesKeptAlive(text), KEPT_ALIVE_SAYS);
   holdsBrowserHeaders(file, text);
+}
+{
+  // Every file that builds @hono/mcp's transport is one held above — a server
+  // added without an entry would otherwise answer on a stream nothing keeps
+  // alive. (The Next.js route on Vercel builds the SDK's own transport, on
+  // Node, where nothing reaps a silent stream; it is not a Bun server.)
+  const held = [...SERVERS.filter((s) => s.kind === "mcp").map((s) => s.file), "integrations/enhanced-mcp/index.ts"].sort();
+  const building = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
+    .filter((f) => !f.includes("node_modules") && !/(^|\/)test-[^/]*$/.test(f) && readFileSync(join(ROOT, f), "utf8").includes("new StreamableHTTPTransport("))
+    .sort();
+  assert(building.join() === held.join(), `every file that builds a StreamableHTTPTransport is an MCP server held above (${building.length}; unheld: ${building.filter((f) => !held.includes(f)).join(", ") || "none"}; held but building none: ${held.filter((f) => !building.includes(f)).join(", ") || "none"})`);
 }
 // The rule reached the four lists the tree publishes — a list respelled (a template literal, hono's cors())
 // would drop out of the regex's reach silently otherwise (first review pass).

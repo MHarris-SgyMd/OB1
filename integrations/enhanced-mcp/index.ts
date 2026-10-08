@@ -30,6 +30,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts";
+import { mcpReply } from "../_shared/sse.ts";
 
 import {
   embedText,
@@ -1826,7 +1827,10 @@ app.all("*", async (c) => {
 
   const transport = new StreamableHTTPTransport();
   await buildServer().connect(transport);
-  return transport.handleRequest(c);
+  // The reply kept alive while the tool runs — a capture here pays an embedding
+  // and a classification, past Bun's silent-stream close (SMD-1864) — and a
+  // client that leaves logged (SMD-2001, _shared/sse.ts).
+  return mcpReply(c.req.raw, await c.req.text().catch(() => null), () => transport.handleRequest(c));
 });
 
 export default {
