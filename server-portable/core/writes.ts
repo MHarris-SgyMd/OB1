@@ -150,8 +150,9 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // first review pass): `supersedes` marks the target superseded in every
     // search result — an alteration of a thought the key did not write, the
     // one thing the scope promises it cannot do. Ownership is the target's
-    // capture audit row (008/010) carrying this key's agent id, and the
-    // thought still standing. A pointer that is not provably so is dropped
+    // capture audit row (008/010) carrying this key's agent id, the thought
+    // still standing, and no other key or board-sync having taken it since
+    // (migration 082, SMD-2638). A pointer that is not provably so is dropped
     // before the write, and the reply says nothing of it, as derived_from's
     // trim above (SMD-2473): any answer that differed by target told a key
     // that cannot read something it may not know — whether an id exists,
@@ -172,10 +173,15 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     } else if (supersedes !== undefined && !reader) {
       let writer: Awaited<ReturnType<ThoughtStore["captureActorOf"]>>;
       let present: boolean;
+      let taken: boolean;
       try {
-        // Both reads for every target, so no cell is a query shorter.
+        // All three reads for every target, so no cell is a query shorter.
         const store = await ctx.store();
-        [writer, present] = await Promise.all([store.captureActorOf(supersedes), liveIn(store, [supersedes]).then((live) => live(supersedes))]);
+        [writer, present, taken] = await Promise.all([
+          store.captureActorOf(supersedes),
+          liveIn(store, [supersedes]).then((live) => live(supersedes)),
+          store.takenFromCapturer(supersedes),
+        ]);
       } catch (e) {
         // The reads need SELECT on thought_audit and thoughts — the `server` grant group,
         // soft like the rest of it (second review pass: the capture group
@@ -199,7 +205,12 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // it reached the self-FK and answered as no other target did).
       // Spelled whole, not leaning on the branch above for principal.agentId:
       // a row with no capture audit row, or one without an id, is never owned.
-      const own = present && writer !== null && writer.agentId !== null && writer.agentId === principal.agentId;
+      // Nor is one another key or board-sync has since taken (SMD-2638): a
+      // write key's capture of the same text lands on the row, and board-sync
+      // adopts it in place, so capturing a text first does not keep it this
+      // key's. Migration 082's one rule says what takes it (takenFromCapturer),
+      // and its lapse clears a pointer this key wrote before the taking.
+      const own = present && writer !== null && writer.agentId !== null && writer.agentId === principal.agentId && !taken;
       if (!own) pointer = undefined;
     }
     // What may leave the box (SMD-1903): asked once, for both calls, and
@@ -274,6 +285,10 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
         // The gate's decisions for this write, on the audit row (SMD-1903);
         // absent when both endpoints are declared local and nothing was judged.
         ...(gate.record ? { egress: gate.record } : {}),
+        // A key that cannot read, said on its capture row: 082's lapse clears
+        // a pointer such a key wrote once another key takes the thought it
+        // points at; a write key's pointer it leaves (SMD-2638).
+        ...(reader ? {} : { scope: "capture" as const }),
       },
       // NULL when the gate refused the embedding call: the row lands with
       // its text and fingerprint and no vector, as the reply says.
@@ -311,7 +326,11 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       } catch (e) {
         if (reader) throw e;
         const msg = String((e as Error)?.message ?? e);
-        if (pointer !== undefined && /thoughts_supersedes_fkey/.test(msg)) pointer = undefined;
+        // The pointer's target gone mid-write (the self-FK), or no longer this
+        // key's alone by the time the write ran — 082's check at the write,
+        // which waits for a taking the reads above could not see (SMD-2638):
+        // either way the capture lands without it, as the reads would have.
+        if (pointer !== undefined && /thoughts_supersedes_fkey|ob1_check_capture_pointer/.test(msg)) pointer = undefined;
         else if (!derivedMended && derivedFrom?.length && /derived_from references a thought that does not exist/.test(msg)) { derivedMended = true; derivedFrom = await liveSubset(store, derivedFrom); }
         else throw e;
       }

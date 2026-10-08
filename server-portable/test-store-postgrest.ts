@@ -139,6 +139,148 @@ console.log("\n[8b] captureActorOf reads the capture row's actor, the lower id f
   await sql.close();
 }
 
+console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migration 082's one rule (SMD-2638)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const resolved = async (label: string, scope: string, seed: string) => {
+    const r = await store.resolveAgent({ keyHash: seed.repeat(32), label, scope });
+    return r.ok ? r.agentId : "";
+  };
+  const hookId = await resolved("hook-8c", "capture", "8c");
+  const writerId = await resolved("writer-8c", "write", "c8");
+  const otherId = await resolved("other-8c", "write", "d8");
+  assert(hookId !== "" && writerId !== "" && otherId !== "" && new Set([hookId, writerId, otherId]).size === 3, "setup: three agents resolved");
+  const hook = { name: "hook-8c", agentId: hookId, via: "store-test", scope: "capture" as const };
+  const writer = { name: "writer-8c", agentId: writerId, via: "store-test" };
+  const other = { name: "other-8c", agentId: otherId, via: "store-test" };
+  const boardSync = { name: "board-sync", via: "db/sync-linear.ts" };
+  const backfill = { name: "backfill", via: "backfill_thought_actors" };
+  const made: string[] = [];
+  const capture = async (content: string, actor: typeof hook | typeof writer, extra: { supersedes?: string; recapture?: "keep"; metadata?: Record<string, unknown> } = {}) => {
+    const r = await store.captureThought({ content, payload: { metadata: { source: "mcp", ...(extra.metadata ?? {}) } }, embedding: vec(7), actor, supersedes: extra.supersedes, recapture: extra.recapture });
+    made.push(r.id);
+    return r;
+  };
+  const taken = (id: string) => store.takenFromCapturer(id);
+  const rows = async (id: string) => (await sql`SELECT canonical_agent_id::text AS agent, diff FROM thought_audit WHERE thought_id = ${id}::uuid AND action = 'update' ORDER BY seq`) as { agent: string | null; diff: Record<string, unknown> }[];
+
+  // What does not take a thought from its capturer.
+  const own = await capture("[8c] the hook's thought, taken by nobody", hook);
+  const older = await capture("[8c] an older thought the writer points the hook's at", hook);
+  assert((await taken(own.id)) === false, "the capturer's own thought, untouched: not taken");
+  await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${own.id}::uuid`;
+  assert((await store.updateThought({ id: own.id, provenance: { supersedes: older.id }, actor: writer })).ok === true, "setup: the writer's pointer-only edit lands");
+  await store.updateThought({ id: own.id, metadataPatch: { note: "its own" }, actor: hook });
+  await store.updateThought({ id: own.id, metadataPatch: { enriched: true }, actor: backfill });
+  const quiet = await rows(own.id);
+  assert(quiet.length === 4 && quiet.filter((r) => r.agent === null && "metadata" in r.diff).length === 1 && quiet.filter((r) => r.agent === writerId && "supersedes" in r.diff).length === 1,
+    `setup: a vector row and an unattributed metadata row with no agent, the writer's pointer row, its own metadata row (${JSON.stringify(quiet.map((r) => [r.agent === null ? "none" : r.agent === hookId ? "hook" : "writer", Object.keys(r.diff)]))})`);
+  assert((await taken(own.id)) === false, "…a vector, a pointer set by another, its own metadata move and an unattributed metadata move with no `issue` (an operator's backfill) do not take it");
+  const kept = await capture("[8c] the hook's thought another capture key re-sends", hook);
+  await capture("[8c] the hook's thought another capture key re-sends", { ...hook, name: "other-hook", agentId: otherId }, { recapture: "keep" });
+  assert((await rows(kept.id)).length === 0 && (await taken(kept.id)) === false, "a capture-only key's re-capture ('keep') records nothing and does not take it");
+
+  // What does.
+  const merged = await capture("[8c] the hook's thought the writer merges onto", hook);
+  await capture("[8c] the hook's thought the writer merges onto", writer, { metadata: { project: "8c" } });
+  const recaptured = await capture("[8c] the hook's thought the writer re-captures, changing nothing", hook);
+  const noop = await capture("[8c] the hook's thought the writer re-captures, changing nothing", writer);
+  const adopted = await capture("[8c] the hook's thought board-sync adopts", hook);
+  await store.updateThought({ id: adopted.id, metadataPatch: { issue: "TKT-2638", status: "In Progress" }, actor: boardSync });
+  const rewritten = await capture("[8c] the hook's thought an unattributed writer rewrites", hook);
+  await sql`UPDATE thoughts SET content = '[8c] a raw writer''s text' WHERE id = ${rewritten.id}::uuid`;
+  const edited = await capture("[8c] the hook's thought the writer edits", hook);
+  await store.updateThought({ id: edited.id, metadataPatch: { project: "8c" }, actor: writer });
+  const noopRows = await rows(recaptured.id);
+  assert(noop.existed === true && noopRows.length === 1 && noopRows[0].agent === writerId && JSON.stringify(noopRows[0].diff) === '{"recaptured":true}',
+    `the writer's re-capture that changes nothing is recorded: one event under its agent id, diff {"recaptured": true} (${JSON.stringify(noopRows)})`);
+  const rawRows = await rows(rewritten.id);
+  assert(rawRows.length === 1 && rawRows[0].agent === null && "content" in rawRows[0].diff, `setup: the raw rewrite is a content row with no agent id (${JSON.stringify(rawRows.map((r) => Object.keys(r.diff)))})`);
+  for (const [what, id] of [["the writer's merge", merged.id], ["the writer's re-capture that changes nothing", recaptured.id], ["board-sync's adoption (`issue` gained, no agent id)", adopted.id], ["a text edit with no agent id", rewritten.id]] as const) {
+    assert((await taken(id)) === true, `${what}: taken`);
+  }
+  assert((await taken(edited.id)) === false, "a write key's metadata edit alone (a tag) does not take it: the text is still only the hook's");
+  const filed = await capture("[8c] the hook's thought a write key files under a ticket", hook);
+  await store.updateThought({ id: filed.id, metadataPatch: { issue: "TKT-2638" }, actor: writer });
+  assert((await taken(filed.id)) === false, "…nor does a write key filing it under a ticket: `issue` takes a thought only under no agent id, as board-sync adopts");
+  const [noopAt] = await sql`SELECT (SELECT updated_at FROM thoughts WHERE id = ${recaptured.id}::uuid) > (SELECT max(created_at) FROM thought_audit WHERE thought_id = ${recaptured.id}::uuid AND action = 'capture') AS moved`;
+  assert(noopAt?.moved === true, "…and the noted re-capture moved updated_at, as its projection does");
+  // The note is a capture-only key's rows': a write key's re-capture of another write key's thought records nothing and moves nothing.
+  const writersOwn = await capture("[8c] the writer's own note another write key re-sends", writer);
+  const [beforeAt] = await sql`SELECT updated_at::text AS u FROM thoughts WHERE id = ${writersOwn.id}::uuid`;
+  await capture("[8c] the writer's own note another write key re-sends", other);
+  const [afterAt] = await sql`SELECT updated_at::text AS u FROM thoughts WHERE id = ${writersOwn.id}::uuid`;
+  assert((await rows(writersOwn.id)).length === 0 && beforeAt?.u === afterAt?.u, "a write key's re-capture of another write key's thought records nothing and moves no updated_at");
+  assert((await rows(merged.id)).filter((r) => "recaptured" in r.diff).length === 1 && (await rows(merged.id)).filter((r) => "metadata" in r.diff).length === 1, "…a merge is its metadata event and one recaptured event: the metadata move alone would not take it");
+  assert((await taken("not-an-id")) === true && (await taken("0000dead-0000-4000-8000-000000000000")) === false, "a malformed id is never owned; a ghost has no rows (the existence read is the caller's)");
+
+  // The lapse: a pointer the hook wrote onto its own thought, under the
+  // capture scope, is cleared when another takes that thought.
+  const chain = async (what: string) => {
+    const t = await capture(`[8c] the hook's earlier summary ${what}`, hook);
+    const s = await capture(`[8c] the hook's next summary ${what}`, hook, { supersedes: t.id });
+    const [p] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${s.id}::uuid`;
+    assert(p?.s === t.id, `setup: the hook's pointer ${what} is written`);
+    return { t: t.id, s: s.id };
+  };
+  const pointerOf = async (id: string) => ((await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0] as { s: string | null } | undefined)?.s ?? null;
+  const lapsedMerge = await chain("the writer then merges onto");
+  await capture("[8c] the hook's earlier summary the writer then merges onto", writer, { metadata: { project: "8c" } });
+  const lapsedNoop = await chain("the writer then re-captures");
+  await capture("[8c] the hook's earlier summary the writer then re-captures", writer);
+  const lapsedSync = await chain("board-sync then adopts");
+  await store.updateThought({ id: lapsedSync.t, metadataPatch: { issue: "TKT-2638" }, actor: boardSync });
+  const lapseRows = await rows(lapsedMerge.s);
+  assert((await pointerOf(lapsedMerge.s)) === null && (await pointerOf(lapsedNoop.s)) === null && (await pointerOf(lapsedSync.s)) === null,
+    "a pointer the hook wrote before the taking lapses: after the writer's merge, its re-capture that changes nothing, and board-sync's adoption");
+  assert(lapseRows.length === 1 && lapseRows[0].agent === writerId && Object.keys(lapseRows[0].diff).join() === "supersedes" && (lapseRows[0].diff.supersedes as { before?: string; after?: unknown })?.before === lapsedMerge.t && (lapseRows[0].diff.supersedes as { after?: unknown })?.after === null,
+    `…each an event of its own on the pointing thought, under the agent of the write that took the target (${JSON.stringify(lapseRows)})`);
+  const keptBackfill = await chain("an operator's backfill then restamps");
+  await store.updateThought({ id: keptBackfill.t, metadataPatch: { enriched: true }, actor: backfill });
+  const keptVector = await chain("a worker then re-embeds");
+  await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${keptVector.t}::uuid`;
+  await sql`UPDATE thoughts SET embedding = (SELECT embedding FROM thoughts WHERE id = ${older.id}::uuid) WHERE id = ${keptVector.t}::uuid`;
+  assert((await pointerOf(keptBackfill.s)) === keptBackfill.t && (await pointerOf(keptVector.s)) === keptVector.t, "…and stands after an unattributed metadata move with no `issue`, and a vector moved by no agent");
+  // A write key's pointer is never lapsed: its capture row carries no scope.
+  const wt = await capture("[8c] the writer's earlier note", writer);
+  const ws = await capture("[8c] the writer's next note", writer, { supersedes: wt.id });
+  await store.updateThought({ id: wt.id, metadataPatch: { project: "8c" }, actor: other });
+  assert((await pointerOf(ws.id)) === wt.id, "a write key's own pointer stands when another key takes its target");
+  // A pointer a write key set on the hook's thought after a lapse is the write key's: a later taking leaves it.
+  assert((await store.updateThought({ id: lapsedMerge.s, provenance: { supersedes: lapsedMerge.t }, actor: writer })).ok === true, "setup: the writer re-points the hook's thought");
+  await store.updateThought({ id: lapsedMerge.t, content: "[8c] the hook's earlier summary, rewritten by another", embedding: vec(6), actor: other });
+  assert((await pointerOf(lapsedMerge.s)) === lapsedMerge.t, "a write key's re-set pointer on the hook's thought stands when the target is taken again");
+  // The check at the write: a capture-scoped capture naming a taken target is refused through the store.
+  let refusal = "";
+  try { await capture("[8c] the hook names a taken thought at the write", hook, { supersedes: lapsedNoop.t }); } catch (e) { refusal = (e as Error).message; }
+  assert(/ob1_check_capture_pointer/.test(refusal), `a capture-scoped capture naming a taken thought is refused at the write (${refusal.slice(0, 90)})`);
+  // The reads fail closed: the taken read throws when it cannot be made, and so does a note that fails —
+  // save a database before 082, where the capture stands without one.
+  await sql`ALTER FUNCTION ob1_thought_taken(uuid) RENAME TO ob1_thought_taken_away`;
+  let readError = "";
+  try { await store.takenFromCapturer(own.id); } catch (e) { readError = (e as Error).message; }
+  await sql`ALTER FUNCTION ob1_thought_taken_away(uuid) RENAME TO ob1_thought_taken`;
+  assert(/ob1_thought_taken/.test(readError), `takenFromCapturer throws when the read cannot be made, never answering not-taken (${readError.slice(0, 80)})`);
+  await sql`ALTER FUNCTION ob1_note_recapture(uuid, jsonb) RENAME TO ob1_note_recapture_away`;
+  let missing = "";
+  try { await capture("[8c] the hook's thought the writer re-captures before 082", hook); await capture("[8c] the hook's thought the writer re-captures before 082", writer); } catch (e) { missing = (e as Error).message; }
+  await sql`ALTER FUNCTION ob1_note_recapture_away(uuid, jsonb) RENAME TO ob1_note_recapture`;
+  assert(missing === "", `a database without the note: the capture stands (${missing.slice(0, 80)})`);
+  await sql.unsafe(`CREATE OR REPLACE FUNCTION ob1_note_recapture_failing() RETURNS void LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the note failed for [8c]'; END $$`);
+  await sql`ALTER FUNCTION ob1_note_recapture(uuid, jsonb) RENAME TO ob1_note_recapture_real`;
+  await sql.unsafe(`CREATE FUNCTION ob1_note_recapture(p_id uuid, p_actor jsonb DEFAULT NULL) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the note failed for [8c]'; END $$`);
+  let failed = "";
+  try { await capture("[8c] the hook's thought the writer re-captures while the note fails", hook); await capture("[8c] the hook's thought the writer re-captures while the note fails", writer); } catch (e) { failed = (e as Error).message; }
+  await sql`DROP FUNCTION ob1_note_recapture(uuid, jsonb)`;
+  await sql`DROP FUNCTION ob1_note_recapture_failing()`;
+  await sql`ALTER FUNCTION ob1_note_recapture_real(uuid, jsonb) RENAME TO ob1_note_recapture`;
+  assert(/the note failed/.test(failed), `a note that fails throws, so the caller's retry makes it (${failed.slice(0, 80)})`);
+  // Its thoughts go, so a later section's nearest-neighbour read meets none of
+  // them (exact ties on one axis crowded [8]'s undated row out of a limit of 5).
+  await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(made, "TEXT")}::uuid[])`;
+  await sql.close();
+}
+
 console.log("\n[2] captureThought WITH chunks — the 4-arg RPC arrives intact");
 {
   // This is the argument shape that shipped unverified: p_chunks as a jsonb array
