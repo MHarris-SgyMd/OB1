@@ -179,21 +179,9 @@ If a recipe depends on a reusable behavior, the canonical copy should live in `s
 
 ## Dashboards And REST
 
-`dashboards/open-brain-dashboard-next` is the current fuller dashboard option. It includes dashboard stats, workflow kanban, browse/detail/search, Add to Brain, audit, duplicates, Agent Memory review, and login.
+The brain's REST core is the one REST surface: every operation the MCP tools expose, as JSON (`POST /v1/thoughts`, `POST /v1/search`, `GET /v1/thoughts`, `GET /v1/whoami`, and the rest in its OpenAPI document at `/openapi.json`). It is internal to the stack, and public at `/api` only where the operator turns that on (`deploy/compose.api-public.yaml`). It takes keys in headers, never in the URL.
 
-It depends on `integrations/open-brain-rest`, a REST gateway (one process under Bun) for the non-Agent-Memory surfaces:
-
-- `/health`
-- `/stats`
-- `/thoughts`
-- `/thought/:id`
-- `/capture`
-- `/search`
-- `/duplicates`
-- `/thought/:id/connections`
-- `/thought/:id/reflection`
-- `/ingest`
-- `/ingestion-jobs`
+The two REST gateways that came before it, `integrations/open-brain-rest` and `integrations/rest-api`, are retired (SMD-1931); `docs/vendored-disposition.md` gives each of their routes its fate. `dashboards/open-brain-dashboard-next` and `-pro` were written for `open-brain-rest` and retire with the operator GUI's harvest (SMD-2280); `dashboards/open-brain-dashboard` (SvelteKit) speaks MCP.
 
 Agent Memory dashboard pages call `integrations/agent-memory-api` separately.
 

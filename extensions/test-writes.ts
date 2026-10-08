@@ -43,16 +43,16 @@
  * profile's own row kept out of its sources.
  *
  * SMD-1541 (FORK.md change 103) reads 008's row after every driven capture and
- * edit through change 69's five servers. Their headers said "the actor reaches
+ * edit through change 69's servers (five then; one, agent-memory-api, since
+ * SMD-1931 retired the two REST gateways and the two MCP servers). Their
+ * headers said "the actor reaches
  * the audit (008)" and none passed one — the functions set `ob1.actor` only
  * from `p_actor` / `p_payload.actor` — so `thought_audit.actor_name` was NULL
- * for every write through them, as for the raw writes they replaced. Each now
- * names the key: `principal.name` where the server authenticates through
- * `_shared/auth.ts` (three), the constant `MCP_ACCESS_KEY` where it holds
- * that one key and compares it in place (`enhanced-mcp`, `rest-api`) — both
- * `MCP_ACCESS_KEY` under this suite's legacy single key — and one write through
- * each of the three runs under a NAMED key too, the arm that tells the
- * principal's name from a constant, while the two refuse that key. No actor carries a
+ * for every write through them, as for the raw writes they replaced. It names
+ * the key now: `principal.name`, since it authenticates through
+ * `_shared/auth.ts` — `MCP_ACCESS_KEY` under this suite's legacy single key —
+ * and one write through it runs under a NAMED key too, the arm that tells the
+ * principal's name from a constant that spells the legacy key's name. No actor carries a
  * source — the trigger (008; its body is 025's now) reads the row's own
  * `metadata.source`, so the column means the thought's origin on every row,
  * and a copy of it in the actor was indistinguishable from that fallback under
@@ -65,54 +65,16 @@
  * on an edit) and tolerates only a copy of the origin, the one case the rule
  * allows; server-portable/test-audit.ts holds the trigger itself.
  *
- * SMD-1986 drives enhanced-mcp's three search tools, which SMD-1798's block
- * had pinned answering nothing: each sent `exclude_restricted` and the date
- * bounds as keys of the `filter` that match_thoughts and search_thoughts_text
- * read as a metadata containment. A restricted twin is planted at the captured
- * thought's own vector, with text the query matches and a rank above the
- * capture's, so every search that finds the capture must drop the twin — by
- * the `sensitivity_tier` column, which match_thoughts does not return and the
- * tool looks up by id — and the paging over a hidden first row, the date
- * bounds as instants and the refusals by name are held around the same pair.
- * CI runs this file under TZ=America/Chicago so the zone-less bound's arm
- * distinguishes UTC from the process's zone.
- *
- * SMD-2054 drives rest-api's POST /search the same way, the leak SMD-1986's
- * review found: semantic mode filtered the rows on a `sensitivity_tier`
- * match_thoughts never returns — undefined !== "restricted" — and answered a
- * restricted thought's full content; text mode sent `exclude_restricted: true`
- * inside p_filter and answered an empty page, reading no date bound at all. A
- * restricted twin at that block's capture holds both modes, the open switch,
- * the bounds as instants, the refusals as 400s, the emptied first page and
- * the page past the last hit; GET /recent, which read thoughts with no tier
- * predicate, hides the twin too; and the date helpers rest-api copied from enhanced-mcp
- * are held identical to the character (the text pins at the end); and every
- * answer of /search carries the request's CORS headers under an allowlist.
- *
- * SMD-2079 widens that last arm to the gateway: json() built the CORS headers
- * from the request only when handed `req`, and forty-five of the file's
- * sixty-two answers were not, so under an allowlist a browser could read
- * /search and no other route's page. The headers are set once now, on the way
- * out of the main handler, and an unlisted origin gets no allow-origin header
- * (the literal `null` matched an opaque origin's own). The block drives a page
- * from /recent and /thoughts, a 404, an unlisted origin, the preflight 204, the
- * 401, the 429 (Retry-After exposed), the default `*` through a second instance
- * of the module loaded with no allowlist, and the ingest proxy's timeout
- * through the fetch stub.
- *
- * SMD-2110: rest-api's ingest proxy and smart-ingest's extraction trigger
- * built their upstream URL from SUPABASE_URL — the Postgres DSN here — so
- * every call handed fetch() the database credentials and failed. Each takes
- * its own http(s) knob now (SMART_INGEST_URL, ENTITY_EXTRACTION_WORKER_URL),
- * set here before the modules load: the rest-api block drives both proxy
- * routes to the stub at the knob's address (the key on both hops, job_id a
- * number), the 503 naming the variable through an instance loaded without
- * it, and the boot refusal of a DSN or a query in it; the smart-ingest block
- * drives one write whose trigger reaches the stub at ITS knob's address with
- * the key, a dry run then /execute through the server's own execute path, an
- * instance without the knob that writes and triggers nothing, and the same
- * boot refusal; and the tail asserts no URL the stub was handed, all suite
- * long, began postgres:// or carried /functions/v1/.
+ * SMD-2110: smart-ingest's extraction trigger built its upstream URL from
+ * SUPABASE_URL — the Postgres DSN here — so every call handed fetch() the
+ * database credentials and failed. It takes its own http(s) knob now
+ * (ENTITY_EXTRACTION_WORKER_URL), set here before the module loads: the
+ * smart-ingest block drives one write whose trigger reaches the stub at the
+ * knob's address with the key, a dry run then /execute through the server's
+ * own execute path, an instance without the knob that writes and triggers
+ * nothing, and the boot refusal of a DSN in it; and the tail asserts no URL
+ * the stub was handed, all suite long, began postgres:// or carried
+ * /functions/v1/.
  *
  * SMD-2128: smart-ingest's write path is the fork's — the 3-argument
  * upsert_thought with the vector as p_embedding, its model's label and the
@@ -136,9 +98,8 @@
  * imports compat/supabase-sql itself since SMD-1798 (the loader resolved a
  * supabase-js import to it for the two that did not, until then). The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
- * recognisable — as are Readwise's book lookup, the smart-ingest server rest-api
- * proxies to (SMD-2079/2110) and the extraction worker smart-ingest triggers
- * (SMD-2110), and everything below the tool or
+ * recognisable — as are Readwise's book lookup and the extraction worker
+ * smart-ingest triggers (SMD-2110), and everything below the tool or
  * route boundary is real; test-auth.ts is where the servers start under bun
  * for real.
  *
@@ -271,7 +232,6 @@ for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "ut
   // And applied once more, on the shape it made: nothing to do, nothing refused.
   const twice = await sql.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
   assert(twice === null, `…and the file applies again on its own shape (${twice ?? "ok"})`);
-  await sql`DELETE FROM ingestion_jobs WHERE input_hash = 'prior-shape'`; // the enhanced-mcp block reads "no job yet"
 }
 // The bio worker logs each run to consolidation_log (non-fatally, so a missing table would hide nothing but the log): the
 // table from the entity-extraction sidecar's own definition, alone.
@@ -289,8 +249,6 @@ function unit(text: string): number[] {
 }
 const vec = (v: number[]) => `[${v.join(",")}]`;
 const STUB_METADATA = { type: "idea", summary: "stubbed", topics: ["stubbed"], tags: [], people: [], action_items: [], dates_mentioned: [], confidence: 0.9 };
-/** When set, the embeddings endpoint answers 500 — the provider outage a writer must survive visibly. */
-let embeddingsDown = false;
 /**
  * Texts whose stub vector is 0.88 from another text's — inside smart-ingest's append-or-revise band (0.85–0.92), where a
  * one-hot vector alone is 0 or 1 from every other (SMD-2128): 0.88 of the base text's axis and 0.475 of the text's own,
@@ -302,42 +260,25 @@ const near = (base: string, text: string) => { const own = unit(text); return un
 const bioPrompts: string[] = [];
 /** The book Readwise's API answers for any book id — the receiver's write-through cache reads it once. */
 const BOOK = { id: 42, title: "Meditations", author: "Marcus Aurelius", category: "books", source: "kindle", source_url: null, cover_image_url: null, num_highlights: 3, last_highlight_at: null, tags: [] };
-/** The smart-ingest server's address rest-api proxies to, and the extraction worker's smart-ingest triggers: the two knobs
- * SMD-2110 gave the servers, set below before the modules load, where each built the URL on the Postgres DSN before. */
-const INGEST = "http://smart-ingest.test";
+/** The extraction worker's address smart-ingest triggers: the knob SMD-2110 gave the server, set below before the module
+ * loads, where it built the URL on the Postgres DSN before. */
 const WORKER = "http://extraction-worker.test";
 /** Every URL the stub was handed, suite long: none may begin postgres:// (SMD-2110; the tail asserts it). */
 const reached: string[] = [];
-/** The key each call to the worker's address carried, and each call to the smart-ingest server's. */
+/** The key each call to the worker's address carried. */
 const workerKeys: (string | null)[] = [];
-const ingestKeys: (string | null)[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   reached.push(url);
   if (/readwise\.io\/api\/v2\/books\//.test(url)) return Response.json(BOOK);
-  // The smart-ingest server at rest-api's SMART_INGEST_URL — its root for POST /ingest, /execute for the job route —
-  // answered after a pause with the signal honoured, so a proxy whose timeout is not a number — a Request in the slot,
-  // the defect SMD-2079's first review pass holds — aborts here instead. Matched whole at the knob's address: main's file
-  // fetched the same paths on the DSN, which this stub refuses below like any URL it does not know (SMD-2110).
-  if (url === INGEST || url === `${INGEST}/execute`) {
-    await Bun.sleep(25);
-    if (init?.signal?.aborted) throw Object.assign(new Error("the proxy aborted"), { name: "AbortError" });
-    ingestKeys.push(new Headers(init?.headers).get("x-brain-key"));
-    const sent = JSON.parse(String(init?.body ?? "{}"));
-    // The server's own check on /execute, mirrored: a job_id that is not a number is a 400 — the string rest-api's proxy sent
-    // until review pass 2 (the route captures \d+ and passed it on as captured).
-    if (url !== INGEST && typeof sent.job_id !== "number") return Response.json({ error: "job_id is required" }, { status: 400 });
-    return Response.json(url === INGEST ? { status: "dry_run_complete", dry_run: sent.dry_run, stub: true } : { job_id: sent.job_id, status: "executed", stub: true });
-  }
   // The extraction worker at smart-ingest's ENTITY_EXTRACTION_WORKER_URL, POSTed to after a write with the key (SMD-2110).
   if (url.startsWith(`${WORKER}/`)) {
     workerKeys.push(new Headers(init?.headers).get("x-brain-key"));
     return Response.json({ processed: 0, succeeded: 0, failed: 0, entities_created: 0, edges_created: 0, dry_run: false, stub: true });
   }
-  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider, Readwise's book lookup, the smart-ingest server and the extraction worker are stubbed`);
+  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider, Readwise's book lookup and the extraction worker are stubbed`);
   const body = JSON.parse(String(init?.body ?? "{}"));
   if (url.endsWith("/embeddings")) {
-    if (embeddingsDown) return new Response("stub: embeddings down", { status: 500 });
     const input = String(body.input);
     const base = nearOf.get(input);
     return Response.json({ data: [{ embedding: base ? near(base, input) : unit(input) }] });
@@ -382,12 +323,13 @@ Bun.plugin({
 
 // One key, presented as `x-brain-key`: the older single MCP_ACCESS_KEY, which
 // the servers on _shared/auth.ts accept with write scope (compared by digest)
-// and the two still on a constant-time compare accept as their only key. And
+// and smart-ingest, on a constant-time compare, accepts as its only key. And
 // a second, NAMED key in MCP_ACCESS_KEYS, which only the servers on the module
-// know: one write through each of them runs under it (SMD-1541), the arm that
+// know — agent-memory-api is the one this suite drives since SMD-1931, so the
+// arm has one witness: one write through it runs under that key (SMD-1541), the arm that
 // tells `principal.name` on the audit row from a constant that happens to
 // spell the legacy key's name — every other arm runs under the legacy key,
-// whose name the two in-place-compare servers' constant spells too.
+// whose name smart-ingest's in-place compare records too.
 const KEY = "one-write-key-for-every-writer";
 const NAMED_KEY = "a-second-key-with-a-name-of-its-own";
 const NAMED = "named-client";
@@ -396,8 +338,7 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.MCP_ACCESS_KEY = KEY;
 process.env.MCP_ACCESS_KEYS = `${NAMED}:write:${createHash("sha256").update(NAMED_KEY, "utf8").digest("hex")}`;
 process.env.OPENROUTER_API_KEY = "stub-openrouter-key"; // the writers' first-choice provider; its model name is the label
-// The two servers' upstream addresses (SMD-2110), read at import: the stub answers at them, and refuses the DSN's paths.
-process.env.SMART_INGEST_URL = INGEST;
+// smart-ingest's upstream address (SMD-2110), read at import: the stub answers at it, and refuses the DSN's paths.
 process.env.ENTITY_EXTRACTION_WORKER_URL = WORKER;
 for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"]) delete process.env[name];
 // The receiver's secret and token, and the auditor's key and Slack settings (read at import; Slack is never reached).
@@ -427,11 +368,11 @@ type Reply = { status: number; json: any; text: string; headers: Headers };
 // counted it. The console is restored when the last request in flight returns.
 const CONSOLE = { error: console.error, warn: console.warn };
 let inFlight = 0;
-async function send(handler: Handler, method: string, path: string, body?: unknown, key = KEY, origin?: string): Promise<Reply> {
+async function send(handler: Handler, method: string, path: string, body?: unknown, key = KEY): Promise<Reply> {
   if (inFlight++ === 0) { console.error = () => {}; console.warn = () => {}; }
   let r: Response;
   try {
-    const headers = { ...HEADERS, "x-brain-key": key, ...(origin ? { Origin: origin } : {}) };
+    const headers = { ...HEADERS, "x-brain-key": key };
     r = await handler(new Request("http://writer.test" + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }));
   } finally {
     if (--inFlight === 0) Object.assign(console, CONSOLE);
@@ -441,11 +382,6 @@ async function send(handler: Handler, method: string, path: string, body?: unkno
   let json: any = null;
   try { json = line ? JSON.parse(line) : null; } catch { json = null; }
   return { status: r.status, json, text, headers: r.headers };
-}
-/** An MCP tools/call, JSON-RPC over POST /mcp; the tool's first text block and structured content. */
-async function call(handler: Handler, name: string, args: Record<string, unknown>, key = KEY) {
-  const r = await send(handler, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, key);
-  return { ...r, toolText: String(r.json?.result?.content?.[0]?.text ?? ""), structured: r.json?.result?.structuredContent ?? null, isError: r.json?.result?.isError === true };
 }
 
 // ── The rows: planted, read, and the oracle ──────────────────────────────────
@@ -464,39 +400,6 @@ async function plant(tag: string): Promise<string> {
     VALUES (${text}, content_fingerprint_of(${text}), ${vec(unit(BEFORE))}::vector, 'model-before', '{"source": "planted"}'::jsonb) RETURNING id`;
   await plantWindows(id);
   return id as string;
-}
-/**
- * A restricted twin: a thought at another's vector (`atText`'s axis), with text
- * a query for that one matches too, so a search that finds the one must drop
- * the twin — by the `sensitivity_tier` column, the row no search may show
- * (SMD-1986 for enhanced-mcp's three tools, SMD-2054 for rest-api's /search).
- * Importance 5 and quality 100: search_thoughts_text's rank adds importance/20
- * + quality_score/500 to a text term the two contents tie on (both hold the
- * query as a substring, so the ILIKE floor of 0.35 is each one's), so the
- * twin's bonus, 0.45, beats a stubbed capture's 0.316 (the stub leaves
- * importance at the default 3 and confidence 0.9 becomes quality 83) and the
- * twin is the first row of the function's order — the page drives lean on
- * that; a tie would fall to created_at DESC, which the later-planted twin
- * also wins.
- */
-async function plantRestricted(hidden: string, atText: string): Promise<string> {
-  const [{ id }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, quality_score, metadata)
-    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(atText))}::vector, ${MODEL}, 'restricted', 5, 100, '{"source": "planted"}'::jsonb) RETURNING id`;
-  return id as string;
-}
-/**
- * Four clocks around a row's created_at, rendered by Postgres: its UTC day and
- * the next (date-only bounds), one hour later in a zone two hours ahead (an
- * offset bound naming an instant an hour BEFORE the row), and one hour earlier
- * with no zone. The enhanced-mcp block reads all four; the rest-api block reads `later`.
- */
-async function clocksOf(id: string): Promise<{ day: string; next: string; later: string; earlier: string }> {
-  const [row] = await sql`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
-    to_char((created_at + interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS next,
-    to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later,
-    to_char((created_at - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') AS earlier FROM thoughts WHERE id = ${id}`;
-  if (!row) throw new Error(`clocksOf: no thought ${id}`);
-  return row;
 }
 /** Two chunk rows of the previous vector — 022's stale set, if an edit leaves them. */
 async function plantWindows(id: string) {
@@ -584,201 +487,6 @@ function judgeActor(label: string, a: Audit | undefined, via: string, name = "MC
 
 // Everything below runs inside one try so the sidecars are dropped however it ends.
 try {
-
-// ── integrations/update-thought-mcp ──────────────────────────────────────────
-
-{
-  const F = "integrations/update-thought-mcp/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const id = await plant("update-thought-mcp");
-  const text = "the text after the edit, through update-thought-mcp";
-  const r = await call(h, "update_thought", { id, content: text, metadata_patch: { via: "update-thought-mcp" } });
-  assert(r.status === 200 && !r.isError && /^Updated thought /.test(r.toolText), `update_thought answers Updated (${r.toolText.split("\n")[0]})`);
-  assert(/content replaced and re-embedded/.test(r.toolText) && /metadata merged/.test(r.toolText) && /updated_at: \d{4}-/.test(r.toolText), "…naming what moved and the function's updated_at");
-  const after = await row(id, text);
-  judgeEdit("update-thought-mcp", after, await oracle("update-thought-mcp", text), text);
-  assert(after.metadata.via === "update-thought-mcp", "the patch is shallow-merged into metadata, in the function");
-  judgeActor("update-thought-mcp edit", await auditRow(id, "update"), "update-thought-mcp");
-
-  // The concurrency check is the function's now, decided under the row's lock.
-  const stale = await call(h, "update_thought", { id, content: "a lost update", if_unchanged_since: "2000-01-01T00:00:00Z" });
-  assert(stale.isError && /^STALE_READ:/.test(stale.toolText) && /Current updated_at: \d{4}-/.test(stale.toolText), `an old if_unchanged_since is refused as STALE_READ with the row's updated_at (${stale.toolText.slice(0, 60)})`);
-  assert((await row(id, text)).content === text, "…and the row is untouched");
-  const gone = await call(h, "update_thought", { id: "00000000-0000-4000-8000-000000000000", content: "nobody" });
-  assert(gone.isError && /^Thought not found/.test(gone.toolText), "an unknown id is Thought not found");
-
-  // A metadata-only edit leaves the vector, its label and the fingerprint alone (018/021).
-  const meta = await call(h, "update_thought", { id, metadata_patch: { pinned: true } });
-  const kept = await row(id, text);
-  assert(!meta.isError && kept.metadata.pinned === true && kept.at_axis === true && kept.embedding_model === MODEL && kept.fp_ok, "a metadata-only edit merges the patch and leaves vector, label and fingerprint as they were");
-
-  // Editing INTO another row's text is refused by name, not as a constraint error.
-  const other = await plant("update-thought-mcp twin");
-  const dup = await call(h, "update_thought", { id: other, content: text });
-  assert(dup.isError && /^DUPLICATE_CONTENT:/.test(dup.toolText), "an edit into text another thought holds is refused as DUPLICATE_CONTENT");
-
-  // Under the NAMED key: the row names it — `principal.name`, not a constant that spells the legacy key's name.
-  const named = await call(h, "update_thought", { id, metadata_patch: { named: true } }, NAMED_KEY);
-  assert(named.status === 200 && !named.isError, `a named write key (MCP_ACCESS_KEYS) edits (${named.toolText.slice(0, 60)})`);
-  judgeActor("update-thought-mcp edit under a named key", await auditRow(id, "update"), "update-thought-mcp", NAMED);
-}
-
-// ── integrations/enhanced-mcp ────────────────────────────────────────────────
-
-{
-  const F = "integrations/enhanced-mcp/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const id = await plant("enhanced-mcp");
-  const text = "the text after the edit, through enhanced-mcp";
-  const r = await call(h, "update_thought", { id, content: text });
-  assert(r.status === 200 && !r.isError && /^Updated thought #/.test(r.toolText), `update_thought takes the row's UUID and answers Updated (${r.toolText.slice(0, 70)})`);
-  const after = await row(id, text);
-  judgeEdit("enhanced-mcp", after, await oracle("enhanced-mcp", text), text);
-  assert(after.metadata.type === "idea" && after.metadata.summary === "stubbed", "the re-classified metadata is merged in");
-  judgeActor("enhanced-mcp edit", await auditRow(id, "update"), "enhanced-mcp");
-  const [side] = await sql`SELECT type, sensitivity_tier, importance FROM thoughts WHERE id = ${id}`;
-  assert(side.type === "idea" && side.sensitivity_tier === "standard" && Number(side.importance) === 3, "the enhanced-thoughts columns are written beside the function, by the raw update that carries neither content nor vector");
-
-  // SMD-1525: the read tools take the row's UUID too — they took upstream's integer id and could reach no row here.
-  const got = await call(h, "get_thought", { id });
-  assert(!got.isError && got.structured?.thought?.id === id && got.structured?.thought?.content === text, `get_thought takes the thought's UUID and answers the row (${got.toolText.slice(0, 60)})`);
-  const gotInt = await call(h, "get_thought", { id: 7 });
-  assert(gotInt.isError || gotInt.json?.error, `…and an integer id is refused by the schema, not looked up (${gotInt.isError ? gotInt.toolText.slice(0, 40) : JSON.stringify(gotInt.json?.error).slice(0, 60)})`);
-  const gotNone = await call(h, "get_thought", { id: "00000000-0000-4000-8000-000000000000" });
-  assert(gotNone.isError && /not found/.test(gotNone.toolText), "…and an unknown UUID is not found");
-  const related = await call(h, "related_thoughts", { thought_id: id });
-  assert(!related.isError && related.structured?.thought_id === id && Array.isArray(related.structured?.results), `related_thoughts takes the UUID and reaches get_thought_connections (enhanced-thoughts's, p_thought_id UUID) rather than binding an integer (${related.toolText.slice(0, 60)})`);
-
-  const captured = "a fresh thought captured through enhanced-mcp";
-  const c = await call(h, "brain_capture_thought", { content: captured });
-  assert(!c.isError && /^Captured new thought #/.test(c.toolText) && UUID.test(String(c.structured?.thought_id)) && c.structured?.action === "inserted",
-    `brain_capture_thought reads the fork's return — a UUID id, inserted — instead of throwing after the write (${c.toolText.slice(0, 60)})`);
-  const cid = String(c.structured?.thought_id);
-  if (UUID.test(cid)) {
-    judgeCapture("enhanced-mcp capture", await row(cid, captured), captured);
-    judgeActor("enhanced-mcp capture", await auditRow(cid, "capture"), "enhanced-mcp");
-    assert(typeof c.structured?.content_fingerprint === "string" && c.structured.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
-    const [cside] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
-    assert(cside.type === "idea" && cside.source_type === "mcp", "the enhanced-thoughts columns follow the capture");
-    // A re-capture of the same text: the tool's own fingerprint check answers before the function
-    // does, and either way a hand-set tier stays — the second review pass found this gate undriven.
-    await sql`UPDATE thoughts SET sensitivity_tier = 'personal' WHERE id = ${cid}`;
-    const again = await call(h, "brain_capture_thought", { content: captured });
-    const [kept] = await sql`SELECT sensitivity_tier FROM thoughts WHERE id = ${cid}`;
-    assert(!again.isError && String(again.structured?.thought_id) === cid && again.structured?.action !== "inserted" && kept.sensitivity_tier === "personal",
-      `a re-capture answers the same id, not as inserted, and leaves a hand-set tier (${again.structured?.action} ${kept.sensitivity_tier})`);
-  }
-  // One key, compared in place: a named key is refused here, and the name this server records is its constant's (SMD-1798 moved the file onto the shim and left the compare).
-  const named = await call(h, "brain_capture_thought", { content: "a capture under a named key, refused by enhanced-mcp" }, NAMED_KEY);
-  assert(named.status === 401, `a named key (MCP_ACCESS_KEYS) is 401 here — this server knows its one MCP_ACCESS_KEY (${named.status})`);
-
-  // The other nine tools, on the shim (SMD-1798): the reads by construction, the schema-backed ones degrading as they say.
-  // The three search tools (SMD-1986). Each sent `exclude_restricted: true` (and any date bound) as a key of the
-  // `filter` it hands match_thoughts and search_thoughts_text, and both functions — this fork's 014 and the
-  // enhanced-thoughts sidecar's own — read that argument as `metadata @> filter`, which no thought's metadata
-  // satisfies: every search answered no matches, and this suite pinned it. Now the caller's metadata_filter goes
-  // alone and the tier and the dates are applied to the rows — the tier by the COLUMN (match_thoughts returns none,
-  // so semantic mode looks it up by id; the old client-side filter compared undefined). A restricted twin at the
-  // captured thought's own vector, whose text the query matches too, is the mutant that shows the filter at work;
-  // it ranks first in the text function's order (plantRestricted), which the page drive below leans on.
-  const hidden = "a restricted thought captured through enhanced-mcp, which no search may show";
-  const rid = await plantRestricted(hidden, captured);
-  const ids = (r: { structured: any }) => ((r.structured?.results ?? []) as { id: string }[]).map((x) => x.id);
-  const textMode = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text" });
-  assert(!textMode.isError && ids(textMode).includes(cid) && !ids(textMode).includes(rid),
-    `brain_search_thoughts in text mode finds the captured thought through search_thoughts_text and not the restricted twin (${textMode.toolText.slice(0, 80)})`);
-  assert(textMode.structured?.pagination?.total === 2 && textMode.structured?.pagination?.has_more === false,
-    `…its total is the function's count, the hidden row included, and has_more reads the page the cursor passed (${JSON.stringify(textMode.structured?.pagination)})`);
-  const semantic = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5 });
-  assert(!semantic.isError && ids(semantic).includes(cid) && !ids(semantic).includes(rid),
-    `…and in semantic mode embeds the query through the stub, calls match_thoughts, and drops the twin by its sensitivity_tier column — one match_thoughts does not return (${semantic.toolText.slice(0, 80)})`);
-  const direct = await call(h, "search_thoughts_text", { query: "captured through enhanced" });
-  assert(!direct.isError && ids(direct).includes(cid) && !ids(direct).includes(rid), `search_thoughts_text likewise (${direct.toolText.slice(0, 60)})`);
-  // The one containment that IS meant: a metadata_filter no thought satisfies answers nothing, in both modes.
-  const noneText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", metadata_filter: { nothing_has_this: true } });
-  const noneSem = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, metadata_filter: { nothing_has_this: true } });
-  assert(!noneText.isError && ids(noneText).length === 0 && noneText.structured?.pagination?.total === 0 && !noneSem.isError && ids(noneSem).length === 0,
-    `a metadata_filter no thought satisfies answers nothing in both modes — the containment the argument is for (${noneText.toolText.slice(0, 40)} / ${noneSem.toolText.slice(0, 40)})`);
-  // The date bounds, applied to the rows in both modes: a window that closed before the capture hides it; one that opened before shows it.
-  const past = "2000-01-01T00:00:00Z";
-  const before = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: past });
-  const since = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: past });
-  const beforeText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", end_date: past });
-  const sinceText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", start_date: past });
-  assert(ids(before).length === 0 && ids(since).includes(cid) && ids(beforeText).length === 0 && ids(sinceText).includes(cid),
-    `a date bound is applied to the rows in both modes: an end_date in the past hides the capture, a start_date in the past shows it (${ids(before).length}/${ids(since).length}/${ids(beforeText).length}/${ids(sinceText).length})`);
-  assert(beforeText.structured?.pagination?.has_more === false && /^No matches found/.test(beforeText.toolText),
-    `…and a text page the bounds emptied, with none following, says so plainly (${beforeText.toolText})`);
-  // The bounds are instants, not strings (review pass 1). The meaning first: a date-only value is that day's
-  // midnight UTC, so the capture's own day as end_date closes before it and the next day's keeps it, in both modes
-  // (the string comparison agreed on these two — the pins that tell the schemes apart follow).
-  const { day, next, later, earlier } = await clocksOf(cid);
-  const ownDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: day });
-  const nextDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: next });
-  const nextDayText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", end_date: next });
-  const [{ sqlKeeps }] = await sql`SELECT count(*)::int = 1 AS "sqlKeeps" FROM thoughts WHERE id = ${cid} AND created_at <= (${day} || 'T00:00:00Z')::timestamptz`;
-  assert(ids(ownDay).length === 0 && ids(nextDay).includes(cid) && ids(nextDayText).includes(cid) && sqlKeeps === false,
-    `a date-only end_date is that day's midnight UTC — Postgres agrees on the instant: the capture's own day closes before it, the next day keeps it, in both modes (${day}: ${ids(ownDay).length}, ${next}: ${ids(nextDay).length}/${ids(nextDayText).length}, SQL keeps ${sqlKeeps})`);
-  // `later` names a clock one hour after the capture in a zone two hours ahead: an instant one hour BEFORE it, so a
-  // window opening there holds the capture — compared as strings its digits sorted after the row's and dropped it.
-  const offsetBound = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: later });
-  assert(ids(offsetBound).includes(cid), `a start_date with a UTC offset is the instant it names — later digits, an earlier instant, so the capture is inside the window (${later}: ${ids(offsetBound).length})`);
-  // `earlier` is a zone-less clock one hour before the capture: read as UTC it opens the window before the row;
-  // read in this process's zone it would open hours after it — on a machine west of UTC, which is why CI's step
-  // runs this suite under TZ=America/Chicago (fork-checks.yml); on a UTC machine the two readings coincide and this
-  // arm proves nothing. Text mode, so the instant reading is pinned in both modes (offsetBound is semantic).
-  const zoneless = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", start_date: earlier });
-  assert(ids(zoneless).includes(cid), `a zone-less date-time is read as UTC, never the process's zone — text mode (${earlier}: ${ids(zoneless).length})`);
-  const unparsable = await call(h, "brain_search_thoughts", { query: captured, end_date: "yesterday" });
-  const prose = await call(h, "brain_search_thoughts", { query: captured, start_date: "Dec 25, 2025" });
-  const rolled = await call(h, "brain_search_thoughts", { query: captured, start_date: "2026-02-30" });
-  const inverted = await call(h, "brain_search_thoughts", { query: captured, mode: "text", start_date: "2026-01-02", end_date: "2026-01-01" });
-  assert(unparsable.isError && /end_date is not an ISO 8601 date or date-time: yesterday/.test(unparsable.toolText) && prose.isError && /start_date is not an ISO 8601/.test(prose.toolText)
-    && rolled.isError && /start_date is not a real date: 2026-02-30/.test(rolled.toolText) && inverted.isError && /is after end_date/.test(inverted.toolText),
-    `a bound off the ISO shape (prose Date.parse would take), a day the calendar lacks (Date.parse rolls it to March), or a window closed before it opens is refused by name (${unparsable.toolText.slice(0, 60)} / ${prose.toolText.slice(0, 50)} / ${rolled.toolText.slice(0, 50)} / ${inverted.toolText.slice(0, 60)})`);
-  // A page the tier filter emptied, with hits behind it: the twin ranks first (importance 5, above), so with limit 1
-  // it is the whole page — hidden, and the tool says another page follows rather than a false end; the third tool
-  // answers the same page the same way (its first draft said "No matches found.").
-  const onePage = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", limit: 1 });
-  const onePageDirect = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 1 });
-  const secondPage = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 1, offset: 1 });
-  assert(ids(onePage).length === 0 && /^No matches on this page; more follow\./.test(onePage.toolText) && onePage.structured?.pagination?.has_more === true
-    && ids(onePageDirect).length === 0 && /more follow/.test(onePageDirect.toolText) && onePageDirect.structured?.pagination?.has_more === true,
-    `a page the tier filter emptied says more follow, in both tools, with has_more true (${onePage.toolText} / ${onePageDirect.toolText}; ${JSON.stringify(onePageDirect.structured?.pagination)})`);
-  assert(ids(secondPage).includes(cid) && secondPage.structured?.pagination?.has_more === false,
-    `…and the next page holds the capture, with no page after (${secondPage.toolText.slice(0, 40)}; ${JSON.stringify(secondPage.structured?.pagination)})`);
-  // The ordinal's teeth (review pass 2): one page of two, the hidden twin first — the capture's line is `2.`, its
-  // place in the function's order; numbered by its place in the filtered list it would read `1.`.
-  const twoPage = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 2 });
-  assert(ids(twoPage).length === 1 && /^2\. /.test(twoPage.toolText) && twoPage.structured?.pagination?.has_more === false,
-    `a line is numbered by the row's place in the page, hidden rows counted: the capture behind the twin is 2. (${twoPage.toolText.slice(0, 30)})`);
-  const listed = await call(h, "brain_list_thoughts", { limit: 1, type: "idea" });
-  const pagination = listed.structured?.pagination;
-  assert(!listed.isError && listed.structured?.results?.length === 1 && typeof pagination?.total === "number" && pagination.total >= 2 && pagination.has_more === true,
-    `brain_list_thoughts pages: one row, the head count the total, has_more from the two (${listed.toolText.slice(0, 60)}; ${JSON.stringify(pagination)})`);
-  const counted = await call(h, "count_thoughts", { type: "idea" });
-  assert(!counted.isError && counted.structured?.count === pagination?.total, `count_thoughts agrees with the listing's total (${counted.structured?.count} vs ${pagination?.total})`);
-  const stats = await call(h, "brain_thought_stats", {});
-  assert(!stats.isError && typeof stats.structured?.total === "number" && stats.structured.total >= 2 && Array.isArray(stats.structured?.top_types),
-    `brain_thought_stats reads brain_stats_aggregate, a jsonb scalar (${stats.toolText.slice(0, 60)})`);
-  const ops = await call(h, "ops_capture_status", {});
-  // The smart-ingest sidecar is applied here since SMD-2110 (its block below writes a job), so the tool finds the table.
-  assert(!ops.isError && ops.structured?.available === true && ops.structured?.total_jobs === 0, `ops_capture_status says smart-ingest is installed with no job yet — tableExists through the shim's head count, the sidecar this suite applies (${ops.toolText.slice(0, 60).replace(/\n/g, " ")})`);
-  const graph = await call(h, "graph_search", { query: "ada" });
-  assert(!graph.isError && graph.structured?.available === false, `graph_search degrades without schemas/knowledge-graph (${graph.toolText.slice(0, 60)})`);
-  const entity = await call(h, "entity_detail", { entity_id: "11111111-1111-4111-8111-111111111111" });
-  const entityInt = await call(h, "entity_detail", { entity_id: 7 });
-  assert(!entity.isError && entity.structured?.available === false && !entityInt.isError && entityInt.structured?.available === false, `entity_detail takes a UUID or an integer id and degrades the same way (SMD-1525) (${entity.toolText.slice(0, 40)})`);
-  const monitor = await call(h, "ops_source_monitor", {});
-  assert(!monitor.isError && monitor.structured?.available === false, `ops_source_monitor degrades without the ops views (${monitor.toolText.slice(0, 60)})`);
-  // The drift guard: tools/list under the key is exactly the thirteen driven in this block.
-  const listedTools = await send(h, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
-  const names = ((listedTools.json?.result?.tools ?? []) as { name: string }[]).map((t) => t.name).sort().join();
-  const drivenHere = ["brain_capture_thought", "brain_list_thoughts", "brain_search_thoughts", "brain_thought_stats", "count_thoughts", "entity_detail", "get_thought", "graph_search", "ops_capture_status", "ops_source_monitor", "related_thoughts", "search_thoughts_text", "update_thought"].join();
-  assert(names === drivenHere, `enhanced-mcp's tools/list is exactly the thirteen tools driven here (${names})`);
-}
 
 // ── integrations/agent-memory-api ────────────────────────────────────────────
 
@@ -881,291 +589,6 @@ try {
   assert(logged === 1, `…and one consolidation_log row for it (${logged})`);
   const again = await send(h, "POST", "/?limit=10");
   assert(again.status === 200 && again.json?.candidates_found === 0, `a second run finds no candidate — the reviewed marker excludes it (${again.json?.candidates_found})`);
-}
-
-// ── integrations/open-brain-rest ─────────────────────────────────────────────
-
-{
-  const F = "integrations/open-brain-rest/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const captured = "a fresh thought captured through open-brain-rest";
-  const c = await send(h, "POST", "/capture", { content: captured, importance: 4 });
-  assert(c.status === 200 && UUID.test(String(c.json?.thought_id)), `POST /capture answers the thought's id (${c.status} ${JSON.stringify(c.json).slice(0, 80)})`);
-  const cid = String(c.json?.thought_id);
-  if (UUID.test(cid)) {
-    judgeCapture("open-brain-rest capture", await row(cid, captured), captured);
-    judgeActor("open-brain-rest capture", await auditRow(cid, "capture"), "open-brain-rest");
-    const [cside] = await sql`SELECT type, source_type, importance FROM thoughts WHERE id = ${cid}`;
-    assert(cside.type === "idea" && cside.source_type === "dashboard" && Number(cside.importance) === 4, "the enhanced-thoughts columns follow the capture, without content or vector");
-    // A re-capture of the same text: the function refreshes vector and metadata; the enhanced columns are the owner's.
-    await sql`UPDATE thoughts SET sensitivity_tier = 'personal', importance = 6 WHERE id = ${cid}`;
-    const again = await send(h, "POST", "/capture", { content: captured, importance: 1 });
-    const [kept] = await sql`SELECT sensitivity_tier, importance FROM thoughts WHERE id = ${cid}`;
-    assert(again.status === 200 && again.json?.thought_id === cid && again.json?.action === "updated", `a re-capture answers the same id as updated (${again.status} ${again.json?.action})`);
-    assert(kept.sensitivity_tier === "personal" && Number(kept.importance) === 6, "…and leaves a hand-set tier and importance as they were — a fresh row's columns only");
-  }
-
-  // POST /ingest captures through the same createThought with the same actor (the README says so; this holds it).
-  const ingested = "a fresh thought ingested through open-brain-rest";
-  const ing = await send(h, "POST", "/ingest", { text: ingested });
-  assert(ing.status === 200 && UUID.test(String(ing.json?.thought_id)), `POST /ingest answers the thought's id (${ing.status} ${JSON.stringify(ing.json).slice(0, 80)})`);
-  if (UUID.test(String(ing.json?.thought_id))) {
-    judgeCapture("open-brain-rest ingest", await row(String(ing.json.thought_id), ingested), ingested);
-    judgeActor("open-brain-rest ingest", await auditRow(String(ing.json.thought_id), "capture"), "open-brain-rest");
-  }
-
-  const id = await plant("open-brain-rest");
-  const text = "the text after the edit, through open-brain-rest";
-  const r = await send(h, "PUT", `/thought/${id}`, { content: text, importance: 9, metadata: { via: "open-brain-rest" } });
-  assert(r.status === 200 && r.json?.action === "updated", `PUT /thought/:id answers updated (${r.status})`);
-  const after = await row(id, text);
-  judgeEdit("open-brain-rest", after, await oracle("open-brain-rest", text), text);
-  assert(after.metadata.via === "open-brain-rest", "the metadata is merged in the function");
-  judgeActor("open-brain-rest edit", await auditRow(id, "update"), "open-brain-rest");
-  const [side] = await sql`SELECT importance FROM thoughts WHERE id = ${id}`;
-  assert(Number(side.importance) === 9, "the enhanced-thoughts column is written beside it");
-  const meta = await send(h, "PUT", `/thought/${id}`, { status: "new" });
-  const kept = await row(id, text);
-  assert(meta.status === 200 && kept.at_axis === true && kept.embedding_model === MODEL && kept.fp_ok, "an edit without content leaves vector, label and fingerprint as they were");
-  const gone = await send(h, "PUT", "/thought/00000000-0000-4000-8000-000000000000", { content: "nobody" });
-  assert(gone.status === 404, "an unknown id is 404");
-
-  // Under the NAMED key: the row names it — `principal.name`, not a constant that spells the legacy key's name.
-  const named = await send(h, "PUT", `/thought/${id}`, { metadata: { named: true } }, NAMED_KEY);
-  assert(named.status === 200, `a named write key (MCP_ACCESS_KEYS) edits (${named.status})`);
-  judgeActor("open-brain-rest edit under a named key", await auditRow(id, "update"), "open-brain-rest", NAMED);
-}
-
-// ── integrations/rest-api ────────────────────────────────────────────────────
-
-{
-  const F = "integrations/rest-api/index.ts";
-  console.log(`\n[${F}]`);
-  process.env.CORS_ALLOWED_ORIGINS = "https://dash.test"; // read at module load, for the CORS arms at the block's end (SMD-2054 review pass 3, SMD-2079)
-  const h = await load(F);
-  const captured = "a fresh thought captured through rest-api";
-  const c = await send(h, "POST", "/capture", { content: captured });
-  assert(c.status === 200 && UUID.test(String(c.json?.thought_id)) && c.json?.action === "inserted",
-    `POST /capture reads the fork's return — a UUID id, inserted — instead of throwing after the write (${c.status} ${JSON.stringify(c.json).slice(0, 80)})`);
-  const cid = String(c.json?.thought_id);
-  if (UUID.test(cid)) {
-    judgeCapture("rest-api capture", await row(cid, captured), captured);
-    judgeActor("rest-api capture", await auditRow(cid, "capture"), "rest-api");
-    assert(typeof c.json?.content_fingerprint === "string" && c.json.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
-    await sql`UPDATE thoughts SET sensitivity_tier = 'personal' WHERE id = ${cid}`;
-    const again = await send(h, "POST", "/capture", { content: captured });
-    const [kept] = await sql`SELECT sensitivity_tier FROM thoughts WHERE id = ${cid}`;
-    assert(again.status === 200 && again.json?.thought_id === cid && again.json?.action === "updated" && kept.sensitivity_tier === "personal",
-      `a re-capture answers the same id as updated and leaves a hand-set tier — escalation-only holds for captures too (${again.status} ${again.json?.action} ${kept.sensitivity_tier})`);
-  }
-
-  const id = await plant("rest-api");
-  const text = "the text after the edit, through rest-api";
-  const r = await send(h, "PUT", `/thought/${id}`, { content: text, importance: 5 });
-  assert(r.status === 200 && r.json?.action === "updated", `PUT /thought/:id reaches a UUID row and answers updated (${r.status} ${JSON.stringify(r.json).slice(0, 80)})`);
-  judgeEdit("rest-api", await row(id, text), await oracle("rest-api", text), text);
-  judgeActor("rest-api edit", await auditRow(id, "update"), "rest-api");
-  const [side] = await sql`SELECT importance FROM thoughts WHERE id = ${id}`;
-  assert(Number(side.importance) === 5, "the enhanced-thoughts column is written beside it");
-
-  // The provider is down during an edit: the function is told no vector, so the
-  // row has none — 021's rule, not the old vector under the new text — and the
-  // response says so instead of a bare 200.
-  embeddingsDown = true;
-  const down = await send(h, "PUT", `/thought/${id}`, { content: `${text}, edited while the provider was down` });
-  embeddingsDown = false;
-  const unembedded = await row(id, text);
-  assert(down.status === 200 && down.json?.embedding_updated === false && /no vector until PATCH/.test(String(down.json?.message)),
-    `a PUT whose embedding call failed answers 200 with embedding_updated: false and says how to refill (${down.status} ${JSON.stringify(down.json).slice(0, 90)})`);
-  assert(!unembedded.has_vec && unembedded.embedding_model === null && unembedded.fp_ok && unembedded.content.endsWith("provider was down"),
-    "…and the row holds the new text and fingerprint with no vector and no label — not the previous vector");
-  assert((await send(h, "PUT", `/thought/${id}`, { content: text })).json?.embedding_updated === true, "the next PUT, provider back, re-embeds and says so");
-
-  // Enrich: the same text, a new vector — an unchanged edit that relabels and replaces the windows.
-  await plantWindows(id);
-  await sql`UPDATE thoughts SET embedding_model = 'model-before' WHERE id = ${id}`;
-  const e = await send(h, "PATCH", `/thought/${id}/enrich?fill=embedding`);
-  assert(e.status === 200 && e.json?.action === "enriched" && (e.json?.fills ?? []).includes("embedding"), `PATCH /thought/:id/enrich?fill=embedding answers enriched (${e.status})`);
-  const after = await row(id, text);
-  assert(after.embedding_model === MODEL && after.at_axis === true, "the new vector carries its label (021) — a raw update left model-before");
-  assert(after.chunks === 0, "the previous vector's windows are gone (022)");
-  assert(after.fp_ok && after.content === text, "the text and its fingerprint are untouched");
-  assert(after.metadata.enrichment_fills?.toString() === "embedding", "the enrichment record is merged into metadata");
-  judgeActor("rest-api enrich", await auditRow(id, "update"), "rest-api");
-
-  // One key, compared in place: a named key is refused here, and the name this server records is its constant's (SMD-1798 moves it onto the module).
-  const named = await send(h, "POST", "/capture", { content: "a capture under a named key, refused by rest-api" }, NAMED_KEY);
-  assert(named.status === 401, `a named key (MCP_ACCESS_KEYS) is 401 here — this server knows its one MCP_ACCESS_KEY (${named.status})`);
-
-  // POST /search (SMD-2054): the defect SMD-1986 fixed in enhanced-mcp, found here by that ticket's review. Semantic
-  // mode filtered the rows on a `sensitivity_tier` match_thoughts never returns — undefined !== "restricted" — so a
-  // restricted thought's full content came back; text mode sent `exclude_restricted: true` inside p_filter, a
-  // metadata containment no thought satisfies, answered an empty page, and read no date bound at all. A restricted
-  // twin at the capture's vector, whose text the query matches too (the capture's tier is `personal` by now — shown,
-  // as every tier but restricted is). Semantic mode embeds the query through the stub, so the twin's similarity is 1.
-  const hidden = "a restricted thought captured through rest-api, which no search may show";
-  const rid = await plantRestricted(hidden, captured);
-  // The twin's metadata carries no `type` (a capture's does, and agrees with its column), so its column, set here,
-  // reaches a semantic result only through the column lookup — the arm with teeth for `type` (review pass 2).
-  await sql`UPDATE thoughts SET type = 'planted-kind' WHERE id = ${rid}`;
-  const ids = (r: Reply) => ((r.json?.results ?? []) as { id: string }[]).map((x) => x.id);
-  const sem = (body: Record<string, unknown>) => send(h, "POST", "/search", { query: captured, min_similarity: 0.5, ...body });
-  const txt = (body: Record<string, unknown>) => send(h, "POST", "/search", { query: "captured through rest-api", mode: "text", ...body });
-  const semantic = await sem({});
-  assert(semantic.status === 200 && ids(semantic).includes(cid) && !ids(semantic).includes(rid),
-    `POST /search in semantic mode finds the capture and not the restricted twin — the tier read by the column, looked up by id after the match (${semantic.status}: ${ids(semantic).length} rows${ids(semantic).includes(rid) ? ", the twin among them" : ""})`);
-  // match_thoughts returns no `type` and no `source_type` either (review pass 1): the projection named both from the
-  // row, so `source_type` was missing from every semantic result. Both come from the same lookup as the tier; a
-  // capture's `type` is its metadata's first, which agrees with the column, so the teeth for `type` are the twin's
-  // (below, under exclude_restricted: false).
-  const [own] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
-  const hit = ((semantic.json?.results ?? []) as Record<string, unknown>[]).find((x) => x.id === cid);
-  assert(hit !== undefined && "source_type" in hit && hit.source_type === own.source_type && hit.type === own.type,
-    `…and a semantic result carries the row's source_type, read by the same lookup — match_thoughts returns it no more than the tier (${JSON.stringify({ type: hit?.type, source_type: hit?.source_type })} vs ${JSON.stringify(own)})`);
-  const textMode = await txt({});
-  assert(textMode.status === 200 && ids(textMode).includes(cid) && !ids(textMode).includes(rid) && textMode.json?.total === 2 && textMode.json?.count === 1 && textMode.json?.total_pages === 1,
-    `…and in text mode, through search_thoughts_text with p_filter {}: the page filtered by the column the function returns, total its count with the hidden row, count the rows shown (${textMode.status}: ${JSON.stringify({ count: textMode.json?.count, total: textMode.json?.total, total_pages: textMode.json?.total_pages })})`);
-  const [openSem, openText] = await Promise.all([sem({ exclude_restricted: false }), txt({ exclude_restricted: false })]);
-  // send()'s in-flight counter (the fix in c5b3a21d) is held by nothing while every arm passes — it fixes how a failure
-  // is REPORTED — so its teeth are this self-check (review pass 4, the mutant run): two requests were just in flight.
-  assert(console.error === CONSOLE.error && console.warn === CONSOLE.warn,
-    "send() restores the console after two requests in flight — the per-call save-and-restore it replaced left the second request's silence in place");
-  const twin = ((openSem.json?.results ?? []) as Record<string, unknown>[]).find((x) => x.id === rid);
-  assert(ids(openSem).includes(rid) && ids(openSem).includes(cid) && ids(openText).includes(rid) && ids(openText).includes(cid) && twin?.type === "planted-kind",
-    `exclude_restricted: false shows the twin beside the capture in both modes, and the twin's type — a column its metadata does not carry — reaches the semantic result through the lookup (${ids(openSem).length}/${ids(openText).length}; ${twin?.type})`);
-  // The date bounds, as instants, in both modes: text mode read none; semantic mode compared the strings.
-  const past = "2000-01-01T00:00:00Z";
-  const [beforeSem, sinceSem, beforeText, sinceText] = await Promise.all([sem({ end_date: past }), sem({ start_date: past }), txt({ end_date: past }), txt({ start_date: past })]);
-  assert(ids(beforeSem).length === 0 && ids(sinceSem).includes(cid) && ids(beforeText).length === 0 && ids(sinceText).includes(cid) && beforeText.json?.total === 2,
-    `a date bound is applied to the rows in both modes: an end_date in the past hides the capture (the arms with teeth), a start_date in the past leaves it (the controls); text mode's total still counts the function's rows (${ids(beforeSem).length}/${ids(sinceSem).length}/${ids(beforeText).length}/${ids(sinceText).length}; total ${beforeText.json?.total})`);
-  // `later` names a clock one hour after the capture in a zone two hours ahead: an instant one hour BEFORE it, so a
-  // window opening there holds the capture — compared as strings its digits sorted after the row's and dropped it.
-  const { later } = await clocksOf(cid);
-  const offsetBound = await sem({ start_date: later });
-  assert(ids(offsetBound).includes(cid), `a start_date with a UTC offset is the instant it names — later digits, an earlier instant, so the capture is inside the window (${later}: ${ids(offsetBound).length})`);
-  const [prose, inverted] = await Promise.all([sem({ end_date: "yesterday" }), txt({ start_date: "2026-01-02", end_date: "2026-01-01" })]);
-  assert(prose.status === 400 && /end_date is not an ISO 8601 date or date-time: yesterday/.test(String(prose.json?.error)) && inverted.status === 400 && /is after end_date/.test(String(inverted.json?.error)),
-    `a bound off the ISO shape, or a window closed before it opens, is a 400 naming the field (${prose.status} ${prose.json?.error} / ${inverted.status} ${inverted.json?.error})`);
-  // A page the tier filter emptied, with the hit behind it: the twin ranks first (plantRestricted), so with limit 1 it
-  // is the whole first page — count 0, the total and total_pages the function's — and page 2 holds the capture. A page
-  // past the last hit has no rows for the count to ride on, so its total is 0 (the README says so).
-  const [onePage, secondPage, pastEnd] = await Promise.all([txt({ limit: 1 }), txt({ limit: 1, page: 2 }), txt({ limit: 1, page: 3 })]);
-  assert(onePage.status === 200 && ids(onePage).length === 0 && onePage.json?.count === 0 && onePage.json?.total === 2 && onePage.json?.total_pages === 2 && ids(secondPage).includes(cid) && secondPage.json?.count === 1,
-    `a text page the tier filter emptied answers count 0 with total 2 and total_pages 2 — another page follows — and page 2 holds the capture, count 1 (${JSON.stringify({ count: onePage.json?.count, total: onePage.json?.total, total_pages: onePage.json?.total_pages })}; page 2: ${ids(secondPage).length})`);
-  assert(pastEnd.status === 200 && pastEnd.json?.count === 0 && pastEnd.json?.total === 0 && pastEnd.json?.total_pages === 0,
-    `…and page 3, past the last hit, answers total 0 — the count rides on the rows, and there are none (${JSON.stringify({ count: pastEnd.json?.count, total: pastEnd.json?.total, total_pages: pastEnd.json?.total_pages })})`);
-  // GET /recent (review pass 1): the one route reading thoughts directly with no tier predicate — it answered every
-  // restricted thought's full content, newest first (GET /duplicates calls find_near_duplicates, defined nowhere on
-  // this fork, so it fails rather than answers). Its siblings' exclude_restricted, default true.
-  const recent = await send(h, "GET", "/recent?limit=50");
-  const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
-  assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
-    `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
-  // SMD-2083: no paging parameter reaches SQL non-finite or fractional, and a
-  // non-object JSON body is a named 400 — each a 500 on the pre-fix file. The
-  // GET /recent arms clamp/truncate/default the paging param and echo it back.
-  for (const [path, field, want, note] of [
-    ["/recent?offset=Infinity&limit=5", "offset", 0, "offset=Infinity clamps to 0, not LIMIT NaN OFFSET Infinity → 500"],
-    ["/recent?limit=2.5", "limit", 2, "limit=2.5 truncates to 2, not a fractional LIMIT"],
-    ["/recent", "limit", 20, "no limit uses the default 20, not the min"],
-    ["/recent?limit=", "limit", 20, "?limit= (empty) uses the default 20, not the min"],
-  ] as [string, string, number, string][]) {
-    const r = await send(h, "GET", path);
-    assert(r.status === 200 && r.json?.[field] === want, `GET ${path}: ${note} (${r.status}: ${field} ${r.json?.[field]})`);
-  }
-  const bigPage = await send(h, "POST", "/search", { query: captured, mode: "text", page: 1e9 });
-  assert(bigPage.status === 200 && Number.isInteger(bigPage.json?.page),
-    `POST /search text mode page=1e9 answers a page, not an int4 overflow → 500 (${bigPage.status}: page ${bigPage.json?.page})`);
-  // The offset+limit int4 boundary (review pass 2): limit at max and page at its
-  // max, where (page-1)*limit alone is under int4 but p_limit+p_offset inside
-  // search_thoughts_text would overflow — offset is clamped to INT4_MAX-limit.
-  const maxPage = await send(h, "POST", "/search", { query: captured, mode: "text", limit: 100, page: 21474837 });
-  assert(maxPage.status === 200 && Number.isInteger(maxPage.json?.page),
-    `POST /search text mode limit=100 at max page answers a page, not a p_limit+p_offset int4 overflow → 500 (${maxPage.status}: page ${maxPage.json?.page})`);
-  const fracSearch = await send(h, "POST", "/search", { query: captured, limit: 2.5 });
-  assert(fracSearch.status === 200 && fracSearch.json?.per_page === 2,
-    `POST /search limit=2.5 reports an integer per_page (${fracSearch.status}: per_page ${fracSearch.json?.per_page})`);
-  const nullBody = await send(h, "POST", "/search", null);
-  assert(nullBody.status === 400 && /object/i.test(String(nullBody.json?.error)),
-    `POST /search with a JSON null body is a named 400, not a TypeError → 500 (${nullBody.status}: ${nullBody.json?.error})`);
-
-  // Every answer of the gateway carries the request's CORS headers (SMD-2079): json() built them only when handed `req`,
-  // and forty-five of the file's sixty-two answers were not, so under an allowlist a browser could read /search (SMD-2054)
-  // and no other route's page. Set once now, on the way out of the main handler; an unlisted origin gets NO allow-origin
-  // header, since the literal `null` is an opaque origin's own (review pass 1). The allowlist was set before the module
-  // loaded (above); send() carries the Origin and returns the headers.
-  const D = "https://dash.test";
-  const [okCors, refusedCors, strangerCors, recentCors, browseCors, lostCors, strangerRecent, preflight, unauthorized] = await Promise.all([
-    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, D),
-    send(h, "POST", "/search", { query: captured, end_date: "yesterday" }, KEY, D),
-    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://elsewhere.test"),
-    send(h, "GET", "/recent?limit=1", undefined, KEY, D),
-    send(h, "GET", "/thoughts", undefined, KEY, D),
-    send(h, "GET", "/no-such-route", undefined, KEY, D),
-    send(h, "GET", "/recent?limit=1", undefined, KEY, "https://elsewhere.test"),
-    send(h, "OPTIONS", "/recent", undefined, KEY, D),
-    send(h, "GET", "/recent?limit=1", undefined, "not-the-key", D)]);
-  const allow = (r: Reply) => r.headers.get("access-control-allow-origin");
-  assert(okCors.status === 200 && allow(okCors) === D && refusedCors.status === 400 && allow(refusedCors) === D && strangerCors.status === 200 && allow(strangerCors) === null,
-    `every answer of POST /search carries the request's CORS headers under an allowlist — the 200 and the 400 echo a listed origin, an unlisted one gets no allow-origin header (${allow(okCors)} / ${allow(refusedCors)} / ${allow(strangerCors)})`);
-  assert(recentCors.status === 200 && allow(recentCors) === D && browseCors.status === 200 && allow(browseCors) === D && lostCors.status === 404 && allow(lostCors) === D && strangerRecent.status === 200 && allow(strangerRecent) === null,
-    `…and so does every other answer of the gateway (SMD-2079): a page from GET /recent and from GET /thoughts and the 404 for an unknown route echo a listed origin, and GET /recent's page to an unlisted one carries no allow-origin header — main's file answered the literal null (${recentCors.status} ${allow(recentCors)} / ${browseCors.status} ${allow(browseCors)} / ${lostCors.status} ${allow(lostCors)} / ${strangerRecent.status} ${allow(strangerRecent)})`);
-  // The preflight and the 401 passed the request before and are the wrapper's now, so the wrapper-absent mutant fails
-  // this arm with the others (six of them, review pass 4).
-  assert(preflight.status === 204 && allow(preflight) === D && /x-brain-key/.test(String(preflight.headers.get("access-control-allow-headers"))) && unauthorized.status === 401 && allow(unauthorized) === D,
-    `the preflight 204 and the 401 keep theirs — they passed the request before, and are the wrapper's now like every answer (${preflight.status} ${allow(preflight)} / ${unauthorized.status} ${allow(unauthorized)})`);
-  // The two proxy routes reach the smart-ingest server at SMART_INGEST_URL, set before the module loaded — /execute for the
-  // job route, the root for /ingest — and answer its reply (SMD-2110): main's file built the URL from SUPABASE_URL, the
-  // Postgres DSN, so a real fetch refused the scheme and every deployment answered 502 with the credentials in the URL it
-  // was handed; the stub here refuses that URL the same way. It answers after 25 ms honouring the signal, so the proxy's
-  // timeout must be the number it was given — dropping `req` from proxyFetchJson's parameters left handleExecuteJob
-  // passing it into the timeout's slot, NaN, an immediate 504 (SMD-2079 review pass 1; nothing typechecks the file, SMD-2080).
-  const [exec, ingest] = await Promise.all([
-    send(h, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D),
-    send(h, "POST", "/ingest", { text: "a note for the ingest server", dry_run: true }, KEY, D)]);
-  assert(exec.status === 200 && exec.json?.status === "executed" && exec.json?.job_id === 7 && allow(exec) === D,
-    `POST /ingestion-jobs/:id/execute reaches the smart-ingest server at SMART_INGEST_URL's /execute with job_id as the number the server requires, and answers its reply with the CORS headers — main's file fetched the DSN and answered 502, the first commit sent "7" for a relayed 400; the proxy's timeout is the number it was given, not the request (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
-  assert(ingest.status === 200 && ingest.json?.status === "dry_run_complete" && ingest.json?.dry_run === true && ingest.json?.stub === true && allow(ingest) === D && ingestKeys.length === 2 && ingestKeys.every((k) => k === KEY),
-    `…and POST /ingest reaches its root with the body forwarded, both hops carrying this gateway's key as x-brain-key — the README's "the two hold the same key" (${ingest.status} ${JSON.stringify(ingest.json).slice(0, 80)}; ${allow(ingest)}; keys ${ingestKeys.map((k) => (k === KEY ? "sent" : String(k))).join(",")})`);
-  // The 429 rebuilt its header set (it spread the CORS headers itself before): Retry-After and the content type stay, the
-  // CORS headers arrive from the wrapper, and Retry-After is exposed, which no answer was (review pass 1). The cap is the
-  // default hundred a minute — the block has sent about thirty under KEY, this loop sends the rest, and its bound outlasts
-  // a window that rolls over mid-loop; a lower cap set before load would starve the earlier arms (review pass 2).
-  let limited: Reply | null = null;
-  for (let i = 0; i < 250 && !limited; i++) { const r = await send(h, "GET", "/health", undefined, KEY, D); if (r.status === 429) limited = r; }
-  assert(limited !== null && allow(limited) === D && /^\d+$/.test(String(limited.headers.get("retry-after"))) && String(limited.headers.get("content-type")).startsWith("application/json") && limited.json?.error === "rate_limited"
-    && /\bRetry-After\b/.test(String(limited.headers.get("access-control-expose-headers"))),
-    `the 429 carries the request's CORS headers beside Retry-After and its JSON content type, and exposes Retry-After to the browser (${limited?.status} ${limited ? allow(limited) : "-"} / ${limited?.headers.get("retry-after")} / ${limited?.headers.get("content-type")} / ${limited?.headers.get("access-control-expose-headers")})`);
-  delete process.env.CORS_ALLOWED_ORIGINS;
-  delete process.env.SMART_INGEST_URL;
-  // The defaults: no allowlist — `*` to any origin, the README's backward-compatibility promise, which nothing drove while
-  // the block ran under an allowlist (SMD-2079 review pass 3) — and no SMART_INGEST_URL, where the two proxy routes answer
-  // 503 naming the variable (SMD-2110). A second instance of the module, loaded with both variables unset; the query string
-  // keeps Bun's module cache from handing back the first. Its rate-limit bucket is its own, so the 429 loop above is no bar.
-  const open = (await import(join(ROOT, F) + "?defaults")).default!.fetch! as Handler;
-  const [star, unconfigured, unconfiguredIngest] = await Promise.all([
-    send(open, "GET", "/health", undefined, KEY, "https://elsewhere.test"),
-    send(open, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D),
-    send(open, "POST", "/ingest", { text: "a note for the ingest server" }, KEY, D)]);
-  assert(star.status === 200 && allow(star) === "*",
-    `with no allowlist the gateway answers Access-Control-Allow-Origin: * to any origin — the README's default (${star.status} ${allow(star)})`);
-  assert(unconfigured.status === 503 && unconfigured.json?.error === "smart_ingest_not_configured" && unconfigured.json?.variable === "SMART_INGEST_URL" && allow(unconfigured) === "*"
-    && unconfiguredIngest.status === 503 && unconfiguredIngest.json?.variable === "SMART_INGEST_URL",
-    `with SMART_INGEST_URL unset, POST /ingestion-jobs/:id/execute and POST /ingest answer 503 naming the variable, CORS headers on — main's file fetched the DSN's path and answered 502 upstream_unreachable (${unconfigured.status} ${JSON.stringify(unconfigured.json).slice(0, 80)}; ${unconfiguredIngest.status} ${unconfiguredIngest.json?.variable})`);
-  // The DSN in the knob — the URL main's file built, handed over as configuration — is refused at boot: the module does not
-  // load, and the message names the variable and the scheme and none of the value, whose userinfo is the database password.
-  process.env.SMART_INGEST_URL = URL_;
-  const refused = await import(join(ROOT, F) + "?dsn-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
-  process.env.SMART_INGEST_URL = INGEST;
-  assert(refused !== null && /^SMART_INGEST_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL; write it as http:\/\/host:port$/.test(refused) && !refused.includes(new URL(URL_).host),
-    `a postgres:// SMART_INGEST_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
-  // So is an address with a query: /execute is appended to it, and `?tenant=a/execute` is no path (review pass 1).
-  process.env.SMART_INGEST_URL = `${INGEST}/si?tenant=a`;
-  const refusedQuery = await import(join(ROOT, F) + "?query-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
-  process.env.SMART_INGEST_URL = INGEST;
-  assert(refusedQuery !== null && /^SMART_INGEST_URL must be a bare http\(s\) address/.test(refusedQuery),
-    `…and one with a query string, which a path is appended to, is refused as not bare (${refusedQuery === null ? "loaded" : refusedQuery})`);
 }
 
 // ── integrations/smart-ingest (SMD-2110 / SMD-2128) ──────────────────────────
@@ -1271,11 +694,10 @@ try {
     && ranRev.status === 200 && ranRev.json?.status === "complete" && ranRev.json?.revised_count === 0 && ranRev.json?.failed_count === 1
     && revItems.length === 1 && revItems[0].status === "failed" && /the text is already thought/.test(revItems[0].error_message ?? "") && captured !== undefined && captured.supersedes === null,
     `a revision parked ready by a dry run, whose text is captured meanwhile, fails on /execute saying the text is already a thought — not counted revised, the captured row's supersedes unset (${dryRev.json?.status} ${JSON.stringify(parked).slice(0, 80)}; ${ranRev.status} ${JSON.stringify(ranRev.json).slice(0, 120)}; items ${JSON.stringify(revItems).slice(0, 200)}; row ${JSON.stringify(captured)})`);
-  // The other half of the pipeline, the one rest-api's execute route proxies: a dry run parks the item as `ready`, and
-  // POST /execute writes it — through recordItemResult's second call site, and with job_id as the STRING the proxy sent
-  // until review pass 2, which the server takes now beside the number it required (a proxied execute was a 400 for every
-  // job, and no arm drove this path).
-  const text2 = "A dry run parks its items as ready in ingestion_items, and the execute route is what rest-api proxies to.";
+  // The other half of the pipeline: a dry run parks the item as `ready`, and POST /execute writes it — through
+  // recordItemResult's second call site, and with job_id as a numeric STRING, which the server takes beside the number it
+  // required (a caller that forwarded the id as a path captured it was a 400 for every job, and no arm drove this path).
+  const text2 = "A dry run parks its items as ready in ingestion_items, and the execute route writes them later.";
   const dry = await send(h, "POST", "/", { text: text2, dry_run: true, skip_classification: true, source_label: "test-writes" });
   const jobId = Number(dry.json?.job_id);
   const mark3 = reached.length;
@@ -1298,7 +720,7 @@ try {
   const calls2 = reached.slice(mark2);
   assert(second.status === 200 && second.json?.added_count === 1 && calls2.length > 0 && calls2.every((u) => /openrouter\.ai/.test(u)),
     `with ENTITY_EXTRACTION_WORKER_URL unset the write lands and reaches nothing but the model — no worker call, no URL on the DSN (${second.status} ${second.json?.added_count}; ${calls2.filter((u) => !/openrouter/.test(u)).join(" ") || "nothing else"})`);
-  // The DSN in the knob is refused at boot, as rest-api refuses its own.
+  // The DSN in the knob is refused at boot.
   process.env.ENTITY_EXTRACTION_WORKER_URL = URL_;
   const refused = await import(join(ROOT, F) + "?dsn-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
   process.env.ENTITY_EXTRACTION_WORKER_URL = WORKER;
@@ -1510,64 +932,12 @@ try {
 {
   console.log("\n[SMD-1724: the capture paths forward the client's trust]");
   const trustOf = async (text: string) => ((await sql`SELECT metadata->>'trust' AS t FROM thoughts WHERE content = ${text}`)[0]?.t ?? null) as string | null;
-  const claimOf = async (text: string) => ((await sql`SELECT a.actor_context->'claimed' AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE t.content = ${text} AND a.action = 'capture'`)[0]?.c ?? null) as unknown;
   const labels = (await sql`SELECT DISTINCT actor_name AS n FROM thought_audit WHERE actor_name IS NOT NULL`).map((r: { n: string }) => r.n);
   // One label at a time: Bun binds a JS array comma-joined, not as an array literal.
   const kindsBefore: { label: string; kind: string | null }[] = [];
   for (const label of labels) kindsBefore.push(...(await sql`SELECT label, kind FROM ob1_agents WHERE label = ${label}`) as { label: string; kind: string | null }[]);
   for (const label of labels) await sql`SELECT set_agent_kind(${label}, 'operator')`;
   try {
-    // rest-api's POST /capture.
-    {
-      // A third instance of the module: its rate-limit bucket is its own, as the defaults instance's is above.
-      const h = (await import(join(ROOT, "integrations/rest-api/index.ts") + "?trust")).default!.fetch! as Handler;
-      const [plain, declared] = ["a note typed into rest-api, trust undeclared", "a page pasted into rest-api, declared ingested"];
-      const a = await send(h, "POST", "/capture", { content: plain });
-      const b = await send(h, "POST", "/capture", { content: declared, trust: "ingested" });
-      const bad = await send(h, "POST", "/capture", { content: "a capture declaring a word off the ladder", trust: "root" });
-      assert(a.status === 200 && b.status === 200 && await trustOf(plain) === "operator" && await trustOf(declared) === "ingested",
-        `rest-api POST /capture forwards the client's trust: undeclared the key's (${await trustOf(plain)}), declared ingested (${await trustOf(declared)})`);
-      assert(bad.status === 400 && /trust must be operator, agent or ingested/.test(String(bad.json?.error)) && await trustOf("a capture declaring a word off the ladder") === null,
-        `…and refuses a word off the ladder before it writes (${bad.status})`);
-      const nulled = "a note sent to rest-api with trust null";
-      const n = await send(h, "POST", "/capture", { content: nulled, trust: null });
-      assert(n.status === 200 && await trustOf(nulled) === "operator", `…and takes a JSON null as no declaration: the key's (${n.status}; ${await trustOf(nulled)}; first review pass)`);
-      const [arr, num] = [await send(h, "POST", "/capture", { content: "a capture declaring an array", trust: ["agent"] }), await send(h, "POST", "/capture", { content: "a capture declaring a number", trust: 3 })];
-      assert(arr.status === 400 && num.status === 400 && await trustOf("a capture declaring an array") === null, `…and refuses a non-string, not stringified into a word (${arr.status}, ${num.status}; second review pass)`);
-      const viaMeta = "a capture whose metadata names a trust, through rest-api";
-      const vm = await send(h, "POST", "/capture", { content: viaMeta, metadata: { trust: "root" } });
-      assert(vm.status === 200 && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust: the key's, no claim filed (${vm.status}; ${await trustOf(viaMeta)}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
-    }
-    // open-brain-rest's POST /capture and POST /ingest.
-    {
-      const h = await load("integrations/open-brain-rest/index.ts");
-      const [cap, ing] = ["a page pasted into open-brain-rest's capture, declared ingested", "a page pasted into open-brain-rest's ingest, declared ingested"];
-      const a = await send(h, "POST", "/capture", { content: cap, trust: "ingested" });
-      const b = await send(h, "POST", "/ingest", { text: ing, trust: "ingested" });
-      const plain = "a note typed into open-brain-rest, trust undeclared";
-      await send(h, "POST", "/capture", { content: plain });
-      const bad = await send(h, "POST", "/ingest", { text: "an ingest declaring a word off the ladder", trust: "Operator" });
-      const badCap = await send(h, "POST", "/capture", { content: "a capture declaring a word off the ladder, open-brain-rest", trust: "root" });
-      assert(a.status === 200 && b.status === 200 && await trustOf(cap) === "ingested" && await trustOf(ing) === "ingested" && await trustOf(plain) === "operator",
-        `open-brain-rest forwards the client's trust on /capture and /ingest, the key's when undeclared (${await trustOf(cap)}, ${await trustOf(ing)}, ${await trustOf(plain)})`);
-      assert(bad.status === 400 && await trustOf("an ingest declaring a word off the ladder") === null && badCap.status === 400 && await trustOf("a capture declaring a word off the ladder, open-brain-rest") === null,
-        `…and refuses a word off the ladder on both routes (${bad.status}, ${badCap.status})`);
-      const viaMeta = "a capture whose metadata names a trust, through open-brain-rest";
-      const vm = await send(h, "POST", "/capture", { content: viaMeta, metadata: { type: "idea", trust: "root" } });
-      assert(vm.status === 200 && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust: the key's, no claim filed (${vm.status}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
-    }
-    // enhanced-mcp's brain_capture_thought.
-    {
-      const h = await load("integrations/enhanced-mcp/index.ts");
-      const declared = "a page pasted into enhanced-mcp, declared ingested";
-      const a = await call(h, "brain_capture_thought", { content: declared, trust: "ingested" });
-      const bad = await call(h, "brain_capture_thought", { content: "an enhanced-mcp capture declaring a word off the ladder", trust: "root" });
-      assert(!a.isError && await trustOf(declared) === "ingested", `enhanced-mcp's brain_capture_thought forwards the client's trust (${a.toolText.slice(0, 60)}; ${await trustOf(declared)})`);
-      assert((bad.isError || bad.json?.error) && await trustOf("an enhanced-mcp capture declaring a word off the ladder") === null, "…and its schema refuses a word off the ladder");
-      const viaMeta = "a capture whose metadata names a trust, through enhanced-mcp";
-      const vm = await call(h, "brain_capture_thought", { content: viaMeta, metadata: { trust: "root" }, trust: null });
-      assert(!vm.isError && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust, a null trust no declaration: the key's, no claim filed (${vm.toolText.slice(0, 60)}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
-    }
     // agent-memory-api's POST /writeback.
     {
       const h = await load("integrations/agent-memory-api/index.ts");
@@ -1617,17 +987,6 @@ try {
 
 console.log("\n[the files say what this test assumes]");
 const spells = (rel: string, re: RegExp, what: string) => assert(re.test(readFileSync(join(ROOT, rel), "utf8")), `${rel} ${what}`);
-// The date helpers rest-api's /search copied from enhanced-mcp (SMD-2054) — DateWindow, ISO_BOUND, parseBound,
-// dateWindow, withinDates — are held identical to the character, comment lines and the row's type aside: the enhanced-mcp block
-// above drives the date-only, zone-less and calendar arms through ITS copy, and a divergence in rest-api's would pass
-// every arm of the rest-api block (review pass 1). The two servers deploy alone and share only _shared/.
-{
-  const dateHelpers = (rel: string) => (readFileSync(join(ROOT, rel), "utf8").match(/^type DateWindow[\s\S]*?^function withinDates[\s\S]*?^}$/m)?.[0] ?? "")
-    .split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*\*)/.test(l)).join("\n").replace("row: ThoughtRow", "row: Record<string, unknown>");
-  const [ours, theirs] = [dateHelpers("integrations/rest-api/index.ts"), dateHelpers("integrations/enhanced-mcp/index.ts")];
-  assert(ours.length > 1000 && ours === theirs,
-    `integrations/rest-api/index.ts 's date helpers, the window's type included, are integrations/enhanced-mcp/index.ts's to the character, comment lines and the row's type aside (${ours.length} vs ${theirs.length} chars)`);
-}
 // A paste-in snippet with free variables; a README's sample.
 spells("recipes/provenance-chains/mcp-tools.ts", /"upsert_thought",\s*\{\s*p_content: content,\s*p_payload: \{[^}]*embedding_model: EMBEDDING_MODEL/s, "captures content, vector and label in one 3-argument upsert_thought");
 spells("recipes/provenance-chains/mcp-tools.ts", /p_embedding: embedding,/, "…passing the vector as p_embedding");
@@ -1647,12 +1006,10 @@ spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\):[
 for (const sample of ["integrations/telegram-capture/README.md", "integrations/slack-capture/README.md"]) {
   spells(sample, /rpc\("upsert_thought", \{\s*p_content: messageText,\s*p_payload: \{\s*metadata: \{[^}]*\},\s*embedding_model: EMBEDDING_MODEL,\s*\},\s*p_embedding: embedding,/s, "'s sample captures through the 3-argument upsert_thought with the label beside the vector");
 }
-// SMD-1541: the two servers that compare one key in place spell the legacy key's name themselves. The name is the one
-// auth.ts gives the same key, so one physical key reads the same in `actor_name` whichever module compared it; the
-// arms above assert the one literal for all five, and these hold the spelling at its sources — the auth.ts copy the
-// three principal servers import (test-auth.ts holds the six copies byte-identical) and the two constants.
+// SMD-1541: the legacy key's name is the one auth.ts gives it, so one physical key reads the same in `actor_name`
+// whichever server compared it; the arms above assert the one literal for every server driven, and this holds the
+// spelling at its source — the auth.ts copy the principal servers import (test-auth.ts holds the copies byte-identical).
 spells("integrations/_shared/auth.ts", /found = \{ name: "MCP_ACCESS_KEY", scope: "write"/, " names the legacy single key MCP_ACCESS_KEY");
-for (const f of ["integrations/enhanced-mcp/index.ts", "integrations/rest-api/index.ts"]) spells(f, /^const ACTOR_NAME = "MCP_ACCESS_KEY";$/m, " spells the same name as its ACTOR_NAME");
 // The three that own their database say they bypass the functions, in the file and in the README.
 for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "integrations/kubernetes-deployment/README.md"], ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/vercel-neon-telegram/README.md"], ["recipes/schema-aware-routing/index.ts", "recipes/schema-aware-routing/README.md"]]) {
   spells(file, /ob1-fork \(SMD-1524\):[^\n]*raw (?:INSERT|insert), by design/, " says its raw insert is by design — a database of its own");
@@ -1660,16 +1017,15 @@ for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "i
 }
 // Every runnable file the three changes touched is driven above, or read: the headers name them.
 const BIO = "integrations/consolidation-workers/bio/index.ts";
-const DRIVEN = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
-  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "recipes/repo-learning-coach/server/brain.ts", BIO,
+const DRIVEN = ["integrations/agent-memory-api/index.ts", "recipes/repo-learning-coach/server/brain.ts", BIO,
   "integrations/smart-ingest/index.ts"]; // smart-ingest joined the 3-argument form's callers with SMD-2128
 const TEXT_ONLY = ["recipes/provenance-chains/mcp-tools.ts"];
 const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts", BIO];
 const TEXT_ONLY_1524 = ["recipes/adaptive-capture-classification/capture-with-gating.ts"];
 const BYPASS_1524 = ["integrations/kubernetes-deployment/index.ts", "recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
 const DRIVEN_1544 = [BIO];
-const DRIVEN_1541 = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
-  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]; // change 69's five servers, the ones that hold a key — and smart-ingest, which passes the actor since SMD-2128
+const DRIVEN_1541 = ["integrations/agent-memory-api/index.ts",
+  "integrations/smart-ingest/index.ts"]; // change 69's one remaining server that holds a key (five until SMD-1931 retired the two REST gateways and the two MCP servers) — and smart-ingest, which passes the actor since SMD-2128
 // Every vendored .ts, read once; each ticket's rule tests the same texts.
 const HEADED = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
   .filter((f) => !f.includes("node_modules")).map((f) => [f, readFileSync(join(ROOT, f), "utf8")] as const);
@@ -1682,12 +1038,12 @@ for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-15
     "scripts/check-fork-consistency.ts check 10 holds the text of every file: no raw write of content or vector on thoughts");
 }
 // SMD-2110: an HTTP target comes from its own variable, never from SUPABASE_URL — the connection string on this fork. Every
-// URL the stub was handed, by every writer this suite drove, and the two files' text: no URL built on that variable.
+// URL the stub was handed, by every writer this suite drove, and smart-ingest's text: no URL built on that variable.
 assert(reached.length > 0 && !reached.some((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")),
   `no writer handed fetch() a postgres:// URL or a /functions/v1/ path, suite long (${reached.length} calls; ${reached.filter((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")).slice(0, 3).map((u) => u.replace(/\/\/[^/@]*@/, "//…@")).join(" ")})`); // userinfo redacted: it is the password
-// The literal forms — a template `${SUPABASE_URL}/…` or a concatenation `SUPABASE_URL + "/…"` — in the two files' text; an
-// alias or a `new URL(path, SUPABASE_URL)` would pass this and fail the arm above at run time.
-for (const f of ["integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]) spells(f, /^(?![\s\S]*(?:\$\{SUPABASE_URL\}\/|SUPABASE_URL\s*\+\s*["'`]\/))/, " writes no `${SUPABASE_URL}/…` template and no `SUPABASE_URL + \"/…\"` concatenation");
+// The literal forms — a template `${SUPABASE_URL}/…` or a concatenation `SUPABASE_URL + "/…"` — in smart-ingest's text;
+// an alias or a `new URL(path, SUPABASE_URL)` would pass this and fail the arm above at run time.
+spells("integrations/smart-ingest/index.ts",/^(?![\s\S]*(?:\$\{SUPABASE_URL\}\/|SUPABASE_URL\s*\+\s*["'`]\/))/, " writes no `${SUPABASE_URL}/…` template and no `SUPABASE_URL + \"/…\"` concatenation");
 // SMD-2128: smart-ingest's text — one upsert_thought call site, the 3-argument form with the vector as p_embedding and the
 // actor in the envelope, and no `embedding` key inside the payload (upstream's shape, which the fork's function ignores).
 {
@@ -1703,13 +1059,6 @@ for (const f of ["integrations/rest-api/index.ts", "integrations/smart-ingest/in
   for (let i = at; at >= 0 && i < text.length && end < 0; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) end = i; }
   const payload = at >= 0 && end > at ? text.slice(at, end + 1) : "";
   assert(payload.length > 0 && !/(?:^|[^\w])["'`]?embedding["'`]?\s*:/.test(payload), `${F} puts no \`embedding\` key inside upsert_thought's payload — the 2-argument form's shape, which the fork's function does not read (${payload.replace(/\s+/g, " ").slice(0, 160)})`);
-}
-// The two servers each carry httpTargetFrom (they deploy alone and share only their own _shared/): held identical to the
-// character, comment lines aside, as the date helpers are above.
-{
-  const helper = (rel: string) => (readFileSync(join(ROOT, rel), "utf8").match(/^function httpTargetFrom[\s\S]*?^}$/m)?.[0] ?? "").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
-  const [ours, theirs] = [helper("integrations/rest-api/index.ts"), helper("integrations/smart-ingest/index.ts")];
-  assert(ours.length > 300 && ours === theirs, `integrations/rest-api/index.ts's httpTargetFrom is integrations/smart-ingest/index.ts's to the character (${ours.length} vs ${theirs.length} chars)`);
 }
 
 } catch (e) {

@@ -343,6 +343,10 @@ console.log("\n[6] test-auth's cases against REST: a read key cannot write, a ca
   const forged = await rest("POST", "/v1/thoughts", { content: "eta: a capture key's ticket claim", metadata: { status_type: "completed" } }, KEYS.hook);
   assert(forged.status === 400 && forged.body.code === "REFUSED_METADATA_SHAPE" && forged.body.problem === "ticket_key" && forged.body.key === "status_type",
     `a capture key's ticket key is a 400 naming the rule and the key (${forged.status} ${JSON.stringify(forged.body)})`);
+  // …`ticket` among them, which files a thought under a ticket (SMD-2657).
+  const filed = await rest("POST", "/v1/thoughts", { content: "eta: a capture key's note filed under a ticket", metadata: { ticket: "TKT-2657" } }, KEYS.hook);
+  assert(filed.status === 400 && filed.body.code === "REFUSED_METADATA_SHAPE" && filed.body.problem === "ticket_key" && filed.body.key === "ticket",
+    `…and so is its \`ticket\` (${filed.status} ${JSON.stringify(filed.body)})`);
   const stated = await rest("POST", "/v1/thoughts", { content: "eta: a write key's ticket row", metadata: { issue: "TKT-2617", status_type: "started" } }, KEYS.writer);
   assert(stated.status === 201, `…and a write key's is a creation (${stated.status})`);
   // The key is in the value unless it is itself malformed: a reserved key's
@@ -391,7 +395,7 @@ console.log("\n[6b] Forwarded through REST: the client's key is the subject, the
 
   const cap = await forwarded("POST", "/v1/thoughts", KEYS.hook, KEYS.forwarder, { content: "iota: a hook's thought, carried by the MCP server" });
   assert(cap.status === 201 && typeof cap.body.id === "string", `a capture key forwarded captures (${cap.status} ${JSON.stringify(cap.body).slice(0, 80)})`);
-  // …as the capture key it is: refused a ticket's lifecycle keys (SMD-2617).
+  // …as the capture key it is: refused the ticket keys (SMD-2617).
   const capTicket = await forwarded("POST", "/v1/thoughts", KEYS.hook, KEYS.forwarder, { content: "iota: a forwarded ticket claim", metadata: { status_type: "completed" } });
   assert(capTicket.status === 400 && capTicket.body.problem === "ticket_key" && capTicket.body.key === "status_type",
     `…and is refused a ticket key, as the capture key it carries (${capTicket.status} ${JSON.stringify(capTicket.body)})`);

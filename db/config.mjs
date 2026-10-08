@@ -1612,9 +1612,11 @@ export const BOUNDS_IN_FORCE_SQL =
 
 /**
  * match_thoughts clamps match_count to this INSIDE the function (migration
- * 014, templated as {{MATCH_COUNT_CEILING}}). 500 covers every caller in the
- * repo: enhanced-mcp asks for up to 500 under a date filter, rest-api up to
- * 200, agent-memory-api up to 200. The servers' own search_thoughts tools
+ * 014, templated as {{MATCH_COUNT_CEILING}}). 500 was set to cover every
+ * caller the repo had: enhanced-mcp asked for up to 500 under a date filter
+ * and rest-api up to 200, both retired since (SMD-1931); agent-memory-api asks
+ * for up to 200. The bound is kept for direct SQL and community callers, as
+ * the bench measures it. The servers' own search_thoughts tools
  * clamp their `limit` to 100 separately — a tool-level choice about what to
  * hand a model, not this cost bound. The bench measures asked-500.
  */

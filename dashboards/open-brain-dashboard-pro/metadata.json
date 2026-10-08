@@ -9,7 +9,7 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["REST API gateway (integrations/open-brain-rest)"],
+    "services": ["REST API gateway (integrations/open-brain-rest, retired by SMD-1931)"],
     "tools": ["Node.js 20+", "Next.js 16"]
   },
   "tags": [

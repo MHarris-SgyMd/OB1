@@ -13,16 +13,15 @@ export type ToolScope = Scope;
 export interface ToolEntry {
   readonly name: string;
   /**
-   * The gate index.ts registers the tool behind, named for the key scope that
-   * unlocks it alone: `read` (canRead — a read or a write key), `capture`
-   * (canCapture — a write key or the capture-only key, SMD-1298), `write`
-   * (canWrite — a write key alone). A key's surface is the union of the groups
-   * its scope unlocks, UNLOCKS below; visibleToolNames() derives it, so the
-   * drift guards read the manifest rather than a fixed count, and a tool
-   * gated with canCapture in index.ts but tagged `write` here fails them
-   * (first review pass: a hand-written list beside the manifest would not). A
-   * future flag-gated or optional tool adds its condition here and extends
-   * that function.
+   * The tool's group, named for the key scope that unlocks it alone: `read`
+   * (a read or a write key), `capture` (a write key or the capture-only key,
+   * SMD-1298), `write` (a write key alone). A key's surface is the union of
+   * the groups its scope unlocks, UNLOCKS below. This is the only statement
+   * of a tool's gate: index.ts registers an MCP tool and the REST core admits
+   * a route through mayCall (SMD-1931), and visibleToolNames() derives what
+   * the drift guards expect, so they read the manifest rather than a fixed
+   * count. A future flag-gated or optional tool adds its condition here and
+   * extends those functions.
    */
   readonly scope: ToolScope;
 }
@@ -66,6 +65,22 @@ export const UNLOCKS: Readonly<Record<Scope, readonly ToolScope[]>> = {
   // A forwarder's key grants nothing (SMD-2284); no server admits it as a caller.
   forward: [],
 };
+
+const SCOPE_OF: ReadonlyMap<ToolName, ToolScope> = new Map(TOOLS.map((t) => [t.name, t.scope]));
+/** A tool's group, from its manifest entry; a name the manifest lacks is a bug, and throws. */
+export const scopeOf = (name: ToolName): ToolScope => {
+  const scope = SCOPE_OF.get(name);
+  if (!scope) throw new Error(`"${name}" is not in the tool manifest (tools.ts)`);
+  return scope;
+};
+
+/**
+ * Whether a key's scope unlocks a tool — the one gate both surfaces ask
+ * (SMD-1931): index.ts registers an MCP tool only where it holds, and the REST
+ * core refuses a route with FORBIDDEN where it does not, so a tool's scope is
+ * stated once, here, and not again beside either registration.
+ */
+export const mayCall = ({ scope }: { scope: Scope }, name: ToolName): boolean => (UNLOCKS[scope] ?? []).includes(scopeOf(name));
 
 /** Every tool name a write-scoped key sees, sorted — derived from UNLOCKS, not restated (eleventh review pass: it was every manifest entry, a second statement of the hierarchy). */
 export const TOOL_NAMES: ToolName[] = namesIn(UNLOCKS.write);

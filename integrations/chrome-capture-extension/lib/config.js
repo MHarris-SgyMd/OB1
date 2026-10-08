@@ -5,8 +5,8 @@
   //
   // All user-specific values (API base URL, API key, per-platform toggles, etc.)
   // live in chrome.storage. There is deliberately NO hardcoded Supabase project
-  // URL in this extension — the user supplies their own Open Brain REST API
-  // gateway URL on the first-run config screen. Until configured, the service
+  // URL in this extension — the user supplies their own brain's REST core URL
+  // on the first-run config screen. Until configured, the service
   // worker refuses to make outbound requests and the popup surfaces a
   // "Configure Open Brain" call to action.
 
@@ -16,7 +16,16 @@
     // apiEndpoint moved to chrome.storage.local alongside apiKey — both are
     // per-device and must not follow the user's Google account across
     // profiles. See README Security section for rationale.
-    apiEndpoint: 'ob_capture_api_endpoint',
+    //
+    // A key of its own since the REST core (SMD-1931): a URL saved under the
+    // old key ('ob_capture_api_endpoint', or in sync before that) named the
+    // retired open-brain-rest gateway and reaches nothing now. Read under this
+    // key, an upgraded install is unconfigured until the user enters the REST
+    // core's URL — the banner asks, and the retry queue waits instead of
+    // dead-lettering every capture on the old URL's 404.
+    apiEndpoint: 'ob_capture_rest_core_endpoint',
+    // The retired gateway's URL, read only to remove it.
+    legacyApiEndpoint: 'ob_capture_api_endpoint',
     // Explicit boolean flag (chrome.storage.local) that signals the last
     // setConfig() write had to fall back to local because chrome.storage.sync
     // rejected the write (QUOTA_BYTES, managed policy, sync disabled).
@@ -35,11 +44,9 @@
     syncStateChatGPT: 'ob_capture_sync_state_chatgpt'
   };
 
-  // No default endpoint. Users MUST supply their own Open Brain REST API URL.
-  // Shape example (Supabase-hosted):
-  //   https://<your-project-ref>.supabase.co/functions/v1
-  // Self-hosted alternative:
-  //   https://brain.example.com
+  // No default endpoint. Users MUST supply their own brain's REST core URL
+  // (SMD-1931): the stack's opt-in public route, e.g.
+  //   https://brain.example.com/api
   const DEFAULT_SETTINGS = {
     apiEndpoint: '',
     apiKey: '',
@@ -132,7 +139,8 @@
         'Open Brain API URL is not configured. Click the extension icon and complete the Configure Open Brain screen.'
       );
     }
-    return trimmed.endsWith('/open-brain-rest') ? trimmed : `${trimmed}/open-brain-rest`;
+    // The REST core's routes (`/v1/...`) sit under the URL as given.
+    return trimmed;
   }
 
   function getPlatformDefinition(platformId) {
@@ -179,6 +187,7 @@
       chrome.storage.local.get({
         [STORAGE_KEYS.apiKey]: '',
         [STORAGE_KEYS.apiEndpoint]: '',
+        [STORAGE_KEYS.legacyApiEndpoint]: '',
         [STORAGE_KEYS.localFallbackActive]: false
       }),
       // Fallback local-only settings blob (used when sync is unavailable).
@@ -213,25 +222,29 @@
       }
     }
 
-    // Migrate legacy installs where the API endpoint lived in sync storage.
-    // After this migration, sync keeps a blank apiEndpoint and the real
-    // value lives in chrome.storage.local only.
-    if (!localApiEndpoint && syncSettings.apiEndpoint) {
+    // An endpoint left by a legacy install named the retired gateway (see
+    // STORAGE_KEYS.apiEndpoint): it is removed, never carried over — the
+    // local key at once, sync's copy while sync takes writes (when it does
+    // not, the fallback below never reads it, and getConfig need not fail a
+    // write on every call).
+    if (localStored[STORAGE_KEYS.legacyApiEndpoint]) {
       try {
-        await Promise.all([
-          chrome.storage.local.set({
-            [STORAGE_KEYS.apiEndpoint]: syncSettings.apiEndpoint
-          }),
-          chrome.storage.sync.set({
-            [STORAGE_KEYS.settings]: {
-              ...syncSettings,
-              apiEndpoint: '',
-              apiKey: ''
-            }
-          })
-        ]);
+        await chrome.storage.local.remove(STORAGE_KEYS.legacyApiEndpoint);
       } catch (err) {
-        console.warn('[Open Brain Capture] Legacy endpoint migration hit storage error', err);
+        console.warn('[Open Brain Capture] Legacy endpoint removal hit storage error', err);
+      }
+    }
+    if (syncSettings.apiEndpoint && !localFallbackActive) {
+      try {
+        await chrome.storage.sync.set({
+          [STORAGE_KEYS.settings]: {
+            ...syncSettings,
+            apiEndpoint: '',
+            apiKey: ''
+          }
+        });
+      } catch (err) {
+        console.warn('[Open Brain Capture] Legacy endpoint cleanup hit storage error', err);
       }
     }
 
@@ -259,7 +272,7 @@
 
     return mergeSettings({
       ...baseSettings,
-      apiEndpoint: localApiEndpoint || baseSettings.apiEndpoint || '',
+      apiEndpoint: localApiEndpoint,
       apiKey: localApiKey || baseSettings.apiKey || ''
     });
   }
