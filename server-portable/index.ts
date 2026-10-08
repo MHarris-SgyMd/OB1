@@ -2,12 +2,12 @@
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
 import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";
-import { authenticateRequest, canCapture, canRead, canWrite, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
+import { authenticateRequest, canRead, canWrite, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
 import { createCore, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
-import type { ToolName } from "./tools.ts";
+import { mayCall, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
 import { labelPart, withSseKeepalive } from "./sse.ts";
@@ -63,14 +63,15 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
     return registerTool(...args.slice(0, -1), (...call: unknown[]) => toolCalls.track(() => handler(...call)));
   };
 
-  // A tool whose logic is in core/ (SMD-2283): registered only when `allowed` —
-  // the key's scope; a tool a key may not use is absent from its tools/list,
-  // not refused — with the SDK validating the input against the tool's spec,
+  // A tool whose logic is in core/ (SMD-2283): registered only where the key's
+  // scope unlocks the tool's group in the manifest (tools.ts's mayCall, the gate
+  // the REST core asks too, SMD-1931) — a tool a key may not use is absent from
+  // its tools/list, not refused — with the SDK validating the input against the tool's spec,
   // `run` calling the operation and rendering its outcome (render.ts), and
   // `fault` saying what an operation throws (review pass 6: sixteen copies of
   // that body before).
-  const registerOp = <K extends ToolName>(name: K, allowed: boolean, run: (input: Input<K>) => Promise<say.Reply>, fault: (err: unknown, input: Input<K>) => say.Reply): void => {
-    if (!allowed) return;
+  const registerOp = <K extends ToolName>(name: K, run: (input: Input<K>) => Promise<say.Reply>, fault: (err: unknown, input: Input<K>) => say.Reply): void => {
+    if (!mayCall(principal, name)) return;
     // The generic K loses the SDK's per-tool inference of `input`; SPECS[name]'s
     // schema is what it validates against, and Input<K> is that schema's output.
     const register = server.registerTool as unknown as (name: string, spec: unknown, handler: (input: Input<K>) => Promise<say.Reply>) => unknown;
@@ -88,7 +89,7 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
   // words in render.ts, for a key that may read; a fault is `Error: <message>`
   // with the tool's hint where it has one, FAILED beside it.
   const readTool = <K extends ToolName>(name: K, run: (input: Input<K>) => Promise<say.Reply>, hint?: (input: Input<K>) => ((msg: string) => string) | undefined): void =>
-    registerOp(name, canRead(principal), run, (err, input) => say.failed(err, { hint: hint?.(input) }));
+    registerOp(name, run, (err, input) => say.failed(err, { hint: hint?.(input) }));
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and
   // deep research look for exact read-only `search` and `fetch` tool shapes. Why
@@ -129,8 +130,8 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
 
   // Tool 3b: the change feed (migration 052, SMD-1296) — what moved since a
   // time or a cursor, for an agent that returns after a break. Gated like the
-  // other read tools (canRead: a read or a write key sees it, a capture-only
-  // key does not). The store calls one SQL function that chooses the page
+  // other read tools (a read or a write key sees it, a capture-only key does
+  // not). The store calls one SQL function that chooses the page
   // and bounds the rendering; the operation decides `since`, render.ts lays the
   // rows out.
   readTool("thought_changes", async (input) => say.renderThoughtChanges(await core.thoughtChanges(principal, input)), () => say.changesHint);
@@ -180,7 +181,7 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
   // egress gate, the parallel model calls, the write and its cites — are
   // core/writes.ts's; a fault is STORE_UNAVAILABLE, a transient the session
   // hook keeps and retries (SMD-1978).
-  registerOp("capture_thought", canCapture(principal),
+  registerOp("capture_thought",
     async (input) => say.renderCapture(await core.capture(principal, input)),
     (err) => say.storeUnavailable(err));
 
@@ -190,11 +191,11 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
    * never registered and do not appear in tools/list. A fault keeps the tool's
    * own lead, `update_thought failed:`, FAILED beside it.
    */
-  registerOp("update_thought", canWrite(principal),
+  registerOp("update_thought",
     async (input) => say.renderUpdate(await core.updateThought(principal, input)),
     (err) => say.failed(err, { lead: "update_thought failed: " }));
 
-  registerOp("delete_thought", canWrite(principal),
+  registerOp("delete_thought",
     async (input) => say.renderDelete(await core.deleteThought(principal, input)),
     (err) => say.failed(err, { lead: "delete_thought failed: " }));
 
@@ -207,15 +208,15 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
   // (Workers) deploy the store throws the SQL-only reason, which is permanent,
   // not the transient STORE_UNAVAILABLE capture's implies. The keyed REST mirror
   // is the app.post guard below, over the same operations.
-  registerOp("retry_failed", canWrite(principal),
+  registerOp("retry_failed",
     async (input) => say.renderRetryFailed(await core.retryFailed(principal, input)),
     (err) => say.failed(err, { lead: "retry_failed failed: " }));
 
-  registerOp("release_stale_leases", canWrite(principal),
+  registerOp("release_stale_leases",
     async (input) => say.renderReleaseStaleLeases(await core.releaseStaleLeases(principal, input)),
     (err) => say.failed(err, { lead: "release_stale_leases failed: " }));
 
-  registerOp("run_worker", canWrite(principal),
+  registerOp("run_worker",
     async (input) => say.renderRunWorker(await core.runWorker(principal, input)),
     (err) => say.failed(err, { lead: "run_worker failed: " }));
 
