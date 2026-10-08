@@ -48,4 +48,4 @@ The original smoke memories were created with the live smoke harness and then cl
 
 Use `integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs` to recreate the Nate continuity project.
 
-Use `docs/walkthroughs/ob1-agent-dashboard` to recreate the full dashboard walkthrough screenshots, PDF, and video. The demo REST shim is intentionally local-only and exists to make dashboard walkthroughs repeatable while the production `open-brain-rest` gateway is still separate from the Agent Memory API.
+Use `docs/walkthroughs/ob1-agent-dashboard` to recreate the full dashboard walkthrough screenshots, PDF, and video. The demo REST shim is intentionally local-only and exists to make dashboard walkthroughs repeatable; the `open-brain-rest` gateway it stands in for is retired (SMD-1931).

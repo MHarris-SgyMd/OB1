@@ -12,17 +12,17 @@
     <p class="subtitle">First-run setup</p>
 
     <div class="hint-block">
-      Paste the base URL of your Open Brain REST API gateway and the API key you generated when deploying the
-      <code>open-brain-rest</code> integration. Nothing leaves this browser until both fields are filled in and you
+      Paste your brain's REST core URL (its origin with <code>/api</code>) and a capture-scoped key minted for
+      this device. Nothing leaves this browser until both fields are filled in and you
       save this form — the extension refuses outbound requests while unconfigured.
     </div>
 
     <div class="form-group">
-      <label for="cfg-api-endpoint">Open Brain REST API URL</label>
-      <input type="url" id="cfg-api-endpoint" placeholder="https://your-project-ref.supabase.co/functions/v1" required>
+      <label for="cfg-api-endpoint">Open Brain REST core URL</label>
+      <input type="url" id="cfg-api-endpoint" placeholder="https://brain.example.com/api" required>
       <p class="permission-note">
-        Supabase-hosted example: <code>https://your-project-ref.supabase.co/functions/v1</code><br>
-        Self-hosted example: <code>https://brain.example.com</code>
+        Hosted example: <code>https://brain.example.com/api</code><br>
+        On this machine: <code>http://127.0.0.1:8000/api</code>
       </p>
     </div>
 

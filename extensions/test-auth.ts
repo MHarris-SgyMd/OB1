@@ -187,11 +187,6 @@ const SERVERS: Server[] = [
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
     ["POST /writeback", "POST /recall/:request_id/usage", "PATCH /memories/:id/review"], { url: PG_REFUSED, readProbe: "POST /recall" }),
-  vendored("integrations/open-brain-rest/index.ts", "rest",
-    ["GET /health", "GET /stats", "GET /thoughts", "GET /thought/:id", "POST /search", "GET /duplicates", "GET /thought/:id/connections",
-     "GET /thought/:id/reflection", "GET /ingestion-jobs", "GET /ingestion-jobs/:id", "POST /ingestion-jobs/:id/execute"],
-    ["PUT /thought/:id", "DELETE /thought/:id", "POST /capture", "POST /thought/:id/reflection", "POST /ingest"],
-    { url: PG_REFUSED, readProbe: "GET /health" }),
   vendored("recipes/editorial-policy/auditor/index.ts", "worker", [], [],
     { keys: "AUDITOR_ACCESS_KEYS", legacy: "AUDITOR_ACCESS_KEY", url: PG_REFUSED, dryRun: "body", unconfigured: 401 }),
   vendored("integrations/entity-extraction-worker/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
@@ -584,10 +579,10 @@ console.log(`\n[${WEBHOOK.file}]`);
 // that server, authenticating: an MCP server's tools/list under a write key
 // is its full tool list, an API's read probe passes under a read key, a
 // worker dry-runs under one, the receiver admits its secret; each refuses a
-// wrong key; each is still running afterwards; then stopped. The two APIs on
-// their own constant-time compare of a single key (rest-api, smart-ingest;
-// their key is not _shared/auth.ts's — they take only routable from it — and
-// check 8 passes them) are started too, with a probe of their own. Every file
+// wrong key; each is still running afterwards; then stopped. The API on its
+// own constant-time compare of a single key (smart-ingest; its key is not
+// _shared/auth.ts's — it takes only routable from it — and check 8 passes
+// it) is started too, with a probe of its own. Every file
 // in the tree that imports the shim and exports the entry shape is in the
 // list, or the guard below fails.
 console.log("\n[each server on the SQL shim starts under bun and answers over the port]");
@@ -626,7 +621,7 @@ const LIVE: Live[] = [
     assert(right.status === 200 && (await right.text()) === "ignored", `${WEBHOOK.file}: under bun, the echoed secret admits the request (${right.status})`);
     assert((await post({ secret: "not-the-secret", event_type: "readwise.other" })).status === 401, "…and a wrong secret is refused with 401");
   } },
-  ...([["integrations/rest-api/index.ts", "GET", "/health"], ["integrations/smart-ingest/index.ts", "POST", "/"]] as const).map(([file, method, path]): Live => ({
+  ...([["integrations/smart-ingest/index.ts", "POST", "/"]] as const).map(([file, method, path]): Live => ({
     file, env: { MCP_ACCESS_KEY: LEGACY_KEY, SUPABASE_URL: PG },
     probe: async (base) => {
       const body = method === "GET" ? undefined : "{}";
@@ -752,8 +747,8 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
   // since fetch sends a Host of its own: at Host localhost, the control, and at
   // each of those, every answer with the control's status and the word that
   // names the route the control reached. No row reaches a store or a model.
-  // rest-api and smart-ingest read their one key at import, so they are
-  // imported here with it set, and the environment put back after.
+  // smart-ingest reads its one key at import, so it is imported here with
+  // it set, and the environment put back after.
   const saved = { key: process.env.MCP_ACCESS_KEY, url: process.env.SUPABASE_URL };
   const singleKey: Record<string, Handler> = {};
   let importFailed: unknown = null;
@@ -761,7 +756,7 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
   process.env.SUPABASE_URL = PG_REFUSED;
   hush(); // smart-ingest warns at import that no extraction worker is set
   try {
-    for (const file of ["integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]) singleKey[file] = await importServer(file);
+    for (const file of ["integrations/smart-ingest/index.ts"]) singleKey[file] = await importServer(file);
   } catch (e) {
     importFailed = e;
   } finally {
@@ -780,11 +775,9 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
   const ROWS: [string, Row[]][] = [
     // The prefix stripped from a URL that parses: the route is reached under it.
     ["integrations/agent-memory-api/index.ts", [["GET", "/health", [], 401, "access key"], ["POST", "/agent-memory-api/writeback", read, 403, "write"], ["GET", "/agent-memory-api/none", read, 404, "Not Found"]]],
-    ["integrations/open-brain-rest/index.ts", [["GET", "/open-brain-rest/health", read, 200, "ok"], ["POST", "/capture", read, 403, "write"], ["GET", `/health?key=${READ_KEY}`, [], 200, "ok"]]],
     ["integrations/consolidation-workers/bio/index.ts", worker],
     ["integrations/consolidation-workers/metadata-norm/index.ts", worker],
     ["integrations/entity-extraction-worker/index.ts", worker],
-    ["integrations/rest-api/index.ts", [["GET", "/rest-api/health", legacy, 200, "open-brain-rest"], ["GET", "/none", legacy, 404, "Not found"], ["GET", "/health", [], 401, "Unauthorized"]]],
     ["integrations/smart-ingest/index.ts", [["POST", "/smart-ingest", legacy, 400, "text"], ["POST", "/smart-ingest/execute", legacy, 400, "job_id"], ["POST", "/", [], 401, "Unauthorized"]]],
   ];
   const why = importFailed instanceof Error ? importFailed.message : String(importFailed);
@@ -819,8 +812,7 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
     // handler waits forever. Each server that reads a body, at a route that
     // reads it.
     const write = [`x-brain-key: ${WRITE_KEY}`];
-    for (const [file, target, headers] of [["integrations/agent-memory-api/index.ts", "/writeback", write], ["integrations/open-brain-rest/index.ts", "/capture", write],
-      ["integrations/rest-api/index.ts", "/search", legacy], ["integrations/smart-ingest/index.ts", "/", legacy]] as const) {
+    for (const [file, target, headers] of [["integrations/agent-memory-api/index.ts", "/writeback", write], ["integrations/smart-ingest/index.ts", "/", legacy]] as const) {
       const server = servers.get(file);
       if (!server) continue;
       for (const host of ["localhost", "x:99999", null]) {

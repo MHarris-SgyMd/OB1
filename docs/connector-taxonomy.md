@@ -159,9 +159,10 @@ fetcher cannot invent one; the brain recomputes it and refuses a mismatch.
 native driver" is checked: same identity, same canonical, two fetchers.
 
 **Where it lands.** The brain-side capture node is a route of the SMD-1931
-surface — today `open-brain-rest`/`rest-api`'s `/ingest` and the
-`capture_thought` tool are the two ways in, and SMD-1931 makes them one
-definition. This page fixes the payload; that ticket fixes the route. A
+surface — the REST core's `POST /v1/thoughts`, which is the
+`capture_thought` tool's operation: one definition both surfaces project
+(SMD-1931, which retired the two gateways' `/ingest`). This page fixes the
+payload; the contract fixes the route. A
 `retrieve` counterpart (search + fetch) is the same surface's read side and is
 what a sink's workflow calls to get the thoughts it delivers.
 

@@ -301,13 +301,12 @@
     "services": [
       { "pattern": "openrouter|openai|anthropic|ollama|gemini api|elevenlabs|\\bllm\\b", "reason": "a model or embedding provider — governed by the egress policy (SMD-1903), not the taxonomy" },
       { "pattern": "supabase|vercel|neon postgres|kubernetes|postgresql|pgvector", "reason": "hosting, the runtime or the database the brain runs on" },
-      { "pattern": "rest api gateway|ob1 agent memory api", "reason": "the brain's own surface (SMD-1931) — a client of it is not a connector" },
+      { "pattern": "rest api gateway|rest core|ob1 agent memory api", "reason": "the brain's own surface (SMD-1931) — a client of it is not a connector" },
       { "pattern": "openclaw|clawhub|hermes agent", "reason": "an agent runtime reading and writing memory through the brain's surface" }
     ],
     "artifacts": {
       "recipes/content-fingerprint-dedup": "tagged import: the dedup convention the importers cite; no external system",
       "recipes/wiki-synthesis": "tagged email: synthesises email-thread wikis from thoughts already captured; the mail came in through gmail-smart-pull",
-      "integrations/rest-api": "tagged webhook: the brain's REST surface (SMD-1931); its /ingest is the brain-side capture node, not a vendor",
       "recipes/atomizer": "tagged gmail: it re-atomizes Gmail thoughts gmail-smart-pull already captured and backfills their correspondents; no Gmail client",
       "recipes/infographic-generator": "tagged gemini: the Gemini image-generation API is a model provider here, not the Gemini chat product the Chrome extension captures",
       "recipes/schema-aware-routing": "tagged slack: a metadata-routing pattern in its own project that keeps a slack_ts column for thoughts a Slack capture wrote; the recipe has no Slack client of its own",
