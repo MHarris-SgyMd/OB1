@@ -79,7 +79,7 @@ MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
 PORT=8787 bun extensions/home-maintenance/index.ts                      # an extension
 
 NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
-bun integrations/delete-thought-mcp/index.ts                             # a recipe or integration
+bun integrations/agent-memory-api/index.ts                              # a recipe or integration
 ```
 
 An extension sits beside `extensions/node_modules` and resolves its packages from
@@ -116,8 +116,8 @@ identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the eight MCP servers with
 a schema of their own — seven extensions and the ob-graph recipe, fifty-five
 tools — against those schemas, and `extensions/test-writes.ts` the servers
-that need the model provider stubbed (enhanced-mcp's thirteen tools,
-agent-memory-api's nine routes, the two consolidation workers): the migrated
+that need the model provider stubbed (agent-memory-api's nine routes,
+the two consolidation workers, smart-ingest): the migrated
 files this shim is judged by.
 
 ## What is supported
@@ -200,8 +200,7 @@ Each of these throws with an explanation instead of guessing:
   refused at the call and the codemod blocks it.
 - **A filter on an embedded column** — `.neq("thoughts.sensitivity_tier", …)`
   beside `thoughts!inner(…)`: the dotted name is refused as an identifier. Read
-  the embedded rows and filter them, or ask in two queries (enhanced-mcp's
-  `graph_search` does).
+  the embedded rows and filter them, or ask in two queries.
 - **A JSON path ending in `->`** — `meta->flag` yields jsonb, and what a bound value
   means against it depends on the value's JavaScript type. End the path in `->>`
   for the key's text, or use `.contains()`. An array index (`->0`), and a path in

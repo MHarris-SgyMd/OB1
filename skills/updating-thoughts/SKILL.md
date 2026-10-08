@@ -4,7 +4,7 @@ description: |
   Use when editing, correcting, rewriting, re-tagging, re-classifying, or
   annotating an existing Open Brain thought — "update that note", "fix the
   thought about X", "add a status/tag to it", "mark it superseded". Uses the
-  update_thought MCP tool (open-brain-update-thought connector). Not for
+  update_thought MCP tool (on the core Open Brain connector, for a write key). Not for
   creating a new thought (that is capture) or removing one (see
   deleting-thoughts).
 author: Ezana Azene
@@ -15,9 +15,8 @@ version: 1.0.0
 
 ## Overview
 
-The core Open Brain MCP server captures and reads thoughts but cannot change
-them. `update_thought` (the `open-brain-update-thought` connector) fills that
-gap. Choosing *how* to update is the non-obvious part: tagging and rewriting
+`update_thought` is one of the core Open Brain MCP server's tools, listed for a
+write-scoped key. Choosing *how* to update is the non-obvious part: tagging and rewriting
 behave and cost differently, and the tool acts on a thought's **UUID**, which
 it will not look up for you.
 
@@ -37,9 +36,8 @@ outdated or wrong, prefer updating or tagging it `superseded` over deleting
    Use `search_thoughts` / `list_thoughts` to find the target and confirm it is
    the right one. Never guess a UUID.
    - **Inspect before editing.** Before you overwrite anything, read the target's
-     full content with `get_thought` (or the connector's `fetch` tool), and use
-     `related_thoughts` to see what it connects to — so you don't clobber context
-     other thoughts depend on. Tool names may carry a connector prefix; use
+     full content with the connector's `fetch` tool, and search for what it
+     relates to — so you don't clobber context other thoughts depend on. Tool names may carry a connector prefix; use
      whatever the environment exposes.
 2. **Pick the mode:**
    - Tag / re-classify only → pass `metadata_patch` (shallow-merges keys; leaves
@@ -78,5 +76,6 @@ re-embedded, and/or metadata merged), and the new `updated_at`.
 ## Notes
 
 - A restricted/sensitive thought may refuse a content update by policy.
-- Connector: `open-brain-update-thought`, auth via `?key=` or the `x-brain-key`
-  header — the same `MCP_ACCESS_KEY` as your core Open Brain connector.
+- Connector: the core Open Brain connector, with a write-scoped key (a read or
+  capture key does not see `update_thought`). The standalone
+  `update-thought-mcp` server retired with SMD-1931.

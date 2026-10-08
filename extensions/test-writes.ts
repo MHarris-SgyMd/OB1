@@ -43,17 +43,16 @@
  * profile's own row kept out of its sources.
  *
  * SMD-1541 (FORK.md change 103) reads 008's row after every driven capture and
- * edit through change 69's servers (five then, three since SMD-1931 retired the
- * two REST gateways). Their headers said "the actor reaches
+ * edit through change 69's servers (five then; one, agent-memory-api, since
+ * SMD-1931 retired the two REST gateways and the two MCP servers). Their
+ * headers said "the actor reaches
  * the audit (008)" and none passed one — the functions set `ob1.actor` only
  * from `p_actor` / `p_payload.actor` — so `thought_audit.actor_name` was NULL
- * for every write through them, as for the raw writes they replaced. Each now
- * names the key: `principal.name` where the server authenticates through
- * `_shared/auth.ts` (two), the constant `MCP_ACCESS_KEY` where it holds
- * that one key and compares it in place (`enhanced-mcp`) — both
- * `MCP_ACCESS_KEY` under this suite's legacy single key — and one write through
- * each of the two runs under a NAMED key too, the arm that tells the
- * principal's name from a constant, while enhanced-mcp refuses that key. No actor carries a
+ * for every write through them, as for the raw writes they replaced. It names
+ * the key now: `principal.name`, since it authenticates through
+ * `_shared/auth.ts` — `MCP_ACCESS_KEY` under this suite's legacy single key —
+ * and one write through it runs under a NAMED key too, the arm that tells the
+ * principal's name from a constant that spells the legacy key's name. No actor carries a
  * source — the trigger (008; its body is 025's now) reads the row's own
  * `metadata.source`, so the column means the thought's origin on every row,
  * and a copy of it in the actor was indistinguishable from that fallback under
@@ -65,18 +64,6 @@
  * server that starts naming a source of its own (the first draft's server name
  * on an edit) and tolerates only a copy of the origin, the one case the rule
  * allows; server-portable/test-audit.ts holds the trigger itself.
- *
- * SMD-1986 drives enhanced-mcp's three search tools, which SMD-1798's block
- * had pinned answering nothing: each sent `exclude_restricted` and the date
- * bounds as keys of the `filter` that match_thoughts and search_thoughts_text
- * read as a metadata containment. A restricted twin is planted at the captured
- * thought's own vector, with text the query matches and a rank above the
- * capture's, so every search that finds the capture must drop the twin — by
- * the `sensitivity_tier` column, which match_thoughts does not return and the
- * tool looks up by id — and the paging over a hidden first row, the date
- * bounds as instants and the refusals by name are held around the same pair.
- * CI runs this file under TZ=America/Chicago so the zone-less bound's arm
- * distinguishes UTC from the process's zone.
  *
  * SMD-2110: smart-ingest's extraction trigger built its upstream URL from
  * SUPABASE_URL — the Postgres DSN here — so every call handed fetch() the
@@ -245,7 +232,6 @@ for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "ut
   // And applied once more, on the shape it made: nothing to do, nothing refused.
   const twice = await sql.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
   assert(twice === null, `…and the file applies again on its own shape (${twice ?? "ok"})`);
-  await sql`DELETE FROM ingestion_jobs WHERE input_hash = 'prior-shape'`; // the enhanced-mcp block reads "no job yet"
 }
 // The bio worker logs each run to consolidation_log (non-fatally, so a missing table would hide nothing but the log): the
 // table from the entity-extraction sidecar's own definition, alone.
@@ -342,7 +328,7 @@ Bun.plugin({
 // know: one write through each of them runs under it (SMD-1541), the arm that
 // tells `principal.name` on the audit row from a constant that happens to
 // spell the legacy key's name — every other arm runs under the legacy key,
-// whose name enhanced-mcp's in-place compare records too.
+// whose name smart-ingest's in-place compare records too.
 const KEY = "one-write-key-for-every-writer";
 const NAMED_KEY = "a-second-key-with-a-name-of-its-own";
 const NAMED = "named-client";
@@ -396,11 +382,6 @@ async function send(handler: Handler, method: string, path: string, body?: unkno
   try { json = line ? JSON.parse(line) : null; } catch { json = null; }
   return { status: r.status, json, text, headers: r.headers };
 }
-/** An MCP tools/call, JSON-RPC over POST /mcp; the tool's first text block and structured content. */
-async function call(handler: Handler, name: string, args: Record<string, unknown>, key = KEY) {
-  const r = await send(handler, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, key);
-  return { ...r, toolText: String(r.json?.result?.content?.[0]?.text ?? ""), structured: r.json?.result?.structuredContent ?? null, isError: r.json?.result?.isError === true };
-}
 
 // ── The rows: planted, read, and the oracle ──────────────────────────────────
 
@@ -418,39 +399,6 @@ async function plant(tag: string): Promise<string> {
     VALUES (${text}, content_fingerprint_of(${text}), ${vec(unit(BEFORE))}::vector, 'model-before', '{"source": "planted"}'::jsonb) RETURNING id`;
   await plantWindows(id);
   return id as string;
-}
-/**
- * A restricted twin: a thought at another's vector (`atText`'s axis), with text
- * a query for that one matches too, so a search that finds the one must drop
- * the twin — by the `sensitivity_tier` column, the row no search may show
- * (SMD-1986, for enhanced-mcp's three tools).
- * Importance 5 and quality 100: search_thoughts_text's rank adds importance/20
- * + quality_score/500 to a text term the two contents tie on (both hold the
- * query as a substring, so the ILIKE floor of 0.35 is each one's), so the
- * twin's bonus, 0.45, beats a stubbed capture's 0.316 (the stub leaves
- * importance at the default 3 and confidence 0.9 becomes quality 83) and the
- * twin is the first row of the function's order — the page drives lean on
- * that; a tie would fall to created_at DESC, which the later-planted twin
- * also wins.
- */
-async function plantRestricted(hidden: string, atText: string): Promise<string> {
-  const [{ id }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, quality_score, metadata)
-    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(atText))}::vector, ${MODEL}, 'restricted', 5, 100, '{"source": "planted"}'::jsonb) RETURNING id`;
-  return id as string;
-}
-/**
- * Four clocks around a row's created_at, rendered by Postgres: its UTC day and
- * the next (date-only bounds), one hour later in a zone two hours ahead (an
- * offset bound naming an instant an hour BEFORE the row), and one hour earlier
- * with no zone. The enhanced-mcp block reads all four.
- */
-async function clocksOf(id: string): Promise<{ day: string; next: string; later: string; earlier: string }> {
-  const [row] = await sql`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
-    to_char((created_at + interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS next,
-    to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later,
-    to_char((created_at - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') AS earlier FROM thoughts WHERE id = ${id}`;
-  if (!row) throw new Error(`clocksOf: no thought ${id}`);
-  return row;
 }
 /** Two chunk rows of the previous vector — 022's stale set, if an edit leaves them. */
 async function plantWindows(id: string) {
@@ -538,201 +486,6 @@ function judgeActor(label: string, a: Audit | undefined, via: string, name = "MC
 
 // Everything below runs inside one try so the sidecars are dropped however it ends.
 try {
-
-// ── integrations/update-thought-mcp ──────────────────────────────────────────
-
-{
-  const F = "integrations/update-thought-mcp/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const id = await plant("update-thought-mcp");
-  const text = "the text after the edit, through update-thought-mcp";
-  const r = await call(h, "update_thought", { id, content: text, metadata_patch: { via: "update-thought-mcp" } });
-  assert(r.status === 200 && !r.isError && /^Updated thought /.test(r.toolText), `update_thought answers Updated (${r.toolText.split("\n")[0]})`);
-  assert(/content replaced and re-embedded/.test(r.toolText) && /metadata merged/.test(r.toolText) && /updated_at: \d{4}-/.test(r.toolText), "…naming what moved and the function's updated_at");
-  const after = await row(id, text);
-  judgeEdit("update-thought-mcp", after, await oracle("update-thought-mcp", text), text);
-  assert(after.metadata.via === "update-thought-mcp", "the patch is shallow-merged into metadata, in the function");
-  judgeActor("update-thought-mcp edit", await auditRow(id, "update"), "update-thought-mcp");
-
-  // The concurrency check is the function's now, decided under the row's lock.
-  const stale = await call(h, "update_thought", { id, content: "a lost update", if_unchanged_since: "2000-01-01T00:00:00Z" });
-  assert(stale.isError && /^STALE_READ:/.test(stale.toolText) && /Current updated_at: \d{4}-/.test(stale.toolText), `an old if_unchanged_since is refused as STALE_READ with the row's updated_at (${stale.toolText.slice(0, 60)})`);
-  assert((await row(id, text)).content === text, "…and the row is untouched");
-  const gone = await call(h, "update_thought", { id: "00000000-0000-4000-8000-000000000000", content: "nobody" });
-  assert(gone.isError && /^Thought not found/.test(gone.toolText), "an unknown id is Thought not found");
-
-  // A metadata-only edit leaves the vector, its label and the fingerprint alone (018/021).
-  const meta = await call(h, "update_thought", { id, metadata_patch: { pinned: true } });
-  const kept = await row(id, text);
-  assert(!meta.isError && kept.metadata.pinned === true && kept.at_axis === true && kept.embedding_model === MODEL && kept.fp_ok, "a metadata-only edit merges the patch and leaves vector, label and fingerprint as they were");
-
-  // Editing INTO another row's text is refused by name, not as a constraint error.
-  const other = await plant("update-thought-mcp twin");
-  const dup = await call(h, "update_thought", { id: other, content: text });
-  assert(dup.isError && /^DUPLICATE_CONTENT:/.test(dup.toolText), "an edit into text another thought holds is refused as DUPLICATE_CONTENT");
-
-  // Under the NAMED key: the row names it — `principal.name`, not a constant that spells the legacy key's name.
-  const named = await call(h, "update_thought", { id, metadata_patch: { named: true } }, NAMED_KEY);
-  assert(named.status === 200 && !named.isError, `a named write key (MCP_ACCESS_KEYS) edits (${named.toolText.slice(0, 60)})`);
-  judgeActor("update-thought-mcp edit under a named key", await auditRow(id, "update"), "update-thought-mcp", NAMED);
-}
-
-// ── integrations/enhanced-mcp ────────────────────────────────────────────────
-
-{
-  const F = "integrations/enhanced-mcp/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const id = await plant("enhanced-mcp");
-  const text = "the text after the edit, through enhanced-mcp";
-  const r = await call(h, "update_thought", { id, content: text });
-  assert(r.status === 200 && !r.isError && /^Updated thought #/.test(r.toolText), `update_thought takes the row's UUID and answers Updated (${r.toolText.slice(0, 70)})`);
-  const after = await row(id, text);
-  judgeEdit("enhanced-mcp", after, await oracle("enhanced-mcp", text), text);
-  assert(after.metadata.type === "idea" && after.metadata.summary === "stubbed", "the re-classified metadata is merged in");
-  judgeActor("enhanced-mcp edit", await auditRow(id, "update"), "enhanced-mcp");
-  const [side] = await sql`SELECT type, sensitivity_tier, importance FROM thoughts WHERE id = ${id}`;
-  assert(side.type === "idea" && side.sensitivity_tier === "standard" && Number(side.importance) === 3, "the enhanced-thoughts columns are written beside the function, by the raw update that carries neither content nor vector");
-
-  // SMD-1525: the read tools take the row's UUID too — they took upstream's integer id and could reach no row here.
-  const got = await call(h, "get_thought", { id });
-  assert(!got.isError && got.structured?.thought?.id === id && got.structured?.thought?.content === text, `get_thought takes the thought's UUID and answers the row (${got.toolText.slice(0, 60)})`);
-  const gotInt = await call(h, "get_thought", { id: 7 });
-  assert(gotInt.isError || gotInt.json?.error, `…and an integer id is refused by the schema, not looked up (${gotInt.isError ? gotInt.toolText.slice(0, 40) : JSON.stringify(gotInt.json?.error).slice(0, 60)})`);
-  const gotNone = await call(h, "get_thought", { id: "00000000-0000-4000-8000-000000000000" });
-  assert(gotNone.isError && /not found/.test(gotNone.toolText), "…and an unknown UUID is not found");
-  const related = await call(h, "related_thoughts", { thought_id: id });
-  assert(!related.isError && related.structured?.thought_id === id && Array.isArray(related.structured?.results), `related_thoughts takes the UUID and reaches get_thought_connections (enhanced-thoughts's, p_thought_id UUID) rather than binding an integer (${related.toolText.slice(0, 60)})`);
-
-  const captured = "a fresh thought captured through enhanced-mcp";
-  const c = await call(h, "brain_capture_thought", { content: captured });
-  assert(!c.isError && /^Captured new thought #/.test(c.toolText) && UUID.test(String(c.structured?.thought_id)) && c.structured?.action === "inserted",
-    `brain_capture_thought reads the fork's return — a UUID id, inserted — instead of throwing after the write (${c.toolText.slice(0, 60)})`);
-  const cid = String(c.structured?.thought_id);
-  if (UUID.test(cid)) {
-    judgeCapture("enhanced-mcp capture", await row(cid, captured), captured);
-    judgeActor("enhanced-mcp capture", await auditRow(cid, "capture"), "enhanced-mcp");
-    assert(typeof c.structured?.content_fingerprint === "string" && c.structured.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
-    const [cside] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
-    assert(cside.type === "idea" && cside.source_type === "mcp", "the enhanced-thoughts columns follow the capture");
-    // A re-capture of the same text: the tool's own fingerprint check answers before the function
-    // does, and either way a hand-set tier stays — the second review pass found this gate undriven.
-    await sql`UPDATE thoughts SET sensitivity_tier = 'personal' WHERE id = ${cid}`;
-    const again = await call(h, "brain_capture_thought", { content: captured });
-    const [kept] = await sql`SELECT sensitivity_tier FROM thoughts WHERE id = ${cid}`;
-    assert(!again.isError && String(again.structured?.thought_id) === cid && again.structured?.action !== "inserted" && kept.sensitivity_tier === "personal",
-      `a re-capture answers the same id, not as inserted, and leaves a hand-set tier (${again.structured?.action} ${kept.sensitivity_tier})`);
-  }
-  // One key, compared in place: a named key is refused here, and the name this server records is its constant's (SMD-1798 moved the file onto the shim and left the compare).
-  const named = await call(h, "brain_capture_thought", { content: "a capture under a named key, refused by enhanced-mcp" }, NAMED_KEY);
-  assert(named.status === 401, `a named key (MCP_ACCESS_KEYS) is 401 here — this server knows its one MCP_ACCESS_KEY (${named.status})`);
-
-  // The other nine tools, on the shim (SMD-1798): the reads by construction, the schema-backed ones degrading as they say.
-  // The three search tools (SMD-1986). Each sent `exclude_restricted: true` (and any date bound) as a key of the
-  // `filter` it hands match_thoughts and search_thoughts_text, and both functions — this fork's 014 and the
-  // enhanced-thoughts sidecar's own — read that argument as `metadata @> filter`, which no thought's metadata
-  // satisfies: every search answered no matches, and this suite pinned it. Now the caller's metadata_filter goes
-  // alone and the tier and the dates are applied to the rows — the tier by the COLUMN (match_thoughts returns none,
-  // so semantic mode looks it up by id; the old client-side filter compared undefined). A restricted twin at the
-  // captured thought's own vector, whose text the query matches too, is the mutant that shows the filter at work;
-  // it ranks first in the text function's order (plantRestricted), which the page drive below leans on.
-  const hidden = "a restricted thought captured through enhanced-mcp, which no search may show";
-  const rid = await plantRestricted(hidden, captured);
-  const ids = (r: { structured: any }) => ((r.structured?.results ?? []) as { id: string }[]).map((x) => x.id);
-  const textMode = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text" });
-  assert(!textMode.isError && ids(textMode).includes(cid) && !ids(textMode).includes(rid),
-    `brain_search_thoughts in text mode finds the captured thought through search_thoughts_text and not the restricted twin (${textMode.toolText.slice(0, 80)})`);
-  assert(textMode.structured?.pagination?.total === 2 && textMode.structured?.pagination?.has_more === false,
-    `…its total is the function's count, the hidden row included, and has_more reads the page the cursor passed (${JSON.stringify(textMode.structured?.pagination)})`);
-  const semantic = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5 });
-  assert(!semantic.isError && ids(semantic).includes(cid) && !ids(semantic).includes(rid),
-    `…and in semantic mode embeds the query through the stub, calls match_thoughts, and drops the twin by its sensitivity_tier column — one match_thoughts does not return (${semantic.toolText.slice(0, 80)})`);
-  const direct = await call(h, "search_thoughts_text", { query: "captured through enhanced" });
-  assert(!direct.isError && ids(direct).includes(cid) && !ids(direct).includes(rid), `search_thoughts_text likewise (${direct.toolText.slice(0, 60)})`);
-  // The one containment that IS meant: a metadata_filter no thought satisfies answers nothing, in both modes.
-  const noneText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", metadata_filter: { nothing_has_this: true } });
-  const noneSem = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, metadata_filter: { nothing_has_this: true } });
-  assert(!noneText.isError && ids(noneText).length === 0 && noneText.structured?.pagination?.total === 0 && !noneSem.isError && ids(noneSem).length === 0,
-    `a metadata_filter no thought satisfies answers nothing in both modes — the containment the argument is for (${noneText.toolText.slice(0, 40)} / ${noneSem.toolText.slice(0, 40)})`);
-  // The date bounds, applied to the rows in both modes: a window that closed before the capture hides it; one that opened before shows it.
-  const past = "2000-01-01T00:00:00Z";
-  const before = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: past });
-  const since = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: past });
-  const beforeText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", end_date: past });
-  const sinceText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", start_date: past });
-  assert(ids(before).length === 0 && ids(since).includes(cid) && ids(beforeText).length === 0 && ids(sinceText).includes(cid),
-    `a date bound is applied to the rows in both modes: an end_date in the past hides the capture, a start_date in the past shows it (${ids(before).length}/${ids(since).length}/${ids(beforeText).length}/${ids(sinceText).length})`);
-  assert(beforeText.structured?.pagination?.has_more === false && /^No matches found/.test(beforeText.toolText),
-    `…and a text page the bounds emptied, with none following, says so plainly (${beforeText.toolText})`);
-  // The bounds are instants, not strings (review pass 1). The meaning first: a date-only value is that day's
-  // midnight UTC, so the capture's own day as end_date closes before it and the next day's keeps it, in both modes
-  // (the string comparison agreed on these two — the pins that tell the schemes apart follow).
-  const { day, next, later, earlier } = await clocksOf(cid);
-  const ownDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: day });
-  const nextDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: next });
-  const nextDayText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", end_date: next });
-  const [{ sqlKeeps }] = await sql`SELECT count(*)::int = 1 AS "sqlKeeps" FROM thoughts WHERE id = ${cid} AND created_at <= (${day} || 'T00:00:00Z')::timestamptz`;
-  assert(ids(ownDay).length === 0 && ids(nextDay).includes(cid) && ids(nextDayText).includes(cid) && sqlKeeps === false,
-    `a date-only end_date is that day's midnight UTC — Postgres agrees on the instant: the capture's own day closes before it, the next day keeps it, in both modes (${day}: ${ids(ownDay).length}, ${next}: ${ids(nextDay).length}/${ids(nextDayText).length}, SQL keeps ${sqlKeeps})`);
-  // `later` names a clock one hour after the capture in a zone two hours ahead: an instant one hour BEFORE it, so a
-  // window opening there holds the capture — compared as strings its digits sorted after the row's and dropped it.
-  const offsetBound = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: later });
-  assert(ids(offsetBound).includes(cid), `a start_date with a UTC offset is the instant it names — later digits, an earlier instant, so the capture is inside the window (${later}: ${ids(offsetBound).length})`);
-  // `earlier` is a zone-less clock one hour before the capture: read as UTC it opens the window before the row;
-  // read in this process's zone it would open hours after it — on a machine west of UTC, which is why CI's step
-  // runs this suite under TZ=America/Chicago (fork-checks.yml); on a UTC machine the two readings coincide and this
-  // arm proves nothing. Text mode, so the instant reading is pinned in both modes (offsetBound is semantic).
-  const zoneless = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", start_date: earlier });
-  assert(ids(zoneless).includes(cid), `a zone-less date-time is read as UTC, never the process's zone — text mode (${earlier}: ${ids(zoneless).length})`);
-  const unparsable = await call(h, "brain_search_thoughts", { query: captured, end_date: "yesterday" });
-  const prose = await call(h, "brain_search_thoughts", { query: captured, start_date: "Dec 25, 2025" });
-  const rolled = await call(h, "brain_search_thoughts", { query: captured, start_date: "2026-02-30" });
-  const inverted = await call(h, "brain_search_thoughts", { query: captured, mode: "text", start_date: "2026-01-02", end_date: "2026-01-01" });
-  assert(unparsable.isError && /end_date is not an ISO 8601 date or date-time: yesterday/.test(unparsable.toolText) && prose.isError && /start_date is not an ISO 8601/.test(prose.toolText)
-    && rolled.isError && /start_date is not a real date: 2026-02-30/.test(rolled.toolText) && inverted.isError && /is after end_date/.test(inverted.toolText),
-    `a bound off the ISO shape (prose Date.parse would take), a day the calendar lacks (Date.parse rolls it to March), or a window closed before it opens is refused by name (${unparsable.toolText.slice(0, 60)} / ${prose.toolText.slice(0, 50)} / ${rolled.toolText.slice(0, 50)} / ${inverted.toolText.slice(0, 60)})`);
-  // A page the tier filter emptied, with hits behind it: the twin ranks first (importance 5, above), so with limit 1
-  // it is the whole page — hidden, and the tool says another page follows rather than a false end; the third tool
-  // answers the same page the same way (its first draft said "No matches found.").
-  const onePage = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", limit: 1 });
-  const onePageDirect = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 1 });
-  const secondPage = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 1, offset: 1 });
-  assert(ids(onePage).length === 0 && /^No matches on this page; more follow\./.test(onePage.toolText) && onePage.structured?.pagination?.has_more === true
-    && ids(onePageDirect).length === 0 && /more follow/.test(onePageDirect.toolText) && onePageDirect.structured?.pagination?.has_more === true,
-    `a page the tier filter emptied says more follow, in both tools, with has_more true (${onePage.toolText} / ${onePageDirect.toolText}; ${JSON.stringify(onePageDirect.structured?.pagination)})`);
-  assert(ids(secondPage).includes(cid) && secondPage.structured?.pagination?.has_more === false,
-    `…and the next page holds the capture, with no page after (${secondPage.toolText.slice(0, 40)}; ${JSON.stringify(secondPage.structured?.pagination)})`);
-  // The ordinal's teeth (review pass 2): one page of two, the hidden twin first — the capture's line is `2.`, its
-  // place in the function's order; numbered by its place in the filtered list it would read `1.`.
-  const twoPage = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 2 });
-  assert(ids(twoPage).length === 1 && /^2\. /.test(twoPage.toolText) && twoPage.structured?.pagination?.has_more === false,
-    `a line is numbered by the row's place in the page, hidden rows counted: the capture behind the twin is 2. (${twoPage.toolText.slice(0, 30)})`);
-  const listed = await call(h, "brain_list_thoughts", { limit: 1, type: "idea" });
-  const pagination = listed.structured?.pagination;
-  assert(!listed.isError && listed.structured?.results?.length === 1 && typeof pagination?.total === "number" && pagination.total >= 2 && pagination.has_more === true,
-    `brain_list_thoughts pages: one row, the head count the total, has_more from the two (${listed.toolText.slice(0, 60)}; ${JSON.stringify(pagination)})`);
-  const counted = await call(h, "count_thoughts", { type: "idea" });
-  assert(!counted.isError && counted.structured?.count === pagination?.total, `count_thoughts agrees with the listing's total (${counted.structured?.count} vs ${pagination?.total})`);
-  const stats = await call(h, "brain_thought_stats", {});
-  assert(!stats.isError && typeof stats.structured?.total === "number" && stats.structured.total >= 2 && Array.isArray(stats.structured?.top_types),
-    `brain_thought_stats reads brain_stats_aggregate, a jsonb scalar (${stats.toolText.slice(0, 60)})`);
-  const ops = await call(h, "ops_capture_status", {});
-  // The smart-ingest sidecar is applied here since SMD-2110 (its block below writes a job), so the tool finds the table.
-  assert(!ops.isError && ops.structured?.available === true && ops.structured?.total_jobs === 0, `ops_capture_status says smart-ingest is installed with no job yet — tableExists through the shim's head count, the sidecar this suite applies (${ops.toolText.slice(0, 60).replace(/\n/g, " ")})`);
-  const graph = await call(h, "graph_search", { query: "ada" });
-  assert(!graph.isError && graph.structured?.available === false, `graph_search degrades without schemas/knowledge-graph (${graph.toolText.slice(0, 60)})`);
-  const entity = await call(h, "entity_detail", { entity_id: "11111111-1111-4111-8111-111111111111" });
-  const entityInt = await call(h, "entity_detail", { entity_id: 7 });
-  assert(!entity.isError && entity.structured?.available === false && !entityInt.isError && entityInt.structured?.available === false, `entity_detail takes a UUID or an integer id and degrades the same way (SMD-1525) (${entity.toolText.slice(0, 40)})`);
-  const monitor = await call(h, "ops_source_monitor", {});
-  assert(!monitor.isError && monitor.structured?.available === false, `ops_source_monitor degrades without the ops views (${monitor.toolText.slice(0, 60)})`);
-  // The drift guard: tools/list under the key is exactly the thirteen driven in this block.
-  const listedTools = await send(h, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
-  const names = ((listedTools.json?.result?.tools ?? []) as { name: string }[]).map((t) => t.name).sort().join();
-  const drivenHere = ["brain_capture_thought", "brain_list_thoughts", "brain_search_thoughts", "brain_thought_stats", "count_thoughts", "entity_detail", "get_thought", "graph_search", "ops_capture_status", "ops_source_monitor", "related_thoughts", "search_thoughts_text", "update_thought"].join();
-  assert(names === drivenHere, `enhanced-mcp's tools/list is exactly the thirteen tools driven here (${names})`);
-}
 
 // ── integrations/agent-memory-api ────────────────────────────────────────────
 
@@ -1178,25 +931,12 @@ try {
 {
   console.log("\n[SMD-1724: the capture paths forward the client's trust]");
   const trustOf = async (text: string) => ((await sql`SELECT metadata->>'trust' AS t FROM thoughts WHERE content = ${text}`)[0]?.t ?? null) as string | null;
-  const claimOf = async (text: string) => ((await sql`SELECT a.actor_context->'claimed' AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE t.content = ${text} AND a.action = 'capture'`)[0]?.c ?? null) as unknown;
   const labels = (await sql`SELECT DISTINCT actor_name AS n FROM thought_audit WHERE actor_name IS NOT NULL`).map((r: { n: string }) => r.n);
   // One label at a time: Bun binds a JS array comma-joined, not as an array literal.
   const kindsBefore: { label: string; kind: string | null }[] = [];
   for (const label of labels) kindsBefore.push(...(await sql`SELECT label, kind FROM ob1_agents WHERE label = ${label}`) as { label: string; kind: string | null }[]);
   for (const label of labels) await sql`SELECT set_agent_kind(${label}, 'operator')`;
   try {
-    // enhanced-mcp's brain_capture_thought.
-    {
-      const h = await load("integrations/enhanced-mcp/index.ts");
-      const declared = "a page pasted into enhanced-mcp, declared ingested";
-      const a = await call(h, "brain_capture_thought", { content: declared, trust: "ingested" });
-      const bad = await call(h, "brain_capture_thought", { content: "an enhanced-mcp capture declaring a word off the ladder", trust: "root" });
-      assert(!a.isError && await trustOf(declared) === "ingested", `enhanced-mcp's brain_capture_thought forwards the client's trust (${a.toolText.slice(0, 60)}; ${await trustOf(declared)})`);
-      assert((bad.isError || bad.json?.error) && await trustOf("an enhanced-mcp capture declaring a word off the ladder") === null, "…and its schema refuses a word off the ladder");
-      const viaMeta = "a capture whose metadata names a trust, through enhanced-mcp";
-      const vm = await call(h, "brain_capture_thought", { content: viaMeta, metadata: { trust: "root" }, trust: null });
-      assert(!vm.isError && await trustOf(viaMeta) === "operator" && await claimOf(viaMeta) === null, `…and drops a metadata.trust, a null trust no declaration: the key's, no claim filed (${vm.toolText.slice(0, 60)}; ${JSON.stringify(await claimOf(viaMeta))}; second review pass)`);
-    }
     // agent-memory-api's POST /writeback.
     {
       const h = await load("integrations/agent-memory-api/index.ts");
@@ -1265,12 +1005,10 @@ spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\):[
 for (const sample of ["integrations/telegram-capture/README.md", "integrations/slack-capture/README.md"]) {
   spells(sample, /rpc\("upsert_thought", \{\s*p_content: messageText,\s*p_payload: \{\s*metadata: \{[^}]*\},\s*embedding_model: EMBEDDING_MODEL,\s*\},\s*p_embedding: embedding,/s, "'s sample captures through the 3-argument upsert_thought with the label beside the vector");
 }
-// SMD-1541: the server that compares one key in place, enhanced-mcp, spells the legacy key's name itself. The name is
-// the one auth.ts gives the same key, so one physical key reads the same in `actor_name` whichever module compared it;
-// the arms above assert the one literal for every server driven, and these hold the spelling at its sources — the auth.ts copy the
-// principal servers import (test-auth.ts holds the copies byte-identical) and the constant.
+// SMD-1541: the legacy key's name is the one auth.ts gives it, so one physical key reads the same in `actor_name`
+// whichever server compared it; the arms above assert the one literal for every server driven, and this holds the
+// spelling at its source — the auth.ts copy the principal servers import (test-auth.ts holds the copies byte-identical).
 spells("integrations/_shared/auth.ts", /found = \{ name: "MCP_ACCESS_KEY", scope: "write"/, " names the legacy single key MCP_ACCESS_KEY");
-spells("integrations/enhanced-mcp/index.ts", /^const ACTOR_NAME = "MCP_ACCESS_KEY";$/m, " spells the same name as its ACTOR_NAME");
 // The three that own their database say they bypass the functions, in the file and in the README.
 for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "integrations/kubernetes-deployment/README.md"], ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/vercel-neon-telegram/README.md"], ["recipes/schema-aware-routing/index.ts", "recipes/schema-aware-routing/README.md"]]) {
   spells(file, /ob1-fork \(SMD-1524\):[^\n]*raw (?:INSERT|insert), by design/, " says its raw insert is by design — a database of its own");
@@ -1278,16 +1016,15 @@ for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "i
 }
 // Every runnable file the three changes touched is driven above, or read: the headers name them.
 const BIO = "integrations/consolidation-workers/bio/index.ts";
-const DRIVEN = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
-  "recipes/repo-learning-coach/server/brain.ts", BIO,
+const DRIVEN = ["integrations/agent-memory-api/index.ts", "recipes/repo-learning-coach/server/brain.ts", BIO,
   "integrations/smart-ingest/index.ts"]; // smart-ingest joined the 3-argument form's callers with SMD-2128
 const TEXT_ONLY = ["recipes/provenance-chains/mcp-tools.ts"];
 const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts", BIO];
 const TEXT_ONLY_1524 = ["recipes/adaptive-capture-classification/capture-with-gating.ts"];
 const BYPASS_1524 = ["integrations/kubernetes-deployment/index.ts", "recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
 const DRIVEN_1544 = [BIO];
-const DRIVEN_1541 = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
-  "integrations/smart-ingest/index.ts"]; // change 69's three servers, the ones that hold a key (five until SMD-1931 retired the two REST gateways) — and smart-ingest, which passes the actor since SMD-2128
+const DRIVEN_1541 = ["integrations/agent-memory-api/index.ts",
+  "integrations/smart-ingest/index.ts"]; // change 69's one remaining server that holds a key (five until SMD-1931 retired the two REST gateways and the two MCP servers) — and smart-ingest, which passes the actor since SMD-2128
 // Every vendored .ts, read once; each ticket's rule tests the same texts.
 const HEADED = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
   .filter((f) => !f.includes("node_modules")).map((f) => [f, readFileSync(join(ROOT, f), "utf8")] as const);

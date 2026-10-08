@@ -2,8 +2,8 @@
 name: deleting-thoughts
 description: |
   Use when asked to delete, remove, purge, wipe, or "get rid of" an Open Brain
-  thought, or before calling delete_thought (the open-brain-delete-thought
-  connector), which HARD-deletes with no undo. Also use when tempted to delete a
+  thought, or before calling delete_thought (a tool of the core Open Brain
+  connector, registered for a write key), which deletes with no undo tool. Also use when tempted to delete a
   thought that is merely outdated or wrong. To edit or deprecate instead of
   removing, see updating-thoughts.
 author: Ezana Azene
@@ -14,9 +14,11 @@ version: 1.0.0
 
 ## Overview
 
-`delete_thought` (the `open-brain-delete-thought` connector) performs a **hard
-delete** — the row is gone the moment it returns, with no tombstone, no
-soft-delete, and no restore. Recovery depends entirely on database backups. The
+`delete_thought` (on the core Open Brain connector, for a write key) performs a
+**permanent delete** — the row and its search chunks are gone the moment it
+returns, with no soft-delete and no restore tool. The audit trail keeps the
+previous content, so an operator can reconstruct a thought removed in error;
+nothing you can call undoes it. The
 Open Brain maintainer's stance is **"deprecate and version rather than
 delete."** So deletion is a last resort, and every delete must target an id you
 verified this session.
@@ -40,18 +42,20 @@ If the thought is merely outdated, wrong, or superseded, **update it or tag it**
 2. **Show the target and confirm.** Surface the thought's content to the user
    and get explicit confirmation that this specific thought should be removed.
    - **Check for derivatives first.** Before deleting, run `find_derivatives`
-     (and/or `related_thoughts`) on the thought. If other thoughts were derived
+     on the thought where the provenance-chains recipe's tools are connected.
+     (The delete itself refuses a thought other thoughts cite as a source.) If other thoughts were derived
      from it, deleting orphans their provenance chain — those derivatives lose
      the source they point back to. Prefer deprecating over deleting in that
      case. Tool names may carry a connector prefix; use whatever the environment
      exposes.
-3. **Delete only after confirmation.** Call `delete_thought(id)`. It pre-checks
-   existence (a clean "not found" if already gone) and returns the prior content
-   length as a receipt. Report that receipt to the user.
+3. **Delete only after confirmation.** Call `delete_thought(id)` and report its
+   reply to the user. If it refuses because statements in other thoughts cite
+   this one as their source, tell the user which (the reply names them) and ask
+   again before calling it with `detach_citations: true`.
 
 ## This Is Irreversible — No Exceptions
 
-- No undo, no trash, no restore. Backups only.
+- No undo, no trash, no restore tool. The audit trail is for an operator, not a way back.
 - Don't batch-delete "to clean up" without confirming **each** id.
 - Don't delete when the user said "update", "fix", "archive", or "deprecate" —
   those are updates, not deletes.
@@ -84,8 +88,9 @@ so there is a record of what was removed.
 
 ## Notes
 
-- Connector: `open-brain-delete-thought`, auth via `?key=` or the `x-brain-key`
-  header — the same `MCP_ACCESS_KEY` as your core Open Brain connector.
-- For recoverable deletes, install the `schemas/thought-audit` table and write
-  an audit row before deleting (see the `integrations/delete-thought-mcp`
-  README's extension hook).
+- Connector: the core Open Brain connector. It lists `delete_thought` only for
+  a write-scoped key; a read or capture key does not see the tool at all. (The
+  standalone `delete-thought-mcp` server retired with SMD-1931.)
+- Every delete is recorded in the brain's audit trail with the previous
+  content, and the delete refuses a cited source unless `detach_citations` is
+  true.

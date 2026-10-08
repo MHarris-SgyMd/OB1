@@ -9,12 +9,24 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["Supabase", "OpenRouter"],
-    "tools": ["update-thought-mcp connector", "AI client with reusable skills, rules, or custom instructions"]
+    "services": [
+      "OpenRouter"
+    ],
+    "tools": [
+      "Open Brain MCP connector with a write-scoped key",
+      "AI client with reusable skills, rules, or custom instructions"
+    ]
   },
-  "tags": ["skill", "update", "edit", "metadata", "mcp", "open-brain"],
+  "tags": [
+    "skill",
+    "update",
+    "edit",
+    "metadata",
+    "mcp",
+    "open-brain"
+  ],
   "difficulty": "beginner",
   "estimated_time": "5 minutes",
   "created": "2026-07-11",
-  "updated": "2026-07-11"
+  "updated": "2026-10-08"
 }

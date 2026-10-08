@@ -246,7 +246,7 @@ Execute a previously dry-run job.
 
 **Planned (not yet built):**
 
-- **Claude Desktop via MCP:** `integrations/enhanced-mcp` is intended to expose `ingest_document` and `execute_ingestion_job` tools so Claude Desktop users can ingest documents through MCP without a terminal. The folder currently ships empty.
+- **Claude Desktop via MCP:** ingest as MCP tools comes with smart-ingest's move into the REST core as a plugin, whose operations both surfaces expose (SMD-2690). The `integrations/enhanced-mcp` server this line once named retired with SMD-1931.
 
 For guidance on managing tool count and token overhead as you add more integrations, see the [tool audit guide](../../docs/05-tool-audit.md).
 

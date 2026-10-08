@@ -144,7 +144,7 @@
   },
   "connectors": {
     "slack": { "direction": "bidirectional", "note": "slack-capture is the source; editorial-policy's optional critical-findings post is the sink. One bot token serves both today, in two artifacts." },
-    "discord": { "direction": "bidirectional", "note": "discord-capture is the source; life-engine's briefings are the sink." },
+    "discord": { "direction": "sink", "note": "life-engine's briefings are the sink; discord-capture, the source, retired with SMD-1931 (a README with no code)." },
     "telegram": { "direction": "bidirectional", "note": "telegram-capture and vercel-neon-telegram's bot route are the source; weekly-digest, life-engine and life-engine-video are the sink. Five artifacts, one vendor driver's worth of client." },
     "gmail": { "direction": "bidirectional", "note": "email-history-import and gmail-smart-pull are the source (pull); daily-digest's draft is the sink, through the client's Gmail MCP connector." },
     "readwise": { "direction": "source", "note": "readwise-capture (push) and readwise-import (pull) are two transports of one source capability; both resolve to `readwise:<highlight id>`." },
@@ -164,12 +164,6 @@
       "path": "integrations/slack-capture",
       "capabilities": [
         { "vendor": "slack", "family": "message-stream/chat", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "Slack Events API → Edge Function; the threaded confirmation is the source's ack" }
-      ]
-    },
-    {
-      "path": "integrations/discord-capture",
-      "capabilities": [
-        { "vendor": "discord", "family": "message-stream/chat", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "an Edge Function fed by a Discord bot that needs the message-content intent; designated channels only. The folder ships a README and no code, so how the bot hands messages to the function is not in the tree — a push either way" }
       ]
     },
     {
