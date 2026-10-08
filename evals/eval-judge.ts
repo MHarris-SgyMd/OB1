@@ -15,6 +15,10 @@
  *             two are related, and none of those relations is a reversal.
  *             079 keeps such a pair out of the candidates, so the judge never
  *             sees one in a pass; here it is asked directly.
+ *   pointer   a thought's own `supersedes` (025), set by its writer — most are
+ *             the session hook's later summary replacing its earlier one. The
+ *             truth with a direction: the newer is current. The pass never
+ *             pairs them either, so they too are asked directly.
  *
  * and a third set with no label, so the rates are the pass's own:
  *
@@ -23,7 +27,7 @@
  *
  * Two steps, so the brain is read once and the model is called offline:
  *
- *   DATABASE_URL=… bun eval-judge.ts --export /private/tmp/judge-pairs.jsonl [--per-relation 40] [--candidates 120]
+ *   DATABASE_URL=… bun eval-judge.ts --export /private/tmp/judge-pairs.jsonl [--per-relation 40] [--pointers 60] [--candidates 120]
  *   bun eval-judge.ts --pairs /private/tmp/judge-pairs.jsonl [--out answers.jsonl] [--concurrency 3] [--logprobs 10] [--limit N]
  *   bun eval-judge.ts --pairs … --replay answers.jsonl      # score saved answers, no model
  *   bun eval-judge.ts --self-check                           # the arithmetic, no database or model
@@ -45,8 +49,8 @@
  *     the accepted proposals;
  *   - on the candidates, what the pass would record at --min-confidence.
  *
- * "Right" per label: an accepted proposal is a conflict; a rejected one is
- * not; a linked pair is related and is neither unrelated nor a conflict — a
+ * "Right" per label: an accepted proposal is a conflict, and so is a pointer
+ * pair; a rejected proposal is not; a linked pair is related and is neither unrelated nor a conflict — a
  * board link is never a reversal (a duplicate_of pair is the one place a
  * reader could argue otherwise, and it is reported on its own row). A
  * rejected proposal says the conflict did not hold, not why; 2448 found most
@@ -69,10 +73,11 @@ import {
 
 // ── The file shapes ──────────────────────────────────────────────────────────
 
-export type GoldSource = "proposal" | "link" | "candidate";
+export type GoldSource = "proposal" | "link" | "pointer" | "candidate";
 export type Gold =
   | { source: "proposal"; label: "accepted" | "rejected"; direction?: "newer" | "older"; judgeKey: string; judged: { verdict: string; confidence: number }; editedSince: boolean }
   | { source: "link"; label: "duplicate_of" | "child_of" | "blocks" | "relates_to" }
+  | { source: "pointer"; label: "supersedes"; direction: "newer" }
   | { source: "candidate"; label: "none"; similarity: number };
 export type Side = PairSide & { id: string };
 export type PairLine = { pair: string; older: Side; newer: Side; gold: Gold };
@@ -89,6 +94,7 @@ export type AnswerLine = { pair: string; ms: number; judgement: Judgement | null
 export function rightFor(gold: Gold, verdict: string): boolean | null {
   if (gold.source === "candidate") return null;
   if (gold.source === "proposal") return gold.label === "accepted" ? verdict === "conflict" : verdict !== "conflict";
+  if (gold.source === "pointer") return verdict === "conflict";
   return verdict !== "unrelated" && verdict !== "conflict";
 }
 
@@ -121,6 +127,7 @@ function selfCheck(): void {
   ok(rightFor(acc, "conflict") === true && rightFor(acc, "agree") === false, "an accepted proposal is right only as a conflict");
   ok(rightFor(rej, "agree") === true && rightFor(rej, "unrelated") === true && rightFor(rej, "conflict") === false, "a rejected proposal is right as anything but a conflict");
   ok(rightFor(link, "agree") === true && rightFor(link, "continues") === true && rightFor(link, "unrelated") === false && rightFor(link, "conflict") === false, "a linked pair is right as related, wrong as unrelated or a conflict");
+  ok(rightFor({ source: "pointer", label: "supersedes", direction: "newer" }, "conflict") === true && rightFor({ source: "pointer", label: "supersedes", direction: "newer" }, "evolves") === false, "a pointer pair is right only as a conflict");
   ok(rightFor({ source: "candidate", label: "none", similarity: 0.7 }, "conflict") === null, "a candidate has no right answer");
   console.log(failed ? `\n${failed} failed` : "\nall passed");
   process.exit(failed ? 1 : 0);
@@ -131,7 +138,7 @@ function selfCheck(): void {
 type SideRow = { id: string; content: string; created_at: string | null; metadata: Record<string, unknown> | null };
 const sideOf = (r: SideRow): Side => ({ id: r.id, content: r.content, createdAt: r.created_at, metadata: r.metadata ?? undefined, writer: actorKindOf(r.metadata) });
 
-async function exportPairs(out: string, perRelation: number, candidates: number): Promise<void> {
+async function exportPairs(out: string, perRelation: number, pointers: number, candidates: number): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url?.trim()) { console.error("--export reads DATABASE_URL (read only)."); process.exit(2); }
   const sql = new SQL({ url, max: 1 });
@@ -180,6 +187,13 @@ async function exportPairs(out: string, perRelation: number, candidates: number)
             FROM pairs JOIN thoughts o ON o.id = pairs.o JOIN thoughts n ON n.id = pairs.n
            ORDER BY md5(o.id::text || n.id::text) LIMIT ${perRelation}`)) add(side(r, "o"), side(r, "n"), { source: "link", label: rel });
       }
+
+      // The writers' own pointers: the newer row names the older in `supersedes`.
+      for (const r of rows(await tx`
+        SELECT o.id::text AS o_id, o.content AS o_content, o.created_at::text AS o_created, o.metadata AS o_meta,
+               n.id::text AS n_id, n.content AS n_content, n.created_at::text AS n_created, n.metadata AS n_meta
+          FROM thoughts n JOIN thoughts o ON o.id = n.supersedes
+         ORDER BY md5(o.id::text || n.id::text) LIMIT ${pointers}`)) add(side(r, "o"), side(r, "n"), { source: "pointer", label: "supersedes", direction: "newer" });
 
       // Candidates the pass would judge today, in md5 order of the newer thought, until the sample is full.
       const before = lines.length;
@@ -284,11 +298,17 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
   const conflicts = rows.filter((r) => r.a.judgement.verdict === "conflict");
   const directed = conflicts.filter((r) => r.a.judgement.supersedes !== "unknown").length;
   console.log(`\n  ── direction ──\n  ${conflicts.length} conflict verdict(s), ${directed} name a side (${pct(directed, conflicts.length)}), ${conflicts.length - directed} undirected`);
-  const acc = rows.filter((r) => r.p.gold.source === "proposal" && r.p.gold.label === "accepted");
-  if (acc.length) {
-    const right = acc.filter((r) => r.p.gold.source === "proposal" && r.a.judgement.verdict === "conflict" && r.a.judgement.supersedes === r.p.gold.direction).length;
-    const unknown = acc.filter((r) => r.a.judgement.verdict === "conflict" && r.a.judgement.supersedes === "unknown").length;
-    console.log(`  on the ${acc.length} accepted proposal(s): ${right} right side, ${unknown} undirected, ${acc.length - right - unknown} wrong side or not a conflict`);
+  const quoted = conflicts.filter((r) => r.a.judgement.supersedes !== "unknown" && r.a.judgement.evidenceFound !== undefined);
+  if (quoted.length) console.log(`  evidence: ${quoted.filter((r) => r.a.judgement.evidenceFound).length} of ${quoted.length} directed conflict(s) quote words found in the side they name`);
+  const goldDirection = (g: Gold) => (g.source === "proposal" && g.label === "accepted") || g.source === "pointer" ? g.direction : undefined;
+  for (const src of ["proposal", "pointer"] as const) {
+    const truth = rows.filter((r) => r.p.gold.source === src && goldDirection(r.p.gold));
+    if (!truth.length) continue;
+    const conf = truth.filter((r) => r.a.judgement.verdict === "conflict");
+    const right = conf.filter((r) => r.a.judgement.supersedes === goldDirection(r.p.gold)).length;
+    const unknown = conf.filter((r) => r.a.judgement.supersedes === "unknown").length;
+    const found = conf.filter((r) => r.a.judgement.evidenceFound === true);
+    console.log(`  on the ${truth.length} ${src === "proposal" ? "accepted proposal" : "pointer"} pair(s): ${conf.length} called a conflict — ${right} right side, ${unknown} undirected, ${conf.length - right - unknown} wrong side${found.length ? `; with the evidence found, ${found.filter((r) => r.a.judgement.supersedes === goldDirection(r.p.gold)).length} of ${found.length} right` : ""}`);
   }
 
   // 5. What the pass would record from the candidates.
@@ -318,7 +338,7 @@ if (import.meta.main) {
   if (has("self-check")) selfCheck();
   const exportTo = flag("export");
   if (exportTo) {
-    await exportPairs(exportTo, int("per-relation", 40), int("candidates", 120));
+    await exportPairs(exportTo, int("per-relation", 40), int("pointers", 60), int("candidates", 120));
     process.exit(0);
   }
   const pairsPath = flag("pairs");
