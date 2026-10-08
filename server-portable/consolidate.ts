@@ -591,6 +591,32 @@ export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older
   return "conflict_undirected";
 }
 
+/** The verdicts that relate two thoughts that both stand — a `relation` facet each (migration 084), never a proposal. */
+export const RELATION_VERDICTS = ["related", "evolves", "duplicate"] as const;
+export type RelationVerdict = (typeof RELATION_VERDICTS)[number];
+
+/**
+ * The relation a judgement records (SMD-1873 PR 2), or null when it records
+ * none — an unrelated pair, an outdates (a proposal's), a malformed answer.
+ * The pass writes it with record_thought_relation (084) on the newer thought,
+ * and a null closes the pair's edge, so a re-judge that no longer sees the
+ * relation retracts it.
+ */
+export function relationVerdict(j: Judgement): RelationVerdict | null {
+  return !j.malformed && (RELATION_VERDICTS as readonly string[]).includes(j.verdict) ? (j.verdict as RelationVerdict) : null;
+}
+
+/**
+ * The confidence a relation records, and where it came from: the model's
+ * token probability of the verdict it chose, by proposalConfidence's rule
+ * (the written number without a distribution, or under MIN_COVERED).
+ */
+export function relationConfidence(j: Judgement): { confidence: number; source: "token" | "stated" } {
+  const d = j.probabilities?.verdict;
+  if (!d || d.covered < MIN_COVERED) return { confidence: j.confidence, source: "stated" };
+  return { confidence: Math.round(((d.p as Record<string, number>)[j.verdict] ?? 0) * 100) / 100, source: "token" };
+}
+
 /** proposalConfidence uses the token distribution only when the alternatives naming a verdict held at least this share of the token's mass. */
 export const MIN_COVERED = 0.5;
 

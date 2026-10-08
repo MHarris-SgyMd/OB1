@@ -2003,12 +2003,18 @@ export const ROLE_GRANTS = Object.freeze({
   // releases work, upserts its job key into `ob1_config` (reembed's
   // --switch-model, extract's key), and, for consolidate.ts, records and
   // resolves proposals in `supersession_proposals` (029's SECURITY INVOKER
-  // record/accept functions run as the caller).
+  // record/accept functions run as the caller) and judged relations in
+  // `thought_facets` (084).
   worker: Object.freeze([
     Object.freeze({ table: "thought_work_claims",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
     // SELECT too: reembed reads the model and its job keys before it writes them, which the server group's SELECT used to cover — and a role given the worker group for that alone would take the server group's key writes with it (SMD-2289 review pass 1).
     Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),           since: "006" }),
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
+    // 084's record_thought_relation (SMD-1873 PR 2): consolidate.ts writes the
+    // judge's related, evolves and duplicate verdicts as relation facets and
+    // closes them (SECURITY INVOKER, so the caller's). Its lineage rows are
+    // the capture group's derivations writes, as a proposal's are.
+    Object.freeze({ table: "thought_facets",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "084" }),
     // 063's rebuild_derived (SMD-1732), run by db/rebuild.ts or by SMD-1723's
     // forget: the forget arm removes the snapshot rows at a leaving thought's
     // fingerprints — the one DELETE on 060's table, and this file's arm of the

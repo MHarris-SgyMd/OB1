@@ -5244,6 +5244,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   /** Until this time the judge, and a follower's probe, answer `judgeDown`: a 503, or nothing at all (SMD-2599). */
   let judgeDownUntil = 0;
   let judgeDown: "503" | "hang" = "503";
+  /** What the stub answers for the rota pair — a duplicate first; SMD-1873 PR 2's block below changes it to drive a relation's replace and close. */
+  let rotaAnswer = "duplicate";
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -5273,7 +5275,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "outdates", supersedes: "B", evidence: (b.match(/\S*annually\S*/)?.[0] ?? ""), confidence: 0.92, reason: "monthly billing against annual" };
       else if (/blue/.test(a) && /green/.test(b)) answer = { verdict: "outdates", supersedes: "unknown", confidence: 0.7, reason: "two brand colours, neither says which stands" };
       else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "outdates", supersedes: "B", confidence: 0.9, reason: "guessing" };
-      else if (/rota/.test(a) && /rota/.test(b)) answer = { verdict: "duplicate", supersedes: "unknown", confidence: 0.85, reason: "the same rota" };
+      else if (/rota/.test(a) && /rota/.test(b)) answer = { verdict: rotaAnswer, supersedes: "unknown", confidence: 0.85, reason: "the same rota" };
       else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "evolves", supersedes: "unknown", confidence: 0.8, reason: "the later deploy note follows the earlier" };
       else answer = { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
       const content = JSON.stringify(answer);
@@ -5419,6 +5421,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
          `…five pairs (one per newer thought with an older neighbour), one malformed, and the six older thoughts with nothing older to compare against (${first.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
   assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 under confidence 0\.5 not recorded.*; of 3 proposing verdict\(s\), confidence from token probabilities on 2, from the number the model wrote on 1/.test(first.out),
          `…two proposals recorded, one undirected, one too weak to record on its token score though it states 0.9, and the floor cut two on token probabilities and one on the written number (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
+  // SMD-1873 PR 2 (084): the deploy pair's evolves, at the floor, is a relation on the newer thought.
+  assert(/relations: 1 added, 0 kept, 0 replaced, 0 closed/.test(first.out), `…and the evolves verdict is one relation added (${first.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
   assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
   assert(modelsSeen.size === 1 && modelsSeen.has("stub-judge"), `every judge request named the metadata model, OB1_JUDGE_MODEL being unset (${[...modelsSeen].join(", ")})`);
   const callsAfterFirst = calls;
@@ -6340,6 +6344,43 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const [{ err: relicErr }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${relicNew}::uuid`;
     assert(run.code === 1 && /answered the verdict "conflict", not one of prompt 4's five/.test(String(relicErr)),
            `an answer in p3's words fails its thought and names the word, where it used to read as an answer not JSON (exit ${run.code}: ${relicErr})`);
+
+    // SMD-1873 PR 2 (084): the duplicate is a relation on the newer thought,
+    // with its lineage; judged again it is replaced by another word, and
+    // closed by an answer that sees none.
+    const relOf = async () => (await sql`SELECT f.id::text AS id, f.payload->>'relation' AS relation, (f.payload->>'confidence')::float AS confidence, f.valid_until IS NULL AS active,
+                                                (SELECT count(*)::int FROM derivations d WHERE d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = ${KEY}) AS lineage
+                                           FROM thought_facets f WHERE f.kind = 'relation' AND f.thought_id = ${rotaNew}::uuid AND f.payload->>'target' = ${rotaOld}::text ORDER BY f.created_at, f.id`) as { id: string; relation: string; confidence: number; active: boolean; lineage: number }[];
+    const r1 = await relOf();
+    assert(r1.length === 1 && r1[0].relation === "duplicate" && r1[0].active && r1[0].confidence === 0.85 && r1[0].lineage === 1 && /relations: 1 added, 0 kept, 0 replaced, 0 closed/.test(run.out),
+      `the duplicate is a relation on the newer thought at the confidence the answer states, its lineage under the pass's key (${JSON.stringify(r1)})`);
+    const rejudge = async (answer: string) => {
+      rotaAnswer = answer;
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+      return consolidate();
+    };
+    const asRelated = await rejudge("related");
+    const r2 = await relOf();
+    assert(/relations: 0 added, 0 kept, 1 replaced, 0 closed/.test(asRelated.out) && r2.length === 2 && r2.filter((r) => r.active).map((r) => r.relation).join() === "related",
+      `judged again as related, the duplicate is replaced: closed, and a related edge standing (${JSON.stringify(r2.map((r) => [r.relation, r.active]))})`);
+    const status = await consolidate("--status");
+    assert(/relations: \d+ standing \(\d+ related, \d+ evolves, 0 duplicate\) — --list relations shows them/.test(status.out), `--status counts the relations standing by word (${status.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    const listed = await consolidate("--list", "relations");
+    assert(listed.code === 0 && /relation\(s\), newest first/.test(listed.out) && listed.out.includes(rotaNew) && listed.out.includes(rotaOld) && /\] related/.test(listed.out),
+      `--list relations shows the edge with both thoughts (exit ${listed.code})`);
+    const asUnrelated = await rejudge("unrelated");
+    assert(/relations: 0 added, 0 kept, 0 replaced, 1 closed/.test(asUnrelated.out) && (await relOf()).every((r) => !r.active),
+      "judged again as unrelated, the relation is closed — a re-judge that no longer sees it retracts it");
+    // A brain without 084: the pass counts the verdicts and says relations are not stored.
+    await sql.unsafe(`ALTER FUNCTION record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation_hidden`);
+    try {
+      const without = await rejudge("duplicate");
+      const noList = await consolidate("--list", "relations");
+      assert(/relations: not stored \(this brain lacks migration 084\) — 1 related, evolves or duplicate verdict\(s\) counted only/.test(without.out) && noList.code === 1 && /--list relations needs migration 084/.test(noList.out),
+        `without 084 the pass counts the verdict and says relations are not stored, and --list relations names the migration (${without.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    } finally {
+      await sql.unsafe(`ALTER FUNCTION record_thought_relation_hidden(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation`);
+    }
   }
 
   judge.stop(true);

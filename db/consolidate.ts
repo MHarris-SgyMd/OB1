@@ -25,6 +25,7 @@
  *   bun db/consolidate.ts --url … --retry-failed          # failed rows back into the pool first
  *   bun db/consolidate.ts --url … --dump verdicts.jsonl   # also append every verdict, for evals/eval-consolidate.ts
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
+ *   bun db/consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, or a lineage pair (070)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -150,7 +151,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderDown, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import {
-  actorKindOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
+  actorKindOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
@@ -178,7 +179,7 @@ const FLAGS = {
 } as const;
 const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "all"];
+const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "all", "relations"];
 /**
  * The longest --stale: stale_entities is given `make_interval(days => n)`
  * subtracted from now(), and a timestamp before 4714 BC is out of range — at
@@ -321,7 +322,7 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
  */
 export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" | "reject" | "direction" | "force" | "note" | "limit" | "stale" | "status" | "dryRun">): string | null {
   const { list, accept, reject, direction, note } = { list: opts.list ?? undefined, accept: opts.accept ?? undefined, reject: opts.reject ?? undefined, direction: opts.direction ?? undefined, note: opts.note ?? undefined };
-  if (list !== undefined && !LIST_STATUSES.includes(list)) return "--list takes pending, accepted, rejected, stale, lineage or all (or nothing, for pending).";
+  if (list !== undefined && !LIST_STATUSES.includes(list)) return "--list takes pending, accepted, rejected, stale, lineage, all or relations (or nothing, for pending).";
   for (const [name, v] of [["accept", accept], ["reject", reject]] as const) {
     if (v !== undefined && !UUID_RE.test(v)) return `--${name} needs a proposal id (a UUID from --list or the list_supersession_proposals tool).`;
   }
@@ -764,7 +765,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         err(`  ${decision} refused: ${why[res.error ?? ""] ?? res.error}`);
       }
     }
-    if (LIST !== undefined) {
+    if (LIST === "relations") {
+      if (!(await has084())) {
+        err("  --list relations needs migration 084 (db/migrations/084_judged_relations.sql), which this brain has not applied: cd db && bun migrate.ts --url <url>");
+        code = 1;
+      } else await printRelations();
+    } else if (LIST !== undefined) {
       // 070 (SMD-2313): a brain at 068 under this tree has no three-argument
       // listing — the one error every --list meets there, named with its file
       // rather than a driver stack (definitions probe, second review pass).
@@ -776,6 +782,52 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     }
     if (STALE_DAYS > 0) await printStale(STALE_DAYS);
     return code;
+  }
+
+  // ── Judged relations (084, SMD-1873 PR 2) ────────────────────────────────────
+
+  /** Whether this brain stores judged relations: migration 084's write. */
+  async function has084(): Promise<boolean> {
+    const [r] = (await sql`SELECT to_regprocedure('record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)') IS NOT NULL AS h`) as { h: boolean }[];
+    return r.h === true;
+  }
+
+  /**
+   * --list relations: the relations standing, newest first, with both
+   * thoughts. An edge whose lineage fingerprint is no longer a side's text
+   * was judged on a text that has since moved — said beside it (SMD-2726
+   * closes such an edge through rebuild_derived; until then the next judging
+   * of the pair replaces or closes it).
+   */
+  async function printRelations(limit = 50): Promise<number> {
+    const rows = (await sql`
+      SELECT f.id, f.payload->>'relation' AS relation, (f.payload->>'confidence')::float AS confidence, f.payload->>'judge_key' AS judge_key, f.created_at,
+             n.id::text AS newer_id, n.content AS newer_content, n.created_at AS newer_created_at,
+             o.id::text AS older_id, o.content AS older_content, o.created_at AS older_created_at,
+             (d.id IS NOT NULL AND (content_fingerprint_of(o.content) IS DISTINCT FROM d.input_fingerprints[1]
+                                    OR content_fingerprint_of(n.content) IS DISTINCT FROM d.input_fingerprints[2])) AS edited
+        FROM thought_facets f
+        JOIN thoughts n ON n.id = f.thought_id
+        JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
+        LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
+       WHERE f.kind = 'relation' AND f.valid_until IS NULL
+       ORDER BY f.created_at DESC, f.id
+       LIMIT ${limit}`) as {
+        id: string; relation: string; confidence: number | null; judge_key: string; created_at: Stamp;
+        newer_id: string; newer_content: string; newer_created_at: Stamp; older_id: string; older_content: string; older_created_at: Stamp; edited: boolean }[];
+    if (rows.length === 0) {
+      out("  no relations");
+      return 0;
+    }
+    const phrase: Record<string, string> = { related: "related", evolves: "the NEWER evolves from the older", duplicate: "duplicates" };
+    out(`  ${rows.length} relation(s), newest first${rows.length === limit ? ` — the first ${limit}; --status counts them all` : ""}:\n`);
+    rows.forEach((r, i) => {
+      out(`  ${i + 1}. [${r.confidence === null ? "—" : Number(r.confidence).toFixed(2)}] ${phrase[r.relation] ?? r.relation}${r.edited ? "  EDITED SINCE JUDGED" : ""}`);
+      out(`     newer [${day(r.newer_created_at)}] ${snippet(r.newer_content)}\n        ID: ${r.newer_id}`);
+      out(`     older [${day(r.older_created_at)}] ${snippet(r.older_content)}\n        ID: ${r.older_id}`);
+      out(`     relation ${r.id}  judged by ${r.judge_key} on ${day(r.created_at)}\n`);
+    });
+    return rows.length;
   }
 
   // ── Where the pass stands ───────────────────────────────────────────────────
@@ -824,6 +876,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       FROM supersession_proposals`;
     const stale = await readStaleStandings();
     out(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${lineageClause(q.lineage, q.has_070)}` : ""} — --list shows them; --accept / --reject decides one`);
+    // 084 (SMD-1873 PR 2): the relations the pass judged, standing.
+    if (await has084()) {
+      const [r] = (await sql`
+        SELECT count(*) FILTER (WHERE payload->>'relation' = 'related')::int AS related,
+               count(*) FILTER (WHERE payload->>'relation' = 'evolves')::int AS evolves,
+               count(*) FILTER (WHERE payload->>'relation' = 'duplicate')::int AS duplicate
+          FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL`) as { related: number; evolves: number; duplicate: number }[];
+      out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate) — --list relations shows them`);
+    } else {
+      out("  relations: not stored — this brain lacks migration 084, so related, evolves and duplicate verdicts are counted only (cd db && bun migrate.ts --url <url>)");
+    }
   }
 
   /**
@@ -880,6 +943,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const [{ has_079: HAS_079 }] = (await sql`
     SELECT COALESCE((SELECT prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')), false)
            AND to_regprocedure('consolidation_linked_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_079`) as { has_079: boolean }[];
+  /** 084 (SMD-1873 PR 2): whether the pass stores its related, evolves and duplicate verdicts as relations. */
+  const HAS_084 = await has084();
   /** The judge calls 079 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
   async function ticketCallsSaved(ids: string, param: string): Promise<{ n: number; t: number }> {
     const [r] = (await sql.unsafe(`
@@ -987,7 +1052,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
   let llmMs = 0;
-  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
+  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, relationsAdded: 0, relationsKept: 0, relationsReplaced: 0, relationsClosed: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
     // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
     // 067: the stale rows this run met — replaced in place (proposed again),
@@ -1204,11 +1269,31 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         else if (proposalId) { totals.proposed++; recorded = "proposed"; if (verdict === "conflict_undirected") totals.undirected++; }
         else { totals.alreadyProposed++; recorded = "already"; }
       }
+      // 084 (SMD-1873 PR 2): a related, evolves or duplicate verdict at the
+      // floor is a relation on the newer thought, at the fingerprints the
+      // judge was sent; any other answer closes the pair's relation, so a
+      // re-judge that no longer sees one retracts it. Nothing when the pair
+      // has none and none is due — record_thought_relation answers "none".
+      let relation: string | null = null;
+      if (HAS_084) {
+        const rv = relationVerdict(j);
+        const rs = relationConfidence(j);
+        const write = rv !== null && rs.confidence >= MIN_CONFIDENCE ? rv : null;
+        const [{ r }] = (await sql`
+          SELECT record_thought_relation(${row.id}::uuid, ${c.older_id}::uuid, ${write}::text, ${write === null ? null : rs.confidence}::numeric,
+                                         ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
+                                         ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM }, judgedRecipe(j, rs.source))}::jsonb) AS r`) as { r: { action: string } }[];
+        relation = r.action;
+        if (r.action === "added") totals.relationsAdded++;
+        else if (r.action === "kept") totals.relationsKept++;
+        else if (r.action === "replaced") totals.relationsReplaced++;
+        else if (r.action === "closed") totals.relationsClosed++;
+      }
       if (DUMP) {
         appendFileSync(DUMP, JSON.stringify({
           newer: row.id, older: c.older_id, similarity: c.similarity, shared: c.shared_entities, key: JOB,
           verdict: j.verdict, supersedes: j.supersedes, confidence: j.confidence, score: scored.confidence, score_source: scored.source, reason: j.reason, evidence: j.evidence, evidence_found: j.evidenceFound ?? null,
-          proposal: proposalId, recorded,
+          proposal: proposalId, recorded, relation,
         }) + "\n");
       }
     }
@@ -1709,6 +1794,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // SMD-1873: which scale the floor cut on — the model's token probability or the number it wrote.
       `${totals.tokenScored + totals.statedScored ? `; of ${totals.tokenScored + totals.statedScored} proposing verdict(s), confidence from token probabilities on ${totals.tokenScored}, from the number the model wrote on ${totals.statedScored}` : ""}`
   );
+  // 084 (SMD-1873 PR 2): what the pass did to the relations it judged.
+  out(HAS_084
+    ? `  relations: ${totals.relationsAdded} added, ${totals.relationsKept} kept, ${totals.relationsReplaced} replaced, ${totals.relationsClosed} closed`
+    : `  relations: not stored (this brain lacks migration 084) — ${totals.related + totals.evolves + totals.duplicate} related, evolves or duplicate verdict(s) counted only`);
   if (totals.pairs > 0) out(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
   // 067: what became of the stale proposals this run met (a line only when it met one).
   {
