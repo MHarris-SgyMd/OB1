@@ -15,6 +15,7 @@ import { createAssert, RuntimeUrl } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { TOOLS, TOOL_NAMES, READ_TOOL_NAMES, CAPTURE_TOOL_NAMES, type ToolName } from "./tools.ts";
 import { SPECS, type Core } from "./core/index.ts";
+import { RESERVED_META } from "./core/writes.ts";
 import { META_KEYS_MAX, ok, refuse, TICKET_META_KEYS } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { ROUTES, pathFields } from "./rest/routes.ts";
@@ -424,6 +425,118 @@ console.log("\n[9] A request URL that will not parse — Bun builds it from the 
     const issues = (r.body.issues ?? []) as { path: string }[];
     assert(r.status === 400 && r.body.code === "REFUSED_INPUT" && issues[0]?.path === "limit", `Host ${host}: GET /v1/thoughts?limit=x → 400 naming limit (${r.status} ${JSON.stringify(r.body).slice(0, 80)})`);
   }
+}
+
+console.log("\n[10] The Chrome capture extension's client speaks this server: the key check, the capture, a queued payload of the retired gateway's shape (SMD-1931)");
+{
+  // The extension's own files, run as its service worker runs them (classic
+  // scripts on one global), with fetch routed to this app — so its requests
+  // are parsed by the same schema and ladder as any caller's.
+  const dir = new URL("../integrations/chrome-capture-extension/lib/", import.meta.url);
+  // chrome.storage, as an install that saved its settings before the REST core left them.
+  const area = (data: Record<string, unknown>) => ({
+    data,
+    get: async (defaults: Record<string, unknown>) => Object.fromEntries(Object.entries(defaults).map(([k, d]) => [k, k in data ? data[k] : d])),
+    set: async (items: Record<string, unknown>) => { Object.assign(data, items); },
+    remove: async (key: string) => { delete data[key]; },
+  });
+  const storage = {
+    sync: area({ ob_capture_settings: { apiEndpoint: "https://brain.example.com/functions/v1", enabledPlatforms: { claude: true } } }),
+    local: area({ ob_capture_api_key: "cap-raw", ob_capture_api_endpoint: "https://brain.example.com" }),
+  };
+  const sandbox: Record<string, unknown> = {
+    fetch: (url: string, init: RequestInit) => app.fetch(new Request(url, init)),
+    setTimeout, clearTimeout, AbortController, console,
+    chrome: { storage },
+  };
+  sandbox.self = sandbox;
+  sandbox.globalThis = sandbox;
+  const { createContext, runInContext } = await import("node:vm");
+  const ctx = createContext(sandbox);
+  for (const f of ["config.js", "api-client.js"]) runInContext(await Bun.file(new URL(f, dir)).text(), ctx, { filename: f });
+  type Client = {
+    apiFetch: (path: string, o: { apiKey: string; endpoint: string; method?: string; body?: unknown }) => Promise<unknown>;
+    healthCheck: (o: { apiKey: string; endpoint: string }) => Promise<Record<string, unknown>>;
+    ingestDocument: (payload: unknown, o: { apiKey: string; endpoint: string }) => Promise<Record<string, unknown>>;
+    toCapture: (payload: unknown) => { content: string; source: string; trust: string; metadata: Record<string, unknown> };
+  };
+  const client = sandbox.OBApiClient as Client;
+  const at = { endpoint: "http://api/" };
+
+  identity = { status: "ok", agentId: "agent-1" };
+  const who = await client.healthCheck({ apiKey: "cap-raw", ...at });
+  assert(who.scope === "capture" && (who.operations as string[]).includes("capture_thought"), `a capture key passes the key check through GET /v1/whoami (${JSON.stringify(who)})`);
+  let readRefused = "";
+  try { await client.healthCheck({ apiKey: "read-raw", ...at }); } catch (e) { readRefused = (e as Error).message; }
+  assert(/cannot capture/.test(readRefused), `a read key is told it cannot capture (${readRefused})`);
+  let wrongRefused = "";
+  try { await client.healthCheck({ apiKey: "wrong", ...at }); } catch (e) { wrongRefused = (e as Error).message; }
+  assert(/HTTP 401: UNAUTHORIZED/.test(wrongRefused), `a wrong key is the server's 401, with its code (${wrongRefused})`);
+
+  // A payload as the extension has always queued it — a retry queued before
+  // this release is sent the same way.
+  const longUrl = `https://claude.ai/chat/${"x".repeat(300)}`;
+  const queued = {
+    text: "Decided to keep the capture key scoped to capture.",
+    source_label: "claude:sync",
+    source_type: "claude_import",
+    auto_execute: true,
+    source_metadata: { conversation_id: "c-1", conversation_title: "T".repeat(250), page_url: longUrl, capture_mode: "sync", export_tool: "open_brain_capture_extension_sync", extension_platform: "claude", content_fingerprint: "f".repeat(64), nested: { a: 1 } },
+  };
+  calls.length = 0;
+  answer = async () => ok({ id: "11111111-1111-4111-8111-111111111111", existed: false, embeddings: { allowed: true }, chunks: 0, contextFailures: 0 });
+  const sent = await client.ingestDocument(queued, { apiKey: "cap-raw", ...at });
+  const input = calls[0]?.input as { content: string; source: string; trust: string; metadata: Record<string, unknown> } | undefined;
+  assert(calls.length === 1 && calls[0].name === "capture" && sent.status === "captured" && sent.id === "11111111-1111-4111-8111-111111111111",
+    `the queued payload is one capture through POST /v1/thoughts, and the answer says captured (${JSON.stringify(sent)})`);
+  assert(input?.content === queued.text && input.source === "chrome-claude" && input.trust === "ingested", `content, source and trust as capture_thought takes them (${JSON.stringify({ source: input?.source, trust: input?.trust })})`);
+  const meta = input?.metadata ?? {};
+  assert(Object.keys(meta).length <= META_KEYS_MAX && Object.values(meta).every((v) => typeof v !== "object") && !("page_url" in meta) && !("nested" in meta) && String(meta.conversation_title).length === 200 && meta.source_type === "claude_import" && meta.extension_platform === "claude",
+    `metadata within capture_thought's bounds: a long URL left out, not cut; a long title cut; nothing nested (${JSON.stringify(Object.keys(meta))})`);
+  answer = async () => ok({ id: "11111111-1111-4111-8111-111111111111", existed: true, embeddings: { allowed: false }, chunks: 0, contextFailures: 0 });
+  const again = await client.ingestDocument(queued, { apiKey: "cap-raw", ...at });
+  assert(again.status === "existing", `a re-capture answers existing, as the extension counts a skip (${again.status})`);
+  // A platform the label alone names, and none at all.
+  assert(client.toCapture({ text: "x", source_label: "gemini:manual" }).source === "chrome-gemini", "a payload without a platform takes it from its label");
+  assert(client.toCapture({ text: "x" }).source === "chrome-extension", "…and with neither, the extension's own label");
+  // An install upgraded from the gateway's release starts unconfigured: the
+  // URL it saved named the retired gateway, so it is not read, the legacy
+  // sync copy is cleared, and the retry queue waits for the new URL instead
+  // of dead-lettering on a 404.
+  const config = sandbox.OBConfig as { getConfig: () => Promise<{ apiEndpoint: string; apiKey: string }>; isConfigured: (c: unknown) => boolean };
+  const upgraded = await config.getConfig();
+  assert(upgraded.apiEndpoint === "" && upgraded.apiKey === "cap-raw" && !config.isConfigured(upgraded), `an upgraded install keeps its key and reads no endpoint, so it is unconfigured (${JSON.stringify(upgraded)})`);
+  assert((storage.sync.data.ob_capture_settings as { apiEndpoint?: string }).apiEndpoint === "" && !("ob_capture_rest_core_endpoint" in storage.local.data), "…the legacy sync endpoint is cleared, never carried into the new key");
+  assert(!("ob_capture_api_endpoint" in storage.local.data), "…and the old local key is removed");
+  const permanent = (sandbox.OBApiClient as { isPermanentError: (e: unknown) => boolean }).isPermanentError;
+  assert(!permanent({ status: 404 }) && !permanent({ status: 429 }) && !permanent({ status: 503 }) && permanent({ status: 400 }) && permanent({ status: 403 }) && permanent({ status: 413 }),
+    "a 404 (a wrong URL, or /api off) is retried like a 429 or a 503; a refusal of the capture itself is not");
+
+  // Metadata: the brain's own keys are dropped, every one the server refuses
+  // (RESERVED_META, and a capture key's ticket keys); a manual capture's mode
+  // is kept; a platform's own keys fill the room left; a cut never splits a
+  // surrogate pair; the eight-key bound holds.
+  const reservedAll = [...RESERVED_META, ...TICKET_META_KEYS];
+  const dropped = client.toCapture({ text: "x", source_metadata: Object.fromEntries(reservedAll.map((k) => [k, "v"])) }).metadata;
+  assert(reservedAll.every((k) => !(k in dropped)), `none of the server's ${reservedAll.length} reserved keys is sent (${JSON.stringify(Object.keys(dropped))})`);
+  const gemini = client.toCapture({ text: "x", source_type: "gemini_manual", source_metadata: { extension_capture_mode: "manual", extension_platform: "gemini", content_fingerprint: "f", gemini_conversation_id: "g-1", gemini_response_id: "r-1", gemini_model: "m", page_title: "a".repeat(199) + "\u{1F600}" } }).metadata;
+  assert(gemini.capture_mode === "manual" && !("extension_capture_mode" in gemini) && gemini.gemini_conversation_id === "g-1" && gemini.gemini_response_id === "r-1" && gemini.gemini_model === "m",
+    `a manual capture keeps its mode, and Gemini's own ids are kept (${JSON.stringify(Object.keys(gemini))})`);
+  const title = String(gemini.page_title);
+  assert(title.length === 199 && !/[\uD800-\uDBFF]$/.test(title), `a value cut at the bound never ends in half a surrogate pair (${title.length})`);
+  const many = client.toCapture({ text: "x", source_metadata: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`extra_${i}`, i])) }).metadata;
+  assert(Object.keys(many).length === META_KEYS_MAX, `at most ${META_KEYS_MAX} keys (${Object.keys(many).length})`);
+
+  // A refusal is told with the facts that say why.
+  const told = async (run: () => Promise<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
+  answer = async () => refuse({ code: "REFUSED_METADATA_SHAPE", retryable: false, problem: "reserved_key", key: "type" });
+  const shape = await told(() => client.ingestDocument(queued, { apiKey: "cap-raw", ...at }));
+  assert(/HTTP 400: REFUSED_METADATA_SHAPE — reserved_key \(type\)/.test(shape), `a metadata refusal names its problem and key (${shape})`);
+  const scope = await told(() => client.apiFetch("/v1/stats", { apiKey: "cap-raw", ...at }));
+  assert(/HTTP 403: FORBIDDEN — needs a read key/.test(scope), `a scope refusal names the scope it needs (${scope})`);
+  const inputTold = await told(() => client.apiFetch("/v1/thoughts", { apiKey: "cap-raw", ...at, method: "POST", body: {} }));
+  assert(/HTTP 400: REFUSED_INPUT — content: /.test(inputTold), `an input refusal names its field (${inputTold})`);
+  answer = async () => ok({});
 }
 
 report();

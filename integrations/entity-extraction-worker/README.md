@@ -163,7 +163,7 @@ the worker runs without `dry_run=true`.
 
 ## How It Connects to Other Components
 
-The Smart Ingest server (`integrations/smart-ingest`) automatically triggers this worker after writing new thoughts. The Enhanced MCP Server (`integrations/enhanced-mcp`) exposes `graph_search` and `entity_detail` tools that query the graph this worker builds.
+The Smart Ingest server (`integrations/smart-ingest`) automatically triggers this worker after writing new thoughts. (The Enhanced MCP Server's `graph_search` and `entity_detail` tools, which queried this graph, retired with SMD-1931; a core entity-graph read is SMD-2280's.)
 
 For guidance on managing tool count and token overhead as you add more integrations, see the [tool audit guide](../../docs/05-tool-audit.md).
 

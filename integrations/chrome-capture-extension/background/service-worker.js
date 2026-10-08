@@ -264,14 +264,16 @@ function buildRetryDelayMinutes(attempts) {
 // every retry — queueing them just produces a 5-minute error drip until
 // dead-letter. Only network failures, timeouts, 429 and 5xx are retryable.
 function isPermanentIngestError(error) {
-  const status = Number(error && error.status);
-  return status >= 400 && status < 500 && status !== 429;
+  return OBApiClient.isPermanentError(error);
 }
 
 function describeIngestError(error) {
   const status = Number(error && error.status);
   if (status === 401 || status === 403) {
     return `API key rejected (HTTP ${status}) — check the key in the Configure screen`;
+  }
+  if (status === 404) {
+    return 'No such route (HTTP 404) — check the REST core URL in the Configure screen, and that /api is on';
   }
   return error && error.message ? error.message : String(error);
 }

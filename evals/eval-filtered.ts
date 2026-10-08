@@ -13,9 +13,10 @@
  *
  * Who sends a filter: not the server's own `search_thoughts`, whose input has
  * no filter and which passes `{}` on every call. The filter argument is reached
- * by direct SQL, by PostgREST RPC callers, and by community code — the
- * enhanced-mcp integration's `metadata_filter`, the local-brain recipe's search
- * function. This eval measures the function they call.
+ * by direct SQL, by PostgREST RPC callers, and by community code (the
+ * enhanced-mcp integration's `metadata_filter` and the local-brain recipe's
+ * search were two, both retired since: SMD-1931, SMD-1800). This eval measures
+ * the function they call.
  *
  * ── The task, and why it is not "title finds its document" ──────────────────
  *

@@ -59,10 +59,12 @@
  * Each is matched on the request target's path as the library reads it, never
  * decoded or resolved. A target that is not a path (absolute-form, which only
  * a caller on the mesh can send: the proxy rewrites it), or that holds a
- * character the library would read another way (`#`, whitespace), is 400, and a throw in
- * the listener, or a rejection of the promise it returns, is that request's
- * 500, not the process's end; the handlers and timeouts it hands on run
- * outside that guard (target.ts, SMD-2615).
+ * character the library would read another way (`#`, whitespace), is 400. A
+ * throw in the listener, or a rejection of the promise it returns, is that
+ * request's 500, not the process's end (target.ts, SMD-2615). A throw in a
+ * handler, timeout or timer it hands on is logged and the process kept:
+ * each one is made by target.ts's guard, and its self-check holds this file
+ * to that (SMD-2665).
  *
  * State is one SQLite file (store.ts) in the `auth` service's own volume, so a
  * restart keeps every session, grant, refresh token and registered client.
@@ -96,7 +98,7 @@ import { ACCESS_TOKEN_TYPE, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
 import { Bucket, clientAddress, clientIdOf, clientKey, countsAgainstClient, retryAfter, SIGN_IN_RATE, SignInBackoff, TOKEN_FAILURES, TOKEN_PATH, Tries, TRIES_PER_SIGN_IN, trustedProxy, WindowLimit } from "./limits.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
 import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
-import { serve, targetOf } from "./target.ts";
+import { guard, say, serve, targetOf, whyOf } from "./target.ts";
 
 /**
  * A start that is refused: said, and after 30 s exit 2, which the restart
@@ -248,11 +250,11 @@ provider.proxy = true;
 // A fault of the server's own (the store full or locked, a bug) answers
 // `server_error` with nothing internal in the body, and the library reports it
 // only on this event: logged here, or `compose logs` would show nothing.
-provider.on("server_error", (_ctx, error) => console.error(`server error: ${(error as Error).stack ?? (error as Error).message}`));
+provider.on("server_error", guard("logging a server error", (_ctx, error) => console.error(`server error: ${(error as Error).stack ?? (error as Error).message}`)));
 
-provider.on("grant.error", (ctx, error) => {
+provider.on("grant.error", guard("adding a refusal's detail", (ctx, error) => {
   if (ctx.body && typeof ctx.body === "object") Object.assign(ctx.body, detailOf(error));
-});
+}));
 
 // The abuse limits (limits.ts). Per address only with a trusted proxy in
 // front: behind a tunnel every client is one address, and a per-address
@@ -270,12 +272,12 @@ const addressOf = (req: http.IncomingMessage) => (trusted.size ? clientAddress(r
 // The keys one address can make are then the clients holding a secret: the
 // fixed ones and at most OB1_AUTH_MAX_CLIENTS registered.
 const tokenFailures = new WindowLimit(TOKEN_FAILURES.limit, TOKEN_FAILURES.windowMs);
-const countFailedClient = (ctx: KoaContextWithOIDC, error: Error) => {
+const countFailedClient = guard("counting a failed client authentication", (ctx: KoaContextWithOIDC, error: Error) => {
   const oidc = ctx.oidc as unknown as { client?: { clientSecret?: unknown }; params?: { client_id?: unknown; client_secret?: unknown; client_assertion?: unknown } } | undefined;
   const params = oidc?.params ?? {};
   const address = addressOf(ctx.req);
   if (address !== undefined && typeof oidc?.client?.clientSecret === "string" && countsAgainstClient(error as { error?: string }, { authorization: ctx.headers.authorization, ...params })) tokenFailures.record(clientKey(address, clientIdOf(ctx.headers.authorization, params.client_id, params.client_assertion)));
-};
+});
 
 provider.on("grant.error", countFailedClient);
 provider.on("revocation.error", countFailedClient);
@@ -548,22 +550,26 @@ const server = serve((req, res) => {
         if (!settled) registrationsByAddress.giveBack(address);
         settled = true;
       };
-      res.on("finish", () => {
+      res.on("finish", guard("a registration's finish", () => {
         if (res.statusCode !== 201) giveBackSlot();
         settled = true;
-      });
+      }));
     }
     if (!registrations.admit()) {
       // RFC 7591 names no error for a full server; this is OAuth's own for "not now".
       res.writeHead(503, { "content-type": "application/json", "retry-after": "3600", "cache-control": "no-store" });
       return res.end(JSON.stringify({ error: "temporarily_unavailable", error_description: `the authorization server holds as many registered clients as it allows (${C.maxClients}); registered clients that go unused are removed after a day` }));
     }
-    res.on("close", () => registrations.release());
+    res.on("close", guard("a registration's close", () => registrations.release()));
     // A registration that stalls holds its place only this long (registration.ts).
-    req.setTimeout(REGISTRATION_TIMEOUT_MS, () => {
-      giveBackSlot();
-      req.destroy();
-    });
+    // The destroy frees the gate's place (its close releases it), so no throw may skip it.
+    req.setTimeout(REGISTRATION_TIMEOUT_MS, guard("a stalled registration's timeout", () => {
+      try {
+        giveBackSlot();
+      } finally {
+        req.destroy();
+      }
+    }));
   }
   if (path === "/auth" || path.startsWith("/auth/")) {
     mount(req, `${path.slice("/auth".length) || "/"}${search}`);
@@ -571,32 +577,48 @@ const server = serve((req, res) => {
   }
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("not found");
-}).listen(3000, "0.0.0.0", () => {
+}).listen(3000, "0.0.0.0", guard("the start", () => {
   console.log(`oidc-provider on Bun ${Bun.version}: issuer ${L.issuer}`);
   // The first purge once the listener is up, so a large store never holds up the start.
   purge();
-});
+}));
 
 // A stop (compose's SIGTERM) closes the listener, lets the requests in flight
 // finish for up to 5 s, closes the store and exits; without a handler Bun
 // ignored the signal and every stop waited out the grace period for SIGKILL
 // (server-portable/shutdown.ts measured the same). A second signal, or the
-// bound, cuts the wait short with exit 1.
+// bound, cuts the wait short with exit 1. A throw on the way out ends the
+// process too, exit 1: kept, a process that has stopped listening would serve
+// no one, and the restart policy would never replace it.
 let stopping = false;
 function stop(signal: string) {
   const done = (code: number) => {
-    store.close();
-    console.log(`stopped on ${signal}${code ? ", requests still in flight cut off" : ""}`);
-    process.exit(code);
+    const cut = code ? ", requests still in flight cut off" : "";
+    try {
+      store.close();
+    } catch (e) {
+      say(() => `closing the store on ${signal} failed: ${whyOf(e)}`);
+      code = 1;
+    }
+    try {
+      console.log(`stopped on ${signal}${cut}`);
+    } finally {
+      process.exit(code);
+    }
   };
   if (stopping) return done(1);
   stopping = true;
-  server.close(() => done(0));
-  server.closeIdleConnections();
-  setTimeout(() => done(1), 5000).unref();
+  try {
+    server.close(guard("the stop", () => done(0)));
+    server.closeIdleConnections();
+    setTimeout(guard("the stop's bound", () => done(1)), 5000).unref();
+  } catch (e) {
+    say(() => `the stop on ${signal} failed: ${whyOf(e)}`);
+    done(1);
+  }
 }
-process.on("SIGTERM", () => stop("SIGTERM"));
-process.on("SIGINT", () => stop("SIGINT"));
+process.on("SIGTERM", guard("the stop on SIGTERM", () => stop("SIGTERM")));
+process.on("SIGINT", guard("the stop on SIGINT", () => stop("SIGINT")));
 
 /** The store's purge (store.ts): once listening, then hourly. It logs only when it removed something, and a failure is logged and retried next hour. */
 function purge() {
@@ -607,4 +629,4 @@ function purge() {
     console.error(`purge failed: ${(e as Error).stack ?? (e as Error).message}`);
   }
 }
-setInterval(purge, 3_600_000).unref();
+setInterval(guard("the hourly purge", purge), 3_600_000).unref();

@@ -331,8 +331,8 @@ const AFTER: Arm = UPTO === undefined ? "after (014 on)" : `after (014–${UPTO}
  * Planted selectivities. `tiers` is one key so a filter is one containment
  * test — the shape a direct caller sends as `{"type": "decision"}`. (The
  * server's own `search_thoughts` sends no filter; the filter argument is
- * reached by direct SQL, PostgREST RPC callers and community code such as the
- * enhanced-mcp integration's `metadata_filter`.) Every tier is a threshold on
+ * reached by direct SQL, PostgREST RPC callers and community code — the
+ * retired enhanced-mcp integration's `metadata_filter` was one, SMD-1931.) Every tier is a threshold on
  * ONE uniform draw per row, so the tiers nest (a row in t001 is also in t01,
  * t1, t10, t50, and in whichever fixed-count tiers are broader) and every
  * selectivity is a superset of the next: the comparison is between filter

@@ -7,8 +7,9 @@
  * hot-swap outages) blocks the three-tier fallback from ever advancing.
  *
  * `isTransientError` duplicates the classifier logic that lives in
- * `helpers.ts` (intentionally — we keep `helpers.ts` as a verbatim copy of
- * the enhanced-mcp helpers so it stays diff-clean against upstream). The
+ * `helpers.ts` (intentionally — `helpers.ts` began as a verbatim copy of
+ * upstream's enhanced-mcp helpers and is kept diff-clean against upstream's
+ * file; the fork's copy of enhanced-mcp retired with SMD-1931). The
  * worker fallback loops use this to distinguish 5xx/429/network errors
  * (retry on the next provider) from 4xx/auth/parse errors (abort the chain).
  */
