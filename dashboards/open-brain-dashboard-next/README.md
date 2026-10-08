@@ -1,5 +1,8 @@
 # Open Brain Dashboard (Next.js)
 
+> [!NOTE]
+> **Retired gateway (SMD-1931).** This dashboard talks to `integrations/open-brain-rest`, which SMD-1931 retired: every route it called has a fate against the REST core in [`docs/vendored-disposition.md`](../../docs/vendored-disposition.md), "The brain's outward surface". It is deployed nowhere, CI only builds it, and it retires with SMD-2280's harvest into the operator GUI.
+
 <div align="center">
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
@@ -31,7 +34,7 @@ Provides 9 pages for managing your thoughts:
 
 ## Prerequisites
 
-- A working Open Brain setup with the **REST API gateway** (`open-brain-rest`) deployed from [integrations/open-brain-rest](../../integrations/open-brain-rest/)
+- A working Open Brain setup with the **REST API gateway** (`open-brain-rest`) deployed from `integrations/open-brain-rest` (retired by SMD-1931; the note above)
 - **Node.js 18+** installed
 - A **Vercel account** (free tier works) or any Node.js hosting
 
@@ -39,7 +42,7 @@ Provides 9 pages for managing your thoughts:
 
 | Credential | Where to get it | Where it goes |
 |------------|----------------|---------------|
-| `NEXT_PUBLIC_API_URL` | Where `open-brain-rest` is served — `http://127.0.0.1:8787` when run under Bun from a checkout ([its README](../../integrations/open-brain-rest/README.md#deploy)) | `.env` or hosting env vars |
+| `NEXT_PUBLIC_API_URL` | Where `open-brain-rest` is served — `http://127.0.0.1:8787` when run under Bun from a checkout | `.env` or hosting env vars |
 | `AGENT_MEMORY_API_URL` | Where `agent-memory-api` is served, run the same way — set it: the fallback derives it from `NEXT_PUBLIC_API_URL` only when that ends in `/open-brain-rest` | `.env` or hosting env vars |
 | `AGENT_MEMORY_WORKSPACE_ID` | Optional. Default workspace for Agent Memory governance views | `.env` or hosting env vars |
 | `AGENT_MEMORY_PROJECT_ID` | Optional. Default project filter for Agent Memory governance views | `.env` or hosting env vars |
@@ -112,7 +115,7 @@ Or connect the folder to Vercel via the dashboard. Set the environment variables
 
 ### Step 5 (alternative): Deploy to Cloudflare Workers (optional)
 
-If you're already on Cloudflare for the [`open-brain-rest`](../../integrations/open-brain-rest/) gateway, you can host the dashboard on the same platform via the [`@opennextjs/cloudflare`](https://opennext.js.org/cloudflare) adapter. The older `@cloudflare/next-on-pages` adapter caps at Next 15.5.x and doesn't support this dashboard's Next 16.
+If you're already on Cloudflare for the `open-brain-rest` gateway, you can host the dashboard on the same platform via the [`@opennextjs/cloudflare`](https://opennext.js.org/cloudflare) adapter. The older `@cloudflare/next-on-pages` adapter caps at Next 15.5.x and doesn't support this dashboard's Next 16.
 
 The repo ships the two config files this needs out of the box (`open-next.config.ts` and `wrangler.jsonc`); rename the Worker in `wrangler.jsonc` if you want something other than `ob-dashboard`.
 
@@ -279,4 +282,4 @@ Do not enable `OB1_DEMO_AUTH_BYPASS` in shared previews or production. It exists
 
 4. **Search returns no results** — Ensure your thoughts have embeddings. Semantic search requires the `embedding` column to be populated. Run an embedding backfill if needed.
 
-5. **Ingest page shows "extracting" forever** — the `open-brain-rest` gateway's `/ingest` captures the text as one thought with no extraction stage, and its `/ingestion-jobs` routes are stubs; there is no separate extraction server in its path to check. A page that waits on job status is waiting on a stub. The `rest-api` gateway (`integrations/rest-api`) is the one that proxies to smart-ingest, through its `SMART_INGEST_URL` (SMD-2110).
+5. **Ingest page shows "extracting" forever** — the `open-brain-rest` gateway's `/ingest` captures the text as one thought with no extraction stage, and its `/ingestion-jobs` routes are stubs; there is no separate extraction server in its path to check. A page that waits on job status is waiting on a stub. The `rest-api` gateway that proxied to smart-ingest is retired too (SMD-1931).

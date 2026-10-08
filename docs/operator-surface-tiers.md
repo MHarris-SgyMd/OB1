@@ -214,17 +214,19 @@ Read against the tree on 2026-09-27.
 | Jev, the LLM env forwarding, the preflight entrypoint | Move from the `server` service to the REST core | SMD-2284 |
 | Release images and CI | `ob1-server` becomes one image per server; the full-stack job goes through the proxy; the Workers build retires | SMD-2296, SMD-2288 |
 | Docs and skills with the one-process `?key=` URL shape | One bring-up path and the new URLs | SMD-2288 |
-| `chrome-capture-extension`, `recipes/*` MCP callers, agent-memory plugins | New URLs; the extension needs `/api` or a move to `/mcp` once `rest-api` retires | SMD-1931 |
+| `chrome-capture-extension`, `recipes/*` MCP callers, agent-memory plugins | New URLs; the extension is a client of `/api` (`POST /v1/thoughts`) since `open-brain-rest` retired | SMD-1931 |
 | Secrets in `deploy/.env` | The authorization server's signing key, its cookie keys, each static client's secret, and the operator's password (which the operator may remove once hashed) and its argon2id hash, written by `deploy/auth/provision.ts --init`, with the backup note (`deploy/README.md`, "Authorization server"). The container is given the hash, never the password | SMD-2285 |
 | The authorization server's store, backup and restore | One SQLite file in the `auth` service's own volume, through an oidc-provider adapter of ours (`deploy/auth/store.ts`), backed up with `VACUUM INTO` beside the running server. Decided 2026-10-01 in place of an `ob1_auth` role and database on the brain's Postgres: the internet-facing server then holds no Postgres credential (once SMD-1846 puts Postgres on the mesh beside it, a credential is still all that stands between them), and `pg_dump openbrain` and `db/tier.ts --refresh` are unchanged | SMD-2285 |
 | `docs/01-getting-started.md` (quick tunnel first) | OAuth and passkeys need a stable origin: a named tunnel, Tailscale Funnel or your own domain. The quick tunnel stays key-only | SMD-2382 |
 
 ## Retirement conditions
 
+Which vendored integrations become plugins and which retire was decided on 2026-10-08 (SMD-1931), with each REST gateway route's fate: [`docs/vendored-disposition.md`](vendored-disposition.md), "The brain's outward surface". Plugins: agent-memory-api, smart-ingest and readwise-capture (SMD-2690), slack- and telegram-capture (SMD-2101). Retired: the two REST gateways, enhanced-mcp, the delete- and update-thought servers and discord-capture, all gone from the tree with SMD-1931; and kubernetes-deployment, whose removal is SMD-2288. The Chrome capture extension becomes a client of `/api`.
+
 | Surface | Retires when |
 |---|---|
 | `dashboards/open-brain-dashboard-next`, `-pro` | SMD-2280's harvest list is recorded. They are deployed nowhere. |
-| `integrations/open-brain-rest`, `integrations/rest-api` | Every route has a disposition against the REST core (SMD-1931) |
+| `integrations/open-brain-rest`, `integrations/rest-api` | Every route has a disposition against the REST core (SMD-1931). **Met and retired** (SMD-1931 PR 3). |
 | server-portable's MCP registration | The MCP server passes parity and the stable tier's `/mcp` routes to it (SMD-2287) |
 | The Cloudflare Workers target and the PostgREST store it selects | After SMD-2287's cutover (SMD-2288) |
 | `dashboards/open-brain-dashboard` (current SvelteKit) | The REST core and MCP server are stable (decision 2) |
@@ -248,7 +250,6 @@ Read against the tree on 2026-09-27.
   - the client-metadata fetch policy (resolve-and-refuse, or an allowlist) (SMD-2285). Whether `openbrain` revokes PUBLIC's CONNECT went with the `ob1_auth` role: the authorization server reaches no database (2026-10-01).
 
   The survey behind decision 13 (eight candidates at the versions checked on 2026-09-28) is on SMD-2285.
-- **Which vendored integrations become plugins and which retire** (agent-memory-api, smart-ingest, the capture sources in SMD-2101). SMD-1931 gives the dispositions under decision 9. The GUI's agent-memory and kanban views follow from them.
 - **The importance scale, the restricted-content lock and kanban's status column.** Each is non-core schema today (`schemas/enhanced-thoughts`, `schemas/workflow-status`); adopting one is a migration decision of its own.
 - **Operations that exist only on the command line or not at all**, needed by the GUI's later views, filed when the GUI reaches them:
   - supersession accept/reject (`db/consolidate.ts --accept/--reject`), where the list tool now also has a `stale` status (migration 063) and a `lineage` selector (070);

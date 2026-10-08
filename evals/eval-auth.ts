@@ -90,7 +90,7 @@ import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { discoverAuthorizationServerMetadata, discoverOAuthProtectedResourceMetadata } from "@modelcontextprotocol/client";
 import { layoutFromEnv } from "../deploy/auth/layout.ts";
-import { guardProbes } from "./auth/fetch-guard-probes.ts";
+import { answerProbes, guardProbes } from "./auth/fetch-guard-probes.ts";
 import { Browser, claimsOf, pkce, tampered, tokenRequest, type Claims, type TokenReply } from "./auth/flows.ts";
 import { ACCESS_TOKEN_TYPE, INTERNAL, layout, NATIVE_REDIRECT, TIERS, TOKEN_EXCHANGE, type Layout } from "./auth/policy.ts";
 import { route } from "./auth/proxy.ts";
@@ -930,15 +930,17 @@ async function verify(candidate: Candidate, json: boolean): Promise<number> {
 
 // --- self-check -----------------------------------------------------------
 
-function selfCheck(): number {
+async function selfCheck(): Promise<number> {
   const failures: string[] = [];
   let probes = 0;
   const expect = (what: string, ok: boolean) => {
     probes++;
     if (!ok) failures.push(what);
   };
-  // The fetch guard's rules, by its own probes (evals/auth/fetch-guard-probes.ts).
+  // The fetch guard's rules, by its own probes (evals/auth/fetch-guard-probes.ts),
+  // and how it reads an answer, against peers on loopback (SMD-2665).
   guardProbes(expect);
+  await answerProbes(expect);
 
   // The proxy's table.
   const routes: [string, string | null][] = [
@@ -1029,7 +1031,7 @@ function selfCheck(): number {
 // --- main -----------------------------------------------------------------
 
 const args = process.argv.slice(2);
-if (args[0] === "--self-check") process.exit(selfCheck());
+if (args[0] === "--self-check") process.exit(await selfCheck());
 const verb = args[0];
 const candidate = args[1] as Candidate;
 if (!["--up", "--verify", "--down"].includes(verb)) usage("unknown verb");

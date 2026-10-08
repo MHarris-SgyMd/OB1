@@ -2,15 +2,15 @@
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
 import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";
-import { authenticateRequest, canCapture, canRead, canWrite, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
+import { authenticateRequest, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
 import { createCore, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
-import type { ToolName } from "./tools.ts";
+import { mayCall, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
-import { labelPart, withSseKeepalive } from "./sse.ts";
+import { abandonedRequestLine, labelPart, requestLabel, withSseKeepalive } from "./sse.ts";
 import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
@@ -18,7 +18,7 @@ import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDoc
 export { parseFilter, withActorFilter } from "./core/filter.ts";
 export { actorLine, demotedLine, currentNote, currentSearchHint, ingestedNotice, INGESTED_NOTICE, minTrustHint } from "./render.ts";
 export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";
-export { SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
+export { abandonedRequestLine, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
 
 // The core (SMD-2283): every tool's logic over the store and the model
 // provider, as functions of a principal and a typed input (core/index.ts). Built
@@ -63,14 +63,15 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
     return registerTool(...args.slice(0, -1), (...call: unknown[]) => toolCalls.track(() => handler(...call)));
   };
 
-  // A tool whose logic is in core/ (SMD-2283): registered only when `allowed` —
-  // the key's scope; a tool a key may not use is absent from its tools/list,
-  // not refused — with the SDK validating the input against the tool's spec,
+  // A tool whose logic is in core/ (SMD-2283): registered only where the key's
+  // scope unlocks the tool's group in the manifest (tools.ts's mayCall, the gate
+  // the REST core asks too, SMD-1931) — a tool a key may not use is absent from
+  // its tools/list, not refused — with the SDK validating the input against the tool's spec,
   // `run` calling the operation and rendering its outcome (render.ts), and
   // `fault` saying what an operation throws (review pass 6: sixteen copies of
   // that body before).
-  const registerOp = <K extends ToolName>(name: K, allowed: boolean, run: (input: Input<K>) => Promise<say.Reply>, fault: (err: unknown, input: Input<K>) => say.Reply): void => {
-    if (!allowed) return;
+  const registerOp = <K extends ToolName>(name: K, run: (input: Input<K>) => Promise<say.Reply>, fault: (err: unknown, input: Input<K>) => say.Reply): void => {
+    if (!mayCall(principal, name)) return;
     // The generic K loses the SDK's per-tool inference of `input`; SPECS[name]'s
     // schema is what it validates against, and Input<K> is that schema's output.
     const register = server.registerTool as unknown as (name: string, spec: unknown, handler: (input: Input<K>) => Promise<say.Reply>) => unknown;
@@ -85,10 +86,11 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
 
   // The read tools: each is its operation in core/reads.ts — the search op
   // with its egress gate and query log, the store reads, the probes — and its
-  // words in render.ts, for a key that may read; a fault is `Error: <message>`
-  // with the tool's hint where it has one, FAILED beside it.
+  // words in render.ts, behind the manifest's gate like every tool (each is in
+  // the read group); a fault is `Error: <message>` with the tool's hint where it
+  // has one, FAILED beside it.
   const readTool = <K extends ToolName>(name: K, run: (input: Input<K>) => Promise<say.Reply>, hint?: (input: Input<K>) => ((msg: string) => string) | undefined): void =>
-    registerOp(name, canRead(principal), run, (err, input) => say.failed(err, { hint: hint?.(input) }));
+    registerOp(name, run, (err, input) => say.failed(err, { hint: hint?.(input) }));
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and
   // deep research look for exact read-only `search` and `fetch` tool shapes. Why
@@ -129,8 +131,8 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
 
   // Tool 3b: the change feed (migration 052, SMD-1296) — what moved since a
   // time or a cursor, for an agent that returns after a break. Gated like the
-  // other read tools (canRead: a read or a write key sees it, a capture-only
-  // key does not). The store calls one SQL function that chooses the page
+  // other read tools (a read or a write key sees it, a capture-only key does
+  // not). The store calls one SQL function that chooses the page
   // and bounds the rendering; the operation decides `since`, render.ts lays the
   // rows out.
   readTool("thought_changes", async (input) => say.renderThoughtChanges(await core.thoughtChanges(principal, input)), () => say.changesHint);
@@ -180,7 +182,7 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
   // egress gate, the parallel model calls, the write and its cites — are
   // core/writes.ts's; a fault is STORE_UNAVAILABLE, a transient the session
   // hook keeps and retries (SMD-1978).
-  registerOp("capture_thought", canCapture(principal),
+  registerOp("capture_thought",
     async (input) => say.renderCapture(await core.capture(principal, input)),
     (err) => say.storeUnavailable(err));
 
@@ -190,11 +192,11 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
    * never registered and do not appear in tools/list. A fault keeps the tool's
    * own lead, `update_thought failed:`, FAILED beside it.
    */
-  registerOp("update_thought", canWrite(principal),
+  registerOp("update_thought",
     async (input) => say.renderUpdate(await core.updateThought(principal, input)),
     (err) => say.failed(err, { lead: "update_thought failed: " }));
 
-  registerOp("delete_thought", canWrite(principal),
+  registerOp("delete_thought",
     async (input) => say.renderDelete(await core.deleteThought(principal, input)),
     (err) => say.failed(err, { lead: "delete_thought failed: " }));
 
@@ -207,15 +209,15 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
   // (Workers) deploy the store throws the SQL-only reason, which is permanent,
   // not the transient STORE_UNAVAILABLE capture's implies. The keyed REST mirror
   // is the app.post guard below, over the same operations.
-  registerOp("retry_failed", canWrite(principal),
+  registerOp("retry_failed",
     async (input) => say.renderRetryFailed(await core.retryFailed(principal, input)),
     (err) => say.failed(err, { lead: "retry_failed failed: " }));
 
-  registerOp("release_stale_leases", canWrite(principal),
+  registerOp("release_stale_leases",
     async (input) => say.renderReleaseStaleLeases(await core.releaseStaleLeases(principal, input)),
     (err) => say.failed(err, { lead: "release_stale_leases failed: " }));
 
-  registerOp("run_worker", canWrite(principal),
+  registerOp("run_worker",
     async (input) => say.renderRunWorker(await core.runWorker(principal, input)),
     (err) => say.failed(err, { lead: "run_worker failed: " }));
 
@@ -619,7 +621,8 @@ app.get("*", async (c, next) => {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  // The keyed body is brain_info's record, so the key needs what that tool needs.
+  if (!principal || !mayCall(principal, "brain_info")) return c.text("ok", 200, corsHeaders);
   // A HEAD has no body to carry the record: liveness, as without a key, and no
   // read for nothing (review pass 1: it paid the whole read, and the deadline).
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
@@ -662,7 +665,7 @@ app.get("*", async (c, next) => {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, "worker_status")) return c.text("ok", 200, corsHeaders);
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
   // The same identity gate as /health: a revoked or unresolved key is shown nothing.
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -688,7 +691,7 @@ app.get("*", async (c, next) => {
 // endpoint (app.on(MCP_METHODS, "*") below), so this guard is registered BEFORE
 // it and falls through with next() for any path it does not own; the two action
 // paths it handles never reach the transport, and no MCP client posts JSON-RPC
-// there. WRITE-scoped (canWrite) — stricter than /worker-status's read mirror; a
+// there. Gated as the tool each mirrors (mayCall: write scope today) — stricter than /worker-status's read mirror; a
 // read/capture/no/wrong/revoked key is shown and does nothing (plain "ok",
 // parity with /health and /worker-status). Args ride the JSON body; the
 // refusals-as-values are the tool's, as a 400 carrying the same code, and the
@@ -705,7 +708,7 @@ app.post("*", async (c, next) => {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !canWrite(principal)) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, isRetry ? "retry_failed" : isRelease ? "release_stale_leases" : "run_worker")) return c.text("ok", 200, corsHeaders);
   // The same identity gate as /worker-status: a revoked or unresolved key does nothing.
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([
@@ -775,7 +778,7 @@ app.get("*", async (c, next) => {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, "job_status")) return c.text("ok", 200, corsHeaders);
   // HEAD carries no body for a job's state or stream: liveness, before the
   // identity resolve, exactly as /health and the worker mirrors answer it.
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
@@ -802,33 +805,9 @@ app.get("*", async (c, next) => {
 });
 
 
-/**
- * What a log line may say about a request: the JSON-RPC method and, for a
- * tool call, the tool's name — never the arguments, which are the thought —
- * each as `labelPart` admits it, since both are the caller's strings. A batch
- * is named by its first message; anything unreadable is `?`.
- */
-export function requestLabel(bodyText: string | null): string {
-  try {
-    const parsed: unknown = JSON.parse(bodyText ?? "");
-    const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const msg = (first ?? {}) as { method?: unknown; params?: { name?: unknown } };
-    const method = typeof msg.method === "string" ? labelPart(msg.method) : "?";
-    return typeof msg.params?.name === "string" ? `${method} ${labelPart(msg.params.name)}` : method;
-  } catch {
-    return "?";
-  }
-}
-
-/**
- * The line the server logs when a client closes the connection before the
- * response is complete — the trace SMD-1864's captures never left. The tool
- * runs to its end regardless (a capture may still land), which the line says,
- * so an operator reading a duplicate row later knows where it came from.
- */
-export function abandonedRequestLine(label: string, elapsedMs: number): string {
-  return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
-}
+// requestLabel and abandonedRequestLine live in sse.ts, beside the keepalive,
+// so the vendored MCP servers' copies of it log a client that leaves the same
+// way (SMD-2001).
 
 /**
  * The same close when the server's own stop made it: the request was still

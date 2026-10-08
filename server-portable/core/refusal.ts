@@ -47,9 +47,14 @@ export type Refusal =
 
 /** What is wrong with a caller's `metadata` argument (SMD-2014). */
 export type MetadataProblem = "too_many_keys" | "bad_key" | "reserved_key" | "ticket_key" | "bad_value" | "value_too_long";
-/** The keys a ticket's lifecycle is read from (068's head, board-sync's plan), which a key that cannot read may not set (SMD-2617). */
-export const TICKET_META_KEYS = ["issue", "status", "status_type", "linear_updated_at"] as const;
-/** The four as the tool description and the refusal name them, one rendering for both. */
+/**
+ * The keys a ticket's lifecycle is read from (068's head and node_lifecycle,
+ * 071's dependencies, 079's pairing, board-sync's plan), which a key that cannot
+ * read may not set (SMD-2617). `ticket` files a thought under a ticket, read
+ * ahead of `issue` (SMD-2657).
+ */
+export const TICKET_META_KEYS = ["issue", "ticket", "status", "status_type", "linear_updated_at"] as const;
+/** The keys as the tool description and the refusal name them, one rendering for both. */
 export const TICKET_META_KEYS_TEXT = TICKET_META_KEYS.map((k) => `\`${k}\``).join(", ");
 /** The bounds a caller's `metadata` is held to (SMD-2014): here, beside the refusal that names them, so its words need not load the write path. */
 export const META_VALUE_MAX = 200;

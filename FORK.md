@@ -174,7 +174,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**254 numbered changes** on top of the pin: 1–17 are the table above; 18–254 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**279 numbered changes** on top of the pin: 1–17 are the table above; 18–279 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -415,6 +415,31 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 252 | [Blank options and the hard-stop lapse in extract and consolidate, as reembed since SMD-2304 PR 4](changes/252-blank-options-and-the-hard-stop-lapse-in-extract.md) | SMD-2425 |
 | 253 | [The pass's report beside a review is refused](changes/253-the-pass-s-report-beside-a-review-is-refused.md) | SMD-2405 |
 | 254 | [A thought's text is fenced in the prose read tools, so it cannot forge a result block](changes/254-a-thought-s-text-is-fenced-in-the-prose-read.md) | SMD-2483 |
+| 255 | [A REST core answers every MCP operation as JSON over the same core, authorized by the key, internal unless the operator opens /api](changes/255-a-rest-core-answers-every-mcp-operation-as-json.md) | SMD-2284 |
+| 256 | [Abuse limits: the authorization server sets its own, and `/mcp` takes none by design](changes/256-abuse-limits-the-authorization-server-sets.md) | SMD-2309 |
+| 257 | [A thought's metadata prints on one line in every reply, so it cannot forge a result block](changes/257-a-thought-s-metadata-prints-on-one-line-in-every.md) | SMD-2510 |
+| 258 | [prefer_current reads the tickets a thought is about, not only its own lifecycle](changes/258-prefer-current-reads-the-tickets-a-thought.md) | SMD-2271 |
+| 259 | [The root connector URL gets a compatibility window that closes with 2.0.0](changes/259-the-root-connector-url-gets-a-compatibility.md) | SMD-2306 |
+| 260 | [A supersession proposal's judge reason and review note print on one line each, so neither can forge an `ID:` line](changes/260-a-supersession-proposal-s-judge-reason.md) | SMD-2533 |
+| 261 | [The judge's reason is stored on one line, by the rule the replies print it with](changes/261-the-judge-s-reason-is-stored-on-one-line.md) | SMD-2536 |
+| 262 | [The MCP server's half of the public origin](changes/262-the-mcp-server-s-half-of-the-public-origin.md) | SMD-2382 |
+| 263 | [Two tickets Linear links are never paired for judgement](changes/263-two-tickets-linear-links-are-never-paired.md) | SMD-2448 |
+| 264 | [A capture-only key's supersedes is no existence oracle](changes/264-a-capture-only-key-s-supersedes-is-no-existence.md) | SMD-2473 |
+| 265 | [The board-sync watermark reaches the record and the compare, and long-running workers report their liveness](changes/265-the-board-sync-watermark-reaches-the-record.md) | SMD-2261 |
+| 266 | [Ollama's repeat limit is a runaway, not a provider outage](changes/266-ollama-s-repeat-limit-is-a-runaway.md) | SMD-2449 |
+| 267 | [The tier stack on proxy paths](changes/267-the-tier-stack-on-proxy-paths.md) | SMD-2294 |
+| 268 | [A `Host` the URL parser refuses, or none](changes/268-a-host-the-url-parser-refuses-or-none.md) | SMD-2535 |
+| 269 | [A capture-only key's re-capture leaves the row it lands on](changes/269-a-capture-only-key-s-re-capture-leaves-the-row.md) | SMD-2539 |
+| 270 | [The seven vendored servers that read their URL answer a `Host` the URL parser refuses, or none, as `localhost` gets answered, not with a 500; a hang-up mid-upload no longer leaves a request pending](changes/270-the-seven-vendored-servers-that-read-their-url.md) | SMD-2595 |
+| 271 | [Preflight's pass rows read the leases and the heartbeats](changes/271-preflight-s-pass-rows-read-the-leases.md) | SMD-2423 |
+| 272 | [A capture-only key cannot state a ticket's lifecycle](changes/272-a-capture-only-key-cannot-state-a-ticket.md) | SMD-2617 |
+| 273 | [A `--follow` worker outlasts a database or provider outage](changes/273-a-follow-worker-outlasts-a-database-or-provider.md) | SMD-2599 |
+| 274 | [The authorization server answers an absolute-form request target 400 instead of stopping, and a throw in a request is that request's 500](changes/274-the-authorization-server-answers-an-absolute.md) | SMD-2615 |
+| 275 | [Extraction and consolidation run as opt-in services](changes/275-extraction-and-consolidation-run-as-opt.md) | SMD-2424 |
+| 276 | [A capture-only key's thought stops being its own once another key or board-sync takes it, a pointer it wrote onto it lapses, and its pointer is re-checked at its own write](changes/276-a-capture-only-key-s-thought-stops-being-its-own.md) | SMD-2638 |
+| 277 | [A peer's odd status can no longer stop the authorization server, and a throw in a function its own code hands on is logged, not the process's end](changes/277-a-peer-s-odd-status-can-no-longer-stop.md) | SMD-2665 |
+| 278 | [The MCP tools and the REST core's operations are two projections of one contract, held by a test that reads both surfaces as a client does, and the REST gateways and three vendored MCP servers retire against it](changes/278-the-mcp-tools-and-the-rest-core-s-operations-are.md) | SMD-1931 |
+| 279 | [A capture-only key is refused `metadata.ticket`](changes/279-a-capture-only-key-is-refused-metadata-ticket.md) | SMD-2657 |
 
 Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->

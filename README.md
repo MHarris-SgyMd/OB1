@@ -43,7 +43,7 @@ The 20 most recent merged PRs. This list is generated from GitHub and refreshes 
 | [Content-fingerprint-dedup: add write-time fingerprint trigger](recipes/content-fingerprint-dedup/) | Content-fingerprint-dedup: add write-time fingerprint trigger. | [@eazene](https://github.com/eazene) |
 | [Fix readwise-import against content_fingerprint unique index](recipes/readwise-import/) | Fixes readwise-import against content_fingerprint unique index. | [@eazene](https://github.com/eazene) |
 | [Persistent wiki pages](db/README.md#the-migrations) | Retired (SMD-1812) — on this fork the page store is core, migration 064: `pages`, `page_sections`, `page_section_revisions` and `write_page_section`'s regen guard, a page being a thought whose text is its render (`db/README.md`, migration 064) | — |
-| [Fix update-thought-mcp deploy-blocking bugs](integrations/update-thought-mcp/) | Fixes update-thought-mcp deploy-blocking bugs. | [@eazene](https://github.com/eazene) |
+| [Fix update-thought-mcp deploy-blocking bugs](skills/updating-thoughts/) | Retired (SMD-1931) — on this fork `update_thought` is a core tool, listed for a write key; `skills/updating-thoughts` uses it | — |
 | [Reject non-POST MCP requests with 405 to prevent GET handshake hang](integrations/kubernetes-deployment/) | Reject non-POST MCP requests with 405 to prevent GET handshake hang. | [@jcpoyser](https://github.com/jcpoyser) |
 | [Fix ob-graph MCP GET route causing SSE reconnect storm](recipes/ob-graph/) | Fixes ob-graph MCP GET route causing SSE reconnect storm. | [@eazene](https://github.com/eazene) |
 | [Fix UUID id pagination in thought-enrichment backfills](recipes/thought-enrichment/) | Fixes UUID id pagination in thought-enrichment backfills. | [@themacmarketer](https://github.com/themacmarketer) |
@@ -158,7 +158,6 @@ MCP server extensions, alternative deployment targets, and capture sources beyon
 | [Agent Memory API](integrations/agent-memory-api/) | Runtime-neutral recall, write-back, review, inspector, and recall-trace API for OB1 Agent Memory | OB1 Team |
 | [OpenClaw Agent Memory](integrations/openclaw-agent-memory/) | OpenClaw plugin and publishing package for using OB1 Agent Memory from OpenClaw workflows | OB1 Team |
 | [Slack Capture](integrations/slack-capture/) | Quick-capture thoughts via Slack messages with auto-embedding and classification | Core |
-| [Discord Capture](integrations/discord-capture/) | Discord bot that captures messages into Open Brain, mirroring the Slack pattern | Core |
 
 ### [`/schemas`](schemas/) — Database Extensions
 

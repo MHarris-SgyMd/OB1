@@ -1,0 +1,133 @@
+# 265. The board-sync watermark reaches the record and the compare, and long-running workers report their liveness (SMD-2261)
+
+**What changed.**
+- **The record.** `readDatabaseFacts` (`server-portable/brain-info.ts`) gains a guarded read, `boardSync`, taken with the counts: `max(metadata->>'linear_updated_at')`, which `sync-linear.ts` writes. It is normalised to an ISO instant in UTC. It is null when no thought carries a usable one. A read that did not answer is named in `unread`. Preflight's `stats: false` read doesn't take it. The MCP server and the REST core each call the same core reader, so the field appears at once on the `brain_info` tool (a `Board sync` row), keyed `/health` and `GET /v1/brain`.
+- **The compare.** `db/brain-compare.ts` reads the watermark from the `/health` record it already fetched for the identity, so it makes no new call. The Freshness section prints `board sync: a=…  b=…`. The verdict names watermarks half a day or more apart (by magnitude, so the standing does not depend on which brain is `a`), or a brain holding none, and the exit code counts it. Two brains holding none claim nothing about watermarks. A value that is not the server's ISO instant reads `unread`. A server older than this change sends no field: it reads `unread` and is not called older. A server that has the field but did not read it (a read that timed out or failed; it is the last the keyed `/health` deadline reaches) makes the verdict "not certain" rather than "current", with exit 0 as for any unread axis. The "board-sync watermark is not on the read surface" note is gone.
+
+**Why.** A Linear status move rewrites a ticket's thought; it doesn't add one. So a canary that missed a day of board moves has the same thought count, the same newest capture and the same ledger as stable. It is confidently stale, and until now nothing the compare read could show it (SMD-2109's motivating incident). The watermark is a high-water mark: the newest board move a brain reflects, not proof it reflects every move before it. So the verdict words the gap as the capture gap is worded ("watermark is N days older"), not as how long a brain has been stale. A canary refreshed after a quiet week reads a week older the hour the board next moves. The ticket's own wording, "M days behind on board sync", would have overclaimed. The watermark moves when the board does, so it says nothing of whether a sync is alive. Liveness is the heartbeat in PR 2.
+
+**Safety.** The record is rendered `AS_RECORD`, with no `guard()`, while the value comes from a thought's metadata. So only a full ISO instant with its offset that Postgres reads as a timestamp counts. A bare date, a word `timestamptz` accepts (`infinity`, `now`), an impossible month and free text are passed over rather than failing the read or winning the max. So is an instant past an hour from now. Linear's `updatedAt` is never in the future, and any write key can set the key, so a far-future value would win the max for good; past 9999 in UTC it would also render a shape the record refuses, leaving the field unread for good. The cast sits in an inner `CASE`, after the validity test, because `AND` does not order its operands. "An hour from now" is the database's clock: a host clock more than an hour slow passes a fresh move over until it catches up. The residue: a write key can still set any instant up to an hour from now, or a later one that counts once the clock reaches it, and make a stale brain read current. A write key can rewrite the corpus anyway. The TypeScript side then accepts only the read's own `YYYY-MM-DDTHH:MM:SS.mmmZ` shape, and the compare treats any other value as unread. The pattern is spelled `[0-9]`, not `\d`, because a Bun template drops the backslash. `metadata ? 'linear_updated_at'` uses 001's GIN index. No migration.
+
+**Measured.** The read took 4.2 ms on the stable brain (1,512 thoughts, 715 with a watermark) and 5.1 ms on the canary (1,446 and 702). Today the canary's watermark (2026-10-02T21:19Z) is 2.8 days behind stable's (2026-10-05T16:57Z), which the compare will read as "board-sync watermark is 3 days older" once both serve this tree. Against today's v1.5.0 servers it prints `board sync: a=unread  b=unread`, and that line doesn't move the exit code.
+
+**Verified.**
+- `db/test-brain-compare.ts`, 123 assertions:
+  - the incident: same count, capture and ledger, the watermark a day older, named and exit 1;
+  - newer;
+  - under half a day apart reads "current … board-sync watermarks under half a day apart" and exit 0;
+  - two brains with none claim nothing;
+  - whole days by magnitude (±12 h → ±1, ±36 h → ±2, ±11 h → 0);
+  - none on either side, named as that side's;
+  - an older server, an unread read and a malformed value are no delta, on either side, and exit 0;
+  - a server that has the field but did not read it, or sent a malformed value, makes the verdict "not certain", and its Freshness line says why; an older server and a database that did not answer at all leave the watermark unnamed (the ledger and the count speak for the latter);
+  - the Freshness line's value, `none` and `unread`;
+  - the note gone.
+- `server-portable/test-server.ts` [13a], 623:
+  - the read rides the stats;
+  - `boardSyncValue` keeps only the ISO shape, anchored and to the millisecond;
+  - an answer of another shape (year 10000) leaves the field unread and the other facts read;
+  - the table's row reads value, `none`, or `?`.
+- `server-portable/test-e2e-sql.ts` [14], 438, against real Postgres:
+  - null with no Linear rows;
+  - nine planted values: the newest valid instant (minute precision, `+02:00`) wins, in UTC;
+  - passed over: a later bare date, month 13, an instant two hours from now, no offset, a space for the `T`, a leading or a trailing space;
+  - the same instant under a New York session;
+  - read alone, so each must win: Linear's own `…SS.mmmZ` in the afternoon, a negative offset, a compact `+0300` (an instant no other value lands on), and an instant fifty-five minutes ahead by the database's clock;
+  - an instant seventy-five minutes ahead, alone, is passed over, so the slack is pinned to the hour;
+  - the tool's row agrees.
+- `test-rest-sql` 135 (parity unchanged), `check-fork-consistency` PASS, `tsc` clean for `db/` and `server-portable/`.
+- Mutants:
+  - 6 at the first commit;
+  - 14 after review pass 1 (/tmp/smd2261-pr1-pass1-mutants.py): the clamp, `AT TIME ZONE`, each anchor and optional part of the pattern, the read through `boardSyncValue`, the rounding, the "current" claim, either side's none and unread, and the Freshness `none`;
+  - 9 after review pass 2 (/tmp/smd2261-pr1-pass2-mutants.py): `Z` and fractional seconds refused, a 12-hour clock, the hour of slack dropped, `-` and compact offsets refused, the "not certain" rule dropped or one-sided or loud for an older server;
+  - 7 after review pass 3 (/tmp/smd2261-pr1-pass3-own-mutants.py, the slack as 45 and 115 minutes run again after the read moved to 55): the older-server reason as another string, a missed read moving the exit code, a downed database naming the watermark, the reason dropped from the line, each side of the slack, the compact offset;
+  - all killed (pass 1's script matched "0 failed" as a substring, which can only under-count a kill; pass 2's matches it as a word).
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | "current … board sync under half a day apart" was claimed when neither brain held a watermark, and over a value the compare could not parse | cold read | the claim needs two watermarks compared; a value not shaped as the server's instant reads unread |
+| 1 | any write key can set `linear_updated_at`: a far-future value won the max for good, and past 9999 in UTC rendered `10000-…`, which the record refused, leaving the field unread for good | cold read | instants past an hour from now are passed over (inner `CASE`); the residue is named |
+| 1 | "N days behind on board sync" read as staleness, but it is the gap between two high-water marks | cold read | worded as the capture gap is: "board-sync watermark is N days older"; docs say what it is not |
+| 1 | rounding depended on which brain was `a` (`Math.round(-0.5)` is `-0`) | cold read | whole days by magnitude |
+| 1 | a non-string or malformed value read as "no watermark"; "holds no board-sync rows" was wrong for watermarks cleared by failed writes | cold read | unread; "holds no board-sync watermark" |
+| 1 | `server-portable/README.md`, `render.ts`'s `AS_RECORD`, the `brain_info` description and the assistant context said the record holds only the server's and database's own facts | cold read | each names the watermark and its shape |
+| 1 | surviving mutants: the SQL's `AT TIME ZONE` (the container runs UTC), each pattern anchor and the optional offset, the read bypassing `boardSyncValue`, a-side none and unread, `trunc`/`ceil`, the Freshness `none` | run-it | a New York session read, the one-mark misses, a year-10000 answer, either-side and 11/12/36-hour cases |
+| 2 | a server that has the field but did not read the watermark (the last read the keyed `/health` deadline reaches) gave "current with each other", exit 0 — the incident this change exists to catch | cold read | the verdict is "not certain" naming the board-sync watermark; an older server stays quiet |
+| 2 | "none — no thought carries a Linear watermark" was false when every value was passed over as malformed or future; the docs said "null when no thought carries one" | cold read, run-it | "no usable" in the row, the compare and the docs |
+| 2 | "an hour from now" is the database's clock: a host more than an hour slow passes fresh moves over; a far-future value counts once the clock reaches it | cold read, run-it | named in brain-info.ts, both READMEs and the record |
+| 2 | stale words: the record's "3 days behind", a comment's "a day or more", the e2e claiming the two-hour instant stands for `infinity` | cold read | reworded |
+| 2 | Linear's own shape (`…SS.mmmZ`) was planted only as a loser: refusing `Z` or fractional seconds read every real brain as none and every suite passed; nor were a negative or compact offset, an afternoon hour or the hour of slack ever read | run-it | four single-value reads that must each win |
+| 3 | the "older server stays quiet" rule was held by readings built with the literal reason, never through `boardSyncOf`, and no test pinned exit 0 for a missed read | run-it | `boardSyncOf(absent)` is `OLDER_SERVER`; a missed read exits 0 |
+| 3 | the clamp's slack held anywhere from about 30 minutes to 2 hours; the compact-offset read answered the same instant as the nine-value winner | run-it | 55 minutes ahead must be read and 75 must not; `+0300` reads 06:30Z |
+| 3 | the unread list read "ledger and count and watermark unread on one side" — two "and"s, "one side" false across sides, and the watermark named for a database that did not answer at all | cold read | a list with one "and", no side claimed, the watermark unnamed when the database did not answer |
+| 3 | `server-portable/README.md` still said test-server 619 and test:e2e 430; "carries a watermark" survived in the record and a doc comment; the deploy README did not give the clock or the "not certain" qualifiers; the e2e comment named `infinity`, never planted; the line printed `unread` alike for an older server and a missed read | cold read | counts, words and the line's reason |
+| 4 | an operator's walk on two servers built from the tree (keyed `/health`, the tool, `GET /v1/brain`, `--compare` text and `--json`, a held lock for a real missed read, a proxy for an older peer and a malformed value): every documented state held; the docs printed the Freshness line with one space where it has two, named the `/health` deadline as the only cause of a missed read (a held lock's timeout is another), dropped the record's reason from the line, said "a host clock that slow lags", quoted the table's `none` short, and showed the row in a sample from a 052-era tree | walkthrough | the docs say what prints; the line carries the record's reason token (`the brain did not read it: timeout`); the sample is 1.5.0 at 079 |
+| 4 | a fresh read of the final diff: two exports no caller imports, `freshnessVerdict`'s docblock silent on the watermark, a three-dash docblock sentence, a README paragraph wrapped past its width, tests spelling `OLDER_SERVER`'s text beside the import, an e2e expectation computed by the SQL under test, and a session time zone reset only on success | cold read | each tidied |
+
+Then the tidy-ups the passes had cut for space, while the files were open: `BrainReading.boardSync`'s doc re-wrapped and worded as the record's; `freshnessVerdict`'s missed-read comment naming a timed-out or failed read, not the deadline alone; the Freshness line's formatter renamed from `board`, which `freshnessVerdict` uses for the delta; `boardSyncValue`'s doc saying "usable"; and the e2e watermark block's two stacked comments made one. No behaviour changed: test-brain-compare 123, test-server 623, test-e2e-sql 438 (466 on the tree merged with main at a5e89a08).
+
+**PR 2 — the heartbeats (items 4–6).**
+- **The write.** `db/pass-stamp.ts`'s `passStamper` upserts one `ob1_config` row per worker and job: `heartbeat:board-sync`, `heartbeat:<extract job>`, `heartbeat:<consolidate job>` (a custom `--job` prefixed with its worker).
+  - The value is `{v, job?, every_s, running, outcome, ended?, malformed?}`, and the time is the row's `updated_at`, the database's `now()`. `job` is the claim job as given, so the restart works that pool.
+  - It is stamped `running` as a pass starts and every `every_s` while it runs, and done after it. `every_s` is the worker's interval, from a minute up to what a timer holds (2,147,483 s, the most the reader takes).
+  - Writes go one after another, so a timer stamp in flight cannot land after the pass's own.
+  - Each stamp writes the whole value: a restarted follower's row carries no malformed block until it judges one, so a restart clears the alarm: fix the model first, since one restarted on a broken model reads healthy until 48 new answers trip it again.
+  - A failed write is said once (again only after one succeeds); a reporter that throws breaks no later stamp; the work goes on.
+  - There is one row per job, not per process: two followers of one job share it, and the last to stamp wins.
+- **Who stamps.** Only the long-running modes:
+  - `sync-linear.ts --loop`: its loop is now the exported `loopPasses`, so the stamping is tested without Linear. A dry run and an audit stamp nothing.
+  - the `--follow` of `extract-entities.ts` and `consolidate.ts`, inside each engine's `run()` through the Writer.
+- **Outcomes:** a pass is `ok` when it ran, whatever its rows came to; `failed` when a worker of it stopped on the provider still failing after its pauses, board-sync's pass reported errors, or it threw; a poll with nothing to do keeps the last word. The worker's end is stamped `ended` — `stopped` on a signal or a `--limit`, `failed` on the provider's refusal or a thrown pass — so a gone process never reads alive. Extraction's stamps carry the last judged block, `{answers, bad, alarm}`; the end stamp carries the final judgement's.
+- **The read.** `readDatabaseFacts` gains `workers`, read without the stats so preflight has it.
+  - `parseHeartbeats` counts a row only in full; anything else is counted in `ignored` and printed nowhere, since the record is rendered `AS_RECORD`. A malformed block it cannot trust is left off and the heartbeat still counts. In full means:
+    - a known worker's key, of a bounded alphabet, that is the key its value's job derives;
+    - version 1, counts as counts, the enums as written;
+    - the database's own instant, and an age no more than a minute in the future.
+  - Rows past its fifty are counted as ignored too.
+  - A heartbeat is stale past three of its own intervals, by the database's clock. One whose worker ended reads `stopped`, or `ended on a failure`, fresh or not.
+  - `brain_info` gains a `Workers` row; keyed `/health` and `GET /v1/brain` carry `database.workers`, each with its row's key.
+- **Preflight's `workers` row.**
+  - It skips where no worker ever stamped, and is ok while each is fresh.
+  - It warns on a stale or ended heartbeat, naming `db/config.mjs`'s `restartCommand` (built from the worker and its job alone, never a command line) and the `DELETE` that retires its row.
+    - board-sync: `up -d --no-deps` with the stack's own `-f` files and `-p`.
+    - extract: `--job` as given, and when to drop it.
+    - consolidate: the judge model its job follows.
+  - It warns on a fresh heartbeat whose last pass failed (a claim worker's: the provider), and on a malformed alarm, saying how the block clears.
+  - It never fails the deploy. Over PostgREST it is the twenty-first catalog-only skip.
+- **A tier refresh** deletes the source's `heartbeat:` rows (`tier.ts`'s `settleRefreshed`), so a canary never reports stable's workers, nor names a restart for them.
+- **Grants.** The `worker` group already holds INSERT and UPDATE on `ob1_config`; the README's grants table now names the heartbeat beside the job key. No migration.
+- **Verified:**
+  - test-live [37] and the follower sections, 1100 on the tree merged with main at 395f83f7 (a down provider through the real 5/15/45 s pauses, for each engine, idle polls holding it, then back; a following pass that throws, in each engine): `stampKey`; a stamp's fields, job and floors, an oversized interval at the cap; a restart's first stamp carrying no block, an old value of any shape replaced whole; `running` as a pass starts and on the timer, then done; a failed write said once, a throwing reporter harmless; board-sync's loop stamping `running`, then `failed, failed, ok, stopped`; a refresh's settle leaving no heartbeat; each follower's one row, `stopped`, none from a one-shot run; a first pass then a stop reading `stopped`; a provider refusal `failed`; failing passes `failed` through the empty polls, with the tripped block; a `--limit` stop carrying the final block.
+  - test-preflight 640 (an ended follower, a stopped one with an alarm, a down provider): none, fresh, stale, alive inside three intervals, stopped at a minute, each claim worker's restart and row and a custom job's, a failed pass and an alarm with their remedies, ob1_config refused, rows not of the shape never printed, PostgREST skips 21. test-server [13a] 637 (699 on the tree merged with main at ab2a4ff4): `parseHeartbeats`' full rows and eighteen refusals (each guard alone), the bound, the stale edge, `heartbeatState`, `ago`, the row's three states. test-e2e-sql [14] 470: empty, then a stopped row, in the body and the tool; fifty-one rows, fifty carried and one counted from Postgres's own total. test-engines 472, test-rest-sql 149, test-brain-compare 123, `check-fork-consistency`, `tsc`.
+  - Mutants, all killed: 15 at the first commit (/tmp/smd2261-pr2-mutants.py); 13 after review pass 1 (/tmp/smd2261-pr2-pass1-mutants.py); 5 of pass 1's run-it survivors re-run against the tests that close them (/tmp/smd2261-pr2-pass1-survivors.py); 17 after review pass 2 (/tmp/smd2261-pr2-pass2-mutants.py), the provider-stop signal and idle rule in both engines among them; 5 after review pass 3 (/tmp/smd2261-pr2-pass3-mutants.py).
+  - **Live, three real workers** on a throwaway brain (2026-10-06): board-sync syncing SMD-2261 from Linear, extraction and consolidation on local Ollama. All three read ok within 3 s. Each of consolidation and board-sync, stopped by SIGTERM, warned "stopped" at once with its own restart, and read ok again once restarted. Extraction killed with SIGKILL stayed "running a pass" while fresh, warned "stale" at 3 minutes (three intervals of 60 s) with its restart, and read ok on restart. At the end every row was `ended`, `stopped`.
+  - Held by reading: `main()`'s no stamper for a dry run or an audit; the write queue; each engine's `during()`; consolidate's end on the provider's refusal (extract's is tested); a healthy block replacing an alarm in a live follower; a model name outside the key alphabet, counted as ignored.
+
+**PR 2 review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | a tier refresh copied stable's `heartbeat:` rows onto the canary: it reported stable's workers, alive then stale for ever, and preflight named a restart that, through compose's `name: open-brain`, acts on stable's project | cold read | the refresh's settle deletes them |
+| 1 | a fresh `stopped` row read "alive" and preflight passed it — a worker stopped on purpose looked alive for three intervals, three days at `--follow 86400` | cold read | `stopped` reads stopped, fresh or not, and warns |
+| 1 | a custom `--job my-job` restarted as `--job extract:my-job`, another pool; the key lost whether the job had its prefix | cold read, run-it | the job goes in the value; the restart and the retire read the row's own |
+| 1 | a follower stamped `ok` every poll while its provider was down — each worker failing its thought and stopping, the pass ending clean | cold read | a pass that failed rows and finished none is `failed`; an idle poll keeps the word |
+| 1 | a restart erased the malformed alarm: the new process's first stamp replaced the row's block | cold read | a stamp with no block of its own keeps the row's |
+| 1 | board-sync's restart assumed the base compose file alone: with the release overlay, `up -d board-sync` would recreate `migrate` from the checkout | cold read | `--no-deps`, with the stack's own `-f` and `-p` |
+| 1 | a `--follow` over 2,147,483 s wrote an `every_s` the reader refuses, so the worker read as never run | run-it | the stamper caps it |
+| 1 | a follower had no row for its first minute — the first stamp was the timer's first tick | run-it | stamped `running` as a pass starts |
+| 1 | a throwing reporter left the write queue rejected; a future `updated_at` read fresh for ever; rows past fifty vanished; the alarm suffix read like another worker; docs said `stopped` covered a provider refusal | cold read | each fixed |
+| 1 | run-it survivors: the reader's guards one by one, the row's states, each claim worker's restart, the engines' first-pass and in-loop stamps, the refusal's `failed`, the poll's block, board-sync's `running` | run-it | tests for each; the rest named above as held by reading |
+| 2 | pass 1's `failed` rule (rows failed, none done) did not hold: consolidation finishes a thought with no candidates without calling the judge, so a pass read `ok` with the judge down (driven: `ok` at 65 s, `failed` only at 133 s), and a poison document read `failed` for days; all 7 consolidate mutants of it survived | run-it, cold read | `failed` is a worker stopping on the provider still failing after its pauses; tested in both engines through the real pauses, down then back (the maintainer's choice of three) |
+| 2 | a follower ended by the provider's refusal or a thrown pass read "alive, its last pass failed" for three intervals, its remedy naming no restart; its end stamp counted a pass | cold read, run-it | end stamps are `ended`, read as stopped or ended on a failure, the restart named, no pass counted |
+| 2 | the merge kept any `malformed` object, so a block of another shape made the reader refuse the row and hide a live worker; the kept alarm named no way to clear it; a stopped follower with an alarm was told to restart on the broken model | cold read, run-it | only the shape it writes is kept; the remedy says how the block clears and to check the model first |
+| 2 | a job of 121–128 characters was written and never read; the overflow total was read only from a fake; a throwing reporter was told every time; docs said the row warned only past three intervals, and named the old `up -d` | run-it, cold read | the job's bound matches the key's; e2e reads Postgres's total; told once; docs |
+| 3 | a follower against a down provider spends most of each pass in its pauses, and "running a pass" hid that its last pass failed | cold read, run-it | running says it |
+| 3 | the merge kept blocks of the right JSON types that the reader refuses (`bad` > `answers`, a negative or fractional count), so a live follower was hidden again — the merge's third seam | run-it | the reader leaves a block it cannot trust off and counts the heartbeat, whatever the merge keeps |
+| 3 | no test threw a following pass, held consolidate's idle polls, or tried the merge's `bad` and `alarm` checks alone | run-it | tests for each |
+| 3 | a document drawing a repeatable 5xx reads failed while another worker finished; rows failing for another reason read ok; a restored dump reads alive at first; the start-up race after `up`; two stale README counts; the remedy lead overclaimed | cold read | the residues named in db/README and deploy/README; counts and wording |
+
+Then the tidy-ups PR 2's passes had cut for space, while the files were open: `db/pass-stamp.ts`'s header names the value's `job` and `ended` and the stamp as a pass starts; deploy/README's board-sync paragraph re-wrapped. No behaviour changed.
+
+Then two cuts after the merge: the value's `passes` count, which nothing read, and the merge that kept a row's malformed block across a follower's restart. The merge had needed three review passes of shape guards, and its alarm then outlived a fixed model until the restarted follower's first block of 48 answers, or until the row was deleted. Now each stamp writes the whole value.

@@ -824,6 +824,121 @@ services:
     # answering; then the service stops and `ps` says so.
     restart: on-failure:3
 
+  # Entity extraction and consolidation, unattended (SMD-2424). Optional —
+  # `--profile workers`, since each is a model call per thought: GPU time on a
+  # local model, money and the thought's text on a hosted one.
+  #
+  # `bun db/extract-entities.ts --follow` and `bun db/consolidate.ts --follow`:
+  # each drains its pool, then polls for new work every OB1_EXTRACT_FOLLOW /
+  # OB1_CONSOLIDATE_FOLLOW seconds (unset, the CLI's 15). One worker each
+  # unless OB1_EXTRACT_WORKERS / OB1_CONSOLIDATE_WORKERS says more — not the
+  # CLI's 2, so a model slot stays free for captures (the dogfood's 7B serves
+  # three at once; the two counts, board-sync and captures share the slots).
+  # Claims are leased (015, 031), so a follower that dies loses nothing: its
+  # thought goes back to the pool when the lease lapses (and is recorded
+  # failed at the third lapse).
+  #
+  # board-sync's shape — the same image, the same two read-only mounts, the
+  # server's environment by anchor — so, as board-sync does, it runs this
+  # checkout's code: neither release image carries the workers, and a
+  # checkout newer than the stack's release runs newer workers against an
+  # older schema (deploy/README.md; SMD-2601). Two differences from
+  # board-sync. MCP_ACCESS_KEYS stays: the worker names itself by
+  # OB1_WORKER_KEY's hash in that list (db/worker-bootstrap.ts). And
+  # OB1_WORKER_KEY is required: the `sh -c` refuses to start without it,
+  # exit 2, where a run from a checkout warns and writes mentions, edges and
+  # proposals with no agent id. The knobs are forwarded, so `compose exec
+  # extract env` shows what the follower was started with, and read by the
+  # command line, which takes digits only — a value starting with a dash
+  # would otherwise reach the CLI as a flag (`--status` ran once and exited
+  # 0). `exec` hands the process to bun, so the stop signal reaches it.
+  extract:
+    image: oven/bun:1.4.0-alpine
+    profiles: ["workers"]
+    working_dir: /app
+    volumes: &claim-worker-mounts
+      - ../db:/app/db:ro
+      - ../server-portable:/app/server-portable:ro
+    environment:
+      <<: *server-env
+      PORT: ""
+      OB1_WORKER_KEY: ${OB1_WORKER_KEY:-}
+      OB1_EXTRACT_FOLLOW: ${OB1_EXTRACT_FOLLOW:-}
+      OB1_EXTRACT_WORKERS: ${OB1_EXTRACT_WORKERS:-}
+    command:
+      - sh
+      - -c
+      - |
+        [ -n "$$OB1_WORKER_KEY" ] || { echo "extract: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }
+        case "$$OB1_EXTRACT_FOLLOW$$OB1_EXTRACT_WORKERS" in *[!0-9]*) echo "extract: OB1_EXTRACT_FOLLOW ('$$OB1_EXTRACT_FOLLOW') and OB1_EXTRACT_WORKERS ('$$OB1_EXTRACT_WORKERS') take digits only" >&2; exit 2;; esac
+        exec bun db/extract-entities.ts --follow $${OB1_EXTRACT_FOLLOW:+"$$OB1_EXTRACT_FOLLOW"} --workers "$${OB1_EXTRACT_WORKERS:-1}"
+    extra_hosts: *host-alias
+    # The first SIGTERM stops each worker after the thought in hand — every
+    # window of it — and returns the rest of its claims. On the stable brain
+    # a thought's extraction took 37 s at the median, 121 s at p90 and 629 s
+    # at p99 (1,394 claims, two workers on qwen2.5:7b, 2026-10-05). A thought
+    # still in hand at the kill is not lost: its lease lapses (--ttl, 900 s)
+    # and the next follower extracts it again.
+    stop_grace_period: 120s
+    depends_on: &claim-worker-depends
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # board-sync's rule, for both services: a refusal exits 2 — no key, a
+    # key MCP_ACCESS_KEYS does not hold (or revoked, or of a scope that grants
+    # nothing), a bad knob, the egress gate, (this service) a model or prompt
+    # version other than the recorded key's, a provider refusing the first
+    # call at start — and a restart does not fix configuration, so after
+    # three restarts the service stops and `ps` says so. podman restarts at
+    # once, with no backoff, and never resets the count, which is why an
+    # outage must not exit: a follower waits out the database going away
+    # and a provider outage, and spends no restart on either (SMD-2599). A
+    # follower stopped by a signal exits 0 (137 if killed past the grace
+    # period) and stays stopped.
+    restart: on-failure:3
+
+  # Proposals only: consolidation never applies one. Each waits for review
+  # (`bun db/consolidate.ts --list`, then --accept or --reject; 029), but for
+  # a stale one the next pass settles (067). Beside extraction: the pool holds
+  # only thoughts with entities and a vector, and a candidate shares an
+  # entity, has a vector and was captured on an earlier UTC date (029), so a
+  # capture's neighbours were almost always extracted long before it is
+  # judged (one extract worker claims in queue order; with more, a neighbour
+  # captured just before 00:00 UTC can still be in hand). A backlog is not —
+  # a first run or a --switch-key pools every thought at one instant,
+  # claimed in no order — and a pair whose older side was still unextracted
+  # is never judged: start `extract` alone on one, and this when
+  # `extract-entities.ts --status` shows 0 in flight, 0 pending and 0 not
+  # yet in the pool (retrying any failed first). Once newer thoughts are
+  # judged, a failed extraction or embedding, and an import dated older than
+  # thoughts already judged, miss their pairs however this runs
+  # (deploy/README.md).
+  consolidate:
+    image: oven/bun:1.4.0-alpine
+    profiles: ["workers"]
+    working_dir: /app
+    volumes: *claim-worker-mounts
+    environment:
+      <<: *server-env
+      PORT: ""
+      OB1_WORKER_KEY: ${OB1_WORKER_KEY:-}
+      OB1_CONSOLIDATE_FOLLOW: ${OB1_CONSOLIDATE_FOLLOW:-}
+      OB1_CONSOLIDATE_WORKERS: ${OB1_CONSOLIDATE_WORKERS:-}
+    command:
+      - sh
+      - -c
+      - |
+        [ -n "$$OB1_WORKER_KEY" ] || { echo "consolidate: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }
+        case "$$OB1_CONSOLIDATE_FOLLOW$$OB1_CONSOLIDATE_WORKERS" in *[!0-9]*) echo "consolidate: OB1_CONSOLIDATE_FOLLOW ('$$OB1_CONSOLIDATE_FOLLOW') and OB1_CONSOLIDATE_WORKERS ('$$OB1_CONSOLIDATE_WORKERS') take digits only" >&2; exit 2;; esac
+        exec bun db/consolidate.ts --follow $${OB1_CONSOLIDATE_FOLLOW:+"$$OB1_CONSOLIDATE_FOLLOW"} --workers "$${OB1_CONSOLIDATE_WORKERS:-1}"
+    extra_hosts: *host-alias
+    # A thought is up to --k (3) judged pairs: 11 s at the median, 38 s at
+    # the most on the stable brain (1,447 claims, 2026-10-05).
+    stop_grace_period: 60s
+    depends_on: *claim-worker-depends
+    restart: on-failure:3
+
   # Replaces: OpenRouter. Optional — enable with `--profile local-models`.
   #
   # Ollama exposes an OpenAI-compatible surface at /v1, so the server needs no

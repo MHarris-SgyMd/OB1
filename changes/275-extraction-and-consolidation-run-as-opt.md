@@ -1,0 +1,98 @@
+# 275. Extraction and consolidation run as opt-in services — the `workers` profile (SMD-2424)
+
+**What changed.**
+- **Two services in `deploy/compose.yaml`, profile `workers`.** `extract` and `consolidate` take board-sync's shape: `oven/bun:1.4.0-alpine`, `db/` and `server-portable/` mounted read-only (the workers import nothing from `node_modules`, checked by loading both in a bare container), the server's environment through `<<: *server-env`, the host alias, `depends_on` postgres healthy and migrate done, and `restart: on-failure:3`.
+- **Two differences from board-sync.**
+  - `MCP_ACCESS_KEYS` stays (board-sync blanks it): the worker resolves its agent from `OB1_WORKER_KEY`'s hash in that list (`db/worker-bootstrap.ts`).
+  - `OB1_WORKER_KEY` is forwarded, and nothing in compose forwarded it before. The command is an `sh -c` that refuses to start without the key (exit 2, naming the `keygen.ts` line), then `exec`s bun, so the stop signal reaches the worker.
+- **Settings.** `OB1_EXTRACT_FOLLOW` / `OB1_CONSOLIDATE_FOLLOW` set the poll interval (unset, the bare flag: the CLI's 15 s, not a copy). `OB1_EXTRACT_WORKERS` / `OB1_CONSOLIDATE_WORKERS` set the worker count (unset, 1, not the CLI's 2, so a model slot stays free for captures). They are forwarded into the container, so `compose exec extract env` shows them. The command line reads them and takes digits only (exit 2 naming the variable). All four are documented in `deploy/.env.example` beside `OB1_WORKER_KEY`.
+- **Grace periods, from the stable brain's claims** (2026-10-05, two workers on qwen2.5:7b). One extraction took 37 s at the median, 121 s at p90 and 629 s at p99 (1,394 claims), so `extract` has 120 s. A consolidation took at most 38 s (1,447 claims: 260 under prompt p2 and 1,187 under p3, against extraction's one key), so `consolidate` has 60 s. The first SIGTERM finishes the thought in hand. A thought still held at the kill waits out its lease (900 s), and the next run takes it.
+- **`deploy/README.md`** gains "Extraction and consolidation as services":
+  - the cost first;
+  - the first start runs `extract` alone, retries any failed thoughts, then adds `consolidate` once `--status` reads `0 in flight, 0 pending, 0 not yet in the pool`;
+  - `--profile workers` on `down` as on `up`;
+  - the key, the settings and the code (the checkout's, kept at the stack's release);
+  - stopping and refusals;
+  - changing the model: stop both followers first (before a pull, too, with `COMPOSE_PROFILES=workers`), then a one-off `--switch-key` finished as the first start is (done line, failed rows retried), then `up -d` with `server` and `api`. `extract` refuses a new key until told. Going back to a key used before re-extracts nothing (SMD-2607). Consolidation re-judges every pair not already proposed under a new judge key, and nothing when `OB1_JUDGE_MODEL` holds its key;
+  - review: `--direction` for an undirected accept, your own key for an accept, set on that one command line and never exported, and a reject records no reviewer (SMD-2608).
+
+  It also adds a reachability-table row, and the "Entity extraction" note no longer says "it is not a service here".
+- **Preflight's restart line.** SMD-2261's `workers` row names a stale or ended follower's restart through `restartCommand` (`db/config.mjs`). For `extract` and `consolidate` that is now this profile's `up -d --no-deps <service>`, as `board-sync`'s is its profile's, followed by the checkout's command, which alone can carry a custom `--job`. `test-preflight` holds both, in order.
+- **Beside extraction.** A pair is judged once, from its newer side, against thoughts sharing an entity, with a vector, captured on an earlier UTC date (029/079). For captures beside an extract follower, those neighbours were almost always extracted long before.
+  - Two captures either side of 00:00 UTC are the exception when the earlier is still in hand. One extract worker claims in queue order and finishes it first; two can hold it.
+  - A backlog breaks that: a first run or a `--switch-key` pools every thought in one `enqueue_thoughts` INSERT at one `enqueued_at`, and they are claimed in no order (015).
+  - A failed extraction or embedding (a candidate needs a vector) and a backdated import miss their pairs with thoughts judged before the repair, however the passes run.
+  - `db/README.md` and `db/consolidate.ts` say this where they said "run consolidation after extraction has finished, not beside it".
+
+**Why.** On 2026-10-01 the stable brain's extraction had last run on 09-27, leaving 194 thoughts (16%) unextracted, and consolidation had last run on 09-22. Both ran only when someone typed the command. On a local model the cost is GPU time, and a follower idles most of the day (50 to 90 thoughts a day). This is the unattended baseline that SMD-1794's sleep scheduler will throttle.
+
+**Held.**
+- **CI, the config** (`fork-checks.yml`, beside the orchestration and auth checks). `compose --profile workers config` must show:
+  - no published port;
+  - both services with a non-empty `MCP_ACCESS_KEYS`, an `OB1_WORKER_KEY` and a blank `PORT`;
+  - two read-only mounts, `on-failure:3`, the host alias, the wait for `migrate`, and grace periods of exactly 120 s and 60 s;
+  - each command's last line exactly its worker's `exec`'d `--follow` with `--workers` defaulting to 1, so no flag rides along.
+
+  The existing "a plain config names exactly five services" line still holds, so the profile stays opt-in. Seventeen mutants of a copy of the file, one per property, all fail the check. Among them: an inserted `--switch-key` (which would lift the model-change refusal), an appended `--limit 1`, an unconditional `--follow "$VAR"` and a 1 s grace.
+- **CI, the refusals, run** ("The workers profile refuses before it starts a follower", against the job's stack). Each service's own command must:
+  - exit 2 without a key;
+  - exit 2 on a dash or flag-carrying value in each of the four variables;
+  - with a well-formed setting, reach the worker's own refusal: SMD-2599's start probe, which a `--follow` worker makes before anything else, refused by the job's chat-less provider stub (exit 2).
+
+  The image is pulled first, and each run is bounded by `timeout 120`. Run locally against a CI-shaped stack (`OB1_LLM_LOCAL=1`, no provider behind the address), it passes. Six behaviour mutants all fail it: either key guard dropped, either digits check dropped, or either check narrowed to one of its two variables. A narrowed consolidate check exits 0 on `--status`, the pass-1 bug.
+- `check-fork-consistency` check 14 passes: every `OB1_*` name the services forward is in the house form.
+
+**Measured after: a scratch stack** (project `ob1-2424`, host Ollama, qwen2.5:7b, poll 5 s, 2026-10-06).
+- **No worker key:** `extract` exits 2 with the keygen line, four runs in all (three restarts), then stays exited.
+- **`OB1_LLM_LOCAL` unset against the host endpoint:** both exit 2 on the egress gate's "every call is refused", three restarts each, then stop.
+- **Configured:** bun is PID 1 with `--follow 5 --workers 1`.
+  - A capture was claimed 4 s after it landed and succeeded 5 s later.
+  - Its mentions carry the `workers` key's agent.
+  - Consolidation closed both thoughts' claims within 5 s of their extraction, with no model call: same-day captures have no candidates. The pass-3 walkthrough's backdated pair was judged and proposed.
+- **`compose stop` with an extraction in hand:** the thought finished before the container exited; `stop` returned in 6.6 s, both containers exited 0 with no restart, and no claim was left `claimed`.
+
+**Measured after: outages and liveness, on the merge with SMD-2599 and SMD-2261** (project `ob1-2424v`, a stub provider aliased `ollama` whose chat could be switched to 503 or 404, poll 5 s, 2026-10-07).
+- **The four outages, in sequence:** postgres restarted 5 times; postgres stopped 60 s; chat 503 for 5 minutes; chat 404 for the model for 2 minutes. Captures kept arriving throughout.
+- **Result:** both services ran throughout with restart count 0, and all 24 thoughts were extracted and judged, with 0 failed rows. The longest catch-up was 91 s after the 503 ended.
+- **The logs:** "the database answers again after 5 s" (35 s after the stop), and "the provider answers again after 315 s".
+- **SMD-2261's `workers` row** in a one-off preflight read "alive" for both. With `consolidate` stopped, it read "stopped" and named `--profile workers up -d --no-deps consolidate`; that command, run as printed, brought it back to "alive".
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | A Postgres restart exits a follower 1 and podman spends `on-failure:3` in about 1 s; a provider outage fails every capture in it; a 404 while a model is pulled exits 2 — the profile cannot run unattended | run-it | SMD-2599 (#324, #325), merged first |
+| 1 | "Beside extraction" rested on claim order; the UTC-date candidate rule is what holds, and failed rows and backdated imports were unnamed | cold read | the rule restated in the four texts |
+| 1 | The README's first command started both services on a first run, the backlog case | cold read | `extract` first, `consolidate` after |
+| 1 | A model or prompt change retired `extract` (exit 2) and re-judged everything, undocumented | cold read | "Changing the model"; the refusal listed |
+| 1 | A setting starting with a dash reached the CLI as a flag (`--status` ran, exited 0, stayed stopped) | run-it | digits only in the `sh -c` |
+| 1 | A plain `down` left both followers running | run-it | `--profile workers down` documented |
+| 1 | The CI check passed with the key guard deleted | cold read | the refusals run in CI |
+| 2 | "At least a calendar day older" is an earlier UTC date: captures seconds apart across 00:00 UTC pair, and two extract workers can miss one | cold read | the rule and its one-worker reason stated |
+| 2 | "Until it says 0 pending" shows during the last thought in flight, and before the first pass the backlog is "not yet in the pool" | run-it, cold read | wait for all three zero; the block split |
+| 2 | "Changing the model" let the old `extract` write over the switch, or `consolidate` re-judge on the old entities | cold read | stop both before the change |
+| 2 | The CI step's first run pulled `oven/bun` inside its 120 s bound | cold read | pull first |
+| 3 | Switching back to a model used before re-extracts nothing: every thought keeps its finished row under that key, and the graph stays the other model's while `--status` reads done | walkthrough, cold read | warned; SMD-2607 |
+| 3 | A model change left the server tagging captures with the old model | walkthrough | the server in the `up -d` |
+| 3 | An undirected proposal's accept needs `--direction`; a reject records no reviewer; how to pass your own key was a guess | walkthrough | documented; SMD-2608 |
+| 3 | A failed extraction retried before `consolidate` starts misses nothing; a thought with no vector was a fifth miss; slots are shared across both services, board-sync and captures | cold read | first start retries failures; the texts say so |
+| 3 | The CI step tested one variable of each digits pair, and the config regex let a flag ride between `--follow` and `--workers` | cold read | four variables run; the last line held exactly |
+| 4 | Exporting your own key for an accept made every later compose command start the followers under it; unset, the accept silently took the workers' key | run-it, cold read | the key set on the one command line; never export |
+| 4 | The model change left `api`, which tags REST captures, on the old model | run-it, cold read | `api` in the `up -d` |
+| 4 | The model change started consolidation without the first start's done line and failed-row retry | cold read | the same check before consolidation |
+
+A boyscout pass then rewrapped the comments and paragraphs four passes of patching had left ragged, with no change in meaning.
+
+**Not taken.**
+- **Reading the settings in the CLIs.** That would change every checkout run; the profile's knobs are the profile's.
+- **A `command:` that compose interpolates.** `--follow ${OB1_EXTRACT_FOLLOW:-15}` would copy the CLI's default into compose, and check 14 would call the documented names dead switches, since no environment forwards them.
+- **Holding the consolidation follower while extraction has pending rows.** It would close the backlog gap in code, but it changes `consolidate.ts --follow` for every run; the README's first-start order covers the profile.
+- **A read-scope worker key** is accepted, as `db/worker-bootstrap.ts` accepts it for any run. That is not this profile's rule to change.
+
+**Follow-ups.**
+- **SMD-2599** (merged before this, #324 and #325): followers outlast a Postgres restart, a provider outage and a model pull; the README's "Outages" bullet says how.
+- **SMD-2601**: the profiles run the checkout's code. A release install has none, and a newer checkout runs newer workers against an older schema, unchecked.
+- **SMD-2607**: `--switch-key` back to a key used before re-extracts nothing.
+- **SMD-2608**: a rejected proposal records no reviewer.
+
+**Upstream status.** Fork-only.

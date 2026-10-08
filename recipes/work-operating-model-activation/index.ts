@@ -20,6 +20,7 @@ import { createClient } from "../../compat/supabase-sql/index.ts";
 import { Hono } from "hono";
 import { z } from "zod";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
+import { mcpReply } from "../_shared/sse.ts";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -884,7 +885,8 @@ app.all("*", async (c) => {
   // build cost (tens of microseconds).
   const transport = new StreamableHTTPTransport();
   await buildServer(principal).connect(transport);
-  return transport.handleRequest(c);
+  // The reply kept alive while the tool runs, and a client that leaves logged (SMD-2001, _shared/sse.ts).
+  return mcpReply(c, () => transport.handleRequest(c));
 });
 
 export default {

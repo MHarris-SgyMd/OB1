@@ -1,0 +1,123 @@
+# 263. Two tickets Linear links are never paired for judgement (SMD-2448)
+
+**What changed.** Migration 079 adds `consolidation_tickets_linked(a, b)`:
+two thoughts filed under two different tickets — `coalesce(metadata->>'ticket',
+metadata->>'issue')`, the ticket `node_state` reads a thought under (058, 068,
+071), the text exactly — that an active Linear link relates in either
+direction (053's link rows: system `linear`, `valid_until` null, relation
+child_of, blocks, blocked_by or relates_to; neither a text `references` link
+nor `duplicate_of` counts — a duplicate is Linear's verdict that a ticket no
+longer holds, the nearest thing to a supersession, left to the judge). It
+redefines `consolidation_candidates` on 066's body plus
+`AND NOT consolidation_tickets_linked(me.metadata, o.metadata)`, and adds
+`consolidation_linked_ticket_pairs_left_out(thought, floor)`, the pairs the rule
+removes for one thought, every other term met, no k cut. Two rows of one
+ticket, two tickets Linear does not relate, and a thought with no identity
+are still paired. Nothing is stored: a link written or closed moves the rule
+at the next pass. The body carries `ob1:linked-tickets-not-paired`;
+preflight's `lineage` check warns naming 079 when 063 or 066 is re-applied by
+hand over it. `db/consolidate.ts` turns the count into judge calls fewer at
+`--k` (the cut over 066's list less the cut over 079's; a lower bound, since a
+stale pair past the cut is not counted) — read once per claim, added when the
+thought is finished, a failed read counted 0 and said rather than stopping
+the pass — for a run's summary line and for `--status` / `--dry-run` over the
+thoughts the next run judges (pending, unpooled, re-pooled for a stale
+proposal, failed under `--retry-failed`). It reports the rule only where the
+candidate body carries the sentinel; otherwise it says such pairs are still
+judged and how to apply or re-apply 079. A stale proposal on two linked
+tickets is settled by the pass as no longer a candidate, the note naming
+079's rule (read through the predicate). The sixth restriction is stated in
+079's header and in `db/README.md`, not in 029's, which release 1.0.0 froze.
+
+**Why.** The first full p3 pass (2026-10-01) recorded 98 proposals and 68
+paired two different issues (84 on `node_state`'s ticket key, which pass 1
+adopted): a parent and its child, tickets Linear relates
+or blocks, a ticket and its follow-up. Two tickets Linear relates are two
+records whose relationship is already stated, each with its own status that
+board-sync keeps current and `node_state` reads; one "superseding" the other
+archives a record that still holds. An always-on consolidation follower
+(SMD-2424) would fill the review queue with them. Not every pair of tickets:
+the eval's hand-graded proposals hold six real supersessions between two
+tickets (a later ticket replacing an earlier ticket's decision). That corpus
+carries no links, so it cannot measure the narrower rule's cost: in a live
+workspace such a ticket is often filed as `relates_to`, which 079 leaves out
+— the residual risk, for a labelled set that keeps Linear's relations.
+
+**Held.** test-schema [70]: one body, 079's, both sentinels and the rule read
+through the predicate; the predicate either way round, through a section, and
+false (never NULL) for one ticket, a note, NULL, a text reference, a closed
+link and an unrelated ticket; a newer SMD-1 row is judged under 066 against
+every older row nothing supersedes, and under 079 against its own ticket's
+rows, an unlinked, a merely named and a no-longer-linked ticket, a note and a
+null-issue row — never a related ticket from either side or its section; for
+every thought of a corpus exercising each shared term the kept list and the
+count partition 066's; closing a link puts the pair back; a re-apply is a
+no-op. test-upgrade [20ac]: refused naming 025, 029, 053 and 063 in turn;
+onto a populated brain at 077 a newer ticket row lists a related ticket
+before the file and its own ticket's row, an unrelated ticket and the note
+after, an operator's REVOKE kept, no row, proposal or audit row moved, a
+re-apply a no-op. test-live [16]: `--status` and `--dry-run` count the one
+call saved, after a run of one and with a stale row re-pooled; with 066
+re-applied by hand they say such pairs are still judged; the runs judge the
+newer ticket row twice, never against the related ticket's row or section;
+a stale proposal on the two tickets is settled naming 079's rule.
+test-preflight: 066 re-applied over 079 warns naming 079.
+
+Verify re-scoped: SMD-2448's first two Verify items name every pair of two
+different tickets; the PR holds the linked pairs instead (review pass 3,
+the maintainer's choice), and the third — the judge-call share — is stated
+below.
+
+**Measured after.** Read-only on the stable dogfood brain (2026-10-04/05): 109 of
+the 128 proposals ever recorded pair two different tickets (24 of 24 under
+`@p2`, 85 of 104 under `@p3`), all rejected, and 107 of those 109 pair two
+tickets Linear relates as of 2026-10-04 — 94 by relates_to alone, 12 through
+child_of, 1 blocks, none duplicate_of; about 72 of the 10-01 pass's 84 were
+linked when judged, a dozen linked during that review. Neither accepted
+proposal pairs two tickets. Over the 1,241 pooled thoughts at the shipped
+defaults (k 3, cosine ≥ 0.6, 2026-10-05) a full pass makes 3,435 judge calls
+before the rule and 3,293 after (−4.1%; 3,439 → 3,295 with every proposal's
+pair counted unjudged; 2,310 of 42,046 eligible pairs left out). The broad
+"any two tickets" rule measured −36.1% the day before (3,427 → 2,190): most
+judge calls on ticket pairs go to unlinked ones, which the judge rarely
+proposes — their cost is SMD-1873's. On a copy of the brain the worker's
+per-thought candidate read went from 2.3 s to about 3.2 s over the pool
+(+0.7 ms a thought); `--status` and `--dry-run` spend about 6 ms a thought
+still to judge (7.7 s over the whole pool).
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | the identity read `metadata.issue` alone, while `node_state` (058, 068, 071) reads a thought's ticket as `metadata.ticket` else `issue`: a dated section filed under ticket A was still paired with ticket B's row (16 of the 128, all rejected) | run-it | the key is node_state's; [70] and test-live seed a section |
+| 1 | the worker took 079 as applied when its count existed, so with 066 re-applied by hand over 079 `--status` and the run reported pairs "left out" that the pass was judging | cold read | it reads the candidate body's sentinel; test-live re-applies 066 and reads the line |
+| 1 | the run summary printed every eligible pair past the k cut beside the pairs judged — about 9,896 on the dogfood where 911 calls are saved, by issue alone — and added it once per `processRow` call (again after a pause, for an abandoned thought) | cold read | judge calls not spent at `--k`, read once per claim, added when the thought is finished |
+| 1 | `--dry-run`'s count ran over pending and unpooled thoughts while its "would judge" line also takes stale re-pools and `--retry-failed`'s rows | cold read | one set for both |
+| 1 | seven of the count's nine shared terms could be dropped with every suite green: [70]'s corpus could not tell them apart | mutant | [70] exercises each term and checks the partition for every thought; the two still surviving are equivalent (a vectorless row fails the floor, a pair's own supersession is a superseded side) |
+| 1 | nothing held the stale settle reason, or 079's 025 and 029 guards | mutant | test-live [16] and test-upgrade [20ac] |
+| 1 | the text rule was recorded as "too few pairs to call"; under the wider key it would leave out an accepted proposal | run-it | recorded as not clean |
+| 2 | pass 1 moved the per-claim count read outside the worker's try, so a database error there escaped the worker and stopped every worker instead of pausing | cold read | a failed read counts 0 and the summary says how many |
+| 2 | the summary said "not spent on a pair of two different tickets" for a net number (066's ticket-pair calls less the calls the freed slots spend: 1,774 against 1,237 on the dogfood) | cold read | "judge call(s) fewer", as `--status` says |
+| 2 | a stale proposal past the k cut costs a call under 066 and none under 079, uncounted (52 − 44 = 8 calls by a stub, 7 reported); the comment said a pair past the cut cost nothing | run-it | stated as a lower bound in the code, header, README and here |
+| 2 | dropping the pending or stale arm of `--status`'s set, or reverting the stale read's key to issue alone, left every suite green while changing the output | mutant | test-live [16] reads `--status` after a run of one and with a stale row re-pooled, the stale proposal's older side a section filed by `metadata.ticket` |
+| 3 | the rule left out every pair of two different tickets, but the repo's own labels hold six real supersessions between two tickets (`evals/consolidate-labels.json`, a later ticket replacing an earlier one's decision) and `eval-consolidate.ts` would have measured nothing (its corpus gives every row an issue) | cold read | narrowed, at the maintainer's choice, to tickets an active Linear link relates: 107 of the 128 proposals still left out, judge calls −4.1% instead of −36.1%; the eval corpus carries no links, so it is unaffected |
+| 3 | `--status`'s "still judged" line offered `bun migrate.ts` for a 066 re-applied by hand over 079, which the migrator skips as recorded | cold read | it names `--reapply` for that case |
+| 3 | an operator walkthrough on a copy of the stable brain (076 → 077 → 079) — `--status`, `--dry-run`, preflight at each step | walkthrough | confirmed: the 077 warning names 079, the 079 lineage row is ok, the next pass over 68 thoughts reads "41 fewer" under the first rule in 0.6 s |
+| 3 | pass 2's three test-live mutants (the pending and stale arms of `--status`'s set, the stale read's key) re-run against the new tests | mutant | each now fails its assertion |
+| 4 | `duplicate_of` was among the relations left out, though a duplicate is Linear's verdict that a ticket no longer holds: six such pairs on the dogfood meet every other candidate term and none of the 107 rests on it | run-it | dropped from the relations; [70] holds a duplicate as not linked |
+| 4 | the predicate's holder check could be dropped from one direction, or its system filter dropped, with every suite green: every seeded link targeted the judged thought's own ticket, and every one was Linear's | mutant | [70]'s truth table asks a third ticket against SMD-1 both ways round, and another system's link |
+| 4 | the records said the eval's cross-ticket supersessions "carry no Linear relation, so the narrower rule keeps them" — that corpus carries no links at all and cannot measure the narrowed rule; "107 of 109 linked" is as of 2026-10-04 | cold read | said so, with the residual risk and the judge-time figure |
+| 4 | the records put `--status`'s cost at 3.1 s for the pool; on a copy of the brain it is about 6 ms a thought, 7.7 s over the pool, and the worker's candidate read +0.7 ms a thought | run-it | corrected |
+
+**Not taken.** Every pair of two different tickets (the rule as first built):
+it would lose the unlinked ticket-to-ticket supersessions the eval's labels
+hold, for 32 more points of judge calls on the dogfood. `duplicate_of` among
+the relations left out: six duplicate pairs on the dogfood meet every other
+candidate term, and a duplicate is the board's own supersession verdict. The
+text rule (SMD-2448's optional third item: a thought naming ticket X paired with a
+thought filed under X is lineage): on the 128 it would leave out 11 more
+pairs, one of them accepted. A `--status` clause for proposals already
+standing on two linked tickets (070's shape for lineage pairs): every such
+row on the dogfood is already rejected. One body behind both the candidate
+filter and the count: it would move 063's and 066's sentinels, which
+preflight and the suites read in `consolidation_candidates`' own text.

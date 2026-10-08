@@ -522,9 +522,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // (min_trust on match_thoughts and the keyword arm, SMD-1724), 075
   // (min_trust on the hybrid and the current read, SMD-1724), 077 (the
   // current read by the tickets a thought names, SMD-2271), 079 (two
-  // tickets Linear links never paired for judgement, SMD-2448) and 080 (a
-  // capture-only key's re-capture leaves the row, SMD-2539) stay recorded
-  // and
+  // tickets Linear links never paired for judgement, SMD-2448), 080 (a
+  // capture-only key's re-capture leaves the row, SMD-2539) and 082 (a
+  // capture-only key's pointer lapses when another takes its target,
+  // SMD-2638) stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -622,12 +623,18 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // on its own body and adds a predicate and a count beside it, refusing by
   // name without 025, 029, 053 or 063 ([20ac]); 080 redefines the three
   // upsert_thought forms on 073's and 061's bodies, refusing by name without
-  // 060, 061 or 073 ([20ad]) — all recorded by the
+  // 060, 061 or 073 ([20ad]); 081 upserts ob1_config.schema_version for the
+  // 1.6.0 cut, needing only 006's table; 082 adds the taking rule, its two
+  // reads, the re-capture note and the lapse and write-time triggers on
+  // 008's thought_audit, refusing by name without 060 or 061 ([20ae]); 083
+  // upserts ob1_config.schema_version for the 1.7.0 cut, needing only 006's
+  // table — all
+  // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 51, `030 is among the last fifty-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 54, `030 is among the last fifty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3602,6 +3609,64 @@ console.log("\n[20ad] Migration 080: refused by name without 073; onto a populat
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the080 });
   const [{ n: again }] = await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'upsert_thought' AND prosrc LIKE '%ob1:recapture-keep-leaves-the-row%'`;
   assert(Number(again) === 3 && (await rows()) === rowsBeforeReapply && (await windowsOf()) === windowsBeforeReapply, "a re-apply of 080 is a no-op: three forms, each carrying 'keep', and no row or window moved");
+  await sql.close();
+}
+
+console.log("\n[20ae] Migration 082: refused by name without 060; onto a populated brain at the file before it — the rule, its reads, the note, the lapse and the check at the write, no row and no audit row moved; a capture-scoped pointer written before the upgrade lapses when a write key takes its target after it, by a merge or by a re-capture that changes nothing, and an unmarked one stands; a re-apply a no-op (SMD-2638)");
+{
+  const the082 = MIGRATIONS.find((f) => f.endsWith("_capture_pointer_lapse.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "060" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the082 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 082 needs 060 and 061 (ob1_append_thought_event, ob1_project_thought_event, ob1_actor_agent_id); this schema lacks it",
+    `082 on a schema stopped before 060 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the082 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const agent = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  const HOOK = { name: "hook-key", agent_id: await agent("e", "hook-key", "capture"), via: "open-brain", scope: "capture" };
+  const OLD_HOOK = { name: "hook-key", agent_id: HOOK.agent_id, via: "open-brain" };  // a server from before SMD-2638 marks no scope
+  const WRITER = { name: "writer-key", agent_id: await agent("f", "writer-key", "write"), via: "open-brain" };
+  const cap = async (content: string, payload: Record<string, unknown>) =>
+    (await sql`SELECT upsert_thought(${content}::text, ${payload}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string; existed: boolean };
+  const pointerOf = async (id: string) => ((await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0] as { s: string | null }).s;
+  // A brain at 080: three chains the hook key wrote — two under the capture
+  // scope's mark, one by a server that sent none.
+  const chain = async (what: string, actor: Record<string, unknown>) => {
+    const t = await cap(`upgrade 082: the hook's summary ${what}`, { metadata: { source: "codex" }, actor, recapture: "keep" });
+    const n = await cap(`upgrade 082: the hook's next summary ${what}`, { metadata: { source: "codex" }, actor, recapture: "keep", supersedes: t.id });
+    return { t: t.id, s: n.id, text: `upgrade 082: the hook's summary ${what}` };
+  };
+  const merged = await chain("a write key merges onto", HOOK);
+  const noop = await chain("a write key re-captures unchanged", HOOK);
+  const unmarked = await chain("from before the mark", OLD_HOOK);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), auditBefore = await audits();
+  assert((await pointerOf(merged.s)) === merged.t && (await pointerOf(noop.s)) === noop.t && (await pointerOf(unmarked.s)) === unmarked.t, "[20ae] setup: the hook's three pointers are written at 080");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the082 });
+  const [made] = await sql`SELECT
+      (SELECT count(*)::int FROM pg_proc WHERE proname IN ('ob1_takes_thought', 'ob1_capturer_of', 'ob1_thought_taken', 'ob1_note_recapture', 'ob1_lapse_capture_pointers', 'ob1_check_capture_pointer')) AS fns,
+      (SELECT count(*)::int FROM pg_trigger WHERE tgname IN ('thought_audit_lapse_capture_pointers', 'thought_audit_check_capture_pointer') AND tgrelid = 'thought_audit'::regclass) AS trg,
+      (SELECT count(*)::int FROM pg_proc WHERE proname = 'ob1_lapse_capture_pointers' AND prosrc LIKE '%ob1:capture-pointer-lapses%') AS sentinel`;
+  assert(made?.fns === 6 && made?.trg === 2 && made?.sentinel === 1, `the six functions and the two triggers, the lapse's sentinel in its body (${JSON.stringify(made)})`);
+  assert((await rows()) === before && (await audits()) === auditBefore, "…no row and no audit row moved");
+  // The write key lands on two of the hook's targets after the upgrade.
+  await cap(merged.text, { metadata: { source: "mcp", project: "upgrade" }, actor: WRITER });
+  await sql`SELECT ob1_note_recapture(${merged.t}::uuid, ${WRITER}::jsonb)`;  // as the stores do after a capture that lands on a row
+  const again = await cap(noop.text, { metadata: { source: "codex" }, actor: WRITER });
+  const [{ noted }] = await sql`SELECT ob1_note_recapture(${again.id}::uuid, ${WRITER}::jsonb) AS noted`;
+  await cap(unmarked.text, { metadata: { source: "mcp", project: "upgrade" }, actor: WRITER });
+  assert((await pointerOf(merged.s)) === null, "a capture-scoped pointer written before the upgrade lapses when a write key's re-capture of its target is noted after it (a pointer only a server sending the mark writes, onto 080 — a state this leg builds by hand)");
+  assert(again.existed === true && noted === true && (await pointerOf(noop.s)) === null, `…and when its re-capture that changed nothing is noted (${noted})`);
+  assert((await pointerOf(unmarked.s)) === unmarked.t, "…while a pointer whose capture row carries no scope stands");
+  // A re-apply moves nothing.
+  const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the082 });
+  const [{ trg }] = await sql`SELECT count(*)::int AS trg FROM pg_trigger WHERE tgname IN ('thought_audit_lapse_capture_pointers', 'thought_audit_check_capture_pointer')`;
+  assert(trg === 2 && (await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 082 is a no-op: two triggers, and no row or audit row moved");
   await sql.close();
 }
 

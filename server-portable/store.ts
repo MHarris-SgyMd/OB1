@@ -920,6 +920,13 @@ export type Actor = {
    * its own, so no migration.
    */
   act?: { name: string; agentId?: string };
+  /**
+   * "capture" on a write by a key that cannot read (SMD-2638). Lands in
+   * thought_audit.actor_context as `scope`, where migration 082's lapse reads
+   * it: a pointer such a key wrote onto its own thought is cleared when
+   * another key or board-sync takes that thought. Absent for any other key.
+   */
+  scope?: "capture";
 };
 
 /**
@@ -941,6 +948,7 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
     ...(actor.egress !== undefined ? { egress: actor.egress } : {}),
     // agent_id, not agentId — the trigger's spelling, as for the actor itself.
     ...(actor.act !== undefined ? { act: { name: actor.act.name, ...(actor.act.agentId !== undefined ? { agent_id: actor.act.agentId } : {}) } } : {}),
+    ...(actor.scope !== undefined ? { scope: actor.scope } : {}),
   };
 }
 
@@ -1405,6 +1413,18 @@ export interface ThoughtStore {
    * key may replace only what it wrote. A malformed id is null, not an error.
    */
   captureActorOf(id: string): Promise<{ actorName: string | null; agentId: string | null } | null>;
+
+  /**
+   * Whether another key or board-sync has taken the thought from the agent
+   * that captured it: migration 082's ob1_thought_taken, the one rule — a
+   * re-capture by a key that can read, a text edit, or board-sync (no agent
+   * id) giving the metadata a ticket's `issue`; a key's metadata edit never. Read beside
+   * captureActorOf for every target of a capture-only key's `supersedes`
+   * (SMD-2638). A malformed id is true, never owned; a database before 082
+   * throws (the function is missing), and the pointer is the server's to
+   * retry, as for an unreadable capture row.
+   */
+  takenFromCapturer(id: string): Promise<boolean>;
 
   /**
    * Which of the given ids are thoughts, lower-cased. Read after upsert_thought

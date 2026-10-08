@@ -315,7 +315,10 @@ jobs:
 
       # The authorization server's fetch guard, the POC's proxy route table and
       # resource policy, and the deploy's two layout settings (SMD-2285), with
-      # no stack; the auth-poc job runs the stack.
+      # no stack; the auth-poc job runs the stack. The guard's reading of an
+      # answer runs against peers on loopback (SMD-2665: a status outside
+      # 200-599 and a 101 refused, where one stopped the server and the other
+      # left the fetch hanging).
       - name: Authorization POC rules
         working-directory: evals
         run: bun eval-auth.ts --self-check
@@ -332,8 +335,13 @@ jobs:
       # the client a request names, the address rule, the proxy's resolution
       # and the bounded maps); and the request target (SMD-2615: the path read
       # as the library reads it, held against parseurl itself, and a throw or
-      # rejection in a request answered 500 with the server still up). The
-      # full-stack job runs the service.
+      # rejection in a request answered 500 with the server still up); and the
+      # functions it hands on (SMD-2665: a throw in a guarded timer or
+      # response handler logged with the process kept, and each function
+      # server.ts and the files it imports hand on, in the spellings a walk
+      # with the TypeScript checker reads, wrapped, run at once, chained or
+      # exempt by a pinned key with a reason). The full-stack job runs the
+      # service.
       - name: Install the authorization server's pinned packages
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
@@ -835,15 +843,11 @@ jobs:
         working-directory: extensions
         run: bun install --frozen-lockfile
 
-      # TZ: the enhanced-mcp block holds that a zone-less date bound is read as
-      # UTC, never the process's zone — an arm that proves nothing on a UTC
-      # runner, so the suite runs west of UTC here (SMD-1986).
       - name: Vendored writers leave what update_thought leaves
         working-directory: extensions
         run: bun test-writes.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          TZ: America/Chicago
 
       # Every tool of the eight servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
@@ -1117,6 +1121,43 @@ jobs:
           [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; cat /tmp/negative.out >&2; exit 1; }
           docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
 
+      # SMD-2424: the workers profile's own command, run for real against
+      # this stack (its database is up; --no-deps starts nothing else). The
+      # `sh -c` refuses without a worker key and on a setting that is not
+      # digits — `--status` as a value once reached the CLI as a flag, ran
+      # and exited 0 — both exit 2 before bun starts; and a well-formed
+      # setting gets as far as the worker, whose own refusal proves the exec
+      # and the arguments were taken: SMD-2599's start probe, which a
+      # --follow worker makes before it registers a key or claims anything,
+      # and which this stack's provider stub (embeddings only, a bare 404
+      # for chat) refuses with exit 2.
+      - name: The workers profile refuses before it starts a follower
+        working-directory: deploy
+        run: |
+          # Nothing else in this stack runs the workers' image: pull it first,
+          # so the bound below times the command, not Docker Hub.
+          docker compose -f compose.yaml --profile workers pull --quiet extract consolidate
+          # Bounded: a refusal that regressed starts a follower, which never exits.
+          worker() { local svc=$1; shift; set +e; timeout 120 docker compose -f compose.yaml --profile workers run --rm --no-deps -T "$@" "$svc" > /tmp/worker.out 2>&1; CODE=$?; set -e; }
+          hold() { if ! grep -qF -- "$1" /tmp/worker.out || [ "$CODE" -ne 2 ]; then echo "--- expected exit 2 and \"$1\"; got $CODE: ---" >&2; cat /tmp/worker.out >&2; exit 1; fi; }
+          worker extract -e OB1_WORKER_KEY=
+          hold 'extract: OB1_WORKER_KEY is not set in deploy/.env'
+          worker consolidate -e OB1_WORKER_KEY=
+          hold 'consolidate: OB1_WORKER_KEY is not set in deploy/.env'
+          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
+          hold "OB1_EXTRACT_FOLLOW ('--status') and OB1_EXTRACT_WORKERS ('') take digits only"
+          worker consolidate -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
+          hold "take digits only"
+          # …and each variable is checked, not only the pair's first.
+          worker consolidate -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
+          hold "OB1_CONSOLIDATE_FOLLOW ('--status') and OB1_CONSOLIDATE_WORKERS ('') take digits only"
+          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_WORKERS='1 --limit 1'
+          hold "OB1_EXTRACT_FOLLOW ('') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only"
+          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
+          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          worker consolidate -e OB1_WORKER_KEY=not-a-key
+          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
+
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own
       # rendering rather than the file: the base file publishes exactly one port
@@ -1168,6 +1209,17 @@ jobs:
           # Postgres credential, no plain password and not the POC's switch.
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
+          # SMD-2424: the workers profile's two followers publish nothing,
+          # keep the key list the worker names itself by (board-sync blanks
+          # it), are handed the worker key, mount the checkout read-only,
+          # reach a host model by the host alias, wait for the schema, keep
+          # their grace periods (120 s, 60 s), and stop after three refusals
+          # rather than loop; and each command's last line is exactly its
+          # worker's exec'd --follow, so no flag (a --switch-key would lift
+          # the model-change refusal) rides along. The refusals themselves
+          # are run, by the step above.
+          docker compose -f compose.yaml --profile workers config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
@@ -2066,8 +2118,8 @@ jobs:
       # SMD-1801. The three dashboards build from their pinned installs, with no
       # Supabase package among them (check 22 holds the imports; this holds the
       # builds). The two Next dashboards are built, not run: they speak to the
-      # open-brain-rest gateway, which this stack does not serve
-      # (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP to
+      # open-brain-rest gateway, which SMD-1931 retired; they retire with
+      # SMD-2280's harvest. The SvelteKit one speaks MCP to
       # the server this stack serves, so it is driven too, below.
       # They build in the background from the job's start (SMD-2251); this step
       # waits for that and reports it — each dashboard's log folded when it

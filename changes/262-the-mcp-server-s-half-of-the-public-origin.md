@@ -1,0 +1,115 @@
+# 262. The MCP server's half of the public origin — the protected-resource document and the 401 challenge, at the origin alone (SMD-2382)
+
+**What it answers, and when.** ADR decision 16 keeps two states apart. Configured is static: `COMPOSE_PROFILES` names `auth`. Reachable is dynamic: the authorization server answers its health check. `server-portable/oauth-edge.ts` holds the rules, and `index.ts` applies them:
+
+- **The document.** `/.well-known/oauth-protected-resource/mcp` (RFC 9728) names `<origin>/mcp`, the issuer `<origin>/auth` and the three `brain:` scopes. It is served only while the stack is configured with a sound origin, the request's `Host` is the origin's, and the authorization server answers. Otherwise it is change 42's 404, as before. It is sent `Cache-Control: no-store`, since it goes when the authorization server does.
+- **The challenge.** The same conditions, plus exactly the path `/mcp`, any query (RFC 9728 wants the `resource` identical to the URL the client used, so `/mcp/` is not it), turn a refused request into a 401 with `WWW-Authenticate: Bearer resource_metadata="…"`. The body keeps the -32001 envelope for its id, and a notification gets a bodyless 401. A bearer of a JWT's shape gets `error="invalid_token"`: until SMD-2286 checks tokens, none is accepted. Every response now exposes `WWW-Authenticate` to a browser beside `Retry-After`.
+- **The authorization server down.** Configured but not answering, nothing is advertised. A keyless request gets today's refusal, and an OAuth token gets a 503 with `Retry-After: 30` and -32003, not a 401 that would restart its sign-in.
+- **Who keeps today's answers, in every state:**
+  - any request with a key in any form, wrong, empty or malformed (`Authorization: Bearer ` with nothing after it), so this server's 401 never sends a key client to sign in;
+  - any `Host` but the origin's (loopback, a LAN address, another name), where hosts reach the brain with keys;
+  - the root URL kept for SMD-2306's window, which is not the resource the document names;
+  - every request on a stack whose origin is unsound, a token's included: there is no resource to recognise.
+- **The `Host`.** Behind the proxy the runtime's URL says `http://<Host>` whatever the client dialled, so the `Host` is read again under the origin's own scheme: the host name as the URL normalises it, only that scheme's default port (`:443` from a TLS front, for an `https:` origin) counting as none. A `Host` that is not a bare host and port (unparsable, with userinfo or a path) is not the origin's.
+- **The probe.** A GET of `http://auth.ob1.internal.:3000/healthz` (rooted, as the proxy's route is), not following redirects: a 200 within 2 s is up. Its answer is kept 30 s, one probe is in flight at a time, and it is made only for a request whose answer turns on it. Bun's fetch honours `HTTP_PROXY`, so a server given one needs `NO_PROXY` to name that host; compose passes the server neither.
+- **Preflight** adds a `public origin` row:
+  - configured with a sound origin: ok, naming the resource;
+  - configured without one: a warning, not a failure, since keys must keep working, and the authorization server refuses the same origin itself;
+  - an origin without the profile: ok, keys only, or a warning when it is unsound;
+  - a value holding an `@` is never echoed, and nothing from a `?` or `#` on ("the rest not shown"), since a pasted connector URL carries the key as `?key=`. The authorization server's own copy of the rule (`deploy/auth/layout.ts`) now holds the same.
+- **Compose** passes `OB1_PUBLIC_ORIGIN` and `COMPOSE_PROFILES` to the server, as it does to the authorization server, and puts it on the mesh as `mcp.ob1.internal`, where it reaches `auth.ob1.internal` (cut 2). The proxy routes the document to it (`resource`, through `auth-absent`, so a server that is down is a 404, not a 502), and answers `/register`, `/authorize` and `/token` at the root with a 404 (`oauth-fallback-off`). A client that finds the document but no authorization-server metadata signs in at the issuer's root, and for up to the probe's 30 s after the authorization server falls the document is still served while its metadata 404s; the legacy route would hand that POST to the MCP server, whose 200 envelope the client cannot read (review pass 1, run against SDK 1.30 and 2.1).
+- **The keyed `/health`** carries the server's own view beside the brain's record, `oauth`: configured, the origin, advertised now (cut 2). `smoke.sh` check 2 is decided by the document, which this server answers only 404 or naming its own `<origin>/mcp`. For a URL at `<origin>/mcp` or the root, a document naming exactly `<origin>/mcp` must come with the challenge on a keyless request there, a 404 at the root form, and the authorization server's metadata naming the issuer `<origin>/auth` (a front that routes `/mcp` but not `/auth` fails). The view is read for one verdict: advertised at exactly this origin, yet the document a 404 — the tunnel or proxy in front does not keep the origin's `Host`; a first `/health` of `ok` is read again after one keyed call warms the registry, and a key still not shown the record says the `Host` could not be judged. A URL spelled otherwise than the server's origin (case, the default port), or a document naming another origin, fails with the URL to use (origins compared as typed; the server's is canonical). A catch-all 200 at the document gets the routing advice. Anywhere else the forms a connector asks are a 404 (for a URL under another path, its own path form and the root form), and the line says where OAuth is advertised, or that a configured stack's authorization server is not answering. A URL with credentials or a fragment is refused, as one with a query is. A server flipping up or down inside one run (the probe's 30 s) can fail it once.
+- **Docs:** the ADR's Identity section records what was built and corrects two lines: the loopback refusal is HTTP 200 with -32001 (202 for a notification), not a plain 401, and configured reaches the services that act on it. `deploy/README.md`'s route table names the two new routes. Its upgrade guide's sign-in bullet now says a configured stack sends a claude.ai connector to sign in, key or no key, and its authorization-server section says the profile is a preview.
+- **The onboarding docs (cut 3):**
+  - **getting-started's Step 6.1:**
+    - claude.ai reaches only a name with a public IPv4 address, never a private or CGNAT one (its troubleshooting page), so `tailscale serve` never works for it.
+    - Every tunnel there works with a key. OAuth needs a stable origin (a named tunnel, Tailscale Funnel or your own domain), never the quick tunnel.
+    - The tunnel must pass on the `Host`. Funnel and a named Cloudflare tunnel do so by default (read in their source). Don't override it; `./deploy/smoke.sh` check 2 settles it once the profile is on.
+  - **The `mcp-remote` notes** (getting-started and `primitives/remote-mcp`):
+    - `?key=` rides every request on every version.
+    - The server never answers a keyed request with the challenge (mcp-remote 0.14.3 probes discovery, then signs in only on a 401).
+    - The extension servers serve no OAuth.
+  - **FORK.md's security note and change 42** record the fork's own OAuth path, a preview until SMD-2286, where change 42's 404 still stands, and its one reversal: a claude.ai connector at a configured stack's public `/mcp` is asked to sign in first.
+
+**Upgrading.** On a stack that is not configured, the MCP server's answers are today's; only `Access-Control-Expose-Headers` gains `WWW-Authenticate` (measured byte for byte against the base tree in review), and the keyed `/health` gains `oauth`. Through the proxy, on every stack, `/register`, `/authorize` and `/token` at the root are now a 404 (the legacy route handed them to the MCP server), and the protected-resource document's 404 is the server's (`Not Found`, with its CORS headers) rather than the proxy's. On one configured with a sound origin, the MCP server advertises OAuth at the origin while the authorization server answers. A claude.ai connector at `/mcp` is then asked to sign in, `?key=` ones too, and only the operator can sign in today. A `?key=` connector is served once through, since its key authenticates before the token (auth.ts's order; claude.ai's keeping the query is not measured); one with no key loops until SMD-2286 accepts the token. Leave the profile off where others' connectors must keep working. A keyless request there, and a keyed `/health` anywhere, may wait on the probe: at most 2 s, once per 30 s, by the probe's own timer even when a fetch ignores its signal.
+
+**Held by:**
+
+- `test-server.ts` [11a]:
+  - the profile rule;
+  - the origin rules, against the authorization server's own `originFromEnv` over 17 values;
+  - what each credential reads as, an empty key, an empty or two-word bearer, a key after a tab and a JWT with a second word all a key;
+  - a query or fragment never echoed, in each of the four origin messages, and a value with nothing to cut quoted whole;
+  - the `Host`: plain HTTP, `:443`, upper case, another port, a trailing dot, `/mcp/`, an origin with its own port, one the URL cannot parse; and as a header, `:80` against an `https:` origin, `:443` against an `http:` one, userinfo, a password with no user name, a path, a query and a fragment;
+  - the challenge's two forms and the document;
+  - every state of the refusal, and whether it probed;
+  - the probe's single flight, TTL, 503, refused connection, unfollowed redirect (the fetch is asked not to follow), timeout, a fetch that throws at once, and one that ignores its signal (down at the probe's own timeout, cut 2);
+  - `edgeView` with no origin: nothing advertised, no probe asked (cut 2).
+- `test-server.ts` [11b], the wired server at a public origin:
+  - the document up, down, on loopback, at another host and in the root form;
+  - the 401 and the document over real HTTP with the origin's `Host`, and with `:443`;
+  - the 401 for a request and a notification, and the exposed header on every response;
+  - `invalid_token`;
+  - a wrong or empty `?key=`, an empty bearer, `/mcp/`, loopback's `/mcp` and the root, each with today's answer;
+  - a right key, up and down;
+  - the 503 for a request and a notification;
+  - the keyed `/health`'s view, up and down (cut 2).
+
+  The whole suite runs configured, and [11b] counts that no loopback request probed.
+- CI's deploy job (cut 2): the server recreated on the configured `.env`; the document and the challenge at the origin's `Host` through the proxy; a wrong key and loopback keeping today's answers; the fallback paths' 404. Then, the authorization server stopped: the document gone within 40 s, a keyless request back to today's refusal, and a token's 503 with `Retry-After: 30`. Loopback's document is the server's 404, and with the server stopped the proxy's bodiless 404 (`auth-absent`). Rehearsed whole on a scratch compose project under podman, and the server's shape (the default network and the internal mesh) measured on the dogfood's networks: the host's Ollama, `postgres` and outside names all reached.
+- `smoke.sh` check 2's branches, run once on the host against the real server at a loopback origin (up at the `/mcp` URL and at the root URL, another host, a URL under `/canary/mcp`, down, a key not shown the record), against a stub that loses the `Host`, a gateway that answers the root form 401, a 401 document and a document naming another origin (each a failure), a front's catch-all 200, a URL typed in upper case, the authorization server's metadata not routed (each a failure), and URLs with credentials, a fragment or a query (refused); a 101-run stub matrix of the rebuilt rule (views × document × root form × challenge × URL shapes, both verdict and message class); actionlint 1.7.7 with shellcheck 0.10.0 over the workflow.
+- `test-preflight.ts` [2a]: the row's shapes, an unsound origin without the profile a warning, the origin a default port names, a keys-only origin named as it reads, and a pasted connector URL's key unechoed, configured or not.
+- `deploy/auth/provision.ts --self-check`: the authorization server's message for the same pasted URL, with and without a scheme, and a query or fragment on the `https://` and loopback branches.
+- Mutants, each caught by a named assertion:
+  - the document without reachability;
+  - the `Host` ignored, compared as `url.origin` or by host name alone, read under `http:` whatever the origin's scheme, read from the runtime's URL instead of the header, or with userinfo and a path accepted;
+  - an unparsable `Host` throwing;
+  - the refusal without the path, or with `/mcp/` again;
+  - `?key=` not read as a key, an empty key read as none, and an empty bearer read as none;
+  - the query echoed, in `oauth-edge.ts` (test-server and test-preflight) and in `layout.ts` (provision); the cut at `?` alone, in both; every value redacted; one branch of `layout.ts` echoing;
+  - `atOrigin` accepting a query, a fragment or a password, or its comparison inverted;
+  - the bearer read after a space only, the JWT shape unanchored, and token and key swapped;
+  - a token while down given today's answer, and a key given the challenge;
+  - no single flight or TTL, a fetch's throw escaping the chain, and the probe following redirects;
+  - `index.ts` never answering the challenge, and `WWW-Authenticate` not exposed;
+  - `edgeSettings` reading an origin without the profile;
+  - preflight's keys-only row printing the raw value.
+
+- **Tidied after the review passes, no behaviour changed:** the 401 and the 503 share one builder (`edgeRefusal`); the challenge answer carries its origin, so `index.ts` asserts none non-null; preflight builds the edge's settings once; the suite keeps one JWT constant, and the document-while-down check is one plain assertion (two that held nothing fall away). Cut 2: smoke.sh check 2's comment names the metadata it asks for, its no-record flag is set where the second read happens, and check 10's comment says when it reads again. Cut 3: `primitives/remote-mcp`'s Option B gives the same reason for `?key=` as its note below, not the retired "OAuth discovery issues".
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+|------|---------|--------|-----|
+| 1 | Every public-origin test built its `Request` by hand, so comparing `url.origin` (never equal for an `https:` origin behind the proxy, which delivers `http://<Host>`) survived | cold read | tests over real HTTP with the origin's `Host` |
+| 1 | A `Host: …:443` from a TLS front never matched the origin | cold read | the origin scheme's default port counts as none |
+| 1 | `/mcp/` got the challenge, though RFC 9728 wants the `resource` identical to the URL used | cold read | exactly `/mcp` |
+| 1 | An unparsable `Host` turned the document's 404 into a 500 | run-it | a guarded parse; such a `Host` is not the origin's |
+| 1 | An empty `?key=` read as keyless and was sent to sign in | run-it | a key form present is a key, empty or not |
+| 1 | On Workers the probe's unbound `fetch` threw outside the chain, a 500 | cold read | a plain-function default, started inside the chain |
+| 1 | "A `?key=` connector is never sent to sign in" held only for the 401; the 503 and preflight claimed what cut 1 cannot know | cold read | narrowed, and worded as "reaches" |
+| 2 | `:80` matched an `https:` origin, since the runtime's `http://` URL had already dropped it, and the `http:` default never applied | cold read, run-it | the `Host` read under the origin's own scheme; userinfo and paths refused |
+| 2 | The probe's unfollowed redirect, the exposed header and the keys-only row's naming were untested | cold read, run-it | each held, each mutant caught |
+| 3 | `Authorization: Bearer ` with nothing after it (a key variable unset) read as no key form, and got the challenge | cold read | any Bearer-scheme header is a key unless its value has a JWT's shape |
+| 3 | An origin pasted as the connector URL echoed its `?key=` in preflight, and in the authorization server's refusal | cold read | nothing from a `?` or `#` on is echoed, in both copies |
+| 3 | "Loopback", "no credential" and "configured but unreachable → 503" named the rule loosely: it is any `Host` but the origin's, no key form, and an unsound origin answered as not configured | cold read | worded so in the module, the ADR and here |
+| 4 | Seven mutants survived: `atOrigin` without its query, fragment or password refusal; the bearer read after a space only; the JWT shape unanchored; the cut at `?` alone or a branch echoing in `layout.ts`; every value redacted | cold read | a test row for each; each mutant caught |
+| 4 | Five sentences left over from earlier passes ("no credential", "on loopback", "the one header", preflight warning only when configured, "configured" for "configured with a sound origin"), and "its query not shown" for a fragment | cold read, run-it | reworded; "the rest not shown" |
+| cut 2, 1 | The docs said a `?key=` connector's sign-in "does not stick"; its key authenticates before the token, so once through it is served | cold read | worded so in the README, the ADR and here |
+| cut 2, 1 | A keyed `/health` of `ok` (a key not shown the record, a slow registry) read as "not advertised", and check 2 advised 404ing a served document | run-it | no view is "not judged", uncounted |
+| cut 2, 1 | smoke compared origins as written, so `https://host:443/mcp` failed; a fetch that ignored its signal could hold the keyed `/health` | run-it, cold read | origins normalised; the probe keeps its own timer |
+| cut 2, 2 | "Not judged" covered every miss with no view, so a gateway's 401 at the root form no longer failed check 2 | cold read | only the `/mcp` document is excused; a record with no `oauth` reads as not advertised |
+| cut 2, 2 | `norm()` read a long-form IPv6 or an IDN host as another origin; "nothing signs in" beside the preview; smoke's failure always blamed the `Host` | run-it, cold read | IP literals compressed, names IDNA-encoded; reworded; the failing parts named |
+| cut 2, 3 | Check 2 judged OAuth only for a URL whose path was `/mcp`, so the root URL passed with the `Host` lost; and never asked for the authorization server's metadata, so a front that did not route `/auth` passed | cold read | judged at the origin whatever the path; the metadata's issuer required |
+| cut 2, 3 | "Not judged" was never needed: this server answers the document only 404 or naming its own origin | cold read, run-it | judged from the document when the keyed `/health` gives no view |
+| cut 2, 4 | Pass 3's rewrite asked `<origin>/…/mcp` for a URL under any path, so a tier at `/canary/mcp` would be judged by stable's document | cold read | judged at the origin only for `/mcp` and the root; other paths by their own form |
+| cut 2, 4 | `norm()` took a URL with a path for an origin; a document naming another origin got the routing advice; a configured stack with its authorization server down passed silently | cold read, run-it | origins alone; "give smoke the URL at that origin"; the line says so |
+| cut 2, 5 | Passes 2–4 each found a seam in check 2's gate (the view, `norm()` standing in for the server's URL parser, an inference from the document); `norm()` still disagreed with the server on IDNA2008 and `127.1`, and two empty origins compared equal | cold read (altitude), run-it | the mechanism replaced: the document decides, the view gives one verdict, origins compared as typed; `norm()` dropped |
+| cut 2, 6 | Pass 5 dropped the authorization server's metadata check, but CI proves only this stack's proxy, not an operator's front; a cold registry's `ok` let a Host-dropping front pass; a URL spelled otherwise passed with a false note; a catch-all 200 got the wrong advice | cold read, run-it | the metadata check back, as plain strings; one warming call and a second read; the server's spelling asked for; the routing advice |
+
+**Left for the next cuts.**
+
+- A tier at a path prefix (`/canary/mcp`): its own protected-resource document and smoke's judgement of it are SMD-2286's (SMD-2294 routes the tiers and keeps them on keys).
+- Turning `auth` on stays a preview until SMD-2286. A claude.ai connector at `/mcp` finds the document and is asked to sign in, `?key=` ones included (change 42's reason). A keyless client's token is refused `invalid_token`, and both SDK clients then repeat discovery, registration and the sign-in (review pass 2).
+
+**Follow-ups.** SMD-2535, since fixed: an unparsable `Host` gave a 500 at `/mcp`, the root and `/health`, through `auth.ts`'s `presentedKeys`, on main before this change. So did HTTP/1.0 with no `Host`, and a `Host` with userinfo or a path, which leave Bun's `req.url` relative (review pass 3).

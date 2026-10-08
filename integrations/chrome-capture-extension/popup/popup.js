@@ -301,7 +301,7 @@
         throw new Error(response?.error || 'Connection test failed');
       }
 
-      showResult(`Connected: ${response.result?.service || 'open-brain-rest'} is healthy`, 'success');
+      showResult(`Connected as ${response.result?.name || 'this key'}, which can capture`, 'success');
       setStatusDot(true, false);
     } catch (error) {
       showResult(error.message, 'error');

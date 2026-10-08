@@ -790,7 +790,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
   lines.push("---");
   lines.push("");
   lines.push("**Safety:** `lint-sweep.js` is read-only. Every finding above is a suggestion for a human to review. ");
-  lines.push("Before acting on any item, verify the thought with `get_thought` or the web UI. ");
+  lines.push("Before acting on any item, verify the thought with the `fetch` tool or the web UI. ");
   lines.push("Never delete or edit a thought based solely on this report.");
   return lines.join("\n");
 }
